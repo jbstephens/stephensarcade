@@ -149,10 +149,11 @@
             style="font-size:13px;padding:8px 12px;margin:0;">RANDOM</button>
   </div>
   <div class="help" id="controlsHelp">
-    <b>P1:</b> WASD move/dig · SPACE place · Q/E cycle · F use<br>
-    <b>P2 (co-op):</b> arrows move/dig · ENTER place · ,/. cycle · / use<br>
-    <b>Touch:</b> dpad + PLACE / USE / TOOL · <b>Gamepads</b> supported<br>
-    <span style="color:#ffd76b">TIP:</span> Stuck in a pit? Hold S + tap SPACE to pillar UP.
+    <b>P1:</b> A/D move · W jump (or climb) · S dig down · SPACE place · Q/E cycle · F use<br>
+    <b>P2 (co-op):</b> arrows (up = jump) · ENTER place · ,/. cycle · / use<br>
+    <b>Touch:</b> dpad (tap UP = jump) + PLACE / USE / TOOL · <b>Gamepads</b> supported<br>
+    <span style="color:#ffd76b">TIP:</span> The gold-outlined tile shows where your block will land.
+    Stuck in a pit? Jump out, or hold S + tap SPACE to pillar UP.
     The <span style="color:#ffd76b">UPGRADE BENCH</span> is right next to your spawn.
   </div>
   <button id="startBtn">START</button>
@@ -244,6 +245,7 @@ const FALL_MAX = 600;
 const MOVE_SPEED = 150;
 const CLIMB_SPEED = 110;
 const WATER_DRAG = 0.45;
+const JUMP_SPEED = 480;        // ~1.6 tiles clearance
 
 const TORCH_RADIUS = 6;
 const DARKNESS_START_DEPTH = 30;
@@ -469,6 +471,7 @@ function sfx(kind) {
                     break;
     case 'sammy':   blip(880, 0.10, 'sine', 0.06, 660);
                     setTimeout(()=>blip(1320, 0.14, 'sine', 0.05, 990), 80); break;
+    case 'jump':    blip(380, 0.07, 'square', 0.035, 760); break;
   }
 }
 
@@ -717,7 +720,7 @@ function newPlayer(id, skinKey) {
            ladder:STARTING_INV.ladder, dynamite:STARTING_INV.dynamite,
            coal:0, copper:0, iron:0, gold:0, gem:0, star:0, goo:0 },
     selected: 0,
-    flash: 0, alive: true,
+    flash: 0, alive: true, prevUp: false,
   };
 }
 
@@ -997,6 +1000,19 @@ function updatePlayer(p, dt) {
   if (p.inputDir.r) dx += 1;
   p.vx = dx * speed;
 
+  // jump (edge-triggered on Up press, ground only, not on ladder)
+  if (p.onGround && p.inputDir.u && !p.prevUp && !p.onLadder && !p.inWater) {
+    p.vy = -JUMP_SPEED;
+    p.onGround = false;
+    sfx('jump');
+    spawnPuff(p.x + p.w/2, p.y + p.h - 1, '#8b5a2b', 3);
+  }
+  // in water you can "swim up" with a softer impulse on Up edge
+  else if (p.inWater && p.inputDir.u && !p.prevUp) {
+    p.vy = -Math.min(180, CLIMB_SPEED + 60);
+  }
+  p.prevUp = p.inputDir.u;
+
   if (p.onLadder) {
     if (p.inputDir.u) p.vy = -CLIMB_SPEED;
     else if (p.inputDir.d) p.vy = CLIMB_SPEED;
@@ -1151,42 +1167,45 @@ function decideDigTarget(p) {
   return null;
 }
 
+// Where would this player's NEXT placement land? Shared by tryPlace + ghost preview.
+// Returns { tx, ty, pillar } or null if no legal target.
+function placeTarget(p) {
+  if (!p || !p.alive) return null;
+  const item = PLACEABLES[p.selected];
+  const isDyn = item.tile === 'dyn';
+  const cTx = Math.floor((p.x + p.w/2)/TILE);
+  const cTy = Math.floor((p.y + p.h/2)/TILE);
+  let tx, ty, pillar = false;
+  if (p.inputDir.d && !isDyn) {
+    if (collidesSolid(p.x, p.y - TILE, p.w, p.h)) return null;
+    pillar = true; tx = cTx; ty = cTy;
+  } else if (p.inputDir.u) { tx = cTx; ty = cTy - 1; }
+  else if (p.facing === 'left')  { tx = cTx - 1; ty = cTy; }
+  else if (p.facing === 'right') { tx = cTx + 1; ty = cTy; }
+  else if (p.facing === 'up')    { tx = cTx; ty = cTy - 1; }
+  else if (p.facing === 'down')  { tx = cTx; ty = Math.floor((p.y + p.h)/TILE); }
+  else                           { tx = cTx + 1; ty = cTy; }
+  if (tx<1||tx>=W_TILES-1||ty<1||ty>=H_TILES-1) return null;
+  if (getT(tx, ty) !== T.AIR) return null;
+  return { tx, ty, pillar, isDyn, item };
+}
+
 function tryPlace(p) {
   if (!p.alive) return;
   const item = PLACEABLES[p.selected];
-  const isDyn = item.tile === 'dyn';
   if (state.mode !== 'creative' && (p.inv[item.key]||0) <= 0) return;
-
-  const cTx = Math.floor((p.x + p.w/2)/TILE);
-  const cTy = Math.floor((p.y + p.h/2)/TILE);
-  let tx, ty;
-  let pillar = false;
-
-  if (p.inputDir.d && !isDyn) {
-    if (collidesSolid(p.x, p.y - TILE, p.w, p.h)) return;
-    pillar = true;
-    tx = cTx; ty = cTy;
-  } else if (p.inputDir.u) {
-    tx = cTx; ty = cTy - 1;
-  } else if (p.facing === 'left') { tx = cTx - 1; ty = cTy; }
-  else if (p.facing === 'right'){ tx = cTx + 1; ty = cTy; }
-  else if (p.facing === 'up')   { tx = cTx; ty = cTy - 1; }
-  else if (p.facing === 'down') { tx = cTx; ty = Math.floor((p.y + p.h)/TILE); }
-  else                          { tx = cTx + 1; ty = cTy; }
-
-  if (tx<1||tx>=W_TILES-1||ty<1||ty>=H_TILES-1) return;
-  if (getT(tx, ty) !== T.AIR) return;
+  const tgt = placeTarget(p);
+  if (!tgt) return;
+  const { tx, ty, pillar, isDyn } = tgt;
   for (const pp of players) {
     if (pillar && pp === p) continue;
     if (pp.alive && isInTile(pp, tx, ty)) return;
   }
-
   if (state.mode !== 'creative') p.inv[item.key]--;
   if (pillar) p.y -= TILE;
   if (isDyn) dynamites.push({tx, ty, t: DYNAMITE_FUSE});
   else setT(tx, ty, item.tile);
   sfx('place');
-  // small puff so placing feels weighty
   const pc = isDyn ? '#a02020' : (BLOCK[item.tile]?.color || '#ccc');
   spawnPuff(tx*TILE+TILE/2, ty*TILE+TILE/2, pc, 3);
 }
@@ -1729,6 +1748,31 @@ function draw() {
         ctx.stroke();
       }
     }
+  }
+
+  // place-ghost preview — semi-transparent block where the next PLACE will land
+  for (const p of players) {
+    if (!p.alive) continue;
+    const item = PLACEABLES[p.selected];
+    if (state.mode !== 'creative' && (p.inv[item.key]||0) <= 0) continue;
+    const tgt = placeTarget(p);
+    if (!tgt) continue;
+    const px = tgt.tx*TILE - cam.x, py = tgt.ty*TILE - cam.y;
+    ctx.globalAlpha = 0.35 + 0.15 * Math.sin(state.time*5);
+    if (tgt.isDyn) {
+      ctx.fillStyle = '#a02020';
+      ctx.fillRect(px+5, py+8, TILE-10, TILE-12);
+      ctx.fillStyle = '#ffd070';
+      ctx.fillRect(px+TILE/2-1, py+3, 2, 5);
+    } else {
+      const tc = tileCanvas[item.tile];
+      if (tc) ctx.drawImage(tc, px, py);
+    }
+    ctx.globalAlpha = 1;
+    // pulsing gold outline so the target tile is unmistakable
+    ctx.strokeStyle = '#ffd76b';
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(px+0.5, py+0.5, TILE-1, TILE-1);
   }
 
   for (const a of aliens) drawAlien(a, cam);
