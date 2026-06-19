@@ -31,5 +31,13 @@ window.GAMES_DATA = [
     "status": "PRESS START",
     "icon": "rocket",
     "source": "https://screamrocket.onrender.com/"
+  },
+  {
+    "slug": "block-quarry",
+    "title": "BLOCK QUARRY",
+    "genre": "PUZZLE",
+    "status": "PRESS START",
+    "icon": "quarry",
+    "source": "https://blockquarry.onrender.com/blockquarry.html"
   }
 ];
