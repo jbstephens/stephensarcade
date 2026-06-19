@@ -15,5 +15,21 @@ window.GAMES_DATA = [
     "status": "PRESS START",
     "icon": "phaser",
     "source": "https://phaser-wars.onrender.com/fightinggame.html"
+  },
+  {
+    "slug": "meteor-blaster",
+    "title": "METEOR BLASTER",
+    "genre": "ARCADE",
+    "status": "PRESS START",
+    "icon": "meteor",
+    "source": "https://meteorblaster.onrender.com/meteorblaster.html"
+  },
+  {
+    "slug": "scream-rocket",
+    "title": "SCREAM ROCKET",
+    "genre": "ARCADE",
+    "status": "PRESS START",
+    "icon": "rocket",
+    "source": "https://screamrocket.onrender.com/"
   }
 ];
