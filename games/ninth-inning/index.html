@@ -3019,6 +3019,11 @@ function runPitchingHalf() {
     game.cpuBat.contactDone = false;
     game.cpuBat.decided = false;
     game.cpuBat.willSwing = false;
+    // Clear leftover at-bat result flags — continueAfterAtBat skipped its own
+    // reset when it routed us into the half-flip path, so the previous
+    // `resultPending=true` would block tryThrow forever.
+    game.resultPending = false;
+    game.lastResult = null;
     game.state = 'idle';
     game.pitch = null;
     updateHud();
@@ -5395,50 +5400,162 @@ function drawCpuBatter(timeMs) {
 // Drawn after the ball + fielders so it sits on top of the field.
 // ---------------------------------------------------------------------------
 function drawPitchingForeground(timeMs) {
-  // Pitcher's right shoulder + upper arm in the lower-foreground.
-  // Tilts back when winding up, forward on release.
+  // Pitcher's right shoulder + arm in the lower-right foreground.
+  // Phases: rest (0) → cocked (0.5) → release (1).
   const p = game.pitch;
-  let armPhase = 0; // 0=rest, 1=release
+  let armPhase = 0;
   if (p) {
-    if (p.t < 0.08) armPhase = p.t / 0.08;
-    else if (p.t < 0.20) armPhase = 1.0;
-    else armPhase = Math.max(0, 1 - (p.t - 0.20) / 0.4);
+    if (p.t < 0.05) armPhase = 0.4 + p.t / 0.05 * 0.6;   // ramp from cocked-back to release
+    else if (p.t < 0.18) armPhase = 1.0;                 // released, arm extended
+    else armPhase = Math.max(0, 1 - (p.t - 0.18) / 0.45); // follow-through fade
+  } else {
+    // Idle breath / subtle sway between pitches
+    armPhase = 0.42 + Math.sin(timeMs * 0.003) * 0.04;
   }
 
+  const S = Math.min(W, H);
   ctx.save();
-  // Anchor at lower-right of screen.
-  const anchorX = W * 0.78;
-  const anchorY = H * 1.05;
 
-  // Shoulder + back silhouette
+  // Lower-right shoulder silhouette — keep it modest so it doesn't eat the frame
+  const anchorX = W * 0.82;
+  const anchorY = H + S * 0.05;
+  const shoulderRX = S * 0.36;
+  const shoulderRY = S * 0.30;
   ctx.fillStyle = '#cfd5e2';
   ctx.beginPath();
-  ctx.ellipse(anchorX, anchorY, W * 0.30, H * 0.25, 0, 0, Math.PI * 2);
+  ctx.ellipse(anchorX, anchorY, shoulderRX, shoulderRY, 0, 0, Math.PI * 2);
   ctx.fill();
-  // Jersey edge stripe
-  ctx.strokeStyle = 'rgba(20,30,60,0.4)';
-  ctx.lineWidth = 6;
+  // Subtle shadow on the jersey edge
+  ctx.strokeStyle = 'rgba(20,30,60,0.30)';
+  ctx.lineWidth = 4;
   ctx.beginPath();
-  ctx.ellipse(anchorX, anchorY, W * 0.30, H * 0.25, 0, Math.PI, Math.PI * 2);
+  ctx.ellipse(anchorX, anchorY, shoulderRX, shoulderRY, 0, Math.PI, Math.PI * 2);
   ctx.stroke();
 
-  // Throwing arm extending toward upper-left during the release phase
-  const armBaseX = anchorX - W * 0.10;
-  const armBaseY = anchorY - H * 0.18;
-  const armTipX  = lerp(armBaseX, armBaseX - W * 0.18, armPhase);
-  const armTipY  = lerp(armBaseY - 10, armBaseY - H * 0.16, armPhase);
-  ctx.strokeStyle = '#d4a376';
-  ctx.lineWidth = Math.max(10, W * 0.020);
+  // ── Throwing arm: shoulder → elbow → wrist with jersey sleeve + bare forearm ──
+  // Shoulder pivot sits at the upper-left curve of the silhouette
+  const shoulderX = anchorX - shoulderRX * 0.55;
+  const shoulderY = anchorY - shoulderRY * 0.85;
+
+  // Upper-arm angle: cocked back at rest, swings forward on release.
+  // Angle measured CCW from +x in canvas space.
+  const upperAngleRest    = -Math.PI * 0.72;   // pointing up-and-back (right shoulder cocked)
+  const upperAngleRelease = -Math.PI * 0.35;   // forward-up
+  const upperA = lerp(upperAngleRest, upperAngleRelease, armPhase);
+
+  // Elbow bend: tight bend at rest, opens to nearly straight at release.
+  // (Positive bend rotates the forearm clockwise from the upper-arm.)
+  const elbowBendRest    = Math.PI * 0.75;
+  const elbowBendRelease = Math.PI * 0.05;
+  const elbowBend = lerp(elbowBendRest, elbowBendRelease, armPhase);
+
+  const upperLen = S * 0.18;
+  const forearmLen = S * 0.16;
+
+  const elbowX = shoulderX + Math.cos(upperA) * upperLen;
+  const elbowY = shoulderY + Math.sin(upperA) * upperLen;
+  const forearmA = upperA + elbowBend;
+  const wristX = elbowX + Math.cos(forearmA) * forearmLen;
+  const wristY = elbowY + Math.sin(forearmA) * forearmLen;
+
+  // Upper arm (jersey sleeve — light gray with a darker outline)
+  const sleeveW = Math.max(14, S * 0.045);
   ctx.lineCap = 'round';
+  ctx.strokeStyle = '#1c2f55';
+  ctx.lineWidth = sleeveW + 4;
   ctx.beginPath();
-  ctx.moveTo(armBaseX, armBaseY);
-  ctx.lineTo(armTipX, armTipY);
+  ctx.moveTo(shoulderX, shoulderY);
+  ctx.lineTo(elbowX, elbowY);
+  ctx.stroke();
+  ctx.strokeStyle = '#d8dde8';
+  ctx.lineWidth = sleeveW;
+  ctx.beginPath();
+  ctx.moveTo(shoulderX, shoulderY);
+  ctx.lineTo(elbowX, elbowY);
   ctx.stroke();
 
-  // Glove (showing on lower-left foreground)
+  // Sleeve cuff at the elbow — small navy band
+  const cuffW = sleeveW + 4;
+  ctx.fillStyle = '#1c2f55';
+  ctx.save();
+  ctx.translate(elbowX, elbowY);
+  ctx.rotate(upperA + Math.PI / 2);
+  ctx.fillRect(-cuffW * 0.6, -3, cuffW * 1.2, 6);
+  ctx.restore();
+
+  // Forearm (skin tone, tapered slightly toward wrist)
+  const forearmW = Math.max(10, S * 0.034);
+  // Drop-shadow
+  ctx.strokeStyle = 'rgba(60, 32, 14, 0.45)';
+  ctx.lineWidth = forearmW + 2;
+  ctx.beginPath();
+  ctx.moveTo(elbowX, elbowY);
+  ctx.lineTo(wristX, wristY);
+  ctx.stroke();
+  ctx.strokeStyle = '#d4a376';
+  ctx.lineWidth = forearmW;
+  ctx.beginPath();
+  ctx.moveTo(elbowX, elbowY);
+  ctx.lineTo(wristX, wristY);
+  ctx.stroke();
+  // Highlight along the upper edge of the forearm
+  ctx.strokeStyle = 'rgba(255, 226, 188, 0.55)';
+  ctx.lineWidth = Math.max(2, forearmW * 0.32);
+  ctx.beginPath();
+  // Offset perpendicular by forearmW/3 toward the "top" of the limb
+  const perpX = Math.cos(forearmA - Math.PI / 2) * (forearmW * 0.30);
+  const perpY = Math.sin(forearmA - Math.PI / 2) * (forearmW * 0.30);
+  ctx.moveTo(elbowX + perpX, elbowY + perpY);
+  ctx.lineTo(wristX + perpX, wristY + perpY);
+  ctx.stroke();
+
+  // Hand at wrist (small knuckle blob)
+  const handR = forearmW * 0.55;
+  ctx.fillStyle = '#c8966b';
+  ctx.beginPath();
+  ctx.arc(wristX, wristY, handR, 0, Math.PI * 2);
+  ctx.fill();
+  // Thumb hint
+  ctx.fillStyle = '#b0825a';
+  ctx.beginPath();
+  ctx.ellipse(wristX + Math.cos(forearmA) * handR * 0.4,
+              wristY + Math.sin(forearmA) * handR * 0.4,
+              handR * 0.42, handR * 0.28, forearmA, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Ball in hand during the windup (visible while armPhase < 0.85 so it appears
+  // to "leave" the hand right at release).
+  if (armPhase < 0.85) {
+    const ballR = Math.max(6, S * 0.022);
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(wristX + Math.cos(forearmA) * handR * 0.4,
+            wristY + Math.sin(forearmA) * handR * 0.4,
+            ballR, 0, Math.PI * 2);
+    ctx.fill();
+    // Two tiny red seams so it reads as a baseball, not a dot
+    ctx.strokeStyle = '#c0303a';
+    ctx.lineWidth = Math.max(1, ballR * 0.18);
+    ctx.beginPath();
+    ctx.arc(wristX + Math.cos(forearmA) * handR * 0.4,
+            wristY + Math.sin(forearmA) * handR * 0.4,
+            ballR * 0.7, Math.PI * 0.15, Math.PI * 0.55);
+    ctx.stroke();
+  }
+
+  // Glove arm (lower-left foreground) — small jersey + glove peek
+  ctx.fillStyle = '#cfd5e2';
+  ctx.beginPath();
+  ctx.ellipse(W * 0.06, H + S * 0.02, S * 0.22, S * 0.18, 0, 0, Math.PI * 2);
+  ctx.fill();
   ctx.fillStyle = '#4a2e14';
   ctx.beginPath();
-  ctx.ellipse(W * 0.10, H * 1.02, W * 0.07, H * 0.07, -0.2, 0, Math.PI * 2);
+  ctx.ellipse(W * 0.13, H * 0.99, S * 0.07, S * 0.06, -0.2, 0, Math.PI * 2);
+  ctx.fill();
+  // Glove webbing highlight
+  ctx.fillStyle = 'rgba(255, 220, 170, 0.35)';
+  ctx.beginPath();
+  ctx.ellipse(W * 0.13, H * 0.985, S * 0.04, S * 0.025, -0.2, 0, Math.PI * 2);
   ctx.fill();
 
   ctx.restore();
