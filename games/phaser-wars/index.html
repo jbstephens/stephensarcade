@@ -14,6 +14,11 @@
     -webkit-tap-highlight-color: transparent;
     -webkit-touch-callout: none;
   }
+  /* Override the global no-select so users can copy the WebRTC handshake codes */
+  textarea, input {
+    -webkit-user-select: text; user-select: text;
+    -webkit-touch-callout: default;
+  }
   html, body {
     width: 100%; height: 100%;
     overflow: hidden;
@@ -35,6 +40,8 @@
   body.touch .controls { display: flex; }
   body.arcade .controls.right { display: none; }
   body.arcade #buddiesToggle { display: none; } /* buddies are versus-only */
+  /* In multiplayer, each iPad only shows its own player's controls (left side) */
+  body.net-host .controls.right, body.net-guest .controls.right { display: none; }
 
   /* Pause button — top-right, larger, kid-finger friendly, away from iOS status-bar tap zone */
   .hud-btn {
@@ -1339,7 +1346,10 @@
     const idx = parseInt(btn.dataset.p, 10);
     const act = btn.dataset.act;
     const set = (v) => {
-      players[idx].touchInput[act] = v;
+      // In multiplayer-guest mode, the left D-pad controls P2 (the local guest)
+      // instead of P1 (whose data-p="0" the button literally has).
+      const targetIdx = (netMode === 'guest') ? 1 : idx;
+      players[targetIdx].touchInput[act] = v;
       btn.classList.toggle('held', v);
     };
     const down = (e) => { e.preventDefault(); ensureAudio(); set(true); };
@@ -3839,14 +3849,16 @@
       const used = (p.weaponUses || {})[p.weapon] || 0;
       return ` [${Math.max(0, max - used)}]`;
     }
-    ctx.fillText(`${players[0].name} (${w0} W)  ·  ${WEAPON_LABEL[players[0].weapon]}${durLabel(players[0])}`, pad + 2, y - 5);
+    const youP0 = (netMode === 'host') ? ' ★YOU' : '';
+    const youP1 = (netMode === 'guest') ? ' ★YOU' : '';
+    ctx.fillText(`${players[0].name}${youP0} (${w0} W)  ·  ${WEAPON_LABEL[players[0].weapon]}${durLabel(players[0])}`, pad + 2, y - 5);
 
     drawBar(VW - pad - barW, y, barW, barH, players[1].hp / players[1].maxHp, players[1].color, true);
     ctx.textAlign = 'right';
     const w1 = scores[players[1].fighterId] || 0;
     const p1Label = players[1].bossMode ? `⚠ BOSS  ${players[1].name}`
                   : players[1].isAI ? `[CPU] ${players[1].name} (${w1} W)`
-                  : `${players[1].name} (${w1} W)`;
+                  : `${players[1].name}${youP1} (${w1} W)`;
     ctx.fillText(`${WEAPON_LABEL[players[1].weapon]}${durLabel(players[1])}  ·  ${p1Label}`, VW - pad - 2, y - 5);
 
     // combo indicators (just under each health bar)
@@ -3976,6 +3988,7 @@
     if (netPeer) { try { netPeer.close(); } catch(_){} netPeer = null; }
     netConnected = false;
     netMode = 'solo';
+    document.body.classList.remove('net-host', 'net-guest');
   }
 
   async function netStartHost() {
@@ -4038,6 +4051,7 @@
   function onNetOpen() {
     netConnected = true;
     netStatus('CONNECTED!', true);
+    document.body.classList.add(netMode === 'host' ? 'net-host' : 'net-guest');
     // Host kicks off the match with random fighters + arena
     if (netMode === 'host') {
       mode = 'versus';
@@ -4259,15 +4273,38 @@
     const ok = await netStartGuest(v);
     if (ok) document.getElementById('netJoinAnswerWrap').classList.remove('hidden');
   });
-  document.getElementById('netCopyHost').addEventListener('click', () => {
-    const t = document.getElementById('netHostCode');
-    t.select(); document.execCommand('copy');
-    netStatus('Host code copied.', true);
+  async function copyToClipboard(text) {
+    // Modern Clipboard API — required in iOS Safari PWA standalone mode
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch (_) {}
+    // Fallback: hidden textarea + execCommand (legacy browsers)
+    try {
+      const tmp = document.createElement('textarea');
+      tmp.value = text;
+      tmp.style.position = 'fixed'; tmp.style.opacity = '0';
+      tmp.style.left = '-9999px';
+      document.body.appendChild(tmp);
+      tmp.focus(); tmp.select();
+      const ok = document.execCommand('copy');
+      document.body.removeChild(tmp);
+      return ok;
+    } catch (_) { return false; }
+  }
+  document.getElementById('netCopyHost').addEventListener('click', async () => {
+    const text = document.getElementById('netHostCode').value;
+    if (!text) { netStatus('Code not ready yet.', false); return; }
+    const ok = await copyToClipboard(text);
+    netStatus(ok ? 'Host code copied! AirDrop/iMessage it to the other iPad.' : 'Copy blocked — long-press the code box and use the system Copy menu.', ok);
   });
-  document.getElementById('netCopyAnswer').addEventListener('click', () => {
-    const t = document.getElementById('netJoinAnswerOut');
-    t.select(); document.execCommand('copy');
-    netStatus('Answer code copied.', true);
+  document.getElementById('netCopyAnswer').addEventListener('click', async () => {
+    const text = document.getElementById('netJoinAnswerOut').value;
+    if (!text) { netStatus('Answer not ready yet.', false); return; }
+    const ok = await copyToClipboard(text);
+    netStatus(ok ? 'Answer code copied! Send it back to the host.' : 'Copy blocked — long-press the code box and use the system Copy menu.', ok);
   });
   document.getElementById('netBackBtn').addEventListener('click', () => {
     netReset();
