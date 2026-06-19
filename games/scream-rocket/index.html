@@ -197,9 +197,10 @@ const TUNE = {
   // Voice -> rocket
   thrustMax:        1900,    // px/s^2 upward force at max volume
   thrustCurve:      0.65,    // <1 = boosts low/mid volume, so kids don't have to MAX scream
-  gravity:          480,     // px/s^2 downward (low enough that a normal scream lifts off)
+  gravity:          720,     // px/s^2 downward (genuine silence falls fast)
   terminalUp:       720,     // px/s max upward speed
-  terminalDown:     520,     // px/s max downward speed
+  terminalDown:     620,     // px/s max downward speed
+  noiseGate:        1.5,     // multiplier on ambient floor — readings below this count as silence
   steerMax:         520,     // px/s lateral velocity at full pitch deflection
   steerDamping:     6,       // higher = snappier centering
   pitchDeadzone:    0.12,    // |norm pitch - 0.5| below this counts as "center"
@@ -298,6 +299,7 @@ const cal = {
   volMax: TUNE.defaultVolMax,
   pitchLow: TUNE.defaultPitchLow,
   pitchHigh: TUNE.defaultPitchHigh,
+  noiseFloor: 0.01,
 };
 
 async function startAudio() {
@@ -352,9 +354,13 @@ function updateMic() {
     else { mic.pitchValid = false; }
   }
 
-  // Normalize against calibration
-  const vol = clamp(mic.rms / Math.max(0.01, cal.volMax), 0, 1.4);
-  mic.volume = clamp(vol, 0, 1);
+  // Normalize against calibration with noise gate — readings at-or-below the
+  // ambient floor (×gate) count as silence, so the rocket falls when the player
+  // is quiet even if other kids are talking in the room.
+  const floor = cal.noiseFloor * TUNE.noiseGate;
+  const denoised = Math.max(0, mic.rms - floor);
+  const ceiling = Math.max(0.02, cal.volMax - floor);
+  mic.volume = clamp(denoised / ceiling, 0, 1);
 
   if (mic.pitchValid) {
     // log scale feels more linear to the ear
@@ -1492,12 +1498,13 @@ document.getElementById('newPilotBtn').addEventListener('click', () => {
 // ============================================================
 function startCalibration() {
   const steps = [
-    { label: 'STEP 1 OF 3', prompt: 'SCREAM AS LOUD AS YOU CAN!', kind: 'vol',  duration: 3.0 },
-    { label: 'STEP 2 OF 3', prompt: 'Now your SQUEAKIEST sound!', kind: 'high', duration: 3.0 },
-    { label: 'STEP 3 OF 3', prompt: 'Deepest GROWL!',             kind: 'low',  duration: 3.0 },
+    { label: 'STEP 1 OF 4', prompt: 'EVERYONE SHHHHHH!',           kind: 'noise', duration: 2.5 },
+    { label: 'STEP 2 OF 4', prompt: 'SCREAM AS LOUD AS YOU CAN!',  kind: 'vol',   duration: 3.0 },
+    { label: 'STEP 3 OF 4', prompt: 'Now your SQUEAKIEST sound!',  kind: 'high',  duration: 3.0 },
+    { label: 'STEP 4 OF 4', prompt: 'Deepest GROWL!',              kind: 'low',   duration: 3.0 },
   ];
   let idx = 0;
-  let sample = { volMax: 0, pitchHigh: 0, pitchLow: Infinity, hadPitch: false };
+  let sample = { noiseSum: 0, noiseCount: 0, volMax: 0, pitchHigh: 0, pitchLow: Infinity, hadPitch: false };
   let phase = 'ready';
   let timer = 3.0;
   const stepEl = document.getElementById('calStep');
@@ -1528,8 +1535,9 @@ function startCalibration() {
         phase = 'record';
         timer = s.duration;
         countEl.textContent = 'GO!';
-        hintEl.textContent = 'Hold it!';
+        hintEl.textContent = s.kind === 'noise' ? 'Stay quiet…' : 'Hold it!';
         // reset per-step measurement
+        if (s.kind === 'noise') { sample.noiseSum = 0; sample.noiseCount = 0; }
         if (s.kind === 'vol') sample.volMax = 0;
         if (s.kind === 'high') sample.pitchHigh = 0;
         if (s.kind === 'low') sample.pitchLow = Infinity;
@@ -1537,7 +1545,11 @@ function startCalibration() {
     } else if (phase === 'record') {
       timer -= dt;
       countEl.textContent = Math.max(0, timer.toFixed(1));
-      if (s.kind === 'vol') {
+      if (s.kind === 'noise') {
+        sample.noiseSum += mic.rms; sample.noiseCount += 1;
+        // bar shrinks as you get quieter (visual cue: empty = good)
+        barEl.style.width = clamp(mic.rms / 0.15, 0, 1) * 100 + '%';
+      } else if (s.kind === 'vol') {
         sample.volMax = Math.max(sample.volMax, mic.rms);
         barEl.style.width = clamp(mic.rms / 0.4, 0, 1) * 100 + '%';
       } else if (s.kind === 'high') {
@@ -1564,9 +1576,14 @@ function startCalibration() {
         idx++;
         if (idx >= steps.length) {
           // finish calibration
+          // Ambient noise floor — used to gate gameplay readings so background
+          // chatter doesn't count as "the player is making noise."
+          cal.noiseFloor = sample.noiseCount > 0
+            ? clamp(sample.noiseSum / sample.noiseCount, 0.005, 0.10)
+            : 0.01;
           // Use 55% of calibration peak so a "normal" play-scream maps near 1.0 — the
           // kids never re-hit their calibration max during actual gameplay.
-          cal.volMax     = clamp(sample.volMax * 0.55, 0.04, 0.30);
+          cal.volMax     = clamp(sample.volMax * 0.55, cal.noiseFloor * 3, 0.30);
           cal.pitchHigh  = sample.pitchHigh > 0 ? Math.max(220, sample.pitchHigh) : TUNE.defaultPitchHigh;
           cal.pitchLow   = sample.pitchLow < Infinity ? Math.min(200, sample.pitchLow) : TUNE.defaultPitchLow;
           if (cal.pitchHigh <= cal.pitchLow + 30) { cal.pitchHigh = cal.pitchLow + 100; }

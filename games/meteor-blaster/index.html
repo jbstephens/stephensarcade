@@ -543,13 +543,27 @@
   // before resetGame() runs (the title screen draws stars/planets while the
   // user is choosing a pilot, and would otherwise iterate over undefined).
   let bullets = [], enemyBullets = [], meteors = [], ufos = [];
+  let kamikazes = [], turrets = [], wingmen = [], bgComets = [];
   let powerups = [], explosions = [], particles = [], floatingTexts = [];
-  let zorg = null;
+  let zorg = null, miniBoss = null;
   let wave = 0, score = 0, lives = 3, bombs = 2, scoreFlash = 0;
   let waveTimer = 0, waveSpawnAcc = 0, waveSpawnInterval = 60, meteorsThisWave = 0, meteorsRemaining = 0;
+  let kamikazeAcc = 0, turretAcc = 0;
   let bannerText = '', bannerSub = '', bannerTime = 0;
   let shake = 0;
-  const TOTAL_WAVES = 5;
+  // Combo / scoring system. Every kill inside COMBO_WINDOW frames stacks
+  // the multiplier; SpeechSynthesis calls out milestones.
+  let combo = 0, comboTimer = 0, maxCombo = 0;
+  const COMBO_WINDOW = 110;
+  // Active set-piece events
+  let meteorShowerT = 0;
+  let damageThisWave = 0;
+  // Frame-level slow-mo multiplier (0..1). 1 = normal. Set by SLOW-MO power-up.
+  let enemySpeed = 1;
+  // Hit-pause: skip enemy updates for a few frames on a big kill — adds weight.
+  let hitPauseT = 0;
+  const TOTAL_WAVES = 7;
+  const MIDBOSS_WAVE = 4;
 
   function freshPlayer() {
     return {
@@ -561,6 +575,11 @@
       power: 1,            // 1 = single, 2 = spread x3, 3 = spread x5
       powerTime: 0,        // frames remaining of power-up
       shieldTime: 0,
+      laserTime: 0,        // continuous beam mode
+      homingTime: 0,       // shots curve toward enemies
+      magnetTime: 0,       // power-up crates fly toward you
+      slowTime: 0,         // bullet-time on enemies
+      wingmenTime: 0,      // two escort ships co-fire
       invuln: 0,           // post-respawn invulnerability frames
       flash: 0,
       thruster: 0,
@@ -570,31 +589,71 @@
   function resetGame() {
     player = freshPlayer();
     bullets = []; enemyBullets = []; meteors = []; ufos = [];
+    kamikazes = []; turrets = []; wingmen = []; bgComets = [];
     powerups = []; explosions = []; particles = []; floatingTexts = [];
-    zorg = null;
+    zorg = null; miniBoss = null;
     wave = 0;
     score = 0;
     lives = 3;
     bombs = 2;
     scoreFlash = 0;
     shake = 0;
+    combo = 0; comboTimer = 0; maxCombo = 0;
+    meteorShowerT = 0;
+    damageThisWave = 0;
+    enemySpeed = 1;
+    hitPauseT = 0;
   }
 
   // ───── waves ─────
-  // Difficulty curve: spawn faster + more meteors, mix in ice rocks, then UFOs,
-  // then ZORG. Kept gentle for younger kids — early waves let you breathe.
+  // Difficulty ramps from soft into chaos. New enemy types unlock per wave
+  // so the family sees something new every round. Wave 4 is the Mothership
+  // mini-boss, wave 7 is ZORG.
   const WAVES = [
-    { count: 14, interval: 60, ufoEvery: 0,   iceChance: 0.0,  bigChance: 0.0,  meteorVy: 1.6 },
-    { count: 18, interval: 52, ufoEvery: 0,   iceChance: 0.10, bigChance: 0.05, meteorVy: 1.8 },
-    { count: 22, interval: 46, ufoEvery: 8,   iceChance: 0.18, bigChance: 0.10, meteorVy: 2.0 },
-    { count: 26, interval: 38, ufoEvery: 6,   iceChance: 0.25, bigChance: 0.15, meteorVy: 2.2 },
-    // wave 5 is the boss
+    // 1: meteor basics
+    { count: 14, interval: 58, ufoEvery: 0,  iceChance: 0.0,  bigChance: 0.0,  meteorVy: 1.6, kamikazeEvery: 0,  turretEvery: 0,  splitterChance: 0.0,  showerChance: 0.0,  desc: 'METEOR FIELD' },
+    // 2: + ice + occasional splitter
+    { count: 18, interval: 52, ufoEvery: 0,  iceChance: 0.15, bigChance: 0.05, meteorVy: 1.8, kamikazeEvery: 0,  turretEvery: 0,  splitterChance: 0.10, showerChance: 0.0,  desc: 'ICE STORM' },
+    // 3: + UFOs + first kamikaze swarm
+    { count: 22, interval: 46, ufoEvery: 8,  iceChance: 0.18, bigChance: 0.10, meteorVy: 2.0, kamikazeEvery: 16, turretEvery: 0,  splitterChance: 0.15, showerChance: 0.003, desc: 'ENEMY CONTACT' },
+    // 4: MOTHERSHIP mini-boss
+    { boss: 'mini', desc: 'MOTHERSHIP' },
+    // 5: + turret asteroids
+    { count: 24, interval: 42, ufoEvery: 7,  iceChance: 0.20, bigChance: 0.14, meteorVy: 2.1, kamikazeEvery: 13, turretEvery: 18, splitterChance: 0.20, showerChance: 0.004, desc: 'GUN BELT' },
+    // 6: everything mixed, faster
+    { count: 30, interval: 36, ufoEvery: 6,  iceChance: 0.25, bigChance: 0.18, meteorVy: 2.3, kamikazeEvery: 10, turretEvery: 14, splitterChance: 0.22, showerChance: 0.005, desc: 'CHAOS' },
+    // 7: ZORG
+    { boss: 'zorg', desc: 'ZORG' },
   ];
 
   function startWave(n) {
+    // Perfect-wave bonus — only after a non-banner wave that the player
+    // actually played through unharmed.
+    if (n > 1 && n - 1 <= WAVES.length && !WAVES[n - 2].boss && damageThisWave === 0) {
+      addPoints(500, VW / 2, VH / 2, 'PERFECT! +500');
+      try {
+        if ('speechSynthesis' in window) {
+          const u = new SpeechSynthesisUtterance('Perfect!');
+          u.pitch = 1.4; u.rate = 1.1; u.volume = 0.9;
+          window.speechSynthesis.cancel(); window.speechSynthesis.speak(u);
+        }
+      } catch {}
+    }
+    damageThisWave = 0;
+
     wave = n;
     if (n > TOTAL_WAVES) { winGame(); return; }
-    if (n === TOTAL_WAVES) {
+    const def = WAVES[n - 1];
+    if (def.boss === 'mini') {
+      spawnMothership();
+      bannerText = 'WARNING';
+      bannerSub  = 'MOTHERSHIP DETECTED';
+      bannerTime = 120;
+      state = WAVE_BANNER;
+      sfx.bossAppear();
+      return;
+    }
+    if (def.boss === 'zorg') {
       spawnZorg();
       bannerText = 'WARNING';
       bannerSub  = 'ZORG APPROACHES';
@@ -603,37 +662,86 @@
       sfx.bossAppear();
       return;
     }
-    const def = WAVES[n - 1];
     meteorsThisWave = def.count;
     meteorsRemaining = def.count;
     waveSpawnInterval = def.interval;
     waveSpawnAcc = 0;
+    kamikazeAcc = 0; turretAcc = 0;
     waveTimer = 0;
     bannerText = 'WAVE ' + n;
-    bannerSub  = 'INCOMING';
+    bannerSub  = def.desc || 'INCOMING';
     bannerTime = 90;
     state = WAVE_BANNER;
     sfx.waveStart();
   }
 
-  function spawnMeteor() {
-    const def = WAVES[wave - 1];
-    const isIce = Math.random() < def.iceChance;
-    const isBig = Math.random() < def.bigChance;
-    const r = isBig ? 30 + Math.random() * 8 : 16 + Math.random() * 8;
+  function spawnMeteor(opts = {}) {
+    const def = WAVES[wave - 1] || { iceChance: 0.1, bigChance: 0.05, meteorVy: 2.0, splitterChance: 0 };
+    // Fragments (from a splitter) are always plain small fast rocks — they
+    // shouldn't randomly upgrade to ice/big/splitter again.
+    const fragment = !!opts.fragment;
+    const isIce      = !fragment && (opts.kind === 'ice' || (opts.kind == null && Math.random() < (def.iceChance || 0)));
+    const isBig      = !fragment && !isIce && (opts.big || (opts.kind == null && Math.random() < (def.bigChance || 0)));
+    const isSplitter = !fragment && !isIce && !isBig && Math.random() < (def.splitterChance || 0);
+    const r = opts.r ?? (isBig ? 30 + Math.random() * 8 : (fragment ? 10 + Math.random() * 3 : 16 + Math.random() * 8));
+    const x = opts.x ?? (30 + Math.random() * (VW - 60));
+    const y = opts.y ?? -40;
+    const vx = opts.vx ?? (Math.random() - 0.5) * 1.2;
+    const vy = opts.vy ?? def.meteorVy + Math.random() * 0.8;
+    const hp = isBig ? 3 : 1;
     meteors.push({
-      x: 30 + Math.random() * (VW - 60),
-      y: -40,
-      vx: (Math.random() - 0.5) * 1.2,
-      vy: def.meteorVy + Math.random() * 0.8,
-      r,
-      hp: isBig ? 3 : 1,
-      maxHp: isBig ? 3 : 1,
-      kind: isIce ? 'ice' : 'rock',
+      x, y, vx, vy, r,
+      hp, maxHp: hp,
+      kind: isSplitter ? 'splitter' : (isIce ? 'ice' : 'rock'),
       spin: Math.random() * Math.PI * 2,
       spinV: (Math.random() - 0.5) * 0.05,
       big: isBig,
+      splitter: isSplitter,
+      fragment,
     });
+  }
+
+  function spawnKamikaze(opts = {}) {
+    kamikazes.push({
+      x: opts.x ?? 50 + Math.random() * (VW - 100),
+      y: opts.y ?? -30,
+      vx: opts.vx ?? (Math.random() - 0.5) * 0.6,
+      vy: opts.vy ?? 2.4 + Math.random() * 0.8,
+      r: 11,
+      hp: 1, maxHp: 1,
+      thruster: 0,
+    });
+  }
+
+  function spawnTurret() {
+    turrets.push({
+      x: 80 + Math.random() * (VW - 160),
+      y: -40,
+      vy: 1.4,
+      r: 22,
+      hp: 4, maxHp: 4,
+      phase: 'falling',
+      dockY: 90 + Math.random() * 90,
+      cooldown: 70 + Math.random() * 50,
+      spin: 0,
+    });
+  }
+
+  function spawnMothership() {
+    miniBoss = {
+      x: VW / 2,
+      y: -60,
+      tx: VW / 2,
+      ty: 90,
+      r: 36,
+      hp: 28, maxHp: 28,
+      phase: 'entering',
+      moveT: 0,
+      dropCooldown: 160,
+      shootCooldown: 110,
+      flash: 0,
+      moveX: 1,
+    };
   }
 
   function spawnUFO() {
@@ -666,34 +774,56 @@
   }
 
   function spawnPowerup(x, y) {
-    // Five types, weighted — life is rare, rapid/spread common.
-    let kind;
-    const r = Math.random();
-    if (r < 0.08)      kind = 'life';
-    else if (r < 0.30) kind = 'bomb';
-    else if (r < 0.55) kind = 'shield';
-    else if (r < 0.78) kind = 'spread';
-    else               kind = 'rapid';
-    powerups.push({ x, y, vy: 1.2, r: 12, rotation: 0, kind });
+    // Ten types, weighted. Common combat boosts come up most; the wild ones
+    // (laser, slow-mo, wingmen) are rare reward moments. Life is rarest.
+    const pool = [
+      ['rapid',   18],
+      ['spread',  16],
+      ['shield',  14],
+      ['bomb',    12],
+      ['magnet',  10],
+      ['homing',   9],
+      ['wingmen',  6],
+      ['laser',    5],
+      ['slowmo',   5],
+      ['life',     5],
+    ];
+    let total = 0; for (const [, w] of pool) total += w;
+    let r = Math.random() * total;
+    let kind = 'rapid';
+    for (const [k, w] of pool) { r -= w; if (r <= 0) { kind = k; break; } }
+    powerups.push({ x, y, vx: 0, vy: 1.2, r: 12, rotation: 0, kind });
   }
 
   function playerFire() {
     if (player.cooldown > 0) return;
+    // Laser mode handles its own continuous-beam damage from updateLaser —
+    // here we just keep a low cooldown for the beep cadence.
+    if (player.laserTime > 0) {
+      player.cooldown = 4;
+      return;
+    }
     const cd = player.powerTime > 0 && player.power >= 2 ? 8 : 12;
     player.cooldown = cd;
     const pc = PILOTS[pilotId].boltColor;
     const fx = player.x, fy = player.y - 14;
+    const homing = player.homingTime > 0;
+    const mk = (vx, vy) => ({ x: fx, y: fy, vx, vy, r: 4, color: pc, life: homing ? 90 : 60, homing });
     if (player.powerTime > 0 && player.power === 3) {
       const spread = [-0.35, -0.17, 0, 0.17, 0.35];
-      for (const a of spread) {
-        bullets.push({ x: fx, y: fy, vx: Math.sin(a) * 8, vy: -10 + Math.cos(a) * -0.5, r: 4, color: pc, life: 60 });
-      }
+      for (const a of spread) bullets.push(mk(Math.sin(a) * 8, -10 + Math.cos(a) * -0.5));
     } else if (player.powerTime > 0 && player.power === 2) {
-      [-0.22, 0, 0.22].forEach(a =>
-        bullets.push({ x: fx, y: fy, vx: Math.sin(a) * 6, vy: -10, r: 4, color: pc, life: 60 })
-      );
+      [-0.22, 0, 0.22].forEach(a => bullets.push(mk(Math.sin(a) * 6, -10)));
     } else {
-      bullets.push({ x: fx, y: fy, vx: 0, vy: -10, r: 4, color: pc, life: 60 });
+      bullets.push(mk(0, -10));
+    }
+    // Wingmen co-fire — each wingman has its own cooldown counter.
+    for (const w of wingmen) {
+      if (w.cooldown <= 0) {
+        const wx = player.x + w.offsetX, wy = player.y + w.offsetY - 12;
+        bullets.push({ x: wx, y: wy, vx: 0, vy: -9, r: 3, color: '#ffe066', life: 60, homing: false });
+        w.cooldown = 14;
+      }
     }
     sfx.shot();
   }
@@ -704,7 +834,7 @@
     syncBombBtn();
     sfx.bomb();
     shake = Math.max(shake, 20);
-    // Big white flash + clear all meteors + chip the boss
+    // Big white flash + clear all enemies + chip both bosses
     explosions.push({ x: VW / 2, y: VH / 2, time: 36, max: 36, radius: 800, color: '#fff' });
     for (const m of meteors) {
       explosions.push({ x: m.x, y: m.y, time: 22, max: 22, radius: m.r * 2.5, color: m.kind === 'ice' ? '#aae6ff' : '#ffa050' });
@@ -718,20 +848,80 @@
       spawnDebris(u.x, u.y, '#aaff60', 14);
     }
     ufos.length = 0;
+    for (const k of kamikazes) {
+      explosions.push({ x: k.x, y: k.y, time: 18, max: 18, radius: 28, color: '#c45fff' });
+      addPoints(40, k.x, k.y, '+40');
+      spawnDebris(k.x, k.y, '#c45fff', 8);
+    }
+    kamikazes.length = 0;
+    for (const t of turrets) {
+      explosions.push({ x: t.x, y: t.y, time: 24, max: 24, radius: 40, color: '#ff7a30' });
+      addPoints(120, t.x, t.y, '+120');
+      spawnDebris(t.x, t.y, '#ff7a30', 14);
+    }
+    turrets.length = 0;
     enemyBullets.length = 0;
+    if (miniBoss && miniBoss.phase === 'fight') {
+      miniBoss.hp = Math.max(0, miniBoss.hp - 6);
+      miniBoss.flash = 12;
+      if (miniBoss.hp <= 0) startMiniBossDeath();
+    }
     if (zorg && zorg.phase !== 'dying') {
       zorg.hp = Math.max(0, zorg.hp - 14);
       zorg.flash = 14;
     }
   }
 
+  // Combo multiplier — every kill inside COMBO_WINDOW frames stacks. The
+  // multiplier steps up every 3 hits (1x, 2x, 3x, …) capped at 8x. Score
+  // popups get progressively flashier colours; SpeechSynthesis announces
+  // milestone tiers so it feels like an arcade crowd cheering you on.
+  const COMBO_TIERS = [
+    { at: 6,  label: 'DOUBLE!',  color: '#ffe066' },
+    { at: 10, label: 'TRIPLE!',  color: '#ffce4d' },
+    { at: 15, label: 'RAMPAGE!', color: '#ff80b3' },
+    { at: 20, label: 'INSANE!',  color: '#ff5252' },
+    { at: 30, label: 'GODLIKE!', color: '#c45fff' },
+  ];
+  let lastComboTier = 0;
+  function comboMult() { return Math.min(8, Math.max(1, Math.floor(combo / 3) + 1)); }
+  function comboColor() {
+    const m = comboMult();
+    return m >= 6 ? '#c45fff' : m >= 4 ? '#ff5252' : m >= 3 ? '#ff80b3' : m >= 2 ? '#ffce4d' : '#ffe066';
+  }
   function addPoints(p, x, y, label) {
-    score += p;
+    if (state === PLAYING && p > 0) {
+      combo++;
+      comboTimer = COMBO_WINDOW;
+      if (combo > maxCombo) maxCombo = combo;
+    }
+    const mult = comboMult();
+    const total = Math.floor(p * mult);
+    score += total;
     scoreFlash = 14;
     if (x != null) floatingTexts.push({
-      x, y: y - 14, vy: -0.8, time: 50, text: label || ('+' + p), color: '#ffe066', size: 14,
+      x, y: y - 14, vy: -0.8, time: 50,
+      text: label || ('+' + total),
+      color: comboColor(),
+      size: 14 + Math.min(8, mult * 1.2),
     });
+    // Milestone announce — speak once per tier per combo run
+    for (const t of COMBO_TIERS) {
+      if (combo === t.at && lastComboTier < t.at) {
+        lastComboTier = t.at;
+        floatingTexts.push({ x: VW / 2, y: 80, vy: -0.6, time: 70, text: t.label, color: t.color, size: 26 });
+        try {
+          if ('speechSynthesis' in window) {
+            const u = new SpeechSynthesisUtterance(t.label.replace('!', ''));
+            u.pitch = 1.2; u.rate = 1.05; u.volume = 0.9;
+            window.speechSynthesis.cancel(); window.speechSynthesis.speak(u);
+          }
+        } catch {}
+        break;
+      }
+    }
   }
+  function resetCombo() { combo = 0; comboTimer = 0; lastComboTier = 0; }
 
   function spawnDebris(x, y, color, count = 8) {
     for (let i = 0; i < count; i++) {
@@ -756,13 +946,16 @@
     spawnDebris(player.x, player.y, PILOTS[pilotId].color, 24);
     sfx.death();
     shake = Math.max(shake, 18);
+    damageThisWave++;
+    resetCombo();
+    wingmen.length = 0;
     lives--;
     if (lives <= 0) {
       state = DEAD;
       setTimeout(showGameOver, 1200);
       return;
     }
-    // Brief respawn delay handled by invuln; reset position
+    // Brief respawn delay handled by invuln; reset position + all timed buffs
     player.x = VW / 2;
     player.y = VH - 60;
     player.vx = 0; player.vy = 0;
@@ -770,6 +963,11 @@
     player.power = 1;
     player.powerTime = 0;
     player.shieldTime = 0;
+    player.laserTime = 0;
+    player.homingTime = 0;
+    player.magnetTime = 0;
+    player.slowTime = 0;
+    player.wingmenTime = 0;
   }
 
   // ───── input ─────
@@ -1040,25 +1238,70 @@
       player.powerTime--;
       if (player.powerTime === 0) player.power = 1;
     }
-    if (player.shieldTime > 0) player.shieldTime--;
+    if (player.shieldTime > 0)  player.shieldTime--;
+    if (player.laserTime > 0)   player.laserTime--;
+    if (player.homingTime > 0)  player.homingTime--;
+    if (player.magnetTime > 0)  player.magnetTime--;
+    if (player.slowTime > 0)    player.slowTime--;
+    if (player.wingmenTime > 0) {
+      player.wingmenTime--;
+      if (player.wingmenTime === 0) wingmen.length = 0;
+    }
     if (player.invuln > 0) player.invuln--;
     if (player.flash > 0) player.flash--;
     player.thruster = (player.thruster + 1) % 6;
+    // Slow-mo affects enemies, not the player.
+    enemySpeed = player.slowTime > 0 ? 0.35 : 1;
+
+    // Update wingmen positions (follow player with smoothing) and cooldowns
+    for (const w of wingmen) {
+      if (w.cooldown > 0) w.cooldown--;
+    }
 
     // Manual fire — hold or mash. playerFire() enforces the cooldown.
     if (keys[' '] || keys['spacebar'] || touchInput.fire) playerFire();
   }
 
+  function nearestTargetTo(x, y) {
+    let best = null, bestD = Infinity;
+    function consider(t) {
+      const dx = t.x - x, dy = t.y - y;
+      const d = dx * dx + dy * dy;
+      if (d < bestD) { bestD = d; best = t; }
+    }
+    for (const m of meteors)  consider(m);
+    for (const u of ufos)     consider(u);
+    for (const k of kamikazes) consider(k);
+    for (const t of turrets)  if (t.phase !== 'falling') consider(t);
+    if (miniBoss && miniBoss.phase !== 'dying') consider(miniBoss);
+    if (zorg && zorg.phase !== 'dying')         consider(zorg);
+    return best;
+  }
+
   function updateBullets() {
     for (let i = bullets.length - 1; i >= 0; i--) {
       const b = bullets[i];
+      // Homing bullets steer toward the nearest target, capped speed
+      if (b.homing) {
+        const t = nearestTargetTo(b.x, b.y);
+        if (t) {
+          const dx = t.x - b.x, dy = t.y - b.y;
+          const d = Math.max(1, Math.hypot(dx, dy));
+          const turn = 0.35;
+          b.vx += (dx / d) * turn;
+          b.vy += (dy / d) * turn;
+          const sp = Math.hypot(b.vx, b.vy);
+          const max = 11;
+          if (sp > max) { b.vx = b.vx / sp * max; b.vy = b.vy / sp * max; }
+        }
+      }
       b.x += b.vx; b.y += b.vy;
       b.life--;
       if (b.life <= 0 || b.y < -20 || b.y > VH + 20 || b.x < -20 || b.x > VW + 20) bullets.splice(i, 1);
     }
     for (let i = enemyBullets.length - 1; i >= 0; i--) {
       const b = enemyBullets[i];
-      b.x += b.vx; b.y += b.vy;
+      b.x += b.vx * enemySpeed; b.y += b.vy * enemySpeed;
       b.life--;
       if (b.life <= 0 || b.y > VH + 20 || b.y < -20 || b.x < -20 || b.x > VW + 20) enemyBullets.splice(i, 1);
     }
@@ -1067,8 +1310,9 @@
   function updateMeteors() {
     for (let i = meteors.length - 1; i >= 0; i--) {
       const m = meteors[i];
-      m.x += m.vx; m.y += m.vy;
-      m.spin += m.spinV;
+      m.x += m.vx * enemySpeed;
+      m.y += m.vy * enemySpeed;
+      m.spin += m.spinV * enemySpeed;
       if (m.y > VH + 60) { meteors.splice(i, 1); continue; }
       // collide with player
       if (player.invuln <= 0 && circHit(player, m)) {
@@ -1089,12 +1333,24 @@
     }
   }
 
+  // When a splitter rock dies it spawns three fast small fragments — fun
+  // chain-reaction kills for kids and a great combo feeder.
+  function splitMeteor(m) {
+    for (let k = -1; k <= 1; k++) {
+      spawnMeteor({
+        x: m.x, y: m.y, vx: k * 2 + (Math.random() - 0.5),
+        vy: 2.2 + Math.random() * 0.8,
+        fragment: true,
+      });
+    }
+  }
+
   function updateUFOs() {
     for (let i = ufos.length - 1; i >= 0; i--) {
       const u = ufos[i];
-      u.x += u.vx;
-      u.y += Math.sin(u.x * 0.02) * 0.6;
-      u.shootCooldown--;
+      u.x += u.vx * enemySpeed;
+      u.y += Math.sin(u.x * 0.02) * 0.6 * enemySpeed;
+      u.shootCooldown -= enemySpeed;
       if (u.shootCooldown <= 0) {
         u.shootCooldown = 90 + Math.random() * 40;
         // aim a slow bolt at the player
@@ -1119,12 +1375,251 @@
     }
   }
 
+  // ── Kamikaze drones ── arrive in pods of 3-5 from the top, lock onto the
+  // player, dive. No projectiles — they're a ramming threat. Cheap and weak,
+  // but their swarm makes the screen feel alive.
+  function updateKamikazes() {
+    for (let i = kamikazes.length - 1; i >= 0; i--) {
+      const k = kamikazes[i];
+      const dx = player.x - k.x;
+      k.vx += Math.sign(dx) * 0.06;
+      k.vx = Math.max(-2.4, Math.min(2.4, k.vx));
+      k.x += k.vx * enemySpeed;
+      k.y += k.vy * enemySpeed;
+      k.thruster = (k.thruster + 1) % 4;
+      if (k.y > VH + 40) { kamikazes.splice(i, 1); continue; }
+      if (player.invuln <= 0 && circHit(player, k)) {
+        if (player.shieldTime > 0) {
+          explosions.push({ x: k.x, y: k.y, time: 18, max: 18, radius: 28, color: '#c45fff' });
+          spawnDebris(k.x, k.y, '#c45fff', 8);
+          kamikazes.splice(i, 1);
+          sfx.smallBoom();
+          continue;
+        }
+        explosions.push({ x: k.x, y: k.y, time: 22, max: 22, radius: 32, color: '#c45fff' });
+        kamikazes.splice(i, 1);
+        killPlayer();
+      }
+    }
+  }
+
+  // ── Turret asteroids ── fall in, lock at an altitude, fire aimed bolts.
+  // Slow but tanky (4 HP) — players must prioritise them or eat damage.
+  function updateTurrets() {
+    for (let i = turrets.length - 1; i >= 0; i--) {
+      const t = turrets[i];
+      t.spin += 0.02 * enemySpeed;
+      if (t.phase === 'falling') {
+        t.y += t.vy * enemySpeed;
+        if (t.y >= t.dockY) { t.phase = 'docked'; t.vy = 0; sfx.warn(); }
+      } else {
+        t.cooldown -= enemySpeed;
+        if (t.cooldown <= 0) {
+          t.cooldown = 95 + Math.random() * 30;
+          const dx = player.x - t.x, dy = player.y - t.y;
+          const d = Math.max(1, Math.hypot(dx, dy));
+          enemyBullets.push({ x: t.x, y: t.y + 6, vx: dx / d * 4.2, vy: dy / d * 4.2, r: 5, life: 200, color: '#ff7a30' });
+          sfx.hit();
+        }
+      }
+      if (player.invuln <= 0 && circHit(player, t)) {
+        if (player.shieldTime > 0) {
+          explosions.push({ x: t.x, y: t.y, time: 22, max: 22, radius: 40, color: '#ff7a30' });
+          spawnDebris(t.x, t.y, '#ff7a30', 10);
+          turrets.splice(i, 1);
+          sfx.smallBoom();
+          continue;
+        }
+        explosions.push({ x: t.x, y: t.y, time: 26, max: 26, radius: 50, color: '#ff7a30' });
+        turrets.splice(i, 1);
+        killPlayer();
+      }
+    }
+  }
+
+  // ── Mothership mini-boss (wave 4) ── glides into position, hovers across
+  // the top, periodically drops kamikaze pods + fires aimed twin bolts.
+  // Takes a chunk of HP; clearing it unlocks the harder back half of the
+  // run. Re-uses drawZorg-style hull but flatter and red.
+  function updateMothership() {
+    if (!miniBoss) return;
+    const m = miniBoss;
+    m.moveT++;
+    if (m.flash > 0) m.flash--;
+    if (m.phase === 'entering') {
+      m.y += (m.ty - m.y) * 0.04;
+      if (Math.abs(m.ty - m.y) < 1.5) m.phase = 'fight';
+      return;
+    }
+    if (m.phase === 'dying') {
+      m.deathT = (m.deathT || 0) + 1;
+      if (m.deathT % 8 === 0) {
+        explosions.push({
+          x: m.x + (Math.random() - 0.5) * 100,
+          y: m.y + (Math.random() - 0.5) * 30,
+          time: 24, max: 24, radius: 36 + Math.random() * 18, color: '#ff5252',
+        });
+        sfx.smallBoom();
+        shake = Math.max(shake, 8);
+      }
+      if (m.deathT > 60) {
+        explosions.push({ x: m.x, y: m.y, time: 40, max: 40, radius: 120, color: '#fff' });
+        spawnDebris(m.x, m.y, '#ff5252', 36);
+        sfx.boom();
+        shake = Math.max(shake, 16);
+        addPoints(800, m.x, m.y, '+800');
+        floatingTexts.push({ x: VW / 2, y: VH / 2, vy: -0.4, time: 90, text: 'MOTHERSHIP DOWN!', color: '#ffe066', size: 28 });
+        try {
+          if ('speechSynthesis' in window) {
+            const u = new SpeechSynthesisUtterance('Mothership down!');
+            u.pitch = 1.1; u.rate = 1.0; u.volume = 0.9;
+            window.speechSynthesis.cancel(); window.speechSynthesis.speak(u);
+          }
+        } catch {}
+        miniBoss = null;
+        // proceed to next wave
+        startWave(wave + 1);
+      }
+      return;
+    }
+    // hover sweep across the top
+    m.x += m.moveX * 1.4 * enemySpeed;
+    if (m.x < 80)  { m.x = 80;  m.moveX = 1; }
+    if (m.x > VW - 80) { m.x = VW - 80; m.moveX = -1; }
+    m.y = m.ty + Math.sin(m.moveT * 0.04) * 14;
+
+    m.shootCooldown -= enemySpeed;
+    if (m.shootCooldown <= 0) {
+      m.shootCooldown = 80 + Math.random() * 30;
+      const dx = player.x - m.x, dy = player.y - m.y;
+      const d = Math.max(1, Math.hypot(dx, dy));
+      const bx = dx / d, by = dy / d;
+      // twin bolt
+      for (const off of [-12, 12]) {
+        enemyBullets.push({ x: m.x + off, y: m.y + 14, vx: bx * 4.0, vy: by * 4.0, r: 4, life: 200, color: '#ff5252' });
+      }
+      sfx.hit();
+    }
+    m.dropCooldown -= enemySpeed;
+    if (m.dropCooldown <= 0) {
+      m.dropCooldown = 200 + Math.random() * 80;
+      for (let k = 0; k < 3; k++) {
+        spawnKamikaze({ x: m.x + (k - 1) * 24, y: m.y + 14, vx: (k - 1) * 0.6, vy: 1.8 + Math.random() * 0.6 });
+      }
+      sfx.warn();
+    }
+
+    if (player.invuln <= 0 && circHit(player, m)) {
+      if (player.shieldTime > 0) {
+        player.y = Math.min(VH - 30, player.y + 50);
+        sfx.smallBoom();
+      } else killPlayer();
+    }
+  }
+
+  // ── LASER ── continuous vertical beam from the ship's nose to the top of
+  // the screen. While active, normal bullet firing is suppressed; instead we
+  // tick damage every frame to anything inside a thin column over the ship.
+  function updateLaser() {
+    if (player.laserTime <= 0) return;
+    const colX = player.x;
+    const halfW = 10;
+    const tick = (e) => {
+      if (Math.abs(e.x - colX) < halfW + (e.r || 0)) {
+        return true;
+      }
+      return false;
+    };
+    // The laser tears through everything in its column at one HP per 4 frames.
+    if ((player.laserTime % 4) !== 0) return;
+    for (let i = meteors.length - 1; i >= 0; i--) {
+      const m = meteors[i];
+      if (m.y < player.y && tick(m)) {
+        m.hp--;
+        spawnDebris(m.x, m.y, m.kind === 'ice' ? '#aae6ff' : '#ff8040', 2);
+        if (m.hp <= 0) {
+          explosions.push({ x: m.x, y: m.y, time: 18, max: 18, radius: m.r * 1.5, color: m.kind === 'ice' ? '#aae6ff' : '#ffa050' });
+          spawnDebris(m.x, m.y, m.kind === 'ice' ? '#aae6ff' : '#ff8040', m.big ? 14 : 6);
+          const pts = m.big ? 30 : (m.kind === 'ice' ? 20 : 10);
+          addPoints(pts, m.x, m.y);
+          if (m.splitter) splitMeteor(m);
+          if (Math.random() < (m.big ? 0.45 : 0.10)) spawnPowerup(m.x, m.y);
+          meteors.splice(i, 1);
+          if (state === PLAYING) meteorsRemaining = Math.max(0, meteorsRemaining - (m.fragment ? 0 : 1));
+        }
+      }
+    }
+    for (let i = ufos.length - 1; i >= 0; i--) {
+      const u = ufos[i];
+      if (u.y < player.y && tick(u)) {
+        u.hp--;
+        if (u.hp <= 0) {
+          explosions.push({ x: u.x, y: u.y, time: 22, max: 22, radius: 36, color: '#aaff60' });
+          spawnDebris(u.x, u.y, '#aaff60', 10);
+          addPoints(80, u.x, u.y, '+80');
+          if (Math.random() < 0.35) spawnPowerup(u.x, u.y);
+          ufos.splice(i, 1);
+        }
+      }
+    }
+    for (let i = kamikazes.length - 1; i >= 0; i--) {
+      const k = kamikazes[i];
+      if (k.y < player.y && tick(k)) {
+        explosions.push({ x: k.x, y: k.y, time: 16, max: 16, radius: 22, color: '#c45fff' });
+        spawnDebris(k.x, k.y, '#c45fff', 6);
+        addPoints(40, k.x, k.y, '+40');
+        kamikazes.splice(i, 1);
+      }
+    }
+    for (let i = turrets.length - 1; i >= 0; i--) {
+      const t = turrets[i];
+      if (t.y < player.y && tick(t)) {
+        t.hp--;
+        if (t.hp <= 0) {
+          explosions.push({ x: t.x, y: t.y, time: 24, max: 24, radius: 40, color: '#ff7a30' });
+          spawnDebris(t.x, t.y, '#ff7a30', 14);
+          addPoints(120, t.x, t.y, '+120');
+          if (Math.random() < 0.4) spawnPowerup(t.x, t.y);
+          turrets.splice(i, 1);
+        }
+      }
+    }
+    if (miniBoss && miniBoss.phase === 'fight' && Math.abs(miniBoss.x - colX) < halfW + miniBoss.r) {
+      miniBoss.hp = Math.max(0, miniBoss.hp - 1);
+      miniBoss.flash = 4;
+      if (miniBoss.hp <= 0) startMiniBossDeath();
+    }
+    if (zorg && zorg.phase === 'fight' && Math.abs(zorg.x - colX) < halfW + zorg.r) {
+      zorg.hp = Math.max(0, zorg.hp - 1);
+      zorg.flash = 4;
+      if (zorg.hp <= 0) startZorgDeath();
+    }
+  }
+
+  function startMiniBossDeath() {
+    miniBoss.phase = 'dying';
+    miniBoss.deathT = 0;
+  }
+
   function updatePowerups() {
     for (let i = powerups.length - 1; i >= 0; i--) {
       const p = powerups[i];
+      // MAGNET: accelerate toward the player when active.
+      if (player.magnetTime > 0) {
+        const dx = player.x - p.x, dy = player.y - p.y;
+        const d = Math.max(1, Math.hypot(dx, dy));
+        p.vx += (dx / d) * 0.35;
+        p.vy += (dy / d) * 0.35;
+        p.vx = Math.max(-6, Math.min(6, p.vx));
+        p.vy = Math.max(-2, Math.min(6, p.vy));
+      } else {
+        p.vx *= 0.96;
+        if (p.vy < 1.2) p.vy = Math.min(1.2, p.vy + 0.04);
+      }
+      p.x += p.vx;
       p.y += p.vy;
       p.rotation += 0.04;
-      if (p.y > VH + 40) { powerups.splice(i, 1); continue; }
+      if (p.y > VH + 40 || p.x < -40 || p.x > VW + 40) { powerups.splice(i, 1); continue; }
       if (circHit(player, p)) {
         applyPowerup(p.kind);
         powerups.splice(i, 1);
@@ -1132,16 +1627,74 @@
     }
   }
 
+  // ── Background events ── distant comets streaking behind the play field.
+  // Pure scenery; never collide with anything. Adds liveliness to slow moments.
+  function updateBgComets() {
+    if (Math.random() < 0.0035 && bgComets.length < 2) {
+      bgComets.push({
+        x: -60, y: 30 + Math.random() * 220,
+        vx: 3 + Math.random() * 2.5, vy: 0.4 + Math.random() * 0.6,
+        len: 60 + Math.random() * 60,
+        color: Math.random() < 0.5 ? '#ffd8b0' : '#cce6ff',
+      });
+    }
+    for (let i = bgComets.length - 1; i >= 0; i--) {
+      const c = bgComets[i];
+      c.x += c.vx; c.y += c.vy;
+      if (c.x > VW + 120) bgComets.splice(i, 1);
+    }
+  }
+
+  // ── Combo tick ── decay the combo when no kills have happened recently
+  function updateCombo() {
+    if (comboTimer > 0) {
+      comboTimer--;
+      if (comboTimer <= 0) resetCombo();
+    }
+  }
+
+  // ── Meteor shower set-piece ── triggers occasionally during a wave,
+  // shows a banner, then rains meteors at 4-5x normal rate for 5 seconds.
+  function maybeTriggerShower() {
+    if (state !== PLAYING) return;
+    if (meteorShowerT > 0) return;
+    const def = WAVES[wave - 1];
+    if (!def || !def.showerChance) return;
+    if (Math.random() < def.showerChance) {
+      meteorShowerT = 300;
+      floatingTexts.push({ x: VW / 2, y: 90, vy: -0.4, time: 100, text: 'METEOR SHOWER!', color: '#ff5252', size: 28 });
+      shake = Math.max(shake, 6);
+      sfx.warn();
+    }
+  }
+  function updateMeteorShower() {
+    if (meteorShowerT <= 0) return;
+    meteorShowerT--;
+    if (meteorShowerT % 10 === 0) spawnMeteor();
+  }
+
   function applyPowerup(kind) {
     sfx.pickup();
     let label = '', color = '#ffe066';
-    if (kind === 'rapid')       { player.power = Math.max(player.power, 2); player.powerTime = 600; label = 'RAPID FIRE'; color = '#ffce4d'; }
-    else if (kind === 'spread') { player.power = 3; player.powerTime = 600; label = 'SPREAD SHOT'; color = '#ff80b3'; }
-    else if (kind === 'shield') { player.shieldTime = 600; sfx.shield(); label = 'SHIELD'; color = '#7fdcff'; }
-    else if (kind === 'bomb')   { bombs = Math.min(9, bombs + 1); syncBombBtn(); label = '+ BOMB'; color = '#ffb24d'; }
-    else if (kind === 'life')   { lives = Math.min(5, lives + 1); label = '+ LIFE'; color = '#ff80b3'; }
+    if (kind === 'rapid')        { player.power = Math.max(player.power, 2); player.powerTime = 600; label = 'RAPID FIRE'; color = '#ffce4d'; }
+    else if (kind === 'spread')  { player.power = 3; player.powerTime = 600; label = 'SPREAD SHOT'; color = '#ff80b3'; }
+    else if (kind === 'shield')  { player.shieldTime = 600; sfx.shield(); label = 'SHIELD'; color = '#7fdcff'; }
+    else if (kind === 'bomb')    { bombs = Math.min(9, bombs + 1); syncBombBtn(); label = '+ BOMB'; color = '#ffb24d'; }
+    else if (kind === 'life')    { lives = Math.min(5, lives + 1); label = '+ LIFE'; color = '#ff80b3'; }
+    else if (kind === 'magnet')  { player.magnetTime = Math.max(player.magnetTime, 900); label = 'MAGNET'; color = '#c45fff'; }
+    else if (kind === 'homing')  { player.homingTime = Math.max(player.homingTime, 600); label = 'HOMING'; color = '#5dd66c'; }
+    else if (kind === 'laser')   { player.laserTime  = Math.max(player.laserTime, 360);  label = 'LASER';  color = '#ff5252'; }
+    else if (kind === 'slowmo')  { player.slowTime   = Math.max(player.slowTime, 360);   label = 'SLOW-MO'; color = '#aae6ff'; }
+    else if (kind === 'wingmen') { spawnWingmen(); label = 'WINGMEN'; color = '#ffe066'; }
     floatingTexts.push({ x: player.x, y: player.y - 28, vy: -0.8, time: 70, text: label, color, size: 18 });
     speakVoice(pilotId);
+  }
+
+  function spawnWingmen() {
+    player.wingmenTime = 720;
+    wingmen.length = 0;
+    wingmen.push({ side: -1, offsetX: -34, offsetY: 6, cooldown: 0, hp: 1 });
+    wingmen.push({ side:  1, offsetX:  34, offsetY: 6, cooldown: 8, hp: 1 });
   }
 
   // bullet ↔ enemy collisions
@@ -1154,16 +1707,17 @@
         if (circHit(b, m)) {
           m.hp--;
           sfx.hit();
-          spawnDebris(b.x, b.y, m.kind === 'ice' ? '#aae6ff' : '#ff8040', 4);
+          spawnDebris(b.x, b.y, m.kind === 'ice' ? '#aae6ff' : (m.kind === 'splitter' ? '#5dd66c' : '#ff8040'), 4);
           if (m.hp <= 0) {
-            explosions.push({ x: m.x, y: m.y, time: 22, max: 22, radius: m.r * 1.8, color: m.kind === 'ice' ? '#aae6ff' : '#ffa050' });
-            spawnDebris(m.x, m.y, m.kind === 'ice' ? '#aae6ff' : '#ff8040', m.big ? 16 : 8);
-            const pts = m.big ? 30 : (m.kind === 'ice' ? 20 : 10);
+            const popColor = m.kind === 'ice' ? '#aae6ff' : m.kind === 'splitter' ? '#5dd66c' : '#ffa050';
+            explosions.push({ x: m.x, y: m.y, time: 22, max: 22, radius: m.r * 1.8, color: popColor });
+            spawnDebris(m.x, m.y, popColor, m.big ? 16 : 8);
+            const pts = m.fragment ? 5 : (m.big ? 30 : (m.kind === 'ice' ? 20 : (m.kind === 'splitter' ? 15 : 10)));
             addPoints(pts, m.x, m.y);
-            // small chance to drop a powerup
-            if (Math.random() < (m.big ? 0.45 : 0.10)) spawnPowerup(m.x, m.y);
+            if (m.splitter) splitMeteor(m);
+            if (!m.fragment && Math.random() < (m.big ? 0.45 : 0.10)) spawnPowerup(m.x, m.y);
             meteors.splice(j, 1);
-            if (state === PLAYING) meteorsRemaining--;
+            if (state === PLAYING && !m.fragment) meteorsRemaining--;
             sfx.smallBoom();
           }
           hit = true;
@@ -1189,6 +1743,48 @@
         }
       }
       if (hit) { bullets.splice(i, 1); continue; }
+      for (let j = kamikazes.length - 1; j >= 0; j--) {
+        const k = kamikazes[j];
+        if (circHit(b, k)) {
+          explosions.push({ x: k.x, y: k.y, time: 20, max: 20, radius: 28, color: '#c45fff' });
+          spawnDebris(k.x, k.y, '#c45fff', 8);
+          addPoints(40, k.x, k.y, '+40');
+          kamikazes.splice(j, 1);
+          sfx.smallBoom();
+          hit = true;
+          break;
+        }
+      }
+      if (hit) { bullets.splice(i, 1); continue; }
+      for (let j = turrets.length - 1; j >= 0; j--) {
+        const t = turrets[j];
+        if (circHit(b, t)) {
+          t.hp--;
+          sfx.hit();
+          spawnDebris(b.x, b.y, '#ff7a30', 4);
+          if (t.hp <= 0) {
+            explosions.push({ x: t.x, y: t.y, time: 26, max: 26, radius: 45, color: '#ff7a30' });
+            spawnDebris(t.x, t.y, '#ff7a30', 16);
+            addPoints(120, t.x, t.y, '+120');
+            if (Math.random() < 0.40) spawnPowerup(t.x, t.y);
+            turrets.splice(j, 1);
+            sfx.smallBoom();
+            hitPauseT = Math.max(hitPauseT, 3);
+          }
+          hit = true;
+          break;
+        }
+      }
+      if (hit) { bullets.splice(i, 1); continue; }
+      if (miniBoss && miniBoss.phase === 'fight' && circHit(b, miniBoss)) {
+        miniBoss.hp = Math.max(0, miniBoss.hp - 1);
+        miniBoss.flash = 8;
+        sfx.hit();
+        spawnDebris(b.x, b.y, '#ff5252', 4);
+        if (miniBoss.hp <= 0) startMiniBossDeath();
+        bullets.splice(i, 1);
+        continue;
+      }
       if (zorg && zorg.phase !== 'dying' && circHit(b, zorg)) {
         zorg.hp = Math.max(0, zorg.hp - 1);
         zorg.flash = 8;
@@ -1244,6 +1840,7 @@
   function updateWave() {
     if (state !== PLAYING) return;
     const def = WAVES[wave - 1];
+    if (!def || def.boss) return;
     waveTimer++;
     if (meteorsRemaining > 0) {
       waveSpawnAcc++;
@@ -1255,9 +1852,32 @@
           spawnMeteor();
         }
       }
+      // Kamikaze swarms — every kamikazeEvery cycles, drop a pod of 3-5
+      if (def.kamikazeEvery > 0) {
+        kamikazeAcc++;
+        if (kamikazeAcc >= def.kamikazeEvery * 18) {
+          kamikazeAcc = 0;
+          const count = 3 + Math.floor(Math.random() * 3);
+          for (let k = 0; k < count; k++) {
+            spawnKamikaze({ x: 80 + Math.random() * (VW - 160), y: -20 - k * 22, vx: (Math.random() - 0.5) * 1.2 });
+          }
+        }
+      }
+      // Turret asteroids (one at a time, slow trickle)
+      if (def.turretEvery > 0) {
+        turretAcc++;
+        if (turretAcc >= def.turretEvery * 22 && turrets.length < 2) {
+          turretAcc = 0;
+          spawnTurret();
+        }
+      }
+      // Random meteor-shower set piece
+      maybeTriggerShower();
     }
-    // wave complete when no more rocks queued AND no rocks/UFOs on screen
-    if (meteorsRemaining <= 0 && meteors.length === 0 && ufos.length === 0) {
+    // wave complete when all spawn queues empty AND nothing on screen
+    if (meteorsRemaining <= 0 && meteorShowerT <= 0 &&
+        meteors.length === 0 && ufos.length === 0 &&
+        kamikazes.length === 0 && turrets.length === 0) {
       startWave(wave + 1);
     }
   }
@@ -1362,6 +1982,7 @@
   function startZorgDeath() {
     zorg.phase = 'dying';
     zorg.deathT = 0;
+    hitPauseT = Math.max(hitPauseT, 8);
     try {
       if ('speechSynthesis' in window) {
         const u = new SpeechSynthesisUtterance('Noooo!');
@@ -1481,10 +2102,14 @@
   // adapted for our 2D motion (trail follows -velocity).
   function drawMeteor(m) {
     const isIce = m.kind === 'ice';
+    const isSplitter = m.kind === 'splitter';
     ctx.save();
     if (isIce) {
       ctx.shadowBlur = 22; ctx.shadowColor = '#aae6ff';
       ctx.strokeStyle = 'rgba(140,220,255,0.6)';
+    } else if (isSplitter) {
+      ctx.shadowBlur = 22; ctx.shadowColor = '#5dd66c';
+      ctx.strokeStyle = 'rgba(120,220,120,0.55)';
     } else {
       ctx.shadowBlur = 22; ctx.shadowColor = '#ff5500';
       ctx.strokeStyle = 'rgba(255,140,40,0.55)';
@@ -1496,23 +2121,26 @@
     ctx.stroke();
     ctx.shadowBlur = 0;
 
-    // body with damage cracks for big meteors
+    // body
     ctx.translate(m.x, m.y);
     ctx.rotate(m.spin);
-    if (isIce) {
-      ctx.fillStyle = '#3aa0d0';
-      ctx.beginPath(); ctx.arc(0, 0, m.r, 0, Math.PI * 2); ctx.fill();
-      ctx.fillStyle = '#aae6ff';
-      ctx.beginPath(); ctx.arc(-m.r * 0.25, -m.r * 0.25, m.r * 0.55, 0, Math.PI * 2); ctx.fill();
-      ctx.fillStyle = '#ffffff';
-      ctx.beginPath(); ctx.arc(-m.r * 0.35, -m.r * 0.35, m.r * 0.25, 0, Math.PI * 2); ctx.fill();
-    } else {
-      ctx.fillStyle = '#aa3300';
-      ctx.beginPath(); ctx.arc(0, 0, m.r, 0, Math.PI * 2); ctx.fill();
-      ctx.fillStyle = '#ff9944';
-      ctx.beginPath(); ctx.arc(-m.r * 0.25, -m.r * 0.25, m.r * 0.55, 0, Math.PI * 2); ctx.fill();
-      ctx.fillStyle = '#fff7d0';
-      ctx.beginPath(); ctx.arc(-m.r * 0.35, -m.r * 0.35, m.r * 0.25, 0, Math.PI * 2); ctx.fill();
+    let core, mid, glint;
+    if (isIce)            { core = '#3aa0d0'; mid = '#aae6ff'; glint = '#ffffff'; }
+    else if (isSplitter)  { core = '#2a7030'; mid = '#5dd66c'; glint = '#c5ffce'; }
+    else                  { core = '#aa3300'; mid = '#ff9944'; glint = '#fff7d0'; }
+    ctx.fillStyle = core;
+    ctx.beginPath(); ctx.arc(0, 0, m.r, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = mid;
+    ctx.beginPath(); ctx.arc(-m.r * 0.25, -m.r * 0.25, m.r * 0.55, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = glint;
+    ctx.beginPath(); ctx.arc(-m.r * 0.35, -m.r * 0.35, m.r * 0.25, 0, Math.PI * 2); ctx.fill();
+    // splitters get cracks so the kids learn what's coming
+    if (isSplitter) {
+      ctx.strokeStyle = 'rgba(0,0,0,0.45)'; ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(-m.r * 0.7, 0); ctx.lineTo(m.r * 0.3, m.r * 0.4);
+      ctx.moveTo(-m.r * 0.2, -m.r * 0.6); ctx.lineTo(m.r * 0.5, -m.r * 0.2);
+      ctx.stroke();
     }
     if (m.big && m.hp < m.maxHp) {
       ctx.strokeStyle = 'rgba(0,0,0,0.55)'; ctx.lineWidth = 2;
@@ -1543,6 +2171,189 @@
       ctx.fillRect(s.x - 10, s.y - 14, 20, 2);
       ctx.fillStyle = '#5dd66c';
       ctx.fillRect(s.x - 10, s.y - 14, 20 * (s.hp / s.maxHp), 2);
+    }
+    ctx.restore();
+  }
+
+  // Background streak — sceneic comet far behind the action plane. Drawn
+  // before stars so the parallax reads as "way out there".
+  function drawBgComet(c) {
+    ctx.save();
+    ctx.globalAlpha = 0.55;
+    ctx.shadowBlur = 18; ctx.shadowColor = c.color;
+    ctx.strokeStyle = c.color; ctx.lineWidth = 3; ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(c.x, c.y);
+    ctx.lineTo(c.x - c.len, c.y - c.len * 0.15);
+    ctx.stroke();
+    ctx.shadowBlur = 8;
+    ctx.fillStyle = '#fff';
+    ctx.beginPath(); ctx.arc(c.x, c.y, 2.5, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+
+  // Kamikaze drone — a small purple arrow with a flicker thruster, points
+  // downward. Cheap and reads instantly as "incoming".
+  function drawKamikaze(k) {
+    ctx.save();
+    ctx.shadowBlur = 10; ctx.shadowColor = '#c45fff';
+    // thruster
+    const flick = 3 + (k.thruster % 2 ? 1.5 : 0);
+    ctx.fillStyle = '#ffd84d';
+    ctx.beginPath();
+    ctx.moveTo(k.x - 4, k.y - 8);
+    ctx.lineTo(k.x + 4, k.y - 8);
+    ctx.lineTo(k.x, k.y - 8 - flick);
+    ctx.closePath(); ctx.fill();
+    // body — pointed down toward player
+    ctx.fillStyle = '#c45fff';
+    ctx.beginPath();
+    ctx.moveTo(k.x, k.y + 10);
+    ctx.lineTo(k.x + 9, k.y - 8);
+    ctx.lineTo(k.x - 9, k.y - 8);
+    ctx.closePath(); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.beginPath(); ctx.arc(k.x, k.y - 1, 2, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+
+  // Turret asteroid — chunky rock with a glowing cannon barrel that aims
+  // down/at the player. Spin for menace; HP bar when damaged.
+  function drawTurret(t) {
+    ctx.save();
+    ctx.shadowBlur = 10; ctx.shadowColor = '#ff7a30';
+    ctx.translate(t.x, t.y);
+    ctx.save();
+    ctx.rotate(t.spin);
+    ctx.fillStyle = '#6a4030';
+    ctx.beginPath(); ctx.arc(0, 0, t.r, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#8a5030';
+    ctx.beginPath(); ctx.arc(-5, -5, t.r * 0.55, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#3a1f0c';
+    ctx.beginPath(); ctx.arc(6, 4, t.r * 0.25, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+    // glowing barrel pointing toward the player
+    if (t.phase !== 'falling') {
+      const dx = player ? player.x - t.x : 0;
+      const dy = player ? player.y - t.y : 1;
+      const ang = Math.atan2(dy, dx);
+      ctx.rotate(ang);
+      ctx.fillStyle = '#222';
+      ctx.fillRect(0, -4, t.r + 6, 8);
+      ctx.shadowBlur = 12; ctx.shadowColor = '#ff7a30';
+      ctx.fillStyle = '#ff7a30';
+      ctx.beginPath(); ctx.arc(t.r + 6, 0, 3.5, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.restore();
+    if (t.hp < t.maxHp) {
+      ctx.fillStyle = '#ff5252';
+      ctx.fillRect(t.x - 18, t.y - t.r - 8, 36, 3);
+      ctx.fillStyle = '#5dd66c';
+      ctx.fillRect(t.x - 18, t.y - t.r - 8, 36 * (t.hp / t.maxHp), 3);
+    }
+  }
+
+  // Mothership mini-boss — wider/flatter than Zorg's saucer, red palette.
+  // Rim lights, a glowing drop bay, and a HP bar above. Reuses the Zorg
+  // hull-gradient language so the family reads them as a related pair.
+  function drawMothership() {
+    if (!miniBoss) return;
+    const m = miniBoss;
+    ctx.save();
+    if (m.flash > 0) {
+      ctx.shadowBlur = 18; ctx.shadowColor = '#ffffff';
+      ctx.globalAlpha = 0.65 + Math.random() * 0.35;
+    }
+    // aura
+    const pulse = Math.sin(Date.now() / 240) * 0.18 + 0.7;
+    ctx.save();
+    ctx.globalAlpha = pulse;
+    ctx.strokeStyle = '#ff5252';
+    ctx.shadowBlur = 28; ctx.shadowColor = '#ff5252';
+    ctx.lineWidth = 2.5;
+    ctx.beginPath(); ctx.ellipse(m.x, m.y, 78, 26, 0, 0, Math.PI * 2); ctx.stroke();
+    ctx.restore();
+    // hull (wide saucer)
+    ctx.shadowBlur = 14; ctx.shadowColor = '#ff5252';
+    const grd = ctx.createLinearGradient(m.x, m.y - 12, m.x, m.y + 18);
+    grd.addColorStop(0, '#9a6a6a');
+    grd.addColorStop(0.5, '#5a2a2a');
+    grd.addColorStop(1, '#2a1010');
+    ctx.fillStyle = grd;
+    ctx.beginPath(); ctx.ellipse(m.x, m.y + 6, 72, 14, 0, 0, Math.PI * 2); ctx.fill();
+    // rim lights
+    ctx.fillStyle = '#ffce4d';
+    for (let i = -3; i <= 3; i++) {
+      ctx.beginPath(); ctx.arc(m.x + i * 20, m.y + 16, 2.2, 0, Math.PI * 2); ctx.fill();
+    }
+    // dome (red instead of green — visually distinct from Zorg)
+    ctx.shadowBlur = 18; ctx.shadowColor = '#ff5252';
+    ctx.fillStyle = '#a02020';
+    ctx.beginPath(); ctx.arc(m.x, m.y, 22, Math.PI, 2 * Math.PI); ctx.fill();
+    // pilot
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = '#dc4a4a';
+    ctx.beginPath(); ctx.arc(m.x, m.y - 4, 10, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#222';
+    ctx.beginPath(); ctx.arc(m.x - 3, m.y - 4, 1.6, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(m.x + 3, m.y - 4, 1.6, 0, Math.PI * 2); ctx.fill();
+    // drop bay glow underneath
+    ctx.shadowBlur = 14; ctx.shadowColor = '#ffce4d';
+    ctx.fillStyle = 'rgba(255,200,80,0.25)';
+    ctx.beginPath();
+    ctx.moveTo(m.x - 20, m.y + 16);
+    ctx.lineTo(m.x + 20, m.y + 16);
+    ctx.lineTo(m.x + 40, m.y + 60);
+    ctx.lineTo(m.x - 40, m.y + 60);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // Wingmen — small mini-ships flanking the player, follow with smoothing.
+  function drawWingman(w) {
+    if (!player) return;
+    const x = player.x + w.offsetX;
+    const y = player.y + w.offsetY;
+    ctx.save();
+    ctx.shadowBlur = 8; ctx.shadowColor = '#ffe066';
+    ctx.fillStyle = '#ffe066';
+    ctx.beginPath();
+    ctx.moveTo(x, y - 8);
+    ctx.lineTo(x + 7, y + 6);
+    ctx.lineTo(x - 7, y + 6);
+    ctx.closePath();
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = '#fff';
+    ctx.beginPath(); ctx.arc(x, y - 2, 1.8, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+
+  // Laser beam — a vertical column from the ship to the top of the screen.
+  // Three stacked layers (outer glow → core → hot spine) for that classic
+  // "ow my retinas" look. Animated with a slight wobble.
+  function drawLaserBeam() {
+    if (!player || player.laserTime <= 0) return;
+    const x = player.x;
+    const top = 0, bot = player.y - 16;
+    const flick = 0.85 + Math.random() * 0.3;
+    ctx.save();
+    ctx.shadowBlur = 28; ctx.shadowColor = '#ff5252';
+    ctx.strokeStyle = `rgba(255,82,82,${0.7 * flick})`;
+    ctx.lineWidth = 18; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(x, bot); ctx.lineTo(x, top); ctx.stroke();
+    ctx.shadowBlur = 0;
+    ctx.strokeStyle = '#ffce4d'; ctx.lineWidth = 8;
+    ctx.beginPath(); ctx.moveTo(x, bot); ctx.lineTo(x, top); ctx.stroke();
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(x, bot); ctx.lineTo(x, top); ctx.stroke();
+    // little glow dots along the beam
+    ctx.fillStyle = '#fff';
+    for (let k = 0; k < 6; k++) {
+      const sy = (bot + ((Date.now() / 6) + k * 30) % (bot - top));
+      const sx = x + Math.sin((sy + Date.now() / 50) * 0.05) * 3;
+      ctx.beginPath(); ctx.arc(sx, sy, 2, 0, Math.PI * 2); ctx.fill();
     }
     ctx.restore();
   }
@@ -1651,16 +2462,24 @@
     ctx.restore();
   }
 
+  const POWERUP_META = {
+    rapid:   { color: '#ffce4d', mark: 'R' },
+    spread:  { color: '#ff80b3', mark: 'S' },
+    shield:  { color: '#7fdcff', mark: '◊' },
+    bomb:    { color: '#ffb24d', mark: 'B' },
+    life:    { color: '#ff80b3', mark: '♥' },
+    magnet:  { color: '#c45fff', mark: 'M' },
+    homing:  { color: '#5dd66c', mark: 'H' },
+    laser:   { color: '#ff5252', mark: 'L' },
+    slowmo:  { color: '#aae6ff', mark: 'T' },
+    wingmen: { color: '#ffe066', mark: 'W' },
+  };
   function drawPowerup(p) {
+    const meta = POWERUP_META[p.kind] || POWERUP_META.rapid;
+    const color = meta.color;
     ctx.save();
     ctx.translate(p.x, p.y);
     ctx.rotate(p.rotation);
-    // glowing crate (visually consistent with mystery boxes from Phaser Wars)
-    const color = p.kind === 'rapid'  ? '#ffce4d'
-                : p.kind === 'spread' ? '#ff80b3'
-                : p.kind === 'shield' ? '#7fdcff'
-                : p.kind === 'bomb'   ? '#ffb24d'
-                : '#ff80b3'; // life
     ctx.shadowBlur = 14; ctx.shadowColor = color;
     ctx.fillStyle = '#1a1a2a';
     ctx.fillRect(-12, -12, 24, 24);
@@ -1670,17 +2489,19 @@
     ctx.fillRect(-12, -12, 3, 24);
     ctx.fillRect(  9, -12, 3, 24);
     ctx.shadowBlur = 0;
-    // letter mark
-    const mark = p.kind === 'rapid'  ? 'R'
-               : p.kind === 'spread' ? 'S'
-               : p.kind === 'shield' ? '◊'
-               : p.kind === 'bomb'   ? 'B'
-               : '♥';
     ctx.fillStyle = color;
     ctx.font = 'bold 16px -apple-system, sans-serif';
     ctx.textAlign = 'center';
-    ctx.fillText(mark, 0, 6);
+    ctx.fillText(meta.mark, 0, 6);
     ctx.restore();
+    // Magnet pull halo when magnet is active — kids can see what's pulling
+    if (player && player.magnetTime > 0) {
+      ctx.save();
+      ctx.globalAlpha = 0.35;
+      ctx.strokeStyle = '#c45fff'; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.arc(p.x, p.y, 14 + Math.sin(Date.now()/120)*2, 0, Math.PI * 2); ctx.stroke();
+      ctx.restore();
+    }
   }
 
   function drawFloatingText(ft) {
@@ -1713,10 +2534,40 @@
 
     // wave label
     ctx.textAlign = 'center';
-    const waveText = state === BOSS || (zorg && state === PLAYING) ? 'BOSS' : ('WAVE ' + Math.min(wave, TOTAL_WAVES));
+    const waveText = zorg ? 'ZORG'
+                  : miniBoss ? 'MOTHERSHIP'
+                  : ('WAVE ' + Math.min(wave, TOTAL_WAVES));
     ctx.strokeText(waveText, VW / 2, 24);
     ctx.fillStyle = '#7fdcff';
     ctx.fillText(waveText, VW / 2, 24);
+
+    // Combo readout — only when the streak is meaningful
+    if (combo >= 3) {
+      const m = comboMult();
+      ctx.textAlign = 'center';
+      ctx.font = 'bold 16px -apple-system, sans-serif';
+      const comboText = m + 'x  ' + combo + ' COMBO';
+      ctx.lineWidth = 4;
+      ctx.strokeStyle = 'rgba(0,0,0,0.85)';
+      ctx.strokeText(comboText, VW / 2, 46);
+      ctx.fillStyle = comboColor();
+      ctx.fillText(comboText, VW / 2, 46);
+      // decay bar underneath
+      const w = 80;
+      ctx.fillStyle = 'rgba(0,0,0,0.5)';
+      ctx.fillRect(VW / 2 - w / 2 - 1, 52, w + 2, 4);
+      ctx.fillStyle = comboColor();
+      ctx.fillRect(VW / 2 - w / 2, 52, w * (comboTimer / COMBO_WINDOW), 3);
+    }
+
+    // Meteor shower active flag
+    if (meteorShowerT > 0) {
+      ctx.textAlign = 'center';
+      ctx.font = 'bold 12px -apple-system, sans-serif';
+      ctx.fillStyle = '#ff5252';
+      ctx.strokeText('☄ METEOR SHOWER', VW / 2, 66);
+      ctx.fillText('☄ METEOR SHOWER', VW / 2, 66);
+    }
 
     // lives icons (mini ships) — right aligned, offset for pause button
     const livesX = VW - pad - 60;
@@ -1764,19 +2615,30 @@
       ctx.fillRect(x, y, w * frac, 4);
     }
 
-    // shield timer
-    if (player && player.shieldTime > 0) {
-      const w = 120;
+    // shield + active-buff timer column on the left edge
+    drawBuffBar(0, player && player.shieldTime,  600, '#7fdcff', 'SHIELD');
+    drawBuffBar(1, player && player.laserTime,   360, '#ff5252', 'LASER');
+    drawBuffBar(2, player && player.homingTime,  600, '#5dd66c', 'HOMING');
+    drawBuffBar(3, player && player.magnetTime,  900, '#c45fff', 'MAGNET');
+    drawBuffBar(4, player && player.slowTime,    360, '#aae6ff', 'SLOW-MO');
+    drawBuffBar(5, player && player.wingmenTime, 720, '#ffe066', 'WINGMEN');
+
+    // Mini-boss HP bar
+    if (miniBoss && (state === PLAYING || state === WAVE_BANNER)) {
+      const w = VW * 0.6;
       const x = VW / 2 - w / 2;
-      const y = 50;
-      ctx.fillStyle = 'rgba(0,0,0,0.5)';
-      ctx.fillRect(x - 2, y - 2, w + 4, 8);
-      const frac = player.shieldTime / 600;
-      ctx.fillStyle = '#7fdcff';
-      ctx.fillRect(x, y, w * frac, 4);
+      const y = VH - 50;
+      ctx.fillStyle = 'rgba(0,0,0,0.6)';
+      ctx.fillRect(x - 3, y - 3, w + 6, 12);
+      ctx.fillStyle = '#ff5252';
+      ctx.fillRect(x, y, w * (miniBoss.hp / miniBoss.maxHp), 6);
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 10px -apple-system, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('MOTHERSHIP', VW / 2, y - 3);
     }
 
-    // boss HP bar
+    // Boss HP bar (Zorg)
     if (zorg && (state === PLAYING || state === BOSS || state === WAVE_BANNER)) {
       const w = VW * 0.7;
       const x = VW / 2 - w / 2;
@@ -1792,6 +2654,23 @@
     }
 
     ctx.restore();
+  }
+
+  // Buff bar — vertical column on the left showing each active power-up
+  function drawBuffBar(slot, value, max, color, label) {
+    if (!value || value <= 0) return;
+    const x = 10, y = 60 + slot * 14;
+    const w = 90;
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.fillRect(x, y, w, 8);
+    ctx.fillStyle = color;
+    ctx.fillRect(x, y, w * Math.min(1, value / max), 8);
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 9px -apple-system, sans-serif';
+    ctx.textAlign = 'left';
+    ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(0,0,0,0.85)';
+    ctx.strokeText(label, x + w + 6, y + 7);
+    ctx.fillText(label, x + w + 6, y + 7);
   }
 
   function drawBanner() {
@@ -1827,13 +2706,21 @@
     ctx.fillRect(0, 0, VW, VH);
 
     drawStars();
+    for (const c of bgComets) drawBgComet(c);
     drawPlanets();
 
     for (const p of powerups)       drawPowerup(p);
+    for (const t of turrets)        drawTurret(t);
     for (const m of meteors)        drawMeteor(m);
+    for (const k of kamikazes)      drawKamikaze(k);
     for (const u of ufos)           drawUFO(u);
+    drawMothership();
     drawZorg();
-    if (state === PLAYING || state === BOSS || state === WAVE_BANNER) drawShip();
+    if (state === PLAYING || state === BOSS || state === WAVE_BANNER) {
+      for (const w of wingmen)      drawWingman(w);
+      drawShip();
+      drawLaserBeam();
+    }
     for (const b of bullets)        drawBullet(b);
     for (const b of enemyBullets)   drawEnemyBullet(b);
     for (const e of explosions)     drawExplosion(e);
@@ -1847,35 +2734,58 @@
   // ───── main loop ─────
   function tick() {
     // banner countdown also runs while waiting
+    // Hit-pause: freeze enemy/meteor updates for a handful of frames after a
+    // big kill. Player + draw still run so the shot lands visually crisp.
+    const paused = hitPauseT > 0;
+    if (paused) hitPauseT--;
+
     if (state === WAVE_BANNER) {
       bannerTime--;
-      // still update background motion + explosions/particles for liveliness
       starScrollT += 1.2;
       updateExplosionsParticlesText();
-      // let player still move during banner (feels less stop-y)
+      updateBgComets();
       updatePlayer();
       updateBullets();
-      // boss handles its own entry transition during banner
-      if (zorg) updateZorg();
+      updateLaser();
+      // bosses handle their own entry transition during the banner
+      if (!paused) {
+        if (zorg)     updateZorg();
+        if (miniBoss) updateMothership();
+      }
       if (bannerTime <= 0) state = PLAYING;
     } else if (state === PLAYING) {
       starScrollT += 1.2;
       updatePlayer();
       updateBullets();
-      updateMeteors();
-      updateUFOs();
-      updatePowerups();
+      updateLaser();
+      if (!paused) {
+        updateMeteors();
+        updateUFOs();
+        updateKamikazes();
+        updateTurrets();
+        updatePowerups();
+        updateMeteorShower();
+      }
       updateCollisions();
       updateExplosionsParticlesText();
-      updateWave();
-      if (zorg) updateZorg();
+      updateBgComets();
+      updateCombo();
+      if (!paused) {
+        updateWave();
+        if (miniBoss) updateMothership();
+        if (zorg)     updateZorg();
+      }
     } else if (state === DEAD || state === VICTORY) {
       starScrollT += 0.6;
       updateBullets();
       updateMeteors();
       updateUFOs();
+      updateKamikazes();
+      updateTurrets();
       updateExplosionsParticlesText();
-      if (zorg) updateZorg();
+      updateBgComets();
+      if (zorg)     updateZorg();
+      if (miniBoss) updateMothership();
       if (state === VICTORY && bannerTime > 0) bannerTime--;
     }
 
