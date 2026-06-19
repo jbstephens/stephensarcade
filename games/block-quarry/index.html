@@ -91,7 +91,8 @@
     font-size:14px; letter-spacing:2px; width:160px; text-align:center; }
 
   #upgradeOverlay .panel { background:#1a1626; border:2px solid #5b4a82; border-radius:16px;
-    padding:18px; max-width:760px; width:94%; max-height:90vh; overflow-y:auto; }
+    padding:18px; max-width:760px; width:94%; max-height:90vh; overflow-y:auto;
+    -webkit-overflow-scrolling:touch; }
   #upgradeOverlay h2 { font-size:22px; letter-spacing:2px; margin-bottom:6px; color:#ffd76b; }
   .upRow { display:flex; align-items:center; gap:10px; padding:10px;
     border-radius:10px; margin:6px 0; background:rgba(255,255,255,0.05); }
@@ -138,7 +139,7 @@
   <div class="skins" id="skinPicker"></div>
   <div class="modes" id="modePicker">
     <button class="mode-btn selected" data-mode="adventure">ADVENTURE</button>
-    <button class="mode-btn" data-mode="creative">CREATIVE</button>
+    <button class="mode-btn" data-mode="creative">CREATIVE (SAFE)</button>
     <button class="mode-btn" data-mode="coop">2-PLAYER</button>
   </div>
   <div class="seedRow">
@@ -150,7 +151,9 @@
   <div class="help" id="controlsHelp">
     <b>P1:</b> WASD move/dig · SPACE place · Q/E cycle · F use<br>
     <b>P2 (co-op):</b> arrows move/dig · ENTER place · ,/. cycle · / use<br>
-    <b>Touch:</b> dpad + PLACE / USE / TOOL · <b>Gamepads</b> supported
+    <b>Touch:</b> dpad + PLACE / USE / TOOL · <b>Gamepads</b> supported<br>
+    <span style="color:#ffd76b">TIP:</span> Stuck in a pit? Hold S + tap SPACE to pillar UP.
+    The <span style="color:#ffd76b">UPGRADE BENCH</span> is right next to your spawn.
   </div>
   <button id="startBtn">START</button>
   <div class="sub" id="hiLabel" style="margin-top:10px;opacity:0.6;font-size:12px;"></div>
@@ -243,13 +246,15 @@ const CLIMB_SPEED = 110;
 const WATER_DRAG = 0.45;
 
 const TORCH_RADIUS = 6;
-const DARKNESS_START_DEPTH = 18;
-const COLLAPSE_RATE = TILE * 3.5;
+const DARKNESS_START_DEPTH = 30;
+const DARKNESS_FALLOFF = 80;
+const COLLAPSE_RATE = TILE * 2.2;
+const COLLAPSE_GRACE = 2.5;          // seconds before collapse begins after grab
 const DYNAMITE_FUSE = 1.4;
 const DYNAMITE_RADIUS = 1;
 
 const SURFACE_TILE = 10;
-const STARTING_INV = { dirt:18, stone:8, torch:4, ladder:0, dynamite:0 };
+const STARTING_INV = { dirt:18, stone:8, torch:10, ladder:0, dynamite:0 };
 const INVENTORY_CAP = 99;
 
 // ============== BLOCK TYPES ==============
@@ -282,7 +287,7 @@ const BLOCK = {
                     drop:'gold',   color:'#807045', hi:'#ffd84a', lo:'#5a4a26', flecks:'#fff099', value:60 },
   [T.GEMSTONE]:   { name:'Gemstone',   solid:true,  mineable:true, hardness:1.8,  tier:2,
                     drop:'gem',    color:'#403060', hi:'#a070ff', lo:'#1a1230', flecks:'#e8c8ff', value:150 },
-  [T.STARCRYSTAL]:{ name:'Starcrystal',solid:true,  mineable:true, hardness:2.6,  tier:3,
+  [T.STARCRYSTAL]:{ name:'Starcrystal',solid:true,  mineable:true, hardness:2.0,  tier:3,
                     drop:'star',   color:'#1a3a4a', hi:'#9fefff', lo:'#0a1a2a', flecks:'#ffffff', value:500 },
   [T.LAVA]:       { name:'Lava',       solid:false, mineable:false, hazard:'lava',
                     color:'#ff5a1a', hi:'#ffd070', lo:'#a02000' },
@@ -454,6 +459,16 @@ function sfx(kind) {
     case 'alien':  blip(330,0.08,'square',0.05,180); break;
     case 'collapse': noise(0.9, 0.6, 800, 60);
                      blip(80, 0.8, 'sawtooth', 0.16, 30); break;
+    case 'stinger': // Starcrystal grab — bright rising chord
+                    [523, 784, 1047, 1568].forEach((f,i) =>
+                      setTimeout(()=>blip(f, 0.20, 'triangle', 0.09, f*1.5), i*70));
+                    break;
+    case 'celebrate': // win
+                    [523, 659, 784, 1047, 1319, 1568, 2093].forEach((f,i) =>
+                      setTimeout(()=>blip(f, 0.18, 'triangle', 0.08), i*120));
+                    break;
+    case 'sammy':   blip(880, 0.10, 'sine', 0.06, 660);
+                    setTimeout(()=>blip(1320, 0.14, 'sine', 0.05, 990), 80); break;
   }
 }
 
@@ -521,19 +536,12 @@ function genWorld(seedNum) {
       }
     }
   }
-  vein(T.COAL,     60, 4,  150, 5);
-  vein(T.COPPER,   55, 10, 150, 4);
-  vein(T.IRON,     45, 30, 180, 4);
-  vein(T.GOLD,     28, 65, 200, 3);
-  vein(T.GEMSTONE, 18, 105,205, 3);
-  vein(T.GOO,      14, 100,200, 6);
-  vein(T.EGG,      12, 110,200, 3);
-
-  // caves: random walkers
+  // caves: random walkers — run BEFORE veins so we don't destroy ore
   function carve(x, y, len) {
     let cx = x, cy = y;
     for (let i=0;i<len;i++) {
-      for (let dy=-1; dy<=1; dy++) for (let dx=-1; dx<=1; dx++) {
+      // 2x2 brush (smaller than before) keeps tunnels traversable without eating the world
+      for (let dy=-1; dy<=0; dy++) for (let dx=-1; dx<=0; dx++) {
         const t = getT(cx+dx, cy+dy);
         if (t !== T.BEDROCK) setT(cx+dx, cy+dy, T.AIR);
       }
@@ -543,17 +551,28 @@ function genWorld(seedNum) {
       cy = Math.max(SURFACE_TILE+3, Math.min(H_TILES-3, cy));
     }
   }
-  for (let i=0;i<30;i++) carve(
+  for (let i=0;i<16;i++) carve(
     2+Math.floor(rng()*(W_TILES-4)),
     SURFACE_TILE+10+Math.floor(rng()*(H_TILES-SURFACE_TILE-30)),
-    18 + Math.floor(rng()*30)
+    10 + Math.floor(rng()*15)
   );
 
-  // lava pools deep
-  for (let i=0;i<24;i++) {
+  vein(T.COAL,     60, 4,  150, 5);
+  vein(T.COPPER,   55, 10, 150, 4);
+  vein(T.IRON,     45, 30, 180, 4);
+  vein(T.GOLD,     28, 65, 200, 3);
+  vein(T.GEMSTONE, 18, 105,205, 3);
+  vein(T.GOO,      14, 100,200, 6);
+  vein(T.EGG,      12, 110,200, 3);
+
+  // lava pools deep — fewer, and skip a safe corridor near the bottom chamber
+  const chamberX = Math.floor(W_TILES/2);
+  for (let i=0;i<14;i++) {
     const tx = 3 + Math.floor(rng()*(W_TILES-6));
     const ty = SURFACE_TILE + 90 + Math.floor(rng()*(H_TILES-SURFACE_TILE-110));
-    const w = 3 + Math.floor(rng()*4), h = 1 + Math.floor(rng()*2);
+    // skip the column near the chamber so descent isn't blocked by a moat of lava
+    if (Math.abs(tx - chamberX) < 6 && ty > H_TILES - 25) continue;
+    const w = 2 + Math.floor(rng()*3), h = 1 + Math.floor(rng()*2);
     for (let dy=0; dy<h; dy++) for (let dx=0; dx<w; dx++) {
       const x = tx+dx, y = ty+dy;
       if (getT(x,y) !== T.BEDROCK) setT(x,y, T.LAVA);
@@ -603,14 +622,16 @@ function genWorld(seedNum) {
   // Sammy in the open area
   setT(cx0-2, cy0, T.SAMMY);
 
-  // surface bench area — flatten + place
-  benchX = 4;
-  for (let dx=-1; dx<=4; dx++) {
+  // surface bench area — close to spawn so kids actually find it
+  benchX = Math.floor(W_TILES/2) - 5;
+  for (let dx=-2; dx<=6; dx++) {
     for (let dy=SURFACE_TILE-3; dy<SURFACE_TILE; dy++) setT(benchX+dx, dy, T.AIR);
     setT(benchX+dx, SURFACE_TILE, T.DIRT);
   }
   setT(benchX,   SURFACE_TILE-1, T.BENCH);
   setT(benchX+1, SURFACE_TILE-1, T.BENCH);
+  // friendly arrow/sign so newcomers notice: place a torch on top of the bench
+  setT(benchX,   SURFACE_TILE-2, T.TORCH);
 
   lightDirty = true;
 }
@@ -634,7 +655,7 @@ function recomputeLight() {
     const dep = ty - SURFACE_TILE;
     let amb;
     if (dep < DARKNESS_START_DEPTH) amb = 1.0;
-    else amb = Math.max(0.07, 1.0 - (dep - DARKNESS_START_DEPTH) / 60);
+    else amb = Math.max(0.07, 1.0 - (dep - DARKNESS_START_DEPTH) / DARKNESS_FALLOFF);
     for (let tx=0; tx<W_TILES; tx++) lightMap[ty*W_TILES+tx] = amb;
   }
   for (let ty=0; ty<H_TILES; ty++) {
@@ -642,9 +663,9 @@ function recomputeLight() {
       const t = world[ty*W_TILES+tx];
       let r = 0;
       if (t === T.TORCH) r = TORCH_RADIUS;
-      else if (t === T.LAVA) r = 3;
-      else if (t === T.STARCRYSTAL) r = 3;
-      else if (t === T.SAMMY) r = 2;
+      else if (t === T.LAVA) r = 5; // larger glow so deep-dark lava warns from a tile away
+      else if (t === T.STARCRYSTAL) r = 4;
+      else if (t === T.SAMMY) r = 3;
       else if (t === T.BENCH) r = 4;
       if (r > 0) addLight(tx, ty, r);
     }
@@ -670,10 +691,17 @@ function lightAt(tx, ty) {
 // ============== PLAYERS ==============
 function newPlayer(id, skinKey) {
   const skin = SKINS[skinKey];
-  const tx = Math.floor(W_TILES/2) + id*2;
+  // try a couple of nearby columns so P2 doesn't embed inside a hill
+  let tx = Math.floor(W_TILES/2) + id*2;
+  for (let attempt=0; attempt<6; attempt++) {
+    const ttx = tx + (attempt % 2 === 0 ? 1 : -1) * Math.ceil(attempt/2);
+    let tty = 0;
+    while (tty < H_TILES-1 && !BLOCK[getT(ttx, tty)].solid) tty++;
+    const tpy = (tty-1)*TILE + (TILE - 22);
+    if (tpy >= 0 && !collidesSolid(ttx*TILE+1, tpy, 22, 22)) { tx = ttx; break; }
+  }
   let ty = 0;
   while (ty < H_TILES-1 && !BLOCK[getT(tx, ty)].solid) ty++;
-  // place feet on top of first solid tile
   const py = (ty-1)*TILE + (TILE - 22);
   return {
     id, skin, skinKey,
@@ -696,7 +724,9 @@ function newPlayer(id, skinKey) {
 // ============== INPUT ==============
 const keys = new Set();
 window.addEventListener('keydown', e => {
-  if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight',' ','Enter','Tab'].includes(e.key)) {
+  // only swallow gameplay-relevant keys while in-match so Tab/arrows still work on title screen
+  if (state.running &&
+      ['ArrowUp','ArrowDown','ArrowLeft','ArrowRight',' ','Enter'].includes(e.key)) {
     e.preventDefault();
   }
   if (e.repeat) return;
@@ -714,7 +744,18 @@ function setupTouch() {
     const dir = el.dataset.dir;
     const on  = e => { e.preventDefault(); touchDir[dir] = true; };
     const off = e => { e.preventDefault(); touchDir[dir] = false; };
+    // drift: if the finger slides off this key, release it (kid thumbs wander)
+    const drift = e => {
+      e.preventDefault();
+      const t = e.changedTouches && e.changedTouches[0];
+      if (!t) return;
+      const r = el.getBoundingClientRect();
+      const off1 = t.clientX < r.left - 8 || t.clientX > r.right + 8 ||
+                   t.clientY < r.top - 8  || t.clientY > r.bottom + 8;
+      if (off1) touchDir[dir] = false;
+    };
     el.addEventListener('touchstart', on, {passive:false});
+    el.addEventListener('touchmove',  drift, {passive:false});
     el.addEventListener('touchend',   off, {passive:false});
     el.addEventListener('touchcancel', off, {passive:false});
     el.addEventListener('mousedown', on);
@@ -722,8 +763,11 @@ function setupTouch() {
     el.addEventListener('mouseleave', off);
   });
   const place = document.querySelector('#actions .place');
-  place.addEventListener('touchstart', e=>{e.preventDefault(); touchDir.place=true;}, {passive:false});
-  place.addEventListener('touchend',   e=>{e.preventDefault(); touchDir.place=false;}, {passive:false});
+  const placeOn  = e => { e.preventDefault(); touchDir.place = true;  };
+  const placeOff = e => { e.preventDefault(); touchDir.place = false; };
+  place.addEventListener('touchstart',  placeOn,  {passive:false});
+  place.addEventListener('touchend',    placeOff, {passive:false});
+  place.addEventListener('touchcancel', placeOff, {passive:false});
   place.addEventListener('mousedown', ()=>touchDir.place=true);
   place.addEventListener('mouseup',   ()=>touchDir.place=false);
   place.addEventListener('mouseleave',()=>touchDir.place=false);
@@ -732,11 +776,13 @@ function setupTouch() {
   const ck = e => { e.preventDefault(); touchCycleEdge = true;
                     setTimeout(()=>touchCycleEdge=false, 90); };
   cyc.addEventListener('touchstart', ck, {passive:false});
+  cyc.addEventListener('touchend', e=>e.preventDefault(), {passive:false});
   cyc.addEventListener('mousedown', ck);
   const use = document.querySelector('#actions .use');
   const uk = e => { e.preventDefault(); touchUseEdge = true;
                     setTimeout(()=>touchUseEdge=false, 90); };
   use.addEventListener('touchstart', uk, {passive:false});
+  use.addEventListener('touchend', e=>e.preventDefault(), {passive:false});
   use.addEventListener('mousedown', uk);
 }
 setupTouch();
@@ -831,7 +877,7 @@ function update(dt) {
   state.time += dt;
   if (state.shake > 0) state.shake = Math.max(0, state.shake - dt*5);
 
-  pollGamepads();
+  // readKeyInput clears inputDir, so gamepad must be polled AFTER it
   for (let i=0;i<players.length;i++) readKeyInput(players[i], i);
   pollGamepads();
 
@@ -855,10 +901,14 @@ function update(dt) {
     if (d.t <= 0) { explode(d.tx, d.ty, DYNAMITE_RADIUS); dynamites.splice(i,1); }
   }
 
-  // falls
+  // falls + water flow
   if (!state._fallTimer) state._fallTimer = 0;
   state._fallTimer += dt;
-  if (state._fallTimer >= 0.12) { state._fallTimer = 0; triggerFalls(); }
+  if (state._fallTimer >= 0.12) {
+    state._fallTimer = 0;
+    triggerFalls();
+    flowWater();
+  }
   for (let i=fallingBlocks.length-1; i>=0; i--) {
     const f = fallingBlocks[i];
     f.vy = Math.min(FALL_MAX, f.vy + GRAVITY*dt);
@@ -870,10 +920,20 @@ function update(dt) {
       const settleTy = fty - 1;
       if (getT(ftx, settleTy) === T.AIR) setT(ftx, settleTy, f.tile);
       sfx('thud');
+      // cave-in: small shake + dust puff to match dynamite juice (spec calls for it)
+      state.shake = Math.max(state.shake, 0.6);
+      spawnPuff(ftx*TILE + TILE/2, settleTy*TILE + TILE, BLOCK[f.tile].color, 6);
       for (const p of players) {
         if (p.alive && isInTile(p, ftx, settleTy)) killPlayer(p, 'cave-in');
       }
       fallingBlocks.splice(i,1);
+    } else {
+      // mid-air falling block can crush a player it passes through
+      for (const p of players) {
+        if (!p.alive) continue;
+        if (p.x < f.x + TILE && p.x + p.w > f.x &&
+            p.y < f.y + TILE && p.y + p.h > f.y) killPlayer(p, 'cave-in');
+      }
     }
   }
 
@@ -892,12 +952,14 @@ function update(dt) {
     if (Math.random() < 0.05) state.shake = Math.max(state.shake, 0.5);
     for (const p of players) {
       if (p.alive && p.y + p.h > state.collapseY) killPlayer(p, 'collapsed');
-      if (p.alive && (p.y/TILE) <= SURFACE_TILE - 1) winGame();
+      // require player to have actually been below the surface (so collapse-start
+      // while standing on the bench doesn't instantly win) and to be back at depth 0
+      if (p.alive && state.depth > 8 && (p.y/TILE) <= SURFACE_TILE - 1) winGame();
     }
   }
 
   const anyAlive = players.some(p => p.alive);
-  if (!anyAlive && !state.win) {
+  if (!anyAlive && !state.win && !state.respawning) {
     state.running = false;
     setTimeout(()=>endGame(false), 600);
   }
@@ -906,7 +968,7 @@ function update(dt) {
   const dep = Math.max(0, Math.floor(focus.y/TILE) - SURFACE_TILE);
   if (dep > state.depth) state.depth = dep;
 
-  if (lightDirty && state.time - (state._lastLight||0) > 0.08) {
+  if (lightDirty && state.time - (state._lastLight||0) > 0.16) {
     recomputeLight(); state._lastLight = state.time;
   }
 }
@@ -957,6 +1019,8 @@ function updatePlayer(p, dt) {
   // Move Y
   let remY = p.vy * dt;
   let stepsY = 0;
+  const wasOnGround = p.onGround;
+  const prevVy = p.vy;
   p.onGround = false;
   while (Math.abs(remY) > 0.01 && stepsY < 16) {
     const step = Math.sign(remY) * Math.min(Math.abs(remY), 6);
@@ -967,6 +1031,18 @@ function updatePlayer(p, dt) {
       p.vy = 0; break;
     }
     stepsY++;
+  }
+  // landing thud + dust on hard hit
+  if (!wasOnGround && p.onGround && prevVy > 280) {
+    sfx('thud');
+    const n = Math.min(10, Math.floor(prevVy / 60));
+    for (let k=0;k<n;k++) {
+      particles.push({ x:p.x + p.w/2 + (Math.random()-0.5)*p.w,
+        y:p.y + p.h - 1,
+        vx:(Math.random()-0.5)*90, vy:-Math.random()*40,
+        life:0.30, color:'#8b5a2b', size:2 });
+    }
+    if (prevVy > 480) state.shake = Math.max(state.shake, 0.4);
   }
 
   p.x = Math.max(0, Math.min((W_TILES)*TILE - p.w, p.x));
@@ -1017,14 +1093,21 @@ function updatePlayer(p, dt) {
   if (getT(cTx,cTy) === T.SAMMY) {
     setT(cTx,cTy,T.AIR);
     state.sammyRescued = true;
-    sfx('gem');
-    flashMsg('SAMMY RESCUED!');
+    sfx('sammy');
+    flashMsg('🐱 SAMMY RESCUED! +500 on escape');
+    for (let k=0;k<20;k++) particles.push({
+      x:cTx*TILE+TILE/2, y:cTy*TILE+TILE/2,
+      vx:(Math.random()-0.5)*120, vy:-Math.random()*120,
+      life:0.7, color:'#ffd76b', size:3 });
   }
 }
 
 function breakBlock(tx, ty, p, bt, silent=false) {
   const bd = BLOCK[bt];
-  spawnPuff(tx*TILE+TILE/2, ty*TILE+TILE/2, bd.color || '#888', 5);
+  // bigger burst — 12 instead of 5; one bright "spark" particle for the impact frame
+  spawnPuff(tx*TILE+TILE/2, ty*TILE+TILE/2, bd.color || '#888', 12);
+  particles.push({ x:tx*TILE+TILE/2, y:ty*TILE+TILE/2,
+    vx:0, vy:0, life:0.18, color:'#ffffff', size:5 });
   if (bd.drop) {
     const key = bd.drop;
     if (p.inv[key] == null) p.inv[key] = 0;
@@ -1032,8 +1115,23 @@ function breakBlock(tx, ty, p, bt, silent=false) {
     if (bd.value) state.score += bd.value;
   }
   setT(tx, ty, T.AIR);
-  if (!silent) sfx(bt === T.GEMSTONE || bt === T.STARCRYSTAL || bt === T.GOLD ? 'gem' : 'pickup');
-  if (bt === T.STARCRYSTAL && !state.starcrystalGot && state.mode === 'adventure') startCollapse();
+  if (!silent) {
+    sfx(bt === T.GEMSTONE || bt === T.STARCRYSTAL || bt === T.GOLD ? 'gem' : 'pickup');
+    // micro hit-stop so each break has crunch
+    if (bd.hardness >= 1.0) state.hitStop = Math.max(state.hitStop, 0.04);
+  }
+  if (bt === T.STARCRYSTAL && !state.starcrystalGot && state.mode === 'adventure') {
+    // distinct stinger BEFORE startCollapse plays the collapse rumble
+    sfx('stinger');
+    state.shake = Math.max(state.shake, 1.5);
+    for (let k=0;k<40;k++) {
+      particles.push({ x:tx*TILE+TILE/2, y:ty*TILE+TILE/2,
+        vx:(Math.random()-0.5)*260, vy:(Math.random()-0.5)*260,
+        life:0.8 + Math.random()*0.4, color: k%3===0?'#fff':'#9fefff', size:3 });
+    }
+    state.hitStop = Math.max(state.hitStop, 0.18);
+    startCollapse();
+  }
   if (bt === T.CHEST) openChest(tx, ty, p);
   if (bt === T.EGG) spawnAlien(tx*TILE, ty*TILE);
 }
@@ -1073,7 +1171,8 @@ function tryPlace(p) {
   } else if (p.facing === 'left') { tx = cTx - 1; ty = cTy; }
   else if (p.facing === 'right'){ tx = cTx + 1; ty = cTy; }
   else if (p.facing === 'up')   { tx = cTx; ty = cTy - 1; }
-  else                          { tx = cTx + (p.facing==='down'?0:1); ty = cTy; }
+  else if (p.facing === 'down') { tx = cTx; ty = Math.floor((p.y + p.h)/TILE); }
+  else                          { tx = cTx + 1; ty = cTy; }
 
   if (tx<1||tx>=W_TILES-1||ty<1||ty>=H_TILES-1) return;
   if (getT(tx, ty) !== T.AIR) return;
@@ -1087,6 +1186,9 @@ function tryPlace(p) {
   if (isDyn) dynamites.push({tx, ty, t: DYNAMITE_FUSE});
   else setT(tx, ty, item.tile);
   sfx('place');
+  // small puff so placing feels weighty
+  const pc = isDyn ? '#a02020' : (BLOCK[item.tile]?.color || '#ccc');
+  spawnPuff(tx*TILE+TILE/2, ty*TILE+TILE/2, pc, 3);
 }
 
 function cyclePlaceable(p) { p.selected = (p.selected + 1) % PLACEABLES.length; }
@@ -1105,8 +1207,8 @@ function useTool(p) {
       if (state.mode !== 'creative') p.inv.dynamite--;
       dynamites.push({tx, ty, t: DYNAMITE_FUSE});
       sfx('place');
-      return;
     }
+    return; // don't fall through and burn a torch when you meant dynamite
   }
   if ((p.inv.torch||0) > 0) {
     const cTx = Math.floor((p.x + p.w/2)/TILE);
@@ -1176,6 +1278,31 @@ function triggerFalls() {
     }
 }
 
+// Water flow: cellular spread into adjacent AIR (down, then sideways).
+// Simple rule, run on the same throttle as falls.
+function flowWater() {
+  const focus = players.find(p=>p.alive) || players[0];
+  if (!focus) return;
+  const cTx = Math.floor((focus.x + focus.w/2)/TILE);
+  const cTy = Math.floor((focus.y + focus.h/2)/TILE);
+  // scan visible-ish area, collect moves, apply after (don't cascade in one pass)
+  const moves = [];
+  for (let ty = cTy - 12; ty <= cTy + 12; ty++)
+    for (let tx = cTx - 18; tx <= cTx + 18; tx++) {
+      if (getT(tx, ty) !== T.WATER) continue;
+      // prefer falling down
+      if (getT(tx, ty+1) === T.AIR) moves.push([tx, ty+1]);
+      else {
+        // spread sideways if blocked below
+        if (getT(tx-1, ty) === T.AIR) moves.push([tx-1, ty]);
+        if (getT(tx+1, ty) === T.AIR) moves.push([tx+1, ty]);
+      }
+    }
+  for (const [x,y] of moves) {
+    if (getT(x,y) === T.AIR) setT(x,y, T.WATER);
+  }
+}
+
 // ============== ALIENS ==============
 function spawnAlien(px, py) {
   aliens.push({ x:px, y:py, vx:0, vy:0, dir:Math.random()<0.5?-1:1,
@@ -1221,8 +1348,8 @@ function updateAliens(dt) {
     let ny = a.y + a.vy*dt;
     if (!collidesSolid(a.x, ny, a.w, a.h)) a.y = ny;
     else {
-      if (a.vy > 0) a.y = Math.floor((a.y + a.h)/TILE)*TILE - a.h;
-      else a.y = (Math.floor(a.y/TILE)+1)*TILE;
+      if (a.vy > 0) a.y = Math.floor((ny + a.h)/TILE)*TILE - a.h;
+      // upward collision: just stop, don't push downward into floor
       a.vy = 0;
     }
     a.jumpT -= dt;
@@ -1247,15 +1374,47 @@ function killPlayer(p, reason) {
       life:0.7, color:'#ff5252', size:3 });
   }
   state.lastDeath = reason;
+  p.deathT = state.time;
+  // single-life respawn: 1.5s after death, if player has respawns left and game isn't collapsing,
+  // revive them at the bench. Loot kept; small score tax. `respawning` flag blocks endGame.
+  if (state.respawnsLeft > 0 && !state.collapsing) {
+    state.respawnsLeft--;
+    state.score = Math.max(0, state.score - 50);
+    state.respawning = true;
+    setTimeout(() => { if (state.running) respawnAt(p); state.respawning = false; }, 1500);
+  }
+}
+
+function respawnAt(p) {
+  if (state.running === false) return;
+  // place above the bench
+  const rx = benchX * TILE + TILE/2 - p.w/2;
+  let ry = (SURFACE_TILE - 2) * TILE;
+  // settle to ground
+  while (ry < H_TILES*TILE - p.h && !collidesSolid(rx, ry+1, p.w, p.h)) ry++;
+  p.x = rx; p.y = ry;
+  p.vx = 0; p.vy = 0;
+  p.alive = true; p.flash = 0.6;
+  flashMsg('★ RESPAWNED — last life! ★');
 }
 
 function startCollapse() {
   state.starcrystalGot = true;
   state.collapsing = true;
-  state.collapseY = (H_TILES - 1) * TILE;
+  // grace period: collapseY starts BELOW the world so it spends ~COLLAPSE_GRACE
+  // ticking up before any tile is actually under it
+  state.collapseY = (H_TILES - 1) * TILE + COLLAPSE_RATE * COLLAPSE_GRACE;
   state.shake = 2;
+  state.starcrystalSting = true;
   sfx('collapse');
-  flashMsg('★ STARCRYSTAL! ★  RUN!');
+  // auto-grant ladders + dynamite to every alive player so escape is achievable
+  for (const p of players) {
+    if (!p.alive) continue;
+    p.inv.ladder = Math.min(p.invCap, (p.inv.ladder||0) + 12);
+    p.inv.dynamite = Math.min(p.invCap, (p.inv.dynamite||0) + 3);
+    p.inv.torch = Math.min(p.invCap, (p.inv.torch||0) + 6);
+  }
+  flashMsg('★ STARCRYSTAL! ★  ESCAPE — ladders + TNT granted');
 }
 
 let flashText = ''; let flashUntil = 0;
@@ -1279,9 +1438,9 @@ const UPGRADES = [
   { id:'iron_pick', name:'Iron Pickaxe',    desc:'Dig hardrock + iron (T1)',
     cost:{copper:10, coal:5}, apply(p){ p.tier = Math.max(p.tier,1); } },
   { id:'gold_pick', name:'Gold Pickaxe',    desc:'Dig gold + gemstone (T2)',
-    req:p=>p.tier>=1, cost:{iron:8, gold:3}, apply(p){ p.tier = Math.max(p.tier,2); } },
+    req:p=>p.tier>=1, cost:{iron:10, copper:8}, apply(p){ p.tier = Math.max(p.tier,2); } },
   { id:'star_pick', name:'Stellar Pickaxe', desc:'Dig the Starcrystal (T3)',
-    req:p=>p.tier>=2, cost:{gold:5, gem:2}, apply(p){ p.tier = Math.max(p.tier,3); } },
+    req:p=>p.tier>=2, cost:{gold:4, gem:2}, apply(p){ p.tier = Math.max(p.tier,3); } },
   { id:'drill',     name:'Power Drill',     desc:'Dig 3 blocks at once in facing direction',
     cost:{iron:8, copper:6}, apply(p){ p.hasDrill = true; } },
   { id:'boots',     name:'Speed Boots',     desc:'Move 40% faster',
@@ -1592,11 +1751,33 @@ function draw() {
       grd.addColorStop(0.08, '#ff5a1a');
       grd.addColorStop(1, '#a02000');
       ctx.fillStyle = grd; ctx.fillRect(0, cy, VW, VH - cy + 100);
+      // wobbly top edge — molten not flat
+      ctx.fillStyle = '#ffd070';
+      for (let x=0; x<VW; x+=4) {
+        const w = 2 + Math.sin(state.time*8 + x*0.08) * 3;
+        ctx.fillRect(x, cy - 2, 4, 2 + w);
+      }
       for (let i=0;i<10;i++) {
         ctx.fillStyle = `rgba(255,255,255,${0.2 + 0.2*Math.random()})`;
         const bx = (i*97 + state.time*60) % VW;
         const by = cy + 4 + 4*Math.sin(state.time*5 + i);
         ctx.fillRect(bx, by, 3, 3);
+      }
+      // upward floating embers
+      if (Math.random() < 0.6) particles.push({
+        x: cam.x + Math.random()*VW, y: cam.y + cy,
+        vx: (Math.random()-0.5)*40, vy: -60 - Math.random()*120,
+        life: 1.0, color: Math.random()<0.5?'#ffd070':'#ff8030', size:2
+      });
+      // red vignette when lava is close (within ~10 tiles)
+      const focusY = (players.find(p=>p.alive)||players[0]).y;
+      const dist = Math.max(0, state.collapseY - focusY);
+      if (dist < 10*TILE) {
+        const v = (1 - dist/(10*TILE)) * 0.35;
+        const vg = ctx.createRadialGradient(VW/2, VH/2, 60, VW/2, VH/2, VW*0.7);
+        vg.addColorStop(0, 'rgba(255,40,0,0)');
+        vg.addColorStop(1, `rgba(255,40,0,${v.toFixed(3)})`);
+        ctx.fillStyle = vg; ctx.fillRect(0,0,VW,VH);
       }
     }
   }
@@ -1623,41 +1804,75 @@ function draw() {
   ctx.restore();
 }
 
+// quantized alpha string table — avoids ~600 toFixed+template allocations per frame
+const DARK_FILL = (() => {
+  const arr = new Array(33);
+  for (let i=0; i<=32; i++) arr[i] = `rgba(0,0,0,${(i/32).toFixed(3)})`;
+  return arr;
+})();
+// cached headlamp glow canvas — radial gradient drawn ONCE at startup
+const HEADLAMP = (() => {
+  const c = document.createElement('canvas'); c.width = c.height = 140;
+  const cx = c.getContext('2d');
+  const g = cx.createRadialGradient(70, 70, 4, 70, 70, 70);
+  g.addColorStop(0, 'rgba(255,240,170,0.32)');
+  g.addColorStop(1, 'rgba(0,0,0,0)');
+  cx.fillStyle = g; cx.fillRect(0, 0, 140, 140);
+  return c;
+})();
 function drawDarkness(cam) {
   const tx0 = Math.max(0, Math.floor(cam.x / TILE) - 1);
   const ty0 = Math.max(0, Math.floor(cam.y / TILE) - 1);
   const tx1 = Math.min(W_TILES-1, Math.ceil((cam.x + VW) / TILE));
   const ty1 = Math.min(H_TILES-1, Math.ceil((cam.y + VH) / TILE));
   for (let ty=ty0; ty<=ty1; ty++) for (let tx=tx0; tx<=tx1; tx++) {
-    const L = lightAt(tx,ty);
-    if (L >= 0.95) continue;
+    const L = lightMap[ty*W_TILES+tx];
+    if (L >= 0.96) continue;
     const a = 1 - L;
     if (a <= 0.04) continue;
-    ctx.fillStyle = `rgba(0,0,0,${a.toFixed(3)})`;
+    const bucket = a >= 1 ? 32 : (a*32)|0;
+    ctx.fillStyle = DARK_FILL[bucket];
     ctx.fillRect(tx*TILE - cam.x, ty*TILE - cam.y, TILE, TILE);
   }
+  const prev = ctx.globalCompositeOperation;
+  ctx.globalCompositeOperation = 'lighter';
   for (const p of players) {
     if (!p.alive) continue;
     const cx = p.x + p.w/2 - cam.x, cy = p.y + p.h/2 - cam.y;
-    const grd = ctx.createRadialGradient(cx, cy, 4, cx, cy, 70);
-    grd.addColorStop(0, 'rgba(255,240,170,0.32)');
-    grd.addColorStop(1, 'rgba(0,0,0,0)');
-    const prev = ctx.globalCompositeOperation;
-    ctx.globalCompositeOperation = 'lighter';
-    ctx.fillStyle = grd; ctx.fillRect(cx-70, cy-70, 140, 140);
-    ctx.globalCompositeOperation = prev;
+    ctx.drawImage(HEADLAMP, cx - 70, cy - 70);
   }
+  ctx.globalCompositeOperation = prev;
 }
 
 function drawPlayer(p, cam) {
-  const x = Math.round(p.x - cam.x), y = Math.round(p.y - cam.y);
+  const baseX = Math.round(p.x - cam.x);
+  let yOff = 0;
+  // walk bob: 1 px bounce when walking on ground
+  if (p.onGround && Math.abs(p.vx) > 10) {
+    yOff = Math.sin(state.time*16) > 0 ? -1 : 0;
+  }
+  const x = baseX, y = Math.round(p.y - cam.y) + yOff;
   ctx.fillStyle = 'rgba(0,0,0,0.35)';
-  ctx.fillRect(x+2, y+p.h-2, p.w-4, 2);
+  ctx.fillRect(x+2, y+p.h-2-yOff, p.w-4, 2);
   if (!p.alive) {
-    ctx.fillStyle = 'rgba(255,80,80,0.85)';
-    ctx.fillRect(x, y+p.h-4, p.w, 4);
-    ctx.fillStyle = '#888';
-    ctx.fillRect(x+p.w/2-3, y+p.h-7, 6, 4);
+    // brief death pop: spin + fade for 0.4s, then a tombstone
+    const dt = state.time - (p.deathT || state.time);
+    if (dt < 0.5) {
+      ctx.save();
+      ctx.translate(x + p.w/2, y + p.h/2);
+      ctx.rotate(dt * Math.PI * 2);
+      ctx.globalAlpha = 1 - dt*1.6;
+      const s = p.skin;
+      ctx.fillStyle = s.shirt; ctx.fillRect(-p.w/2+3, -p.h/2+10, p.w-6, 8);
+      ctx.fillStyle = s.skin;  ctx.fillRect(-p.w/2+4, -p.h/2+2,  p.w-8, 8);
+      ctx.restore();
+      ctx.globalAlpha = 1;
+    } else {
+      ctx.fillStyle = '#888';
+      ctx.fillRect(x+p.w/2-6, y+p.h-12, 12, 11);
+      ctx.fillStyle = '#444'; ctx.fillRect(x+p.w/2-3, y+p.h-9, 2, 2);
+      ctx.fillRect(x+p.w/2+1, y+p.h-9, 2, 2);
+    }
     return;
   }
   const flash = p.flash > 0 && Math.sin(state.time*30) > 0;
@@ -1668,23 +1883,51 @@ function drawPlayer(p, cam) {
   ctx.fillRect(x+4, y+2, p.w-8, 8);
   ctx.fillStyle = flash ? '#fff' : s.hair;
   ctx.fillRect(x+4, y+1, p.w-8, 3);
+  // per-skin distinguishing accent so they read at a glance
+  if (!flash) {
+    if (s.name === 'MOM')  { // longer hair on the sides
+      ctx.fillRect(x+3, y+3, 2, 7); ctx.fillRect(x+p.w-5, y+3, 2, 7);
+    }
+    if (s.name === 'DAD')  { // mustache
+      ctx.fillStyle = s.hair; ctx.fillRect(x+7, y+8, p.w-14, 1);
+    }
+    if (s.name === 'LUKE') { // cowlick
+      ctx.fillStyle = s.hair; ctx.fillRect(x+p.w-8, y-1, 3, 3);
+    }
+    if (s.name === 'BEN')  { // bangs
+      ctx.fillStyle = s.hair; ctx.fillRect(x+5, y+3, p.w-10, 1);
+    }
+  }
   ctx.fillStyle = '#000';
   if (p.facing === 'left') {
     ctx.fillRect(x+5, y+5, 2, 2); ctx.fillRect(x+9, y+5, 2, 2);
   } else {
     ctx.fillRect(x+p.w-7, y+5, 2, 2); ctx.fillRect(x+p.w-11, y+5, 2, 2);
   }
+  // pickaxe — swing while digging
+  const swingPhase = p.digProg > 0 ? Math.sin(state.time*22) * 4 : 0;
   const pickColor = ['#aaaaaa','#cfd9e6','#ffd76b','#9fefff'][p.tier];
   if (p.facing === 'left') {
-    ctx.fillStyle = pickColor; ctx.fillRect(x-3, y+11, 4, 2);
-    ctx.fillStyle = '#5a3a18'; ctx.fillRect(x, y+10, 2, 8);
+    ctx.fillStyle = pickColor; ctx.fillRect(x-3, y+11+swingPhase, 4, 2);
+    ctx.fillStyle = '#5a3a18'; ctx.fillRect(x, y+10+swingPhase, 2, 8);
   } else {
-    ctx.fillStyle = pickColor; ctx.fillRect(x+p.w-1, y+11, 4, 2);
-    ctx.fillStyle = '#5a3a18'; ctx.fillRect(x+p.w-2, y+10, 2, 8);
+    ctx.fillStyle = pickColor; ctx.fillRect(x+p.w-1, y+11+swingPhase, 4, 2);
+    ctx.fillStyle = '#5a3a18'; ctx.fillRect(x+p.w-2, y+10+swingPhase, 2, 8);
   }
   if (p.id === 1) {
     ctx.fillStyle = '#ff8ad0';
     ctx.fillRect(x+p.w/2-2, y-4, 4, 2);
+  }
+  // Sammy follows whoever rescued them — bobbing cat-icon overhead
+  if (state.sammyRescued && p.id === 0) {
+    const sy = y - 8 + Math.sin(state.time*4) * 1.5;
+    ctx.fillStyle = '#e08540';
+    ctx.fillRect(x+p.w/2-3, sy, 6, 4);
+    ctx.fillRect(x+p.w/2-4, sy-1, 2, 2);
+    ctx.fillRect(x+p.w/2+2, sy-1, 2, 2);
+    ctx.fillStyle = '#000';
+    ctx.fillRect(x+p.w/2-2, sy+1, 1, 1);
+    ctx.fillRect(x+p.w/2+1, sy+1, 1, 1);
   }
 }
 
@@ -1801,14 +2044,24 @@ function drawHUD() {
 }
 
 // ============== GAME FLOW ==============
+function resetTouchState() {
+  for (const k of Object.keys(touchDir)) touchDir[k] = false;
+  touchCycleEdge = false; touchUseEdge = false;
+}
+
 function startGame() {
   state.score = 0; state.depth = 0; state.starcrystalGot = false;
   state.sammyRescued = false; state.collapsing = false;
   state.collapseY = H_TILES*TILE;
   state.time = 0; state.shake = 0; state.win = false;
   state.upgradeOpen = false; state.paused = false;
+  state._fallTimer = 0; state._aSpawn = 0; state._lastLight = 0;
+  state.lastDeath = null; state.hitStop = 0; state.respawning = false;
+  state.respawnsLeft = state.mode === 'creative' ? Infinity : 1;
   aliens = []; particles = []; fallingBlocks = []; dynamites = [];
   flashText = ''; flashUntil = 0;
+  resetTouchState();
+  keys.clear();
 
   let seedStr = (document.getElementById('seedInput').value || '').trim().toUpperCase();
   if (!seedStr) seedStr = randomSeedStr();
@@ -1846,6 +2099,7 @@ function togglePause() {
     ov.classList.remove('hidden');
     document.body.classList.add('paused');
     document.getElementById('pauseSeed').textContent = `SEED: ${state.seed}`;
+    resetTouchState(); // hiding the touch-pad swallows touchend events
   } else {
     ov.classList.add('hidden');
     document.body.classList.remove('paused');
@@ -1855,6 +2109,7 @@ function togglePause() {
 function endGame(victory) {
   state.running = false;
   document.body.classList.remove('in-match','paused');
+  resetTouchState();
   document.getElementById('endTitle').textContent =
     victory ? 'YOU ESCAPED!' : 'GAME OVER';
   document.getElementById('endSub').textContent =
@@ -1875,15 +2130,27 @@ function winGame() {
   let bonus = 1000;
   if (state.sammyRescued) bonus += 500;
   state.score += bonus;
+  state.shake = Math.max(state.shake, 1.5);
+  sfx('celebrate');
+  // fountain of gold/cyan particles from each alive player
+  for (const p of players) {
+    if (!p.alive) continue;
+    for (let k=0;k<80;k++) particles.push({
+      x:p.x+p.w/2, y:p.y+p.h/2,
+      vx:(Math.random()-0.5)*340, vy:-Math.random()*420,
+      life:0.9 + Math.random()*0.7,
+      color: k%3===0?'#9fefff':(k%3===1?'#ffd76b':'#ffffff'), size:3
+    });
+  }
   flashMsg(`★ YOU ESCAPED! +${bonus} ★`);
-  setTimeout(()=>endGame(true), 1600);
+  setTimeout(()=>endGame(true), 2200);
 }
 
 // ============== PERSISTENCE ==============
 const SAVE_KEY = 'blockQuarry.v1';
 function getHi() {
   try { return +JSON.parse(localStorage.getItem(SAVE_KEY)||'{}').hi || 0; }
-  catch { return 0; }
+  catch (e) { return 0; }
 }
 function setHi(v) {
   try {
@@ -1892,13 +2159,13 @@ function setHi(v) {
     s.lastSeed = state.seed;
     s.lastSkin = state.selectedSkin;
     localStorage.setItem(SAVE_KEY, JSON.stringify(s));
-  } catch {}
+  } catch (e) {}
 }
 function loadPrefs() {
   try {
     const s = JSON.parse(localStorage.getItem(SAVE_KEY)||'{}');
     if (s.lastSkin && SKINS[s.lastSkin]) state.selectedSkin = s.lastSkin;
-  } catch {}
+  } catch (e) {}
 }
 loadPrefs();
 
@@ -1935,6 +2202,7 @@ document.getElementById('resumeBtn').onclick = togglePause;
 document.getElementById('pauseBtn').onclick = togglePause;
 document.getElementById('quitBtn').onclick = () => {
   state.paused = false; state.running = false;
+  resetTouchState();
   document.getElementById('pauseOverlay').classList.add('hidden');
   document.body.classList.remove('in-match','paused');
   document.getElementById('titleOverlay').classList.remove('hidden');
@@ -1967,13 +2235,28 @@ document.querySelectorAll('#modePicker .mode-btn').forEach(b => {
 buildTileCanvases();
 let last = 0;
 function loop(t) {
-  const dt = Math.min(1/30, (t - last)/1000);
+  // clamp dt to 1/15s so low-power-mode (rAF throttled to 20-30fps) doesn't
+  // make the game run in slow motion; a 50ms real-frame still advances 50ms of sim
+  const dt = Math.min(1/15, (t - last)/1000);
   last = t;
+  if (state.hitStop > 0) { state.hitStop -= dt; draw(); requestAnimationFrame(loop); return; }
   if (state.running && !state.paused) update(dt);
   draw();
   requestAnimationFrame(loop);
 }
 requestAnimationFrame(loop);
+
+// audio context: iOS suspends on tab background; resume on return
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && audioCtx && audioCtx.state === 'suspended') {
+    audioCtx.resume();
+  }
+});
+// also recover from sticky touch state when tab returns
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) resetTouchState();
+});
+window.addEventListener('orientationchange', resize);
 })();
 </script>
 <!-- injected by scripts/bundle-games.sh — back-to-arcade overlay -->
