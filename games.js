@@ -39,5 +39,13 @@ window.GAMES_DATA = [
     "status": "PRESS START",
     "icon": "quarry",
     "source": "https://blockquarry.onrender.com/blockquarry.html"
+  },
+  {
+    "slug": "ghost-patrol",
+    "title": "GHOST PATROL",
+    "genre": "ARCADE",
+    "status": "PRESS START",
+    "icon": "ghost",
+    "source": "https://ghostpatrol.onrender.com/"
   }
 ];
