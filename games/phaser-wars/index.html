@@ -45,6 +45,13 @@
   body.net-host .controls.right, body.net-guest .controls.right { display: none; }
   /* If any gamepad is connected, hide the on-screen touch controls entirely */
   body.input-pad .controls { display: none; }
+  /* Pad menu focus highlight — only visible while gamepad is the active input */
+  body.input-pad .pad-focus {
+    outline: 4px solid #5fefff;
+    outline-offset: 4px;
+    box-shadow: 0 0 22px rgba(95, 239, 255, 0.7);
+    transition: outline-color 0.08s, box-shadow 0.08s;
+  }
 
   /* Pause button — top-right, larger, kid-finger friendly, away from iOS status-bar tap zone */
   .hud-btn {
@@ -1330,13 +1337,125 @@
     ensureAudio();
   }, { passive: false });
 
-  // Gamepad: START button toggles pause (mirrors Esc/P on keyboard)
+  // ═════ Gamepad menu navigation ═════
+  // Each pre-fight state defines focusable groups; up/down moves between
+  // groups, left/right within a group. south/start confirms, east goes back.
+  // Click handlers on the underlying buttons do the real work — we just
+  // synthesize the same .click() events the mouse/touch path uses.
+  const PAD_MENUS = {
+    'start':            { groups: [['#startBtn', '#quickBtn']],                                back: null },
+    'mode':             { groups: [['.mode-card'], ['.diff-btn'], ['#modeBackBtn']],           back: '#modeBackBtn' },
+    'select':           { groups: [['.outfit-swatch'], ['.fighter-card'], ['#backBtn']],       back: '#backBtn' },
+    'arena':            { groups: [['.arena-card'], ['#meteorToggle2', '#buddiesToggle'], ['#arenaBackBtn']], back: '#arenaBackBtn' },
+    'ko':               { groups: [['#rematchBtn', '#newPicksBtn', '#homeBtn']],               back: '#homeBtn' },
+    'paused':           { groups: [['#resumeBtn', '#quitBtn']],                                back: '#resumeBtn' },
+    'arcade-interlude': { groups: [['#arcadeNextBtn']],                                        back: null },
+    'arcade-victory':   { groups: [['#arcadeDoneBtn']],                                        back: null },
+    'netsetup':         { groups: [['#netHostBtn', '#netJoinBtn'],
+                                   ['#netShareHost', '#netPasteAnswer'],
+                                   ['#netPasteOffer', '#netShareGuest'],
+                                   ['#netBackBtn']],                                            back: '#netBackBtn' },
+  };
+  let padFocus = { state: '', group: 0, item: 0 };
+  let padLastTickState = '';
+
+  function padCollect(selectors) {
+    const out = [];
+    for (const s of selectors) {
+      document.querySelectorAll(s).forEach(el => {
+        // visible (not display:none / hidden ancestor) and enabled
+        if (el.offsetParent !== null && !el.disabled) out.push(el);
+      });
+    }
+    return out;
+  }
+  function padGroups() {
+    const cfg = PAD_MENUS[state];
+    if (!cfg) return null;
+    const gs = cfg.groups.map(padCollect).filter(g => g.length > 0);
+    return gs.length ? gs : null;
+  }
+  function padApplyFocus() {
+    document.querySelectorAll('.pad-focus').forEach(el => el.classList.remove('pad-focus'));
+    const gs = padGroups();
+    if (!gs) return;
+    padFocus.group = Math.max(0, Math.min(gs.length - 1, padFocus.group));
+    padFocus.item  = Math.max(0, Math.min(gs[padFocus.group].length - 1, padFocus.item));
+    const el = gs[padFocus.group][padFocus.item];
+    if (el) {
+      el.classList.add('pad-focus');
+      try { el.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' }); } catch (_) {}
+    }
+  }
+  function padMove(dx, dy) {
+    const gs = padGroups();
+    if (!gs) return;
+    if (padFocus.state !== state) { padFocus.state = state; padFocus.group = 0; padFocus.item = 0; }
+    if (dy !== 0) {
+      padFocus.group = (padFocus.group + dy + gs.length) % gs.length;
+      padFocus.item  = Math.min(padFocus.item, gs[padFocus.group].length - 1);
+    } else if (dx !== 0) {
+      const row = gs[padFocus.group];
+      padFocus.item = (padFocus.item + dx + row.length) % row.length;
+    }
+    padApplyFocus();
+    if (sfx && sfx.switch) sfx.switch();
+  }
+  function padConfirm() {
+    const gs = padGroups();
+    if (!gs) return;
+    const el = gs[padFocus.group] && gs[padFocus.group][padFocus.item];
+    if (el) el.click();
+  }
+  function padBack() {
+    const cfg = PAD_MENUS[state];
+    if (!cfg || !cfg.back) return;
+    const el = document.querySelector(cfg.back);
+    if (el && el.offsetParent !== null) el.click();
+  }
+  function padTickFocus() {
+    const stateChanged = state !== padLastTickState;
+    padLastTickState = state;
+    if (!PAD_MENUS[state]) {
+      if (stateChanged) document.querySelectorAll('.pad-focus').forEach(el => el.classList.remove('pad-focus'));
+      return;
+    }
+    // If the previously focused element is gone or hidden (netsetup substates
+    // swap which buttons are visible), refocus from scratch.
+    const cur = document.querySelector('.pad-focus');
+    const curVisible = cur && cur.offsetParent !== null && !cur.disabled;
+    if (stateChanged || !curVisible) {
+      if (stateChanged) { padFocus.state = state; padFocus.group = 0; padFocus.item = 0; }
+      padApplyFocus();
+    }
+  }
+
+  // Flip the body to "pad mode" the moment a gamepad shows up so the
+  // touch D-pad gets out of the way and the focus highlight becomes visible.
+  function padSetInputMode() { document.body.classList.add('input-pad'); }
+  window.addEventListener('gamepadconnected', padSetInputMode);
+
   if (window.ArcadeController && typeof window.ArcadeController.on === 'function') {
     window.ArcadeController.on('press', (e) => {
-      if (e && e.button === 'start') {
-        if (state === 'paused') resumeGame();
-        else pauseGame();
+      padSetInputMode();
+      if (!e || !e.button) return;
+      const btn = e.button;
+      // Active-gameplay pause toggle (priority over menu confirm)
+      if (btn === 'start') {
+        if (state === 'paused') { resumeGame(); return; }
+        if (state === 'fight' || state === 'countdown' || state === 'intro') { pauseGame(); return; }
       }
+      // Cutscene skips
+      if ((btn === 'south' || btn === 'start') && state === 'victory-cutscene') { skipVictoryCutscene(); return; }
+      if ((btn === 'south' || btn === 'start') && state === 'boss-intro')       { skipBossIntro(); return; }
+      // Menu nav
+      if (!PAD_MENUS[state]) return;
+      if (btn === 'left')                          { padMove(-1, 0); return; }
+      if (btn === 'right')                         { padMove(+1, 0); return; }
+      if (btn === 'up')                            { padMove(0, -1); return; }
+      if (btn === 'down')                          { padMove(0, +1); return; }
+      if (btn === 'south' || btn === 'start')      { padConfirm(); return; }
+      if (btn === 'east')                          { padBack(); return; }
     });
   }
   window.addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
@@ -4608,6 +4727,7 @@
       if (netMode === 'host' && netConnected) sendHostState();
     }
     render();
+    padTickFocus();
     requestAnimationFrame(loop);
   }
 
