@@ -7,6 +7,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Meteor Blaster">
 <title>Meteor Blaster</title>
+<script src="https://ses.q5labs.co/lib/controller.js"></script>
 <style>
   * {
     margin: 0; padding: 0; box-sizing: border-box;
@@ -37,6 +38,11 @@
   }
   body.touch.in-match .controls { display: flex; }
   body.paused .controls { display: none; }
+  /* When a gamepad becomes the active input, hide the touch d-pad and the
+     on-screen FIRE/BOMB cluster — the player is using a controller. The
+     ArcadeController library toggles body.input-pad / input-touch / input-kbd. */
+  body.input-pad .controls { display: none !important; }
+  body.input-pad .pilot-card { cursor: default; }
   .controls.left  { left: 0;  align-items: flex-start; }
   .controls.right { right: 0; align-items: flex-end;   }
   .row { display: flex; gap: 12px; pointer-events: auto; align-items: center; justify-content: center; }
@@ -1219,6 +1225,100 @@
     renderPilots();
   });
 
+  // ───── gamepad (ArcadeController) ─────
+  // The hosted library handles polling, edge detection, OS-specific button
+  // maps, reconnect and active-input-source CSS toggling. We use the press
+  // event for menus + edge-triggered actions (pause, bomb), and per-frame
+  // pad(0) polling inside updatePlayer for held inputs (movement + FIRE).
+  const AC = window.ArcadeController || null;
+
+  function backToTitleFromEnd() {
+    endOverlay.classList.add('hidden');
+    document.body.classList.remove('in-match');
+    state = MENU;
+    titleOverlay.classList.remove('hidden');
+    renderPilots();
+  }
+  function backToTitleFromPause() {
+    state = MENU;
+    _resumeState = null;
+    pauseOverlay.classList.add('hidden');
+    document.body.classList.remove('paused', 'in-match');
+    titleOverlay.classList.remove('hidden');
+    renderPilots();
+  }
+  function selectPilotByOffset(delta) {
+    const i = Math.max(0, PILOT_ORDER.indexOf(pilotId));
+    const n = PILOT_ORDER.length;
+    pilotId = PILOT_ORDER[((i + delta) % n + n) % n];
+    ensureAudio();
+    renderPilots();
+    try { sfx.shot(); } catch {}
+  }
+
+  if (AC) {
+    AC.on('press', (e) => {
+      const b = e.button;
+      // Pause overlay: south/start resume, east quits to title
+      if (state === PAUSED) {
+        if (b === 'south' || b === 'start') togglePause();
+        else if (b === 'east') backToTitleFromPause();
+        return;
+      }
+      // Game-over / victory overlay open — south retries, east changes pilot
+      if (!endOverlay.classList.contains('hidden')) {
+        if (b === 'south' || b === 'start') startGame();
+        else if (b === 'east') backToTitleFromEnd();
+        return;
+      }
+      // Title — d-pad walks pilots, south/start launches
+      if (state === MENU) {
+        if (b === 'left' || b === 'up')         selectPilotByOffset(-1);
+        else if (b === 'right' || b === 'down') selectPilotByOffset(+1);
+        else if (b === 'south' || b === 'start') startGame();
+        return;
+      }
+      // In match — start pauses; west / shoulder triggers bomb
+      if (state === PLAYING || state === WAVE_BANNER || state === BOSS) {
+        if (b === 'start') togglePause();
+        else if (b === 'west' || b === 'r1' || b === 'l1') {
+          if (state === PLAYING || state === WAVE_BANNER) {
+            ensureAudio();
+            detonateBomb();
+          }
+        }
+      }
+    });
+  }
+
+  // Held-state pad poll used by updatePlayer. Mirrors keyboard/touch on pad(0)
+  // (P1) and respects the analog stick deadzone.
+  function padHeld(name) {
+    if (!AC) return false;
+    const p = AC.pad(0);
+    if (!p || !p.connected) return false;
+    if (p.button(name)) return true;
+    if (name === 'left')  return p.axis('lx') < -0.35;
+    if (name === 'right') return p.axis('lx') >  0.35;
+    if (name === 'up')    return p.axis('ly') < -0.35;
+    if (name === 'down')  return p.axis('ly') >  0.35;
+    return false;
+  }
+
+  // Title screen stick repeat — analog stick should still walk the pilot row.
+  let _menuStickCool = 0;
+  function pollMenuGamepad() {
+    if (!AC) return;
+    if (state !== MENU) { _menuStickCool = 0; return; }
+    if (_menuStickCool > 0) _menuStickCool--;
+    const p = AC.pad(0).connected ? AC.pad(0) : AC.pad(1);
+    if (!p || !p.connected) return;
+    if (_menuStickCool !== 0) return;
+    const lx = p.axis('lx') || 0;
+    if (lx < -0.5)      { selectPilotByOffset(-1); _menuStickCool = 14; }
+    else if (lx > 0.5)  { selectPilotByOffset(+1); _menuStickCool = 14; }
+  }
+
   // ───── update ─────
   function updatePlayer() {
     const SPEED = 4.6;
@@ -1238,11 +1338,12 @@
       }
       player.vx = tx; player.vy = ty;
     } else {
-      // D-pad and keyboard share input — D-pad inputs map straight to keys
-      const left  = keys['arrowleft']  || keys['a'] || touchInput.left;
-      const right = keys['arrowright'] || keys['d'] || touchInput.right;
-      const up    = keys['arrowup']    || keys['w'] || touchInput.up;
-      const down  = keys['arrowdown']  || keys['s'] || touchInput.down;
+      // D-pad / keyboard / gamepad share input — all three map onto the same
+      // virtual left/right/up/down. Gamepad covers d-pad buttons + left stick.
+      const left  = keys['arrowleft']  || keys['a'] || touchInput.left  || padHeld('left');
+      const right = keys['arrowright'] || keys['d'] || touchInput.right || padHeld('right');
+      const up    = keys['arrowup']    || keys['w'] || touchInput.up    || padHeld('up');
+      const down  = keys['arrowdown']  || keys['s'] || touchInput.down  || padHeld('down');
       if (left)  player.vx -= ACCEL;
       if (right) player.vx += ACCEL;
       if (up)    player.vy -= ACCEL;
@@ -1284,7 +1385,8 @@
     }
 
     // Manual fire — hold or mash. playerFire() enforces the cooldown.
-    if (keys[' '] || keys['spacebar'] || touchInput.fire) playerFire();
+    // Gamepad: south (X/A) fires; r2 trigger also fires for a comfy hold.
+    if (keys[' '] || keys['spacebar'] || touchInput.fire || padHeld('south') || padHeld('r2')) playerFire();
   }
 
   function nearestTargetTo(x, y) {
@@ -2771,6 +2873,7 @@
 
   // ───── main loop ─────
   function tick() {
+    pollMenuGamepad();
     // banner countdown also runs while waiting
     // Hit-pause: freeze enemy/meteor updates for a handful of frames after a
     // big kill. Player + draw still run so the shot lands visually crisp.
