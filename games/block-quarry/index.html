@@ -7,6 +7,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Block Quarry">
 <title>Block Quarry</title>
+<script src="https://ses.q5labs.co/lib/controller.js"></script>
 <style>
   * { margin:0; padding:0; box-sizing:border-box; -webkit-user-select:none; user-select:none;
       -webkit-tap-highlight-color: transparent; -webkit-touch-callout:none; }
@@ -28,6 +29,8 @@
 
   .touch-pad { position:fixed; display:none; z-index:5; touch-action:none; }
   body.touch.in-match:not(.paused) .touch-pad { display:block; }
+  /* ArcadeController toggles body.input-pad when a gamepad becomes the active source */
+  body.input-pad .touch-pad { display:none !important; }
   #dpad { left:max(16px,env(safe-area-inset-left)); bottom:max(16px,env(safe-area-inset-bottom));
     width:198px; height:198px; }
   #dpad .key { position:absolute; width:64px; height:64px; border-radius:14px;
@@ -167,7 +170,9 @@
     <b>iPad:</b> d-pad to move · tap <b>UP</b> = jump (hold UP to dig the block above) ·
     <b>PLACE</b> drops the highlighted block · <b>TOOL</b> cycles which block · <b>USE</b> opens bench / drops TNT<br>
     <b>Keyboard P1:</b> WASD · SPACE place · Q/E cycle · F use ·
-    <b>P2 (co-op):</b> arrows · ENTER · ,/. · / · <b>Gamepads</b> supported<br>
+    <b>P2 (co-op):</b> arrows · ENTER · ,/. · /<br>
+    <b>Gamepad:</b> stick/d-pad move · A/X (south) place · X/□ (west) use ·
+    R1/L1/Y cycle · START pause / advance menus<br>
     <span style="color:#ffd76b">CLIMBING BACK UP:</span><br>
     <b>Ladder tower</b> (easiest): tap TOOL until <b>LADDER</b> is lit, tap PLACE (drops in your tile), hold UP to climb, tap PLACE, hold UP, repeat.
     You start with <b>6 ladders</b> — buy more at the bench for just <b>2 stone</b> each batch of 5.<br>
@@ -859,7 +864,29 @@ function readKeyInput(p, idx) {
   }
 }
 
+// ArcadeController is loaded from https://ses.q5labs.co/lib/controller.js (head).
+// It handles PS4/PS5/Xbox button mapping, sticky padIndex, and debouncing.
+// Fall back to raw navigator.getGamepads if the library failed to load.
+const ARCADE = (typeof window !== 'undefined') ? window.ArcadeController : null;
+
 function pollGamepads() {
+  if (ARCADE) {
+    for (let pIdx=0; pIdx<players.length; pIdx++) {
+      const pad = ARCADE.pad(pIdx);
+      if (!pad || !pad.connected) continue;
+      const i = players[pIdx].inputDir;
+      const lx = pad.axis('lx'), ly = pad.axis('ly');
+      if (pad.button('left')  || lx < -0.35) i.l = true;
+      if (pad.button('right') || lx >  0.35) i.r = true;
+      if (pad.button('up')    || ly < -0.35) i.u = true;
+      if (pad.button('down')  || ly >  0.35) i.d = true;
+      if (pad.button('south')) i.place = true;   // A / X
+      if (pad.button('west'))  i.use   = true;   // X / □
+      if (pad.button('r1') || pad.button('l1') || pad.button('north')) i.cycle = true;
+    }
+    return;
+  }
+  // raw fallback (preserves existing Xbox/PS support if the library fails to load)
   const gps = navigator.getGamepads ? navigator.getGamepads() : [];
   for (let pIdx=0; pIdx<players.length; pIdx++) {
     const p = players[pIdx];
@@ -2413,6 +2440,79 @@ document.querySelectorAll('#modePicker .mode-btn').forEach(b => {
     state.mode = b.dataset.mode;
   };
 });
+
+// ============== GAMEPAD MENU / PAUSE EVENTS ==============
+// All menu nav goes through ArcadeController.on('press') so we don't reimplement
+// the click handlers — just forward to the existing buttons. Don't filter by
+// padIndex; either pad can drive menus.
+if (ARCADE) {
+  function isOverlayVisible(id) {
+    return !document.getElementById(id).classList.contains('hidden');
+  }
+  function selectMode(modeKey) {
+    state.mode = modeKey;
+    document.querySelectorAll('#modePicker .mode-btn').forEach(b => {
+      b.classList.toggle('selected', b.dataset.mode === modeKey);
+    });
+  }
+  ARCADE.on('press', (e) => {
+    // start button: pause toggle while in-match, advance from overlays otherwise
+    if (e.button === 'start') {
+      if (state.upgradeOpen) {
+        document.getElementById('closeUp').click(); return;
+      }
+      if (state.running) { togglePause(); return; }
+      if (isOverlayVisible('endOverlay'))  { document.getElementById('againBtn').click(); return; }
+      if (isOverlayVisible('titleOverlay')){ ensureAudio(); startGame(); return; }
+      return;
+    }
+
+    // upgrade bench overlay
+    if (state.upgradeOpen) {
+      if (e.button === 'east') document.getElementById('closeUp').click();
+      return;
+    }
+
+    // title screen
+    if (isOverlayVisible('titleOverlay')) {
+      if (e.button === 'south') { ensureAudio(); startGame(); return; }
+      if (e.button === 'left' || e.button === 'right') {
+        const i = SKIN_ORDER.indexOf(state.selectedSkin);
+        const d = e.button === 'left' ? -1 : 1;
+        state.selectedSkin = SKIN_ORDER[(i + d + SKIN_ORDER.length) % SKIN_ORDER.length];
+        buildSkinPicker();
+        return;
+      }
+      if (e.button === 'up' || e.button === 'down') {
+        const modes = ['adventure', 'creative', 'coop'];
+        const i = modes.indexOf(state.mode);
+        const d = e.button === 'up' ? -1 : 1;
+        selectMode(modes[(i + d + modes.length) % modes.length]);
+        return;
+      }
+      return;
+    }
+
+    // pause overlay
+    if (state.paused) {
+      if (e.button === 'south') togglePause();
+      else if (e.button === 'east') document.getElementById('quitBtn').click();
+      return;
+    }
+
+    // end overlay
+    if (isOverlayVisible('endOverlay')) {
+      if (e.button === 'south') document.getElementById('againBtn').click();
+      else if (e.button === 'east') document.getElementById('endQuitBtn').click();
+      return;
+    }
+
+    // in-match: bench USE shortcut on east (B / ○) — handy alternate
+    if (state.running && e.button === 'east') {
+      const p = players[0]; if (p && p.alive && isAtBench(p)) useTool(p);
+    }
+  });
+}
 
 // ============== MAIN LOOP ==============
 buildTileCanvases();

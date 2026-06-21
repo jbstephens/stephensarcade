@@ -8,6 +8,7 @@
 <meta name="apple-mobile-web-app-title" content="Ghost Patrol">
 <meta name="theme-color" content="#1a1633">
 <title>Ghost Patrol</title>
+<script src="https://ses.q5labs.co/lib/controller.js"></script>
 <style>
   * {
     margin: 0; padding: 0; box-sizing: border-box;
@@ -209,6 +210,10 @@
     pointer-events: none;
   }
   body.touch.in-match:not(.paused) .touch-zones { display: block; }
+  /* ArcadeController auto-toggles body.input-pad / input-touch / input-kbd.
+     When a pad is active, hide the on-screen touch UI even on touch devices. */
+  body.input-pad .touch-zones,
+  body.input-pad .touch-btns { display: none !important; }
   .touch-zone {
     position: absolute;
     pointer-events: auto;
@@ -2144,23 +2149,23 @@ function pollKeyboard() {
   return { fwd, strafe, turn, vacuum, flash, interact };
 }
 
+// Gamepad via ArcadeController (https://ses.q5labs.co/lib/controller.js).
+// Layout-neutral button names mean PS / Xbox / generic pads all behave identically.
+// Sticky logical pad indexing — pad(0) is the first physically connected pad.
+// Start button and menu nav are handled by an event listener (see init()), not here.
 function pollGamepad() {
-  const pads = navigator.getGamepads ? navigator.getGamepads() : [];
-  for (const pad of pads) {
-    if (!pad) continue;
-    const dz = 0.18;
-    const lx = Math.abs(pad.axes[0]) > dz ? pad.axes[0] : 0;
-    const ly = Math.abs(pad.axes[1]) > dz ? pad.axes[1] : 0;
-    const rx = Math.abs(pad.axes[2]) > dz ? pad.axes[2] : 0;
-    const rt = (pad.buttons[7] && pad.buttons[7].value > 0.4);
-    const lt = (pad.buttons[6] && pad.buttons[6].value > 0.4);
-    const a  = pad.buttons[0] && pad.buttons[0].pressed;
-    const start = pad.buttons[9] && pad.buttons[9].pressed;
-    return { fwd: -ly, strafe: lx, turn: rx, vacuum: !!rt, flash: !!lt, interact: !!a, start: !!start };
-  }
-  return null;
+  if (typeof ArcadeController === 'undefined') return null;
+  const pad = ArcadeController.pad(0);
+  if (!pad || !pad.connected) return null;
+  return {
+    fwd:     -pad.axis('ly'),
+    strafe:   pad.axis('lx'),
+    turn:     pad.axis('rx'),
+    vacuum:   pad.button('r2') || pad.button('r1'),
+    flash:    pad.button('l2') || pad.button('l1'),
+    interact: pad.button('south'),  // edge-trigger happens via event API too — both paths are safe
+  };
 }
-let lastGamepadStart = false;
 
 const touch = {
   moveId: -1, moveStartX: 0, moveStartY: 0, moveX: 0, moveY: 0,
@@ -2289,12 +2294,9 @@ function pollInput(dt) {
 
   if (g) {
     fwd += g.fwd; strafe += g.strafe; turn += g.turn;
-    vacuum = vacuum || g.vacuum; flash = flash || g.flash; interact = interact || g.interact;
-    if (g.start && !lastGamepadStart) togglePause();
-    lastGamepadStart = g.start;
-  } else {
-    // No gamepad connected — reset latch so a stale "start was pressed" doesn't block the next press.
-    lastGamepadStart = false;
+    vacuum = vacuum || g.vacuum;
+    flash = flash || g.flash;
+    interact = interact || g.interact;
   }
 
   if (IS_TOUCH) {
@@ -4297,20 +4299,48 @@ function init() {
   drawTitleBackground();
   startTitleAnimation();
 
-  document.getElementById('btn-start').addEventListener('click', () => {
-    ensureAudio();
-    startNewGame();
-  });
-  document.getElementById('btn-resume').addEventListener('click', togglePause);
-  document.getElementById('btn-quit').addEventListener('click', () => {
+  // Single action functions so both click handlers and the gamepad event API
+  // route through the same code path.
+  const actStart = () => { ensureAudio(); startNewGame(); };
+  const actQuitToMenu = () => {
     game.state = 'menu';
     document.body.classList.remove('paused', 'in-match');
     hideOverlays();
     showMenu();
-  });
+  };
+
+  document.getElementById('btn-start').addEventListener('click', actStart);
+  document.getElementById('btn-resume').addEventListener('click', togglePause);
+  document.getElementById('btn-quit').addEventListener('click', actQuitToMenu);
   document.getElementById('btn-play-again').addEventListener('click', startNewGame);
   document.getElementById('btn-win-menu').addEventListener('click', showMenu);
   document.getElementById('pause-btn').addEventListener('click', togglePause);
+
+  // ArcadeController menu nav + pause via event API (edge-triggered).
+  // Don't filter by padIndex — either pad should drive the menus.
+  if (window.ArcadeController && ArcadeController.on) {
+    ArcadeController.on('press', (e) => {
+      // Pause toggle works from any state that has gameplay running.
+      if (e.button === 'start') {
+        if (game.state === 'menu') actStart();
+        else if (game.state === 'play' || game.state === 'paused') togglePause();
+        else if (game.state === 'win') startNewGame();
+        return;
+      }
+      // South confirms / advances in menus. In-game south is handled by the
+      // per-frame poll as 'interact', so we ignore it here when state is 'play'.
+      if (e.button === 'south') {
+        if (game.state === 'menu') { actStart(); return; }
+        if (game.state === 'paused') { togglePause(); return; }
+        if (game.state === 'win') { startNewGame(); return; }
+      }
+      // East = back / quit out of the current screen.
+      if (e.button === 'east') {
+        if (game.state === 'paused') { actQuitToMenu(); return; }
+        if (game.state === 'win') { showMenu(); return; }
+      }
+    });
+  }
 
   document.getElementById('loading').style.display = 'none';
   requestAnimationFrame(loop);
