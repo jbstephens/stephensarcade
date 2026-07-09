@@ -28,6 +28,11 @@ INJECTIONS = [
         "marker":  'id="__arcade_ga"',
         "anchor":  "</head>",
     },
+    {
+        "snippet": (HERE / "pad-exit.html").read_text(),
+        "marker":  'id="__arcade_pad_exit"',
+        "anchor":  "</body>",
+    },
 ]
 
 for path in sys.argv[1:]:
