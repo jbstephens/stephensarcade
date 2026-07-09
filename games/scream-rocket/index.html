@@ -10,6 +10,7 @@
 <link rel="icon" type="image/svg+xml" href='data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="12" fill="%230a0e27"/><circle cx="14" cy="18" r="1.4" fill="%23fff"/><circle cx="52" cy="22" r="1.4" fill="%23fff"/><circle cx="22" cy="52" r="1.4" fill="%23fff"/><circle cx="46" cy="48" r="1.4" fill="%23fff"/><path d="M32 12 Q42 22 42 34 L42 44 L22 44 L22 34 Q22 22 32 12 Z" fill="%23ff4571" stroke="%230a0e27" stroke-width="2"/><circle cx="32" cy="28" r="5" fill="%235fefff" stroke="%230a0e27" stroke-width="2"/><path d="M22 40 L16 50 L22 50 Z" fill="%23ffd23f" stroke="%230a0e27" stroke-width="1.5"/><path d="M42 40 L48 50 L42 50 Z" fill="%23ffd23f" stroke="%230a0e27" stroke-width="1.5"/><path d="M27 44 Q32 56 37 44 Z" fill="%23ffd23f"/></svg>'>
 <link id="appleTouchIcon" rel="apple-touch-icon">
 <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+<script src="https://ses.q5labs.co/lib/controller.js"></script>
 <style>
   :root {
     --bg:#0a0e27;
@@ -128,6 +129,12 @@
   .countdown { font-family: var(--arcade); font-size: clamp(60px, 16vw, 160px); font-weight: 400; line-height: 1; color: var(--yellow); text-shadow: 4px 4px 0 var(--red); }
   .footer { position:absolute; bottom: calc(8px + env(safe-area-inset-bottom)); left:0; right:0; text-align:center; font-family: var(--arcade); font-size: 9px; color: var(--dim); letter-spacing: 2px; }
   .err { color: var(--red); font-family: var(--arcade); }
+  /* Gamepad-aware labels — the ArcadeController library toggles
+     body.input-pad / input-touch / input-kbd by active input source. */
+  .pad-lbl, .pad-only { display: none; }
+  body.input-pad .pad-lbl { display: inline; }
+  body.input-pad .touch-lbl { display: none; }
+  body.input-pad .pad-only { display: block; }
   /* CRT scanline overlay on the canvas during play */
   body::after {
     content: ''; position: fixed; inset:0; pointer-events:none; z-index: 9;
@@ -153,7 +160,8 @@
 <div id="start" class="overlay">
   <h1>SCREAM<br>ROCKET</h1>
   <p>Fly the rocket with your <b>voice</b>.<br>Louder = higher. Squeaky = right. Growly = left.</p>
-  <button class="primary" id="startBtn">TAP TO START</button>
+  <button class="primary" id="startBtn"><span class="touch-lbl">TAP TO START</span><span class="pad-lbl">PRESS &#10005; TO START</span></button>
+  <p class="small pad-only">GAMEPAD: HOLD &#10005; = THRUST &middot; STICK/D-PAD = STEER &middot; R2 = TURBO &middot; HOLD &#9633; = HUM SHIELD &middot; START = PAUSE</p>
   <p class="small">A STEPHENS GAMES JOINT &middot; NEEDS MIC PERMISSION &middot; IPAD OR DESKTOP</p>
 </div>
 
@@ -169,7 +177,8 @@
 <div id="charsel" class="overlay hidden">
   <h2>Choose your pilot</h2>
   <div class="chars" id="charList"></div>
-  <button class="primary" id="charNext">NEXT</button>
+  <p class="small pad-only">D-PAD/STICK PICKS &middot; &#10005; CONFIRMS</p>
+  <button class="primary" id="charNext"><span class="touch-lbl">NEXT</span><span class="pad-lbl">&#10005; NEXT</span></button>
 </div>
 
 <!-- CALIBRATION -->
@@ -179,6 +188,7 @@
   <div class="big" id="calCountdown">3</div>
   <div class="meter"><div id="calBar"></div></div>
   <p class="small" id="calHint">Get ready…</p>
+  <p class="small pad-only">START = SKIP MIC SETUP</p>
 </div>
 
 <!-- GAME OVER -->
@@ -189,8 +199,8 @@
   <div class="label">Best</div>
   <div style="font-size: clamp(24px,5vw,40px); font-weight:800;" id="bestScore">0</div>
   <div class="row">
-    <button class="primary" id="againBtn">TAP TO PLAY AGAIN</button>
-    <button id="newPilotBtn">CHANGE PILOT</button>
+    <button class="primary" id="againBtn"><span class="touch-lbl">TAP TO PLAY AGAIN</span><span class="pad-lbl">&#10005; PLAY AGAIN</span></button>
+    <button id="newPilotBtn"><span class="touch-lbl">CHANGE PILOT</span><span class="pad-lbl">&#9675; CHANGE PILOT</span></button>
   </div>
 </div>
 
@@ -1039,12 +1049,17 @@ function frame(now) {
   const dt = Math.min(0.05, (now - lastTime) / 1000);
   lastTime = now;
   updateMic();
+  if (state === 'playing') applyPadFlight();
+  pollMenuStick();
   ctx.clearRect(0, 0, W, H);
   drawBG();
 
   if (state === 'playing') {
     updatePlay(dt);
     drawPlay();
+  } else if (state === 'paused') {
+    drawPlay();
+    drawPauseBanner();
   } else if (state === 'calibrating') {
     drawIdleBG();
   } else {
@@ -1439,13 +1454,14 @@ function show(el) {
 
 document.getElementById('startBtn').addEventListener('click', async () => {
   const ok = await startAudio();
-  if (!ok) { show(deniedEl); return; }
+  // No mic but a gamepad is connected — play pad-only instead of blocking.
+  if (!ok && !padConnected()) { show(deniedEl); return; }
   show(charselEl);
   buildCharList();
 });
 document.getElementById('retryBtn').addEventListener('click', async () => {
   const ok = await startAudio();
-  if (!ok) { show(deniedEl); return; }
+  if (!ok && !padConnected()) { show(deniedEl); return; }
   show(charselEl);
   buildCharList();
 });
@@ -1488,6 +1504,7 @@ function drawMiniRocket(c2, ch) {
 }
 
 document.getElementById('charNext').addEventListener('click', () => {
+  if (!audio.ready) { beginGame(); return; }   // gamepad-only session — nothing to calibrate
   show(calEl);
   startCalibration();
 });
@@ -1621,6 +1638,111 @@ initStars();
 window.addEventListener('resize', initStars);
 
 // ============================================================
+// GAMEPAD — ArcadeController (https://ses.q5labs.co/lib/controller.js)
+// The hosted library polls navigator.getGamepads(), applies stick deadzones
+// and toggles body.input-pad / input-touch / input-kbd. Everything is guarded
+// with window.ArcadeController so the game still works if the script fails
+// to load. pad(0) flies the rocket; ANY connected pad drives the menus.
+// ============================================================
+function padConnected() {
+  if (!window.ArcadeController) return false;
+  for (let i = 0; i < 4; i++) if (ArcadeController.pad(i).connected) return true;
+  return false;
+}
+
+// Pad flight synthesizes the same normalized volume/pitch signals the mic
+// produces, so thrust, steering, rings, hum shield, stealth clouds, overheat
+// and the Howler all work unchanged — and voice + pad can be used together
+// (loudest input wins).
+//   hold ✕ / d-pad up = thrust · stick up = analog thrust · R2/L2 = full
+//   turbo (overheats!) · stick / d-pad left-right = steer, which IS pitch:
+//   left = LOW, right = HIGH, center = MID (rings + boss) · hold □ = steady
+//   quiet hum (charges the shield)
+function applyPadFlight() {
+  if (!window.ArcadeController) return;
+  const p = ArcadeController.pad(0);
+  if (!p.connected) return;
+  let vol = 0;
+  if (p.button('south') || p.button('up')) vol = 0.7;   // strong, below overheat threshold
+  if (p.button('west')) vol = Math.max(vol, 0.35);      // steady hum → shield charge
+  vol = Math.max(vol, clamp(-p.axis('ly'), 0, 1));      // analog stick thrust
+  if (p.button('r2') || p.button('l2')) vol = 1;        // turbo — overheats!
+  let steer = p.axis('lx');
+  if (p.button('left')) steer = -1;
+  else if (p.button('right')) steer = 1;
+  if (vol > 0) mic.volume = Math.max(mic.volume, vol);
+  if (Math.abs(steer) > 0.01) mic.pitch = clamp(0.5 + steer * 0.5, 0, 1);
+  else if (!audio.ready) mic.pitch = mic.pitch * 0.85 + 0.5 * 0.15; // no mic to re-center it
+}
+
+function togglePause() {
+  if (state === 'playing') state = 'paused';
+  else if (state === 'paused') state = 'playing';
+}
+
+function drawPauseBanner() {
+  ctx.fillStyle = 'rgba(10,14,39,0.65)';
+  ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#ffd23f';
+  ctx.font = Math.min(48, Math.floor(W * 0.07)) + "px 'Press Start 2P', monospace";
+  ctx.fillText('PAUSED', W / 2, H / 2 - 20);
+  ctx.fillStyle = '#6c7099';
+  ctx.font = "12px 'Press Start 2P', monospace";
+  ctx.fillText('START RESUMES', W / 2, H / 2 + 36);
+}
+
+function padSelectChar(i) {
+  const n = CHARACTERS.length;
+  chosenChar = ((i % n) + n) % n;
+  document.querySelectorAll('#charList .char').forEach((el, k) => {
+    el.classList.toggle('selected', k === chosenChar);
+  });
+}
+
+// Analog-stick nav on the pilot grid needs a repeat cooldown; the d-pad
+// arrives as edge-triggered press events instead (see below).
+let menuStickCool = 0;
+function pollMenuStick() {
+  if (!window.ArcadeController) return;
+  if (charselEl.classList.contains('hidden')) { menuStickCool = 0; return; }
+  if (menuStickCool > 0) { menuStickCool--; return; }
+  for (let i = 0; i < 4; i++) {
+    const p = ArcadeController.pad(i);
+    if (!p.connected) continue;
+    const lx = p.axis('lx');
+    if (lx < -0.5)     { padSelectChar(chosenChar - 1); menuStickCool = 14; break; }
+    else if (lx > 0.5) { padSelectChar(chosenChar + 1); menuStickCool = 14; break; }
+  }
+}
+
+if (window.ArcadeController) {
+  ArcadeController.on('press', (e) => {
+    const b = e.button;
+    // SELECT+START and the PS button are reserved by the arcade shell.
+    if (b === 'home' || b === 'select') return;
+    if (b === 'start' && ArcadeController.pad(e.padIndex).button('select')) return;
+
+    if (!startEl.classList.contains('hidden')) {
+      if (b === 'south' || b === 'start') document.getElementById('startBtn').click();
+    } else if (!deniedEl.classList.contains('hidden')) {
+      if (b === 'south' || b === 'start') document.getElementById('retryBtn').click();
+    } else if (!charselEl.classList.contains('hidden')) {
+      if (b === 'left' || b === 'up') padSelectChar(chosenChar - 1);
+      else if (b === 'right' || b === 'down') padSelectChar(chosenChar + 1);
+      else if (b === 'south' || b === 'start') document.getElementById('charNext').click();
+    } else if (!overEl.classList.contains('hidden')) {
+      if (b === 'south' || b === 'start') document.getElementById('againBtn').click();
+      else if (b === 'east') document.getElementById('newPilotBtn').click();
+    } else if (state === 'calibrating') {
+      if (b === 'start') beginGame();          // skip mic setup, keep defaults
+    } else if (state === 'playing' || state === 'paused') {
+      if (b === 'start' && (state === 'paused' || (rocket && rocket.alive))) togglePause();
+    }
+  });
+}
+
+// ============================================================
 // APPLE TOUCH ICON — generate 180x180 PNG for iPad home screen
 // ============================================================
 (function generateAppleTouchIcon() {
@@ -1705,6 +1827,45 @@ window.addEventListener('resize', initStars);
 </script>
 <!-- injected by scripts/bundle-games.sh — back-to-arcade overlay -->
 <a id="__arcade_back" href="/" style="position:fixed;top:max(10px,env(safe-area-inset-top));left:max(10px,env(safe-area-inset-left));z-index:2147483647;font:bold 10px/1 -apple-system,BlinkMacSystemFont,'Segoe UI',monospace;letter-spacing:2px;color:#ffd23f;background:rgba(10,14,39,0.82);border:2px solid #ffd23f;padding:8px 10px 7px;text-decoration:none;border-radius:3px;box-shadow:2px 2px 0 rgba(255,69,113,0.65);-webkit-tap-highlight-color:transparent;-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);">&#9664; ARCADE</a>
+
+<!-- injected by scripts/bundle-games.sh — hold PS (or SELECT+START) on any gamepad to return to the arcade menu -->
+<script id="__arcade_pad_exit">
+(function () {
+  var HOLD_MS = 1000;
+  var heldSince = 0;
+  var leaving = false;
+  function comboDown(gp) {
+    var b = gp.buttons;
+    var ps = b[16] && b[16].pressed;
+    var selectStart = b[8] && b[8].pressed && b[9] && b[9].pressed;
+    return !!(ps || selectStart);
+  }
+  function tick(now) {
+    if (leaving) return;
+    var pads = navigator.getGamepads ? navigator.getGamepads() : [];
+    var down = false;
+    for (var i = 0; i < pads.length; i++) {
+      if (pads[i] && pads[i].connected && comboDown(pads[i])) { down = true; break; }
+    }
+    var btn = document.getElementById('__arcade_back');
+    if (!down) {
+      heldSince = 0;
+      if (btn) { btn.style.transform = ''; btn.style.boxShadow = ''; }
+    } else {
+      if (!heldSince) heldSince = now;
+      var progress = (now - heldSince) / HOLD_MS;
+      if (btn) {
+        btn.style.transform = 'scale(' + (1 + 0.35 * Math.min(progress, 1)) + ')';
+        btn.style.transformOrigin = 'top left';
+        btn.style.boxShadow = '0 0 ' + Math.round(18 * Math.min(progress, 1)) + 'px #ffd23f';
+      }
+      if (progress >= 1) { leaving = true; location.href = '/'; return; }
+    }
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+})();
+</script>
 
 </body>
 </html>

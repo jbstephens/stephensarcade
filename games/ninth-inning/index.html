@@ -7,6 +7,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Ninth Inning">
 <title>Ninth Inning — Baseball</title>
+<script src="https://ses.q5labs.co/lib/controller.js"></script>
 <style>
   * {
     margin: 0; padding: 0; box-sizing: border-box;
@@ -467,6 +468,23 @@
   body.in-game.pitching #swingBtn,
   body.in-game.pitching #aimPad,
   body.in-game.pitching #swingFeedback { display: none !important; }
+
+  /* ── GAMEPAD ──
+     ArcadeController toggles body.input-pad / input-touch / input-kbd. On a
+     gamepad, hide the touch buttons and touch hints; the AIM pad and the
+     strike-zone reticle stay visible — they double as aim indicators. */
+  body.input-pad #swingBtn,
+  body.input-pad #throwBtn,
+  body.input-pad #swingHint,
+  body.input-pad #pitchHint,
+  body.input-pad #pauseBtn,
+  body.input-pad #audioBtn { display: none !important; }
+  /* Focus ring for pad-driven menu navigation */
+  body.input-pad .pad-focus {
+    outline: 3px solid #ffb24d;
+    outline-offset: 3px;
+    box-shadow: 0 0 18px rgba(255,178,77,0.55);
+  }
 
   #pitchPicker {
     position: fixed;
@@ -1255,6 +1273,7 @@
   <div class="help">
     <b>Desktop:</b> SPACE or S to swing &nbsp;·&nbsp; A/D or ←/→ to aim &nbsp;·&nbsp; P to pause<br>
     <b>Mobile:</b> Tap SWING &nbsp;·&nbsp; drag AIM pad to adjust contact point<br>
+    <b>Gamepad:</b> ✕ swing / throw &nbsp;·&nbsp; stick aims &nbsp;·&nbsp; L1/R1 pitch type &nbsp;·&nbsp; START pause<br>
     Square up perfectly for HOME RUNS. Lay off pitches outside the zone.
   </div>
   <div style="margin-bottom:10px;">
@@ -7166,9 +7185,12 @@ document.getElementById('titleSettingsBtn').addEventListener('click', () => open
 
 // Settings overlay
 document.getElementById('settingsDoneBtn').addEventListener('click', () => closeSettings());
-document.getElementById('resetStatsBtn').addEventListener('click', () => {
+document.getElementById('resetStatsBtn').addEventListener('click', function() {
   resetBest();
-  alert('Best scores reset!');
+  // Inline confirmation instead of alert() — a blocking dialog can't be
+  // dismissed from a gamepad in kiosk mode.
+  this.textContent = 'STATS RESET ✓';
+  setTimeout(() => { this.textContent = 'RESET STATS'; }, 1200);
 });
 document.getElementById('toggleCrowd').addEventListener('click', function() {
   settings.crowdOn = !settings.crowdOn;
@@ -7439,6 +7461,233 @@ function initUI() {
 initUI();
 
 // ============================================================================
+// Gamepad (ArcadeController — https://ses.q5labs.co/lib/controller.js)
+// Layout-neutral names: south = ✕, east = ○, west = □, north = △ on a
+// DualShock. pad(0) drives gameplay; ANY connected pad drives the menus.
+// The SELECT+START combo and the PS/home button are reserved by the arcade
+// shell for "quit to menu" — never bound here.
+// ============================================================================
+const ACtrl = window.ArcadeController || null;
+
+// --- Overlay menu navigation ------------------------------------------------
+// Menus are rows of clickable elements. Up/down moves between rows,
+// left/right moves within a row, south clicks the focused element.
+// Rows of .diff-tab buttons activate on left/right immediately (console-style).
+function padMenuRows(name) {
+  const $ = id => document.getElementById(id);
+  const $$ = sel => Array.from(document.querySelectorAll(sel));
+  switch (name) {
+    case 'title': return [
+      $$('#titleDiffTabs .diff-tab'),
+      $$('#titleInningsTabs .diff-tab'),
+      [$('playBtn')],
+      [$('practiceBtn')],
+      [$('titleSettingsBtn')],
+    ];
+    case 'end': return [[$('againBtn')], [$('menuBtn')]];
+    case 'pause': return [[$('resumeBtn')], [$('pauseSettingsBtn')], [$('quitBtn')]];
+    case 'settings': return [
+      $$('#settingsDiffTabs .diff-tab'),
+      [$('toggleCrowd')],
+      [$('toggleSFX')],
+      [$('toggleHints')],
+      [$('settingsDoneBtn'), $('resetStatsBtn')],
+    ];
+  }
+  return null;
+}
+
+// Which menu (if any) currently owns pad input. Order = stacking order.
+function activePadMenu() {
+  const shown = id => !document.getElementById(id).classList.contains('hidden');
+  if (shown('settingsOverlay')) return 'settings';
+  if (shown('pauseOverlay'))    return 'pause';
+  if (shown('endScreen'))       return 'end';
+  if (shown('titleScreen'))     return 'title';
+  return null;
+}
+
+let padMenuName = null;
+let padFocusR = 0, padFocusC = 0;
+
+function refreshPadFocus() {
+  document.querySelectorAll('.pad-focus').forEach(el => el.classList.remove('pad-focus'));
+  if (!padMenuName) return;
+  const rows = padMenuRows(padMenuName);
+  if (!rows) return;
+  padFocusR = clamp(padFocusR, 0, rows.length - 1);
+  padFocusC = clamp(padFocusC, 0, rows[padFocusR].length - 1);
+  const el = rows[padFocusR][padFocusC];
+  if (el) el.classList.add('pad-focus');
+}
+
+// Re-sync focus whenever the visible overlay changes (open/close/switch).
+function syncPadMenuFocus() {
+  const name = activePadMenu();
+  if (name === padMenuName) return;
+  padMenuName = name;
+  padFocusR = (name === 'title') ? 2 : 0;  // title defaults to PLAY BALL
+  padFocusC = 0;
+  if (name) {
+    // If the default row is a tab row, land on the currently active tab
+    const row = padMenuRows(name)[padFocusR];
+    const activeI = row ? row.findIndex(el => el.classList.contains('active')) : -1;
+    if (activeI >= 0) padFocusC = activeI;
+  }
+  refreshPadFocus();
+}
+
+function padMenuNav(dir) {
+  syncPadMenuFocus();
+  if (!padMenuName) return;
+  const rows = padMenuRows(padMenuName);
+  if (!rows) return;
+  if (dir === 'up' || dir === 'down') {
+    const d = dir === 'up' ? -1 : 1;
+    padFocusR = (padFocusR + d + rows.length) % rows.length;
+    // Land on the active tab when entering a tab row
+    const row = rows[padFocusR];
+    const activeI = row.findIndex(el => el.classList.contains('active'));
+    padFocusC = activeI >= 0 ? activeI : Math.min(padFocusC, row.length - 1);
+  } else {
+    const d = dir === 'left' ? -1 : 1;
+    const row = rows[padFocusR];
+    padFocusC = (padFocusC + d + row.length) % row.length;
+    // Tab rows (difficulty / innings) select as you move
+    const el = row[padFocusC];
+    if (el && el.classList.contains('diff-tab')) el.click();
+  }
+  refreshPadFocus();
+}
+
+function padMenuActivate() {
+  syncPadMenuFocus();
+  if (!padMenuName) return;
+  const rows = padMenuRows(padMenuName);
+  const el = rows && rows[padFocusR] && rows[padFocusR][padFocusC];
+  if (el) { ensureAudio(); el.click(); }
+}
+
+// Left-stick menu navigation with repeat (d-pad arrives as press events).
+let padMenuStickCool = 0;
+function pollPadMenus() {
+  syncPadMenuFocus();
+  if (!padMenuName) { padMenuStickCool = 0; return; }
+  if (padMenuStickCool > 0) { padMenuStickCool--; return; }
+  let p = null;
+  for (let i = 0; i < 4; i++) {
+    const q = ACtrl.pad(i);
+    if (q.connected) { p = q; break; }
+  }
+  if (!p) return;
+  const lx = p.axis('lx'), ly = p.axis('ly');
+  if      (ly < -0.5) { padMenuNav('up');    padMenuStickCool = 12; }
+  else if (ly >  0.5) { padMenuNav('down');  padMenuStickCool = 12; }
+  else if (lx < -0.5) { padMenuNav('left');  padMenuStickCool = 12; }
+  else if (lx >  0.5) { padMenuNav('right'); padMenuStickCool = 12; }
+}
+
+// --- Gameplay: held / analog input, polled each frame (pad 0 = player) -----
+function tickGamepad(dt) {
+  if (!ACtrl) return;
+  const p = ACtrl.pad(0);
+  if (!p || !p.connected) return;
+  let dx = (p.button('right') ? 1 : 0) - (p.button('left') ? 1 : 0);
+  let dy = (p.button('down')  ? 1 : 0) - (p.button('up')   ? 1 : 0);
+  if (p.axis('lx')) dx = p.axis('lx');   // analog wins; deadzone applied by lib
+  if (p.axis('ly')) dy = p.axis('ly');
+
+  if (game.view === 'pitching') {
+    // Move the strike-zone reticle (incremental, like dragging the aim zone)
+    if ((dx || dy) && !game.pitching.locked && game.state !== 'inflight') {
+      const sp = 3.2; // ft/s
+      game.pitching.aimX = clamp(game.pitching.aimX + dx * sp * dt, -AIM_X_RANGE, AIM_X_RANGE);
+      game.pitching.aimY = clamp(game.pitching.aimY - dy * sp * dt, AIM_Y_LOW, AIM_Y_HIGH);
+      syncAimReticle();
+    }
+    return;
+  }
+
+  // Batting: stick/d-pad maps absolutely to bat aim, like dragging the AIM
+  // pad. tickKeyboard's decay springs it back to center on release.
+  if (dx || dy) {
+    game.bat.aim = clamp(dx, -1, 1);
+    game.bat.aimY = clamp(-dy, -1, 1);
+    aimKnob.style.transform = `translate(${game.bat.aim * 28}px, ${-game.bat.aimY * 28}px)`;
+    // Tutorial: aiming with the pad advances step 3, same as an AIM-pad drag
+    if (game.tutStep === 2) {
+      if (tutTimer) { clearTimeout(tutTimer); tutTimer = null; }
+      tutTimer = setTimeout(() => advanceTutorial(), 1200);
+    }
+  }
+}
+
+// Cycle pitch selection: the chip row while pitching, the practice <select>
+// while in practice mode (a native select isn't pad-operable).
+function padCyclePitchType(dir) {
+  const i = Math.max(0, PITCH_KEYS.indexOf(game.pitching.selectedType));
+  game.pitching.selectedType = PITCH_KEYS[(i + dir + PITCH_KEYS.length) % PITCH_KEYS.length];
+  syncSelectedPitchChip();
+}
+function padCyclePracticePitch(dir) {
+  const sel = document.getElementById('pitchTypeSelect');
+  if (!sel || !sel.options.length) return;
+  const n = sel.options.length;
+  sel.selectedIndex = (sel.selectedIndex + dir + n) % n;
+  sel.dispatchEvent(new Event('change'));
+}
+
+// --- Discrete actions via edge-triggered press events -----------------------
+if (ACtrl) {
+  ACtrl.on('press', (e) => {
+    const b = e.button;
+    if (b === 'home' || b === 'select') return;  // reserved by the arcade shell
+
+    // A menu overlay is up — any pad may drive it.
+    const menu = activePadMenu();
+    if (menu) {
+      if (b === 'up' || b === 'down' || b === 'left' || b === 'right') { padMenuNav(b); return; }
+      if (b === 'south') { padMenuActivate(); return; }
+      if (b === 'start') {
+        ensureAudio();
+        if      (menu === 'title')    document.getElementById('playBtn').click();
+        else if (menu === 'pause')    togglePause();
+        else if (menu === 'end')      document.getElementById('againBtn').click();
+        else if (menu === 'settings') closeSettings();
+        return;
+      }
+      if (b === 'east') {
+        if      (menu === 'settings') closeSettings();
+        else if (menu === 'pause')    togglePause();
+        else if (menu === 'end')      document.getElementById('menuBtn').click();
+        return;
+      }
+      return;
+    }
+
+    // In-game, no overlay.
+    if (game.mode !== 'playing' && game.mode !== 'practice') return;
+    if (b === 'start') { togglePause(); return; }
+    if (e.padIndex !== 0) return;  // single-player: pad 0 plays
+    if (b === 'east' && game.tutStep >= 0) {
+      document.getElementById('tutSkip').click();  // ○ skips the tutorial
+      return;
+    }
+    if (b === 'south') {
+      ensureAudio();
+      if (game.view === 'pitching') tryThrow(null);
+      else trySwing(null);
+      return;
+    }
+    if (b === 'l1' || b === 'r1') {
+      const dir = b === 'l1' ? -1 : 1;
+      if (game.view === 'pitching') padCyclePitchType(dir);
+      else if (game.mode === 'practice') padCyclePracticePitch(dir);
+    }
+  });
+}
+
+// ============================================================================
 // Main loop
 // ============================================================================
 let lastT = performance.now();
@@ -7448,6 +7697,10 @@ function loop(now) {
   try {
     const dtReal = Math.min(0.05, (now - lastT) / 1000);
     lastT = now;
+
+    // Gamepad menu navigation (left stick + focus sync) runs every frame,
+    // whatever the game state. D-pad and buttons arrive as press events.
+    if (ACtrl) pollPadMenus();
 
     // Slow-mo time scale
     if (timeScaleRampTimer > 0) {
@@ -7472,6 +7725,7 @@ function loop(now) {
     // Update
     if ((game.mode === 'playing' || game.mode === 'practice') && !game.paused) {
       tickKeyboard(dt);
+      tickGamepad(dt);
       if (game.state === 'inflight') {
         tickPitch(dt);
         if (game.view === 'pitching') {
@@ -7576,6 +7830,45 @@ document.addEventListener('dblclick', e => e.preventDefault());
 </script>
 <!-- injected by scripts/bundle-games.sh — back-to-arcade overlay -->
 <a id="__arcade_back" href="/" style="position:fixed;top:max(10px,env(safe-area-inset-top));left:max(10px,env(safe-area-inset-left));z-index:2147483647;font:bold 10px/1 -apple-system,BlinkMacSystemFont,'Segoe UI',monospace;letter-spacing:2px;color:#ffd23f;background:rgba(10,14,39,0.82);border:2px solid #ffd23f;padding:8px 10px 7px;text-decoration:none;border-radius:3px;box-shadow:2px 2px 0 rgba(255,69,113,0.65);-webkit-tap-highlight-color:transparent;-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);">&#9664; ARCADE</a>
+
+<!-- injected by scripts/bundle-games.sh — hold PS (or SELECT+START) on any gamepad to return to the arcade menu -->
+<script id="__arcade_pad_exit">
+(function () {
+  var HOLD_MS = 1000;
+  var heldSince = 0;
+  var leaving = false;
+  function comboDown(gp) {
+    var b = gp.buttons;
+    var ps = b[16] && b[16].pressed;
+    var selectStart = b[8] && b[8].pressed && b[9] && b[9].pressed;
+    return !!(ps || selectStart);
+  }
+  function tick(now) {
+    if (leaving) return;
+    var pads = navigator.getGamepads ? navigator.getGamepads() : [];
+    var down = false;
+    for (var i = 0; i < pads.length; i++) {
+      if (pads[i] && pads[i].connected && comboDown(pads[i])) { down = true; break; }
+    }
+    var btn = document.getElementById('__arcade_back');
+    if (!down) {
+      heldSince = 0;
+      if (btn) { btn.style.transform = ''; btn.style.boxShadow = ''; }
+    } else {
+      if (!heldSince) heldSince = now;
+      var progress = (now - heldSince) / HOLD_MS;
+      if (btn) {
+        btn.style.transform = 'scale(' + (1 + 0.35 * Math.min(progress, 1)) + ')';
+        btn.style.transformOrigin = 'top left';
+        btn.style.boxShadow = '0 0 ' + Math.round(18 * Math.min(progress, 1)) + 'px #ffd23f';
+      }
+      if (progress >= 1) { leaving = true; location.href = '/'; return; }
+    }
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+})();
+</script>
 
 </body>
 </html>

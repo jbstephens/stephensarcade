@@ -31,6 +31,7 @@
   body.touch.in-match:not(.paused) .touch-pad { display:block; }
   /* ArcadeController toggles body.input-pad when a gamepad becomes the active source */
   body.input-pad .touch-pad { display:none !important; }
+  body.input-pad .hud-btn { display:none !important; }
   #dpad { left:max(16px,env(safe-area-inset-left)); bottom:max(16px,env(safe-area-inset-bottom));
     width:198px; height:198px; }
   #dpad .key { position:absolute; width:64px; height:64px; border-radius:14px;
@@ -109,6 +110,8 @@
   .upRow button:disabled { background:#5a5566 !important; color:#aaa !important;
     cursor:not-allowed !important; }
   .upRow.locked { opacity:0.45; }
+  /* gamepad cursor on the upgrade bench (d-pad up/down, south = buy) */
+  .upRow.padSel { outline:2px solid #ffd76b; background:rgba(255,215,107,0.16); }
   .upRow.cant-afford { opacity:0.7; }
   .upRow.cant-afford .cost { color:#ff8a8a; }
   .upRow .cost .ok   { color:#7be07b; }
@@ -908,6 +911,13 @@ function pollGamepads() {
   }
 }
 const edgeState = [{},{}];
+// Treat action buttons as already-held so the pad press that confirmed a menu
+// (e.g. SOUTH on the title / pause / end overlay) can't also fire in-game on
+// the same press. If the button isn't actually held it clears next frame.
+function primeEdges() {
+  edgeState[0] = {place:true, cycle:true, use:true};
+  edgeState[1] = {place:true, cycle:true, use:true};
+}
 
 // ============== PHYSICS HELPERS ==============
 function collidesSolid(x, y, w, h) {
@@ -1606,18 +1616,27 @@ function hasUpgrade(p, u) {
   }
   return false;
 }
+let benchSel = 0;
 function openUpgradeBench(p) {
   state.upgradeOpen = true;
   state.paused = true;
+  benchSel = 0;
   document.getElementById('upgradeOverlay').classList.remove('hidden');
   document.body.classList.add('paused');
   renderUpgrade(p);
+}
+function highlightUpRow() {
+  const rows = document.querySelectorAll('#upRows .upRow');
+  rows.forEach((r,i) => r.classList.toggle('padSel', i === benchSel));
+  const sel = rows[benchSel];
+  if (sel && sel.scrollIntoView) sel.scrollIntoView({block:'nearest'});
 }
 function closeUpgrade() {
   state.upgradeOpen = false;
   state.paused = false;
   document.getElementById('upgradeOverlay').classList.add('hidden');
   document.body.classList.remove('paused');
+  primeEdges(); // a buy-button still held on close shouldn't place/use in-game
 }
 function renderUpgrade(p) {
   const inv = document.getElementById('upInv');
@@ -1652,6 +1671,7 @@ function renderUpgrade(p) {
     };
     wrap.appendChild(row);
   }
+  highlightUpRow();
 }
 
 // ============== DRAW: TILE CACHES ==============
@@ -2290,7 +2310,7 @@ function startGame() {
     // intentionally NOT enabling drill — sandbox should mine one block at a time
     for (const k of ['torch','ladder','dynamite','dirt','stone']) players[0].inv[k] = 99;
   }
-  edgeState[0] = {}; edgeState[1] = {};
+  primeEdges();
 
   document.getElementById('titleOverlay').classList.add('hidden');
   document.getElementById('endOverlay').classList.add('hidden');
@@ -2313,6 +2333,7 @@ function togglePause() {
   } else {
     ov.classList.add('hidden');
     document.body.classList.remove('paused');
+    primeEdges(); // resume press (e.g. SOUTH) shouldn't also place a block
   }
 }
 
@@ -2467,9 +2488,18 @@ if (ARCADE) {
       return;
     }
 
-    // upgrade bench overlay
+    // upgrade bench overlay — d-pad picks a row, south buys, east closes
     if (state.upgradeOpen) {
       if (e.button === 'east') document.getElementById('closeUp').click();
+      else if (e.button === 'up' || e.button === 'down') {
+        const n = UPGRADES.length;
+        benchSel = (benchSel + (e.button === 'up' ? -1 : 1) + n) % n;
+        highlightUpRow();
+      } else if (e.button === 'south') {
+        const btn = document.querySelectorAll('#upRows .upRow button')[benchSel];
+        if (btn && !btn.disabled) btn.click();
+        else sfx('denied');
+      }
       return;
     }
 
@@ -2544,6 +2574,45 @@ window.addEventListener('orientationchange', resize);
 </script>
 <!-- injected by scripts/bundle-games.sh — back-to-arcade overlay -->
 <a id="__arcade_back" href="/" style="position:fixed;top:max(10px,env(safe-area-inset-top));left:max(10px,env(safe-area-inset-left));z-index:2147483647;font:bold 10px/1 -apple-system,BlinkMacSystemFont,'Segoe UI',monospace;letter-spacing:2px;color:#ffd23f;background:rgba(10,14,39,0.82);border:2px solid #ffd23f;padding:8px 10px 7px;text-decoration:none;border-radius:3px;box-shadow:2px 2px 0 rgba(255,69,113,0.65);-webkit-tap-highlight-color:transparent;-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);">&#9664; ARCADE</a>
+
+<!-- injected by scripts/bundle-games.sh — hold PS (or SELECT+START) on any gamepad to return to the arcade menu -->
+<script id="__arcade_pad_exit">
+(function () {
+  var HOLD_MS = 1000;
+  var heldSince = 0;
+  var leaving = false;
+  function comboDown(gp) {
+    var b = gp.buttons;
+    var ps = b[16] && b[16].pressed;
+    var selectStart = b[8] && b[8].pressed && b[9] && b[9].pressed;
+    return !!(ps || selectStart);
+  }
+  function tick(now) {
+    if (leaving) return;
+    var pads = navigator.getGamepads ? navigator.getGamepads() : [];
+    var down = false;
+    for (var i = 0; i < pads.length; i++) {
+      if (pads[i] && pads[i].connected && comboDown(pads[i])) { down = true; break; }
+    }
+    var btn = document.getElementById('__arcade_back');
+    if (!down) {
+      heldSince = 0;
+      if (btn) { btn.style.transform = ''; btn.style.boxShadow = ''; }
+    } else {
+      if (!heldSince) heldSince = now;
+      var progress = (now - heldSince) / HOLD_MS;
+      if (btn) {
+        btn.style.transform = 'scale(' + (1 + 0.35 * Math.min(progress, 1)) + ')';
+        btn.style.transformOrigin = 'top left';
+        btn.style.boxShadow = '0 0 ' + Math.round(18 * Math.min(progress, 1)) + 'px #ffd23f';
+      }
+      if (progress >= 1) { leaving = true; location.href = '/'; return; }
+    }
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+})();
+</script>
 
 </body>
 </html>
