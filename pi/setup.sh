@@ -69,8 +69,8 @@ mkdir -p "$(dirname "$LABWC_AUTOSTART")"
 if [ ! -f "$LABWC_AUTOSTART" ]; then
   cat > "$LABWC_AUTOSTART" <<'EOF'
 # Created by Stephens Arcade pi/setup.sh.
-# Keep the stock session pieces (panel, background), then start the arcade.
-[ -r /etc/xdg/labwc/autostart ] && . /etc/xdg/labwc/autostart
+# labwc runs the system autostart (/etc/xdg/labwc/autostart) as well as this
+# file, so do NOT source it here — that would start the panel twice.
 EOF
 fi
 grep -qF "$KIOSK_LINE" "$LABWC_AUTOSTART" || echo "$KIOSK_LINE" >> "$LABWC_AUTOSTART"
