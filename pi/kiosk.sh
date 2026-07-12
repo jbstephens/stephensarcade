@@ -37,6 +37,7 @@ while true; do
     --user-data-dir="$PROFILE" \
     --no-first-run \
     --noerrdialogs \
+    --password-store=basic \
     --disable-infobars \
     --disable-session-crashed-bubble \
     --hide-crash-restore-bubble \
