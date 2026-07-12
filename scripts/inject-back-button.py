@@ -33,6 +33,11 @@ INJECTIONS = [
         "marker":  'id="__arcade_pad_exit"',
         "anchor":  "</body>",
     },
+    {
+        "snippet": (HERE / "low-fx.html").read_text(),
+        "marker":  'id="__arcade_lowfx"',
+        "anchor":  "</body>",
+    },
 ]
 
 for path in sys.argv[1:]:

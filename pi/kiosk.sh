@@ -3,17 +3,41 @@
 # Installed to /usr/local/bin/ses-kiosk by pi/setup.sh and started by the
 # desktop session's autostart. Runs Chromium full-screen on the arcade and
 # restarts it if it ever crashes or gets closed.
+#
+# Tunables in /etc/ses-kiosk.conf:
+#   SES_URL=https://ses.q5labs.co     which arcade to boot into
+#   SES_MODE=1920x1080@60             force a display mode every launch (the
+#                                     Pi 5 GPU drowns at 4K/ultrawide-100Hz;
+#                                     the games are built for 1080p60)
+#   SES_DEBUG_PORT=9222               Chromium remote debugging on localhost
+#                                     (reach it from another machine via
+#                                     `ssh -L 9222:localhost:9222 ...`)
+#   SES_EXTRA_FLAGS="--foo --bar"     extra Chromium flags, space-separated
 set -u
 
 CONF=/etc/ses-kiosk.conf
 [ -f "$CONF" ] && . "$CONF"
 URL="${SES_URL:-https://ses.q5labs.co}"
 PROFILE="${SES_PROFILE:-$HOME/.config/ses-kiosk}"
+MODE="${SES_MODE:-}"
+DEBUG_PORT="${SES_DEBUG_PORT:-}"
+EXTRA_FLAGS="${SES_EXTRA_FLAGS:-}"
 
 BROWSER=$(command -v chromium-browser || command -v chromium)
 if [ -z "$BROWSER" ]; then
   echo "ses-kiosk: chromium not found — run pi/setup.sh first" >&2
   exit 1
+fi
+
+# Force the display mode BEFORE Chromium launches, every time — mode changes
+# don't persist across reboots on their own. Compositor-level, so it applies
+# whether Chromium runs on Wayland or Xwayland.
+if [ -n "$MODE" ] && [ -n "${WAYLAND_DISPLAY:-}" ] && command -v wlr-randr >/dev/null 2>&1; then
+  OUTPUT=$(wlr-randr 2>/dev/null | awk 'NR==1 {print $1}')
+  if [ -n "$OUTPUT" ]; then
+    wlr-randr --output "$OUTPUT" --mode "$MODE" 2>/dev/null \
+      || echo "ses-kiosk: could not set mode $MODE on $OUTPUT" >&2
+  fi
 fi
 
 # Give Wi-Fi a moment to come up so we don't boot into an error page.
@@ -32,6 +56,7 @@ while true; do
     sed -i 's/"exited_cleanly":false/"exited_cleanly":true/; s/"exit_type":"[^"]*"/"exit_type":"Normal"/' "$PREFS"
   fi
 
+  # shellcheck disable=SC2086 — EXTRA_FLAGS is intentionally word-split
   "$BROWSER" \
     --kiosk "$URL" \
     --user-data-dir="$PROFILE" \
@@ -47,7 +72,9 @@ while true; do
     --autoplay-policy=no-user-gesture-required \
     --overscroll-history-navigation=0 \
     --disable-pinch \
-    --ozone-platform-hint=auto
+    --ozone-platform-hint=auto \
+    ${DEBUG_PORT:+--remote-debugging-port=$DEBUG_PORT} \
+    $EXTRA_FLAGS
 
   sleep 2
 done
