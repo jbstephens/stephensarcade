@@ -55,5 +55,13 @@ window.GAMES_DATA = [
     "status": "PRESS START",
     "icon": "snake",
     "source": "https://hissandrun.onrender.com/"
+  },
+  {
+    "slug": "nyan-cat-racing",
+    "title": "NYAN CAT RACING",
+    "genre": "RACING",
+    "status": "PRESS START",
+    "icon": "nyan",
+    "source": "https://nyancatracing.onrender.com/"
   }
 ];

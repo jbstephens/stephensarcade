@@ -1,0 +1,1587 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+<title>Nyan Cat Racing</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet" />
+<script src="https://ses.q5labs.co/lib/controller.js"></script>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: #05061a;
+    overflow: hidden;
+    width: 100%;
+    height: 100%;
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: none;
+  }
+  #wrap {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #05061a;
+  }
+  canvas {
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    display: block;
+  }
+</style>
+<!-- Google Analytics — injected by scripts/inject-back-button.py at bundle time -->
+<script id="__arcade_ga" async src="https://www.googletagmanager.com/gtag/js?id=G-T7N4WEJJEL"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+  gtag('config', 'G-T7N4WEJJEL');
+</script>
+
+</head>
+<body>
+<div id="wrap"><canvas id="game" width="1280" height="720"></canvas></div>
+<script>
+(function () {
+"use strict";
+
+/* =========================================================================
+   1. CONSTANTS AND CONFIG
+   ========================================================================= */
+var VW = 1280, VH = 720;              // logical resolution matching Pi
+var canvas = document.getElementById("game");
+var ctx = canvas.getContext("2d");
+ctx.imageSmoothingEnabled = false;
+
+// Race tuning — steady kid mash (~6 presses/s) settles near 380 u/s, so
+// 12800 units ≈ 35s of racing. A hero mash (10pps) caps out at MAX_SPEED.
+var MASH_IMPULSE = 46;                // speed added per button press
+var SPEED_DECAY = 0.988;              // per-frame speed decay multiplier
+var MAX_SPEED = 620;                  // speed cap (world units/s)
+var RACE_DISTANCE = 12800;            // world units to finish
+var CPU_BASE = 330;                   // baseline CPU target speed
+var CPU_MAX = 430;                    // CPUs never exceed this (kid-tuned)
+
+// Lanes
+var LANE_COUNT = 3;
+var LANE_H = 168;
+var LANE_TOP = 176;                   // y of first lane center region
+function laneY(i) { return LANE_TOP + i * LANE_H + LANE_H * 0.5; }
+
+// Colors
+var RAINBOW = ["#ff2b2b", "#ff9b30", "#ffe12b", "#3ddc4a", "#2b9bff", "#5a3bff", "#c22bff"];
+var CANDY = ["#ff8fd0", "#ffffff", "#ff5fb0", "#ffffff"];
+var GOLD_BANDS = ["#ffe561", "#ffb52b", "#ffd23f", "#ffa000"];
+
+// LocalStorage keys
+var LS_P1 = "nyanrace_p1config";
+var LS_P2 = "nyanrace_p2config";
+var LS_BEST = "nyanrace_best";
+var LS_MUTE = "nyanrace_mute";
+
+// Pastry / head / trail catalogs
+var PASTRIES = ["pop-tart", "donut", "waffle", "taco"];
+var FROSTINGS = ["#ff8fd0", "#7fd6ff", "#b6ff7a"]; // 3 frosting colors
+var HEADS = ["cat", "dog", "kitten"];
+var TRAILS = ["rainbow", "candy", "gold"];
+
+/* =========================================================================
+   2. UTIL
+   ========================================================================= */
+function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+function lerp(a, b, t) { return a + (b - a) * t; }
+function rint(a, b) { return (a + Math.random() * (b - a)) | 0; }
+
+function makeCanvas(w, h) {
+  var c = document.createElement("canvas");
+  c.width = Math.max(1, w | 0);
+  c.height = Math.max(1, h | 0);
+  var cc = c.getContext("2d");
+  cc.imageSmoothingEnabled = false;
+  return c;
+}
+
+function loadJSON(key, fallback) {
+  try {
+    var s = localStorage.getItem(key);
+    if (!s) return fallback;
+    return JSON.parse(s);
+  } catch (e) { return fallback; }
+}
+function saveJSON(key, val) {
+  try { localStorage.setItem(key, JSON.stringify(val)); } catch (e) {}
+}
+
+/* =========================================================================
+   3. SPRITE BAKING
+   A racer sprite is a combination of (pastry, frosting index, sprinkles,
+   head). We bake each requested combination once into an offscreen canvas.
+   Paw cycle (4 frames) baked separately and drawn under the body.
+   ========================================================================= */
+var SPR_W = 132, SPR_H = 96;          // racer sprite dimensions
+
+// Cache of baked racer bodies keyed by config signature
+var bodyCache = {};
+
+// px helper: draw a filled pixel block
+function px(c, x, y, w, h, color) {
+  c.fillStyle = color;
+  c.fillRect(x | 0, y | 0, w | 0, h | 0);
+}
+
+// ---- pastry bodies ----
+function bakePastry(c, kind, frostColor, sprinkles) {
+  var cx = 46, cy = 48; // body center within sprite
+  if (kind === "pop-tart") {
+    // beige rectangle
+    px(c, cx - 34, cy - 26, 68, 52, "#f2c98a");
+    px(c, cx - 34, cy - 26, 68, 6, "#e0b06a");
+    px(c, cx - 34, cy + 20, 68, 6, "#d69f57");
+    // frosting inset
+    px(c, cx - 27, cy - 19, 54, 38, frostColor);
+    // rounded corners of frosting
+    px(c, cx - 30, cy - 19, 3, 38, "#f2c98a");
+    px(c, cx + 27, cy - 19, 3, 38, "#f2c98a");
+    if (sprinkles) sprinkleField(c, cx - 24, cy - 15, 48, 30);
+  } else if (kind === "donut") {
+    // brown ring
+    c.fillStyle = "#c78a4a";
+    c.beginPath(); c.arc(cx, cy, 30, 0, Math.PI * 2); c.fill();
+    // frosting cap
+    c.fillStyle = frostColor;
+    c.beginPath(); c.arc(cx, cy, 30, Math.PI, Math.PI * 2); c.fill();
+    c.fillStyle = frostColor;
+    c.beginPath(); c.arc(cx, cy, 30, 0, Math.PI * 2 * 0.62); c.fill();
+    // hole
+    c.fillStyle = "#05061a";
+    c.beginPath(); c.arc(cx, cy, 10, 0, Math.PI * 2); c.fill();
+    // re-fill hole with bg-safe transparent by clearing
+    c.clearRect(cx - 10, cy - 10, 20, 20);
+    c.fillStyle = "#c78a4a";
+    // draw ring shape via two arcs (approximate with donut body already ok)
+    if (sprinkles) {
+      for (var s = 0; s < 10; s++) {
+        var a = s * 0.62;
+        var rr = 20;
+        px(c, cx + Math.cos(a) * rr - 1, cy + Math.sin(a) * rr - 1, 3, 3, RAINBOW[s % 7]);
+      }
+    }
+  } else if (kind === "waffle") {
+    px(c, cx - 32, cy - 26, 64, 52, "#e6b45c");
+    px(c, cx - 32, cy - 26, 64, 4, "#c9963f");
+    // grid pattern
+    c.fillStyle = "#c9963f";
+    for (var gx = 0; gx < 5; gx++) {
+      c.fillRect((cx - 32 + gx * 15) | 0, cy - 26, 3, 52);
+    }
+    for (var gy = 0; gy < 4; gy++) {
+      c.fillRect(cx - 32, (cy - 26 + gy * 15) | 0, 64, 3);
+    }
+    // syrup frosting drizzle
+    px(c, cx - 26, cy - 20, 52, 8, frostColor);
+    if (sprinkles) sprinkleField(c, cx - 24, cy - 14, 46, 34);
+  } else if (kind === "taco") {
+    // chunky half-moon shell with filling bumps along the top
+    c.fillStyle = "#eec267";
+    c.beginPath();
+    c.arc(cx, cy - 2, 34, 0, Math.PI);
+    c.closePath();
+    c.fill();
+    // rim shading along the flat top
+    px(c, cx - 34, cy - 6, 68, 5, "#d29b3f");
+    // filling bumps (frosting = the filling)
+    c.fillStyle = frostColor;
+    c.beginPath(); c.arc(cx - 20, cy - 8, 9, 0, Math.PI * 2); c.fill();
+    c.beginPath(); c.arc(cx - 2, cy - 11, 10, 0, Math.PI * 2); c.fill();
+    c.beginPath(); c.arc(cx + 17, cy - 8, 9, 0, Math.PI * 2); c.fill();
+    // lettuce pixels
+    px(c, cx - 28, cy - 10, 6, 3, "#7ddc5a");
+    px(c, cx + 7, cy - 16, 6, 3, "#7ddc5a");
+    if (sprinkles) sprinkleField(c, cx - 22, cy - 14, 44, 10);
+  }
+}
+
+function sprinkleField(c, x, y, w, h) {
+  var cols = ["#ff4d6d", "#4de1ff", "#ffe14d", "#6dff8b", "#ff8fd0"];
+  var n = ((w * h) / 90) | 0;
+  for (var i = 0; i < n; i++) {
+    var sx = x + Math.random() * w;
+    var sy = y + Math.random() * h;
+    px(c, sx, sy, 3, 3, cols[(Math.random() * cols.length) | 0]);
+  }
+}
+
+// ---- critter heads (poking out front / right side) ----
+function bakeHead(c, kind, hx, hy) {
+  // hx,hy = head center
+  var fur, ear, nose;
+  if (kind === "cat") { fur = "#b9bcc4"; ear = "#9a9ea8"; nose = "#ff9fb2"; }
+  else if (kind === "dog") { fur = "#e0a862"; ear = "#b8823f"; nose = "#3a2a1e"; }
+  else { fur = "#ffc7e0"; ear = "#ffa9d0"; nose = "#ff5c93"; } // kitten
+
+  // ears
+  if (kind === "cat") {
+    // triangular ears
+    triFill(c, hx - 14, hy - 16, hx - 20, hy - 30, hx - 6, hy - 22, ear);
+    triFill(c, hx + 14, hy - 16, hx + 20, hy - 30, hx + 6, hy - 22, ear);
+  } else if (kind === "dog") {
+    // floppy ears (rounded rects on sides)
+    px(c, hx - 24, hy - 12, 10, 26, ear);
+    px(c, hx + 14, hy - 12, 10, 26, ear);
+  } else {
+    // kitten round ears
+    c.fillStyle = ear;
+    c.beginPath(); c.arc(hx - 15, hy - 18, 8, 0, Math.PI * 2); c.fill();
+    c.beginPath(); c.arc(hx + 15, hy - 18, 8, 0, Math.PI * 2); c.fill();
+  }
+
+  // face circle
+  c.fillStyle = fur;
+  c.beginPath(); c.arc(hx, hy, 20, 0, Math.PI * 2); c.fill();
+
+  // eyes
+  px(c, hx - 10, hy - 4, 5, 6, "#141420");
+  px(c, hx + 5, hy - 4, 5, 6, "#141420");
+  px(c, hx - 9, hy - 3, 2, 2, "#ffffff");
+  px(c, hx + 6, hy - 3, 2, 2, "#ffffff");
+
+  // blush cheeks (REQUIRED)
+  c.fillStyle = "rgba(255,110,150,0.75)";
+  c.beginPath(); c.arc(hx - 13, hy + 6, 4, 0, Math.PI * 2); c.fill();
+  c.beginPath(); c.arc(hx + 13, hy + 6, 4, 0, Math.PI * 2); c.fill();
+
+  // nose / snout
+  if (kind === "dog") {
+    px(c, hx - 6, hy + 2, 12, 9, "#f0dcc0"); // snout
+    px(c, hx - 3, hy + 4, 6, 4, nose);
+  } else {
+    px(c, hx - 2, hy + 2, 4, 3, nose);
+    // mouth
+    px(c, hx - 4, hy + 6, 8, 1, "#c26");
+  }
+
+  // whiskers (cat/kitten)
+  if (kind !== "dog") {
+    c.fillStyle = "#ffffff";
+    c.fillRect(hx - 30, hy + 4, 12, 1);
+    c.fillRect(hx - 30, hy + 8, 12, 1);
+    c.fillRect(hx + 18, hy + 4, 12, 1);
+    c.fillRect(hx + 18, hy + 8, 12, 1);
+  }
+}
+
+function triFill(c, x1, y1, x2, y2, x3, y3, color) {
+  c.fillStyle = color;
+  c.beginPath();
+  c.moveTo(x1, y1); c.lineTo(x2, y2); c.lineTo(x3, y3);
+  c.closePath(); c.fill();
+}
+
+// ---- paw cycle: 4 frames baked ----
+var pawFrames = [];
+function bakePaws() {
+  for (var f = 0; f < 4; f++) {
+    var c = makeCanvas(72, 26);
+    var cc = c.getContext("2d");
+    // 4 stubby legs, phase offset per frame
+    var phase = f * (Math.PI / 2);
+    for (var leg = 0; leg < 4; leg++) {
+      var lx = 8 + leg * 16;
+      var swing = Math.sin(phase + leg * 1.4) * 6;
+      var len = 12 + Math.abs(Math.sin(phase + leg)) * 4;
+      px(cc, lx, 2, 8, len, "#8a8d96");      // leg
+      px(cc, lx + swing, 2 + len - 4, 10, 6, "#f4f6fb"); // paw
+    }
+    pawFrames.push(c);
+  }
+}
+
+// Signature for a body config
+function bodySig(cfg) {
+  return cfg.pastry + "|" + cfg.frost + "|" + (cfg.sprinkle ? 1 : 0) + "|" + cfg.head;
+}
+
+// Bake a full racer body (pastry + head), returns canvas
+function bakeRacer(cfg) {
+  var sig = bodySig(cfg);
+  if (bodyCache[sig]) return bodyCache[sig];
+  var c = makeCanvas(SPR_W, SPR_H);
+  var cc = c.getContext("2d");
+  bakePastry(cc, PASTRIES[cfg.pastry] || PASTRIES[0], FROSTINGS[cfg.frost] || FROSTINGS[0], cfg.sprinkle);
+  // head pokes out front-right of body
+  bakeHead(cc, HEADS[cfg.head] || HEADS[0], 96, 46);
+  bodyCache[sig] = c;
+  return c;
+}
+
+// ---- starfield stars baked ----
+var starSprites = [];
+function bakeStars() {
+  var sizes = [2, 3, 4];
+  for (var i = 0; i < sizes.length; i++) {
+    var s = sizes[i];
+    var c = makeCanvas(s + 2, s + 2);
+    var cc = c.getContext("2d");
+    px(cc, 1, 1, s, s, "#ffffff");
+    if (s >= 3) { // sparkle cross
+      cc.fillStyle = "rgba(255,255,255,0.5)";
+      cc.fillRect(0, (s / 2) | 0, s + 2, 1);
+      cc.fillRect((s / 2) | 0, 0, 1, s + 2);
+    }
+    starSprites.push(c);
+  }
+}
+
+// ---- trail band strips baked (vertical colored strips) ----
+// Each trail type baked as one horizontal strip canvas we tile & wave.
+var trailStrips = {};
+var TRAIL_SEG_W = 16;
+var TRAIL_H = 44;
+function bakeTrails() {
+  // rainbow strip
+  var r = makeCanvas(TRAIL_SEG_W, TRAIL_H);
+  var rc = r.getContext("2d");
+  var bh = TRAIL_H / RAINBOW.length;
+  for (var i = 0; i < RAINBOW.length; i++) px(rc, 0, i * bh, TRAIL_SEG_W, bh + 1, RAINBOW[i]);
+  trailStrips.rainbow = r;
+
+  // candy strip (pink/white bands)
+  var cd = makeCanvas(TRAIL_SEG_W, TRAIL_H);
+  var cdc = cd.getContext("2d");
+  var cbh = TRAIL_H / CANDY.length;
+  for (var j = 0; j < CANDY.length; j++) px(cdc, 0, j * cbh, TRAIL_SEG_W, cbh + 1, CANDY[j]);
+  trailStrips.candy = cd;
+
+  // gold strip + sparkles
+  var g = makeCanvas(TRAIL_SEG_W, TRAIL_H);
+  var gc = g.getContext("2d");
+  var gbh = TRAIL_H / GOLD_BANDS.length;
+  for (var k = 0; k < GOLD_BANDS.length; k++) px(gc, 0, k * gbh, TRAIL_SEG_W, gbh + 1, GOLD_BANDS[k]);
+  // sparkle stars
+  gc.fillStyle = "#fffde0";
+  for (var s = 0; s < 5; s++) {
+    var sx = rint(2, TRAIL_SEG_W - 3), sy = rint(2, TRAIL_H - 3);
+    gc.fillRect(sx, sy, 2, 2);
+    gc.fillRect(sx - 1, sy + 1, 1, 1); gc.fillRect(sx + 2, sy + 1, 1, 1);
+  }
+  trailStrips.gold = g;
+}
+
+// Star sparkle overlay tiles for gold (pre-baked variants for animation)
+// (kept simple; the single gold strip already contains sparkles)
+
+function bakeAll() {
+  bakePaws();
+  bakeStars();
+  bakeTrails();
+  bakeStarfield();
+}
+
+/* =========================================================================
+   4. AUDIO ENGINE (WebAudio, lazy init) — original candy chiptune ~140bpm
+   ========================================================================= */
+var Audio2 = {
+  ctx: null,
+  master: null,
+  musicGain: null,
+  muted: loadJSON(LS_MUTE, false),
+  started: false,
+  seqTimer: null,
+  step: 0
+};
+
+function audioInit() {
+  if (Audio2.ctx) return;
+  try {
+    var AC = window.AudioContext || window.webkitAudioContext;
+    Audio2.ctx = new AC();
+    Audio2.master = Audio2.ctx.createGain();
+    Audio2.master.gain.value = Audio2.muted ? 0 : 0.6;
+    Audio2.master.connect(Audio2.ctx.destination);
+    Audio2.musicGain = Audio2.ctx.createGain();
+    Audio2.musicGain.gain.value = 0.34;
+    Audio2.musicGain.connect(Audio2.master);
+  } catch (e) { Audio2.ctx = null; }
+}
+
+function audioResume() {
+  audioInit();
+  if (Audio2.ctx && Audio2.ctx.state === "suspended") Audio2.ctx.resume();
+}
+
+function setMuted(m) {
+  Audio2.muted = m;
+  saveJSON(LS_MUTE, m);
+  if (Audio2.master) Audio2.master.gain.value = m ? 0 : 0.6;
+}
+
+// beep: one-shot tone
+function beep(freq, dur, type, gain, dest) {
+  if (!Audio2.ctx || Audio2.muted) return;
+  var t = Audio2.ctx.currentTime;
+  var o = Audio2.ctx.createOscillator();
+  var g = Audio2.ctx.createGain();
+  o.type = type || "square";
+  o.frequency.value = freq;
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(gain || 0.3, t + 0.01);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g);
+  g.connect(dest || Audio2.master);
+  o.start(t);
+  o.stop(t + dur + 0.02);
+}
+
+// ---- music loop: bubbly melody over bouncy bass, 16 steps x 2 bars ----
+// note frequencies (semitone table)
+function ntf(n) { return 440 * Math.pow(2, (n - 9) / 12); } // n = midi-ish index rel A4
+// melody in a candy major scale (C major-ish), pattern of 32 sixteenths
+var MELODY = [
+  12, 16, 19, 16, 21, 19, 16, 12,
+  14, 17, 21, 17, 19, 17, 14, 11,
+  12, 16, 19, 24, 21, 19, 16, 19,
+  17, 14, 12, 16, 19, 16, 12, 7
+];
+var BASS = [
+  0, 0, 7, 7, 5, 5, 7, 7,
+  2, 2, 9, 9, 7, 7, 4, 4,
+  0, 0, 7, 7, 5, 5, 7, 7,
+  2, 2, -1, -1, 7, 7, 7, 7
+];
+var STEP_MS = 60000 / 140 / 4; // sixteenth at 140bpm
+
+function musicStart() {
+  if (!Audio2.ctx || Audio2.seqTimer) return;
+  Audio2.step = 0;
+  Audio2.seqTimer = setInterval(musicTick, STEP_MS);
+}
+function musicStop() {
+  if (Audio2.seqTimer) { clearInterval(Audio2.seqTimer); Audio2.seqTimer = null; }
+}
+function musicTick() {
+  if (!Audio2.ctx || Audio2.muted) { Audio2.step = (Audio2.step + 1) % 32; return; }
+  var s = Audio2.step % 32;
+  var mn = MELODY[s];
+  if (mn >= 0) {
+    var mf = ntf(mn);
+    var t = Audio2.ctx.currentTime;
+    var o = Audio2.ctx.createOscillator();
+    var g = Audio2.ctx.createGain();
+    o.type = "square";
+    o.frequency.value = mf * 1; // melody one octave up feel
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(0.22, t + 0.01);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + STEP_MS / 1000 * 0.9);
+    o.connect(g); g.connect(Audio2.musicGain);
+    o.start(t); o.stop(t + STEP_MS / 1000);
+  }
+  var bn = BASS[s];
+  if (bn >= 0 && s % 2 === 0) {
+    var bf = ntf(bn) / 2;
+    var t2 = Audio2.ctx.currentTime;
+    var bo = Audio2.ctx.createOscillator();
+    var bg = Audio2.ctx.createGain();
+    bo.type = "triangle";
+    bo.frequency.value = bf;
+    bg.gain.setValueAtTime(0.0001, t2);
+    bg.gain.exponentialRampToValueAtTime(0.3, t2 + 0.01);
+    bg.gain.exponentialRampToValueAtTime(0.0001, t2 + STEP_MS / 1000 * 1.6);
+    bo.connect(bg); bg.connect(Audio2.musicGain);
+    bo.start(t2); bo.stop(t2 + STEP_MS / 1000 * 2);
+  }
+  Audio2.step = (Audio2.step + 1) % 32;
+}
+
+// SFX
+function sfxMash() { beep(700 + Math.random() * 300, 0.06, "square", 0.18); }
+function sfxCount(hi) { beep(hi ? 880 : 520, 0.18, "square", 0.35); }
+function sfxSelect() { beep(660, 0.08, "square", 0.25); }
+function sfxMove() { beep(440, 0.05, "square", 0.15); }
+function sfxBack() { beep(300, 0.08, "square", 0.2); }
+function sfxFanfare() {
+  if (!Audio2.ctx || Audio2.muted) return;
+  var seq = [12, 16, 19, 24, 19, 24];
+  for (var i = 0; i < seq.length; i++) {
+    (function (n, idx) {
+      setTimeout(function () { beep(ntf(n), 0.22, "square", 0.32); }, idx * 130);
+    })(seq[i], i);
+  }
+}
+
+/* =========================================================================
+   5. GAME STATE
+   ========================================================================= */
+var STATE = "title"; // 'title' | 'garage' | 'race' | 'finish' | 'pause'
+var prevState = "title";
+
+var defaultConfig = function () {
+  return { pastry: 0, frost: 0, sprinkle: true, head: 0, trail: 0 };
+};
+
+var p1cfg = loadJSON(LS_P1, defaultConfig());
+var p2cfg = loadJSON(LS_P2, defaultConfig());
+// validate
+function fixCfg(c) {
+  if (!c) return defaultConfig();
+  c.pastry = clamp(c.pastry | 0, 0, PASTRIES.length - 1);
+  c.frost = clamp(c.frost | 0, 0, FROSTINGS.length - 1);
+  c.head = clamp(c.head | 0, 0, HEADS.length - 1);
+  c.trail = clamp(c.trail | 0, 0, TRAILS.length - 1);
+  c.sprinkle = !!c.sprinkle;
+  return c;
+}
+p1cfg = fixCfg(p1cfg);
+p2cfg = fixCfg(p2cfg);
+
+var p2Joined = false;
+
+// Title
+var titleT = 0;
+
+// Garage
+var garagePlayer = 0;       // 0 => building P1, 1 => building P2
+var garageRow = 0;          // 0 pastry, 1 head, 2 trail, 3 frosting/sprinkle group
+var garageBob = 0;
+var GARAGE_ROWS = ["PASTRY BODY", "CRITTER HEAD", "TRAIL", "FROSTING"];
+
+// Racers
+var RACERS_MAX = 3;
+var racers = [];            // active racers this heat
+
+function makeRacer(cfg, isCPU, label, laneIndex, color) {
+  return {
+    cfg: fixCfg(JSON.parse(JSON.stringify(cfg))),
+    body: bakeRacer(cfg),
+    isCPU: isCPU,
+    label: label,
+    lane: laneIndex,
+    color: color,
+    speed: 0,
+    progress: 0,          // world units traveled
+    finished: false,
+    finishTime: 0,
+    topSpeed: 0,
+    pressCount: 0,
+    ppsPeak: 0,
+    bobPhase: Math.random() * Math.PI * 2,
+    pawFrame: 0,
+    pawTimer: 0,
+    // rubber-band
+    cpuMashTimer: 0.4 + Math.random() * 0.4,
+    cpuSkill: 0.93 + Math.random() * 0.1,
+    // pps tracking (fixed ring, zero allocations in the race loop)
+    pressRing: new Float32Array(64),
+    pressHead: 0,
+    lastPressT: -1,
+    lastIv: 0,
+    paceStreak: 0
+  };
+}
+
+// Race runtime
+var raceT = 0;
+var countdown = 3.0;        // 3,2,1,NYAN!
+var cdLast = 4;             // last countdown number beeped
+var raceStarted = false;
+var raceFinishedAll = false;
+var worldScroll = 0;
+var slowmo = 1;             // slow-mo factor at photo finish
+var starOffset = 0;
+
+// Starfield: two parallax layers baked once, scrolled with 4 drawImage/frame.
+var starLayerFar = null, starLayerNear = null;
+function bakeStarfield() {
+  starLayerFar = makeCanvas(VW, VH);
+  var f = starLayerFar.getContext("2d");
+  for (var i = 0; i < 70; i++) {
+    f.globalAlpha = 0.3 + Math.random() * 0.35;
+    f.drawImage(starSprites[rint(0, 2)], rint(0, VW), rint(0, VH));
+  }
+  f.globalAlpha = 1;
+  starLayerNear = makeCanvas(VW, VH);
+  var nc = starLayerNear.getContext("2d");
+  for (var j = 0; j < 40; j++) {
+    nc.drawImage(starSprites[rint(1, 3)], rint(0, VW), rint(0, VH));
+  }
+}
+
+// Finish
+var finishT = 0;
+var winner = null;
+var winnerBand = null;      // baked wavy trail band for the celebration
+var confetti = [];
+var CONFETTI_MAX = 160;
+function allocConfetti() {   // pool: allocated once at load, reset per finish
+  for (var i = 0; i < CONFETTI_MAX; i++) {
+    confetti.push({ x: 0, y: 0, vx: 0, vy: 0, c: "#fff", r: 3, spin: 0 });
+  }
+}
+function initConfetti() {
+  for (var i = 0; i < CONFETTI_MAX; i++) {
+    var c = confetti[i];
+    c.x = Math.random() * VW;
+    c.y = -Math.random() * VH;
+    c.vx = (Math.random() - 0.5) * 60;
+    c.vy = 80 + Math.random() * 160;
+    c.c = RAINBOW[(Math.random() * 7) | 0];
+    c.r = 3 + (Math.random() * 4 | 0);
+    c.spin = Math.random() * Math.PI;
+  }
+}
+
+var best = loadJSON(LS_BEST, null);
+
+// drawImage counter (instrumentation)
+var drawCount = 0;
+var _drawImage = ctx.drawImage.bind(ctx);
+function di() { drawCount++; _drawImage.apply(ctx, arguments); }
+
+/* =========================================================================
+   6. INPUT
+   ========================================================================= */
+var keys = {};
+
+window.addEventListener("keydown", function (e) {
+  audioResume();
+  var k = e.key;
+  if (k === " " || k === "Enter" || k === "ArrowUp" || k === "ArrowDown" ||
+      k === "ArrowLeft" || k === "ArrowRight") e.preventDefault();
+  if (!keys[k]) keys["_edge_" + k] = true; // edge flag
+  keys[k] = true;
+}, { passive: false });
+
+window.addEventListener("keyup", function (e) {
+  keys[e.key] = false;
+});
+
+function keyEdge(k) {
+  if (keys["_edge_" + k]) { keys["_edge_" + k] = false; return true; }
+  return false;
+}
+
+// touch / mouse: tap anywhere = mash / confirm. We record the tap position
+// in canvas coordinates so the garage and pause corner can use it.
+var touchConfirmFlag = false;
+var tapX = 0, tapY = 0;
+function recordTap(clientX, clientY) {
+  var r = canvas.getBoundingClientRect();
+  if (r.width > 0 && r.height > 0) {
+    tapX = (clientX - r.left) / r.width * VW;
+    tapY = (clientY - r.top) / r.height * VH;
+  }
+  touchConfirmFlag = true;
+}
+canvas.addEventListener("touchstart", function (e) {
+  e.preventDefault();
+  audioResume();
+  var t = e.changedTouches[0];
+  if (t) recordTap(t.clientX, t.clientY);
+}, { passive: false });
+canvas.addEventListener("touchend", function (e) { e.preventDefault(); }, { passive: false });
+canvas.addEventListener("mousedown", function (e) {
+  audioResume();
+  recordTap(e.clientX, e.clientY);
+});
+
+function consumeTouchConfirm() {
+  if (touchConfirmFlag) { touchConfirmFlag = false; return true; }
+  return false;
+}
+
+// Pad read helpers — controller.js pads expose button(name)/justPressed(name).
+// We do our own edge tracking against button() so edges line up with the
+// game's update cadence. Result objects are reused (zero per-frame allocs).
+function pad(i) {
+  return window.ArcadeController ? window.ArcadeController.pad(i) : null;
+}
+
+var EDGE_BTNS = ["south", "east", "west", "north", "up", "down", "left", "right", "start"];
+var padPrev = [{}, {}];
+var padEdgeRes = [{}, {}];
+function padEdges(i) {
+  var res = padEdgeRes[i];
+  var prev = padPrev[i];
+  var p = pad(i);
+  var connected = !!(p && p.connected);
+  for (var b = 0; b < EDGE_BTNS.length; b++) {
+    var name = EDGE_BTNS[b];
+    var v = connected ? !!p.button(name) : false;
+    res[name] = v && !prev[name];
+    prev[name] = v;
+  }
+  return res;
+}
+
+/* =========================================================================
+   7. STATE MACHINE — UPDATE
+   ========================================================================= */
+function setState(s) {
+  prevState = STATE;
+  STATE = s;
+  // drop stale input edges so a press from the old state can't leak through
+  for (var k in keys) if (k.indexOf("_edge_") === 0) keys[k] = false;
+  touchConfirmFlag = false;
+}
+
+function update(dt) {
+  var e1 = padEdges(0), e2 = padEdges(1);
+
+  // gentle background drift everywhere; race speed adds to it
+  starOffset += dt * 30;
+  if (STATE === "race" && raceStarted && racers.length) starOffset += racers[0].speed * dt * 0.5;
+
+  if (STATE === "title") updateTitle(dt, e1, e2);
+  else if (STATE === "garage") updateGarage(dt, e1, e2);
+  else if (STATE === "race") updateRace(dt, e1, e2);
+  else if (STATE === "finish") updateFinish(dt, e1, e2);
+  else if (STATE === "pause") updatePause(dt, e1, e2);
+}
+
+// ---- TITLE ----
+function updateTitle(dt, e1, e2) {
+  titleT += dt;
+
+  // mute toggle: North (Y) or 'M'
+  if (e1.north || e2.north || keyEdge("m") || keyEdge("M")) {
+    setMuted(!Audio2.muted); sfxSelect();
+  }
+
+  // P2 join
+  if (!p2Joined && e2.south) { p2Joined = true; sfxSelect(); }
+
+  // Start / confirm -> go to garage
+  var confirm = e1.south || keyEdge(" ") || keyEdge("Enter") || consumeTouchConfirm();
+  if (confirm) {
+    sfxSelect();
+    audioResume();
+    if (!Audio2.seqTimer) musicStart();
+    garagePlayer = 0;
+    garageRow = 0;
+    setState("garage");
+  }
+}
+
+// ---- GARAGE ----
+function currentGarageCfg() { return garagePlayer === 0 ? p1cfg : p2cfg; }
+
+function updateGarage(dt, e1, e2) {
+  garageBob += dt;
+  // Use the building player's controls: P1 uses pad0+kb+touch, P2 uses pad1
+  var e = garagePlayer === 0 ? e1 : e2;
+  var kbAllowed = garagePlayer === 0; // keyboard/touch drive P1 only
+
+  var up = e.up || (kbAllowed && keyEdge("ArrowUp"));
+  var down = e.down || (kbAllowed && keyEdge("ArrowDown"));
+  var left = e.left || (kbAllowed && keyEdge("ArrowLeft"));
+  var right = e.right || (kbAllowed && keyEdge("ArrowRight"));
+  var confirm = e.south || (kbAllowed && (keyEdge(" ") || keyEdge("Enter")));
+  var back = e.east || (kbAllowed && keyEdge("Escape"));
+  var sprink = e.north || (kbAllowed && keyEdge("s"));
+
+  // touch: tap a row to select it (tap the selected row again to cycle);
+  // tap the preview racer up top to confirm.
+  if (kbAllowed && consumeTouchConfirm()) {
+    if (tapY >= 392 && tapY <= 616) {
+      var trow = clamp(((tapY - 392) / 56) | 0, 0, 3);
+      if (trow === garageRow) right = true;
+      else { garageRow = trow; sfxMove(); }
+    } else if (tapY < 380) {
+      confirm = true;
+    }
+  }
+
+  var cfg = currentGarageCfg();
+
+  if (up) { garageRow = (garageRow + GARAGE_ROWS.length - 1) % GARAGE_ROWS.length; sfxMove(); }
+  if (down) { garageRow = (garageRow + 1) % GARAGE_ROWS.length; sfxMove(); }
+
+  if (left || right) {
+    var dir = right ? 1 : -1;
+    if (garageRow === 0) {
+      cfg.pastry = (cfg.pastry + PASTRIES.length + dir) % PASTRIES.length;
+    } else if (garageRow === 1) {
+      cfg.head = (cfg.head + HEADS.length + dir) % HEADS.length;
+    } else if (garageRow === 2) {
+      cfg.trail = (cfg.trail + TRAILS.length + dir) % TRAILS.length;
+    } else if (garageRow === 3) {
+      cfg.frost = (cfg.frost + FROSTINGS.length + dir) % FROSTINGS.length;
+    }
+    sfxMove();
+  }
+
+  // sprinkle toggle on North / 'S'
+  if (sprink) {
+    cfg.sprinkle = !cfg.sprinkle;
+    sfxSelect();
+  }
+
+  if (confirm) {
+    sfxSelect();
+    // persist
+    if (garagePlayer === 0) saveJSON(LS_P1, cfg);
+    else saveJSON(LS_P2, cfg);
+    // next player or start race
+    if (garagePlayer === 0 && p2Joined) {
+      garagePlayer = 1;
+      garageRow = 0;
+    } else {
+      startRace();
+    }
+  }
+
+  if (back) {
+    sfxBack();
+    if (garagePlayer === 1) { garagePlayer = 0; garageRow = 0; }
+    else { setState("title"); }
+  }
+}
+
+// ---- START RACE ----
+function startRace() {
+  racers.length = 0;
+  var laneColors = ["#ff6ec7", "#6ecbff", "#c6ff6e"];
+  // Determine lineup
+  if (p2Joined) {
+    // 2 players + 1 CPU
+    racers.push(makeRacer(p1cfg, false, "P1", 0, laneColors[0]));
+    racers.push(makeRacer(p2cfg, false, "P2", 1, laneColors[1]));
+    racers.push(makeRacer(randomCfg(), true, "CPU", 2, laneColors[2]));
+  } else {
+    // 1 player + 2 CPU
+    racers.push(makeRacer(p1cfg, false, "P1", 0, laneColors[0]));
+    racers.push(makeRacer(randomCfg(), true, "CPU 1", 1, laneColors[1]));
+    racers.push(makeRacer(randomCfg(), true, "CPU 2", 2, laneColors[2]));
+  }
+
+  raceT = 0;
+  countdown = 3.0;
+  cdLast = 4;
+  raceStarted = false;
+  raceFinishedAll = false;
+  worldScroll = 0;
+  slowmo = 1;
+  winner = null;
+  winnerBand = null;
+  setState("race");
+}
+
+function randomCfg() {
+  return {
+    pastry: rint(0, PASTRIES.length),
+    frost: rint(0, FROSTINGS.length),
+    sprinkle: Math.random() < 0.6,
+    head: rint(0, HEADS.length),
+    trail: rint(0, TRAILS.length)
+  };
+}
+
+// ---- RACE ----
+function updateRace(dt, e1, e2) {
+  // pause: START on either pad, Esc/P key, or a tap in the top-left corner
+  var tapped = consumeTouchConfirm();
+  var tapPause = tapped && tapX < 88 && tapY < 88;
+  if (e1.start || e2.start || keyEdge("Escape") || keyEdge("p") || tapPause) {
+    setState("pause"); sfxSelect(); return;
+  }
+
+  // countdown — racers idle-bob while the numbers drop
+  if (!raceStarted) {
+    countdown -= dt;
+    var n = Math.ceil(countdown);
+    if (n !== cdLast && n >= 1) { sfxCount(false); cdLast = n; }
+    for (var ci = 0; ci < racers.length; ci++) racers[ci].bobPhase += dt * 2.2;
+    if (countdown <= 0) { raceStarted = true; sfxCount(true); } // NYAN!
+    return;
+  }
+
+  raceT += dt; // real clock — finish times stay honest through slow-mo
+
+  // photo-finish slow-mo: top two within ~half a body length near the line
+  var lead1 = -1, lead2 = -1;
+  for (var li = 0; li < racers.length; li++) {
+    var pgs = racers[li].progress;
+    if (pgs > lead1) { lead2 = lead1; lead1 = pgs; }
+    else if (pgs > lead2) { lead2 = pgs; }
+  }
+  var targetSlow = (!winner && RACE_DISTANCE - lead1 < 480 && lead1 - lead2 < 115) ? 0.42 : 1;
+  slowmo = lerp(slowmo, targetSlow, 0.09);
+  var sdt = dt * slowmo;
+
+  // camera follows P1
+  worldScroll = racers[0].progress;
+
+  // best HUMAN progress drives CPU rubber-banding (race stays about the kids)
+  var humanBest = 0;
+  for (var hb = 0; hb < racers.length; hb++) {
+    if (!racers[hb].isCPU && racers[hb].progress > humanBest) humanBest = racers[hb].progress;
+  }
+
+  // ---- input mashes ----
+  var p1Mash = e1.south || keyEdge(" ") || keyEdge("Enter") || (tapped && !tapPause);
+  var p2Mash = e2.south;
+
+  for (var r = 0; r < racers.length; r++) {
+    var rc = racers[r];
+    if (rc.finished) continue;
+
+    if (!rc.isCPU) {
+      var mash = (rc.label === "P1") ? p1Mash : p2Mash;
+      if (mash) {
+        rc.speed = Math.min(MAX_SPEED, rc.speed + MASH_IMPULSE);
+        rc.pressCount++;
+        rc.pressRing[rc.pressHead & 63] = raceT;
+        rc.pressHead++;
+        // PERFECT PACE: consecutive press intervals within 30% of each other
+        if (rc.lastPressT >= 0) {
+          var iv = raceT - rc.lastPressT;
+          if (iv > 0.06 && iv < 0.45 && rc.lastIv > 0 &&
+              Math.abs(iv - rc.lastIv) < rc.lastIv * 0.3) rc.paceStreak++;
+          else rc.paceStreak = 0;
+          rc.lastIv = iv;
+        }
+        rc.lastPressT = raceT;
+        sfxMash();
+      }
+      // pps peak = presses inside the trailing 1s window (fixed ring scan)
+      var cnt = 0;
+      var lim = Math.min(rc.pressHead, 64);
+      for (var pw = 0; pw < lim; pw++) if (rc.pressRing[pw] > raceT - 1) cnt++;
+      if (cnt > rc.ppsPeak) rc.ppsPeak = cnt;
+    } else {
+      // CPU rubber-band: chase the best human, ease off when far ahead.
+      var behind = humanBest - rc.progress;   // >0 means behind the kids
+      var tgt = CPU_BASE * rc.cpuSkill;
+      if (behind > 1500) tgt *= 1.3;          // far behind -> hustle
+      else if (behind > 500) tgt *= 1.12;
+      else if (behind < -750) tgt *= 0.58;    // far ahead -> coast
+      else if (behind < -250) tgt *= 0.82;
+      if (tgt > CPU_MAX) tgt = CPU_MAX;
+      // CPUs "mash" too: impulse cadence tuned so equilibrium speed = tgt
+      rc.cpuMashTimer -= sdt;
+      if (rc.cpuMashTimer <= 0) {
+        rc.speed = Math.min(MAX_SPEED, rc.speed + MASH_IMPULSE);
+        rc.pressCount++;
+        var interval = MASH_IMPULSE / (tgt * (1 - SPEED_DECAY) * 60);
+        rc.cpuMashTimer = clamp(interval, 0.07, 0.5) * (0.92 + Math.random() * 0.16);
+      }
+    }
+
+    // decay
+    rc.speed *= Math.pow(SPEED_DECAY, sdt * 60);
+    if (rc.speed < 0) rc.speed = 0;
+    rc.topSpeed = Math.max(rc.topSpeed, rc.speed);
+
+    // advance
+    rc.progress += rc.speed * sdt;
+
+    // paw animation speed scales with speed
+    rc.pawTimer += sdt * (0.6 + rc.speed / MAX_SPEED * 3);
+    if (rc.pawTimer > 0.09) { rc.pawTimer = 0; rc.pawFrame = (rc.pawFrame + 1) % 4; }
+
+    // bob
+    rc.bobPhase += sdt * (3 + rc.speed / MAX_SPEED * 5);
+
+    // finish detection
+    if (rc.progress >= RACE_DISTANCE) {
+      rc.finished = true;
+      rc.finishTime = raceT;
+      rc.progress = RACE_DISTANCE;
+      if (!winner) winner = rc;
+      sfxCount(true);
+    }
+  }
+
+  // race ends when every HUMAN has crossed; a straggling CPU just gets a
+  // projected time so the kids never wait on a robot.
+  var humansDone = true;
+  for (var d = 0; d < racers.length; d++) {
+    if (!racers[d].isCPU && !racers[d].finished) humansDone = false;
+  }
+  if (humansDone && !raceFinishedAll) {
+    for (var d2 = 0; d2 < racers.length; d2++) {
+      var rr = racers[d2];
+      if (!rr.finished) {
+        rr.finished = true;
+        rr.finishTime = raceT + (RACE_DISTANCE - rr.progress) / Math.max(rr.speed, 60);
+      }
+    }
+    raceFinishedAll = true;
+    goFinish();
+  }
+}
+
+function goFinish() {
+  finishT = 0;
+  initConfetti();
+  // bake the winner's celebration band once (wavy tiled trail, scrolled
+  // per-frame with 4 drawImage instead of ~160)
+  if (winner) {
+    winnerBand = makeCanvas(VW, TRAIL_H + 18);
+    var bc = winnerBand.getContext("2d");
+    var strip = trailStrips[TRAILS[winner.cfg.trail]];
+    for (var col = 0; col * TRAIL_SEG_W < VW; col++) {
+      bc.drawImage(strip, col * TRAIL_SEG_W, 9 + Math.sin(col * 0.4) * 7);
+    }
+  }
+  // record best time — only a kid's win goes on the board
+  if (winner && !winner.isCPU) {
+    if (!best || winner.finishTime < best.time) {
+      best = { time: winner.finishTime };
+      saveJSON(LS_BEST, best);
+    }
+  }
+  sfxFanfare();
+  setState("finish");
+}
+
+// ---- FINISH ----
+function updateFinish(dt, e1, e2) {
+  finishT += dt;
+  // confetti fall
+  for (var i = 0; i < confetti.length; i++) {
+    var c = confetti[i];
+    c.x += c.vx * dt;
+    c.y += c.vy * dt;
+    c.spin += dt * 6;
+    if (c.y > VH + 10) { c.y = -10; c.x = Math.random() * VW; }
+  }
+
+  if (finishT < 0.8) {
+    // brief lockout so nobody skips the card instantly — eat any presses
+    keyEdge(" "); keyEdge("Enter"); keyEdge("Escape"); consumeTouchConfirm();
+    return;
+  }
+
+  var rematch = e1.south || e2.south || keyEdge(" ") || keyEdge("Enter") || consumeTouchConfirm();
+  var back = e1.east || e2.east || keyEdge("Escape");
+
+  if (back) { sfxBack(); garagePlayer = 0; garageRow = 0; setState("garage"); return; }
+  if (rematch) { sfxSelect(); startRace(); return; }
+}
+
+// ---- PAUSE ----
+function updatePause(dt, e1, e2) {
+  var resume = e1.start || e2.start || keyEdge("Escape") || keyEdge("p") ||
+               e1.south || keyEdge(" ") || keyEdge("Enter") || consumeTouchConfirm();
+  var quitToGarage = e1.east || e2.east;
+  if (resume) { sfxSelect(); setState("race"); return; }
+  if (quitToGarage) { sfxBack(); garagePlayer = 0; garageRow = 0; setState("garage"); return; }
+}
+
+/* =========================================================================
+   8. RENDER
+   ========================================================================= */
+function fillText(txt, x, y, size, color, align) {
+  ctx.font = size + "px 'Press Start 2P', monospace";
+  ctx.fillStyle = color;
+  ctx.textAlign = align || "left";
+  ctx.textBaseline = "alphabetic";
+  ctx.fillText(txt, x, y);
+}
+
+function drawStarfield(scrollFactor) {
+  // deep blue bg + nebula bands (rects, not paths)
+  ctx.fillStyle = "#080a26";
+  ctx.fillRect(0, 0, VW, VH);
+  ctx.fillStyle = "#0d1140";
+  ctx.fillRect(0, 120, VW, 60);
+  ctx.fillStyle = "#0a0d33";
+  ctx.fillRect(0, 420, VW, 90);
+
+  // two parallax layers, each drawn twice for wraparound = 4 drawImage total
+  var f = scrollFactor || 1;
+  var oxF = (((starOffset * 0.35 * f) % VW) + VW) % VW | 0;
+  di(starLayerFar, -oxF, 0);
+  di(starLayerFar, VW - oxF, 0);
+  var oxN = (((starOffset * 0.9 * f) % VW) + VW) % VW | 0;
+  di(starLayerNear, -oxN, 0);
+  di(starLayerNear, VW - oxN, 0);
+}
+
+// ---- the undulating trail: strip segments phase-offset from the racer's
+// bob so the wave rolls backward — the soul of the meme. Stateless, so
+// zero allocations and a hard cap on segments.
+var TRAIL_SEGS = 26;
+function drawRacerTrail(rc, drawX, cy) {
+  var strip = trailStrips[TRAILS[rc.cfg.trail]];
+  for (var k = 1; k <= TRAIL_SEGS; k++) {
+    var sx = drawX + 12 - k * TRAIL_SEG_W;
+    if (sx < -TRAIL_SEG_W) break;
+    var wob = Math.sin(rc.bobPhase - k * 0.6) * 10;
+    di(strip, sx | 0, (cy + wob - TRAIL_H / 2) | 0);
+  }
+}
+
+var PX_PER_UNIT = 0.62; // world unit -> screen px
+function worldToScreenX(worldX) {
+  // camera tracks P1 progress; the action sits left-of-center like the meme
+  var base = 420;
+  return base + (worldX - worldScroll) * PX_PER_UNIT;
+}
+
+function drawRacer(rc) {
+  var sxRacer = worldToScreenX(rc.progress);
+  // clamp so a leading/lagging racer stays on screen
+  var drawX = clamp(sxRacer, 60, VW - 220);
+  var bob = Math.sin(rc.bobPhase) * 6;
+  var y = laneY(rc.lane) + bob;
+
+  // trail first (behind), waving about the lane center
+  drawRacerTrail(rc, drawX, laneY(rc.lane));
+
+  // paws under body
+  di(pawFrames[rc.pawFrame], (drawX + 20) | 0, (y + 24) | 0);
+
+  // body
+  di(rc.body, drawX | 0, (y - SPR_H / 2) | 0);
+
+  // little name tag
+  fillText(rc.label, drawX + 46, y - 58, 12, rc.color, "center");
+}
+
+// ---- lane frames / progress track ----
+function drawLanes() {
+  for (var i = 0; i < LANE_COUNT; i++) {
+    var top = LANE_TOP + i * LANE_H;
+    // lane band
+    ctx.fillStyle = (i % 2 === 0) ? "rgba(255,255,255,0.03)" : "rgba(255,255,255,0.06)";
+    ctx.fillRect(0, top, VW, LANE_H - 8);
+    // lane divider
+    ctx.fillStyle = "rgba(120,140,255,0.25)";
+    ctx.fillRect(0, top, VW, 2);
+  }
+}
+
+// finish line at right when close
+function drawFinishLine() {
+  var fx = worldToScreenX(RACE_DISTANCE);
+  if (fx < -40 || fx > VW + 40) {
+    // draw a distant flag marker if off right
+    if (fx > VW) { /* nothing */ }
+    return;
+  }
+  // checkered space finish
+  var cell = 20;
+  for (var yy = LANE_TOP - 20; yy < LANE_TOP + LANE_COUNT * LANE_H; yy += cell) {
+    for (var col = 0; col < 3; col++) {
+      var on = (((yy / cell) | 0) + col) % 2 === 0;
+      ctx.fillStyle = on ? "#ffffff" : "#101030";
+      ctx.fillRect((fx + col * cell) | 0, yy, cell, cell);
+    }
+  }
+  // flag
+  ctx.fillStyle = "#ff3b6b";
+  ctx.fillRect((fx + 66) | 0, LANE_TOP - 60, 6, 60);
+  ctx.fillRect((fx + 72) | 0, LANE_TOP - 60, 34, 22);
+}
+
+function drawProgressBars() {
+  var bx = 100, bw = VW - 180, by = 40;
+  for (var i = 0; i < racers.length; i++) {
+    var rc = racers[i];
+    var y = by + i * 26;
+    // track
+    ctx.fillStyle = "rgba(255,255,255,0.12)";
+    ctx.fillRect(bx, y, bw, 12);
+    // fill
+    var f = clamp(rc.progress / RACE_DISTANCE, 0, 1);
+    ctx.fillStyle = rc.color;
+    ctx.fillRect(bx, y, bw * f, 12);
+    // icon marker (small body thumbnail — draw scaled body)
+    var mx = bx + bw * f - 16;
+    di(rc.body, 0, 0, SPR_W, SPR_H, (mx) | 0, (y - 12) | 0, 34, 24);
+    // finish flag at end
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(bx + bw + 4, y - 2, 4, 16);
+  }
+}
+
+// ---- RENDER dispatch ----
+function render() {
+  drawCount = 0;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+
+  if (STATE === "title") renderTitle();
+  else if (STATE === "garage") renderGarage();
+  else if (STATE === "race") renderRace();
+  else if (STATE === "finish") renderFinish();
+  else if (STATE === "pause") { renderRace(); renderPauseOverlay(); }
+
+  // mute indicator + drawcount guard (debug, tiny)
+  renderMuteIndicator();
+  // instrumentation assert
+  if (drawCount > 150) {
+    // draw a subtle warning bar (should never happen)
+    ctx.fillStyle = "rgba(255,0,0,0.4)";
+    ctx.fillRect(0, VH - 4, VW, 4);
+  }
+  lastDrawCount = drawCount;
+  if (drawCount > peakDrawCount) peakDrawCount = drawCount;
+}
+var lastDrawCount = 0, peakDrawCount = 0;
+
+function renderMuteIndicator() {
+  var s = 20;
+  var x = VW - 46, y = 12;
+  ctx.fillStyle = "rgba(0,0,0,0.4)";
+  ctx.fillRect(x - 6, y - 4, 40, 30);
+  fillText(Audio2.muted ? "X" : "))", x, y + 20, 14, Audio2.muted ? "#ff6b6b" : "#8fffa0");
+}
+
+// ---- TITLE render ----
+function renderTitle() {
+  drawStarfield(1);
+
+  // demo racer bobbing
+  var demoY = 360 + Math.sin(titleT * 2) * 16;
+  // fake trail behind demo (rainbow strip tiled)
+  var strip = trailStrips.rainbow;
+  for (var t = 0; t < 24; t++) {
+    var wob = Math.sin(titleT * 3 - t * 0.5) * 14;
+    di(strip, (200 - t * TRAIL_SEG_W) | 0, (demoY - TRAIL_H / 2 + wob) | 0);
+  }
+  var demoBody = bakeRacer(p1cfg);
+  di(pawFrames[(titleT * 10 | 0) % 4], (200 + 20) | 0, (demoY + 24) | 0);
+  di(demoBody, 200, (demoY - SPR_H / 2) | 0);
+
+  // title text
+  var pulse = 1 + Math.sin(titleT * 4) * 0.04;
+  ctx.save();
+  ctx.translate(VW / 2, 180);
+  ctx.scale(pulse, pulse);
+  fillText("NYAN CAT", 0, 0, 64, "#ff8fd0", "center");
+  fillText("RACING", 0, 70, 64, "#8fd6ff", "center");
+  ctx.restore();
+
+  fillText("P1: PRESS " + softBtn() + " / SPACE TO START", VW / 2, 470, 20, "#ffffff", "center");
+
+  if (!p2Joined) {
+    var blink = (Math.sin(titleT * 6) > 0);
+    fillText(blink ? "P2 PRESS ✕ TO JOIN" : "", VW / 2, 520, 18, "#c6ff6e", "center");
+  } else {
+    fillText("P2 JOINED!  HEAD-TO-HEAD", VW / 2, 520, 18, "#c6ff6e", "center");
+  }
+
+  fillText("Y / M = MUTE   " + (Audio2.muted ? "[MUTED]" : "[SOUND ON]"), VW / 2, 600, 14, "#9aa0c0", "center");
+  fillText("SOLO = YOU vs 2 CPU", VW / 2, 640, 12, "#7a80a0", "center");
+
+  if (best) fillText("BEST: " + best.time.toFixed(2) + "s", VW / 2, 680, 12, "#ffe561", "center");
+}
+
+function softBtn() { return window.ArcadeController ? "✕" : "SPACE"; }
+
+// ---- GARAGE render ----
+function renderGarage() {
+  drawStarfield(0.4);
+
+  var cfg = currentGarageCfg();
+  var who = garagePlayer === 0 ? "P1" : "P2";
+  var whoColor = garagePlayer === 0 ? "#ff8fd0" : "#8fd6ff";
+
+  fillText("BUILD-A-CAT", VW / 2, 90, 44, whoColor, "center");
+  fillText(who + ", BUILD YOUR RACER", VW / 2, 140, 18, "#ffffff", "center");
+
+  // live preview (assembled racer bobbing with trail) — bakeRacer caches
+  // by signature, so cycling options only bakes each combo once
+  var body = bakeRacer(cfg);
+  var py = 300 + Math.sin(garageBob * 2.5) * 14;
+  var strip = trailStrips[TRAILS[cfg.trail]];
+  for (var t = 0; t < 20; t++) {
+    var wob = Math.sin(garageBob * 3 - t * 0.5) * 12;
+    di(strip, (VW / 2 - 70 - t * TRAIL_SEG_W) | 0, (py - TRAIL_H / 2 + wob) | 0);
+  }
+  di(pawFrames[(garageBob * 9 | 0) % 4], (VW / 2 - 66 + 20) | 0, (py + 24) | 0);
+  di(body, (VW / 2 - 66) | 0, (py - SPR_H / 2) | 0);
+
+  // rows of options
+  var rowY = 420;
+  var rowGap = 56;
+  var labels = [
+    "PASTRY: " + PASTRIES[cfg.pastry].toUpperCase(),
+    "HEAD:   " + HEADS[cfg.head].toUpperCase(),
+    "TRAIL:  " + TRAILS[cfg.trail].toUpperCase(),
+    "FROST:  " + frostName(cfg.frost) + (cfg.sprinkle ? "  +SPRINKLES" : "")
+  ];
+  for (var i = 0; i < labels.length; i++) {
+    var y = rowY + i * rowGap;
+    var sel = (i === garageRow);
+    if (sel) {
+      ctx.fillStyle = "rgba(255,255,255,0.10)";
+      ctx.fillRect(VW / 2 - 380, y - 26, 760, 40);
+    }
+    var col = sel ? "#ffe561" : "#c9cff0";
+    fillText((sel ? "▶ " : "  ") + "◀  " + labels[i] + "  ▶", VW / 2, y, 18, col, "center");
+  }
+
+  fillText(hintLine(), VW / 2, 690, 13, "#9aa0c0", "center");
+}
+
+function frostName(i) {
+  return ["PINK", "BLUE", "LIME"][i] || "PINK";
+}
+function hintLine() {
+  var c = window.ArcadeController ? "✕=NEXT  ◯=BACK  △=SPRINKLES" : "SPACE=NEXT  ESC=BACK  S=SPRINKLES";
+  return "D-PAD MOVE/CYCLE   " + c;
+}
+
+// ---- RACE render ----
+function renderRace() {
+  drawStarfield(1);
+  drawLanes();
+  drawFinishLine();
+
+  // draw racers (back lane first)
+  for (var i = 0; i < racers.length; i++) drawRacer(racers[i]);
+
+  drawProgressBars();
+
+  // countdown: 3-2-1 then a big NYAN! banner as the race opens
+  if (!raceStarted) {
+    var n = Math.ceil(countdown);
+    if (n < 1) n = 1;
+    var frac = countdown - Math.floor(countdown);
+    var scale = 1 + (1 - frac) * 0.4;
+    ctx.save();
+    ctx.translate(VW / 2, VH / 2);
+    ctx.scale(scale, scale);
+    fillText(String(n), 0, 0, 90, "#ffffff", "center");
+    ctx.restore();
+  } else if (raceT < 0.8) {
+    var ns = 1.7 - raceT;
+    ctx.save();
+    ctx.translate(VW / 2, VH / 2);
+    ctx.scale(ns, ns);
+    fillText("NYAN!", 0, 0, 90, "#ff8fd0", "center");
+    ctx.restore();
+  }
+
+  // PERFECT PACE shimmer for P1 when mash rhythm is steady
+  var p1r = racers[0];
+  if (raceStarted && p1r && !p1r.finished && p1r.paceStreak >= 6) {
+    if (Math.sin(raceT * 14) > -0.4) fillText("PERFECT PACE!", VW / 2, 150, 16, "#ffe561", "center");
+  }
+
+  // touch pause corner
+  ctx.fillStyle = "rgba(255,255,255,0.35)";
+  ctx.fillRect(24, 24, 10, 34);
+  ctx.fillRect(44, 24, 10, 34);
+
+  // race clock
+  fillText(raceT.toFixed(2) + "s", 40, VH - 30, 18, "#ffffff", "left");
+  // mash hint
+  fillText("MASH " + softBtn() + " !", VW - 40, VH - 30, 18, "#8fffa0", "right");
+
+  if (slowmo < 0.9) fillText("PHOTO FINISH!", VW / 2, VH - 30, 18, "#ff6ec7", "center");
+}
+
+// ---- FINISH render ----
+function renderFinish() {
+  drawStarfield(0.5);
+
+  // winner's trail streams across the top and bottom of the screen —
+  // pre-baked wavy band, scrolled both ways (4 drawImage total)
+  if (winner && winnerBand) {
+    var ox = (((finishT * 140) % VW) + VW) % VW | 0;
+    di(winnerBand, -ox, 12);
+    di(winnerBand, VW - ox, 12);
+    var ox2 = VW - ox;
+    di(winnerBand, -ox2, VH - TRAIL_H - 30);
+    di(winnerBand, VW - ox2, VH - TRAIL_H - 30);
+  }
+
+  // confetti
+  for (var i = 0; i < confetti.length; i++) {
+    var c = confetti[i];
+    ctx.fillStyle = c.c;
+    var sw = c.r + Math.sin(c.spin) * 2;
+    ctx.fillRect(c.x | 0, c.y | 0, sw | 0, c.r);
+  }
+
+  // stats card
+  var cardX = VW / 2 - 340, cardY = 120, cardW = 680, cardH = 460;
+  ctx.fillStyle = "rgba(10,12,40,0.92)";
+  ctx.fillRect(cardX, cardY, cardW, cardH);
+  ctx.fillStyle = "#ff8fd0";
+  ctx.fillRect(cardX, cardY, cardW, 6);
+
+  fillText("FINISH!", VW / 2, cardY + 60, 40, "#ffe561", "center");
+  if (winner) {
+    fillText(winner.label + " WINS!", VW / 2, cardY + 120, 30, winner.color, "center");
+    // winner body thumbnail
+    di(winner.body, (VW / 2 - SPR_W / 2) | 0, (cardY + 140) | 0);
+  }
+
+  // sorted results by finishTime
+  var order = racers.slice().sort(function (a, b) { return a.finishTime - b.finishTime; });
+  var ry = cardY + 260;
+  for (var k = 0; k < order.length; k++) {
+    var rc = order[k];
+    var place = (k + 1) + ".";
+    fillText(place + " " + rc.label, cardX + 60, ry + k * 40, 16, rc.color, "left");
+    fillText(rc.finishTime.toFixed(2) + "s", cardX + 320, ry + k * 40, 16, "#ffffff", "left");
+    fillText("TOP " + (rc.topSpeed | 0), cardX + 500, ry + k * 40, 12, "#9aa0c0", "left");
+  }
+
+  // winner extra stats
+  if (winner) {
+    fillText("PPS PEAK: " + winner.ppsPeak + "   PRESSES: " + winner.pressCount,
+             VW / 2, cardY + cardH - 60, 12, "#c6ff6e", "center");
+  }
+  if (best) fillText("BEST: " + best.time.toFixed(2) + "s", VW / 2, cardY + cardH - 30, 12, "#ffe561", "center");
+
+  if (finishT > 0.8) {
+    var blink = Math.sin(finishT * 5) > 0;
+    if (blink) fillText(softBtn() + " REMATCH   ◯ GARAGE", VW / 2, cardY + cardH + 50, 16, "#ffffff", "center");
+  }
+}
+
+// ---- PAUSE overlay ----
+function renderPauseOverlay() {
+  ctx.fillStyle = "rgba(5,6,26,0.78)";
+  ctx.fillRect(0, 0, VW, VH);
+  fillText("PAUSED", VW / 2, VH / 2 - 40, 56, "#ffffff", "center");
+  fillText("START / " + softBtn() + " = RESUME", VW / 2, VH / 2 + 30, 18, "#c6ff6e", "center");
+  fillText("◯ = QUIT TO GARAGE", VW / 2, VH / 2 + 70, 16, "#9aa0c0", "center");
+}
+
+/* =========================================================================
+   9. MAIN LOOP
+   ========================================================================= */
+var lastT = 0;
+function loop(ts) {
+  if (!lastT) lastT = ts;
+  var dt = (ts - lastT) / 1000;
+  lastT = ts;
+  if (dt > 0.05) dt = 0.05; // clamp big frame gaps
+
+  update(dt);
+  render();
+
+  requestAnimationFrame(loop);
+}
+
+/* =========================================================================
+   RESIZE / SCALE
+   ========================================================================= */
+function resize() {
+  var scale = Math.min(window.innerWidth / VW, window.innerHeight / VH);
+  canvas.style.width = (VW * scale) + "px";
+  canvas.style.height = (VH * scale) + "px";
+}
+window.addEventListener("resize", resize);
+
+/* =========================================================================
+   INIT
+   ========================================================================= */
+function init() {
+  bakeAll();
+  allocConfetti();
+  resize();
+  // First user gesture will resume audio; start music once resumed
+  requestAnimationFrame(loop);
+}
+
+// Tiny verification/debug handle (read-only; harmless in production).
+window.__nyan = {
+  get state() { return STATE; },
+  get racers() { return racers; },
+  get raceT() { return raceT; },
+  get countdown() { return countdown; },
+  get raceStarted() { return raceStarted; },
+  get drawCount() { return lastDrawCount; },
+  get peakDrawCount() { return peakDrawCount; },
+  resetPeak: function () { peakDrawCount = 0; },
+  get p2Joined() { return p2Joined; },
+  get garageRow() { return garageRow; },
+  get garagePlayer() { return garagePlayer; },
+  get cfg() { return { p1: p1cfg, p2: p2cfg }; },
+  get winner() { return winner; },
+  get best() { return best; },
+  get muted() { return Audio2.muted; }
+};
+
+init();
+
+})();
+</script>
+<!-- injected by scripts/bundle-games.sh — back-to-arcade overlay -->
+<a id="__arcade_back" href="/" style="position:fixed;top:max(10px,env(safe-area-inset-top));left:max(10px,env(safe-area-inset-left));z-index:2147483647;font:bold 10px/1 -apple-system,BlinkMacSystemFont,'Segoe UI',monospace;letter-spacing:2px;color:#ffd23f;background:rgba(10,14,39,0.82);border:2px solid #ffd23f;padding:8px 10px 7px;text-decoration:none;border-radius:3px;box-shadow:2px 2px 0 rgba(255,69,113,0.65);-webkit-tap-highlight-color:transparent;-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);">&#9664; ARCADE</a>
+
+<!-- injected by scripts/bundle-games.sh — hold PS (or SELECT+START) on any gamepad to return to the arcade menu -->
+<script id="__arcade_pad_exit">
+(function () {
+  var HOLD_MS = 1000;
+  var heldSince = 0;
+  var leaving = false;
+  function comboDown(gp) {
+    var b = gp.buttons;
+    var ps = b[16] && b[16].pressed;
+    var selectStart = b[8] && b[8].pressed && b[9] && b[9].pressed;
+    return !!(ps || selectStart);
+  }
+  function tick(now) {
+    if (leaving) return;
+    var pads = navigator.getGamepads ? navigator.getGamepads() : [];
+    var down = false;
+    for (var i = 0; i < pads.length; i++) {
+      if (pads[i] && pads[i].connected && comboDown(pads[i])) { down = true; break; }
+    }
+    var btn = document.getElementById('__arcade_back');
+    if (!down) {
+      heldSince = 0;
+      if (btn) { btn.style.transform = ''; btn.style.boxShadow = ''; }
+    } else {
+      if (!heldSince) heldSince = now;
+      var progress = (now - heldSince) / HOLD_MS;
+      if (btn) {
+        btn.style.transform = 'scale(' + (1 + 0.35 * Math.min(progress, 1)) + ')';
+        btn.style.transformOrigin = 'top left';
+        btn.style.boxShadow = '0 0 ' + Math.round(18 * Math.min(progress, 1)) + 'px #ffd23f';
+      }
+      if (progress >= 1) { leaving = true; location.href = '/'; return; }
+    }
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+})();
+</script>
+
+<!-- injected by scripts/bundle-games.sh — low-effects mode for the Pi console.
+     Canvas shadowBlur (neon glow) costs a GPU blur pass per glowing sprite;
+     the Pi 5 drops from ~50fps to ~13fps with it on. The console kiosk loads
+     the arcade with ?fx=low, the launcher persists the flag in localStorage,
+     and this overlay no-ops shadowBlur in every bundled game. Visit with
+     ?fx=full to turn glows back on. -->
+<script id="__arcade_lowfx">
+(function () {
+  var on = false;
+  try {
+    if (/[?&]fx=low\b/.test(location.search)) { on = true; localStorage.setItem('arcade_lowfx', '1'); }
+    else if (/[?&]fx=full\b/.test(location.search)) { localStorage.setItem('arcade_lowfx', '0'); }
+    else { on = localStorage.getItem('arcade_lowfx') === '1'; }
+  } catch (e) {}
+  if (!on) return;
+  try {
+    Object.defineProperty(CanvasRenderingContext2D.prototype, 'shadowBlur', {
+      set: function () {}, get: function () { return 0; }
+    });
+  } catch (e) {}
+  // Console mode: no mouse exists, so never show a cursor. And CSS
+  // backdrop-filter re-blurs the animating canvas under every frosted panel
+  // on every frame — measured 17fps -> 60fps in Ninth Inning on the Pi by
+  // disabling it. Panels keep their translucent rgba backgrounds.
+  try {
+    document.head.insertAdjacentHTML('beforeend',
+      '<style>* { cursor: none !important; backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }</style>');
+  } catch (e) {}
+})();
+</script>
+
+</body>
+</html>
