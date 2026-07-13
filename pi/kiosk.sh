@@ -47,6 +47,26 @@ for _ in $(seq 1 30); do
   sleep 2
 done
 
+# HDMI audio races the TV at boot: if PipeWire probes the port before the TV
+# advertises audio, the only sink is the dummy one and games play into the
+# void. Wait for a real sink, restarting wireplumber (which re-probes) if it
+# doesn't appear — a slow TV needs a second look, not a reboot.
+have_real_sink() {
+  wpctl status 2>/dev/null | sed -n '/Sinks:/,/Sources:/p' | grep 'vol:' | grep -qv 'Dummy Output'
+}
+if command -v wpctl >/dev/null 2>&1; then
+  for _attempt in 1 2 3; do
+    FOUND=""
+    for _ in $(seq 1 10); do
+      have_real_sink && { FOUND=1; break; }
+      sleep 1
+    done
+    [ -n "$FOUND" ] && break
+    systemctl --user restart wireplumber 2>/dev/null || true
+    sleep 3
+  done
+fi
+
 mkdir -p "$PROFILE"
 while true; do
   # Chromium nags about restoring tabs after any unclean exit (power switch
