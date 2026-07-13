@@ -40,6 +40,27 @@ if [ -n "$MODE" ] && [ -n "${WAYLAND_DISPLAY:-}" ] && command -v wlr-randr >/dev
   fi
 fi
 
+# The TV can renegotiate HDMI mid-session (TV power-cycle, input switch),
+# silently resetting the mode to its 4K@30 preferred and leaving Chromium
+# pacing on stale timings (tiny window + half frame rate). Watchdog: check
+# every 10s; on drift, reassert the mode and bounce Chromium — the launch
+# loop below brings it back with fresh timings in seconds.
+if [ -n "$MODE" ] && [ -n "${WAYLAND_DISPLAY:-}" ] && command -v wlr-randr >/dev/null 2>&1; then
+  (
+    while true; do
+      sleep 10
+      CUR=$(wlr-randr 2>/dev/null | awk '/\(current\)/ { split($3, hz, "."); print $1 "@" hz[1]; exit }')
+      if [ -n "$CUR" ] && [ "$CUR" != "$MODE" ]; then
+        echo "ses-kiosk: display drifted to $CUR — reasserting $MODE" >&2
+        OUT=$(wlr-randr 2>/dev/null | awk 'NR==1 {print $1}')
+        wlr-randr --output "$OUT" --mode "$MODE" 2>/dev/null
+        sleep 2
+        pkill -f "$BROWSER" 2>/dev/null || pkill chromium 2>/dev/null
+      fi
+    done
+  ) &
+fi
+
 # Give Wi-Fi a moment to come up so we don't boot into an error page.
 # After ~60s we launch anyway; Chromium will show its retry page.
 for _ in $(seq 1 30); do
