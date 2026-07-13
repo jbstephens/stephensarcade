@@ -1579,7 +1579,11 @@
 // Canvas setup with DPR scaling
 // ============================================================================
 const canvas = document.getElementById('game');
-const ctx = canvas.getContext('2d');
+// `let` (not const): the offscreen pre-render bakes temporarily swap `ctx`
+// to an offscreen canvas so every draw helper can render into a cached layer
+// (see "Pre-rendered layers" section — Pi 5 GPU dies on per-frame path/rect
+// storms but handles drawImage of baked canvases easily).
+let ctx = canvas.getContext('2d');
 const diamondCanvas = document.getElementById('diamond');
 const dctx = diamondCanvas.getContext('2d');
 
@@ -4154,61 +4158,145 @@ function buildCrowdDots() {
 }
 buildCrowdDots();
 
+// ============================================================================
+// Pre-rendered layers (Raspberry Pi 5 performance)
+// ----------------------------------------------------------------------------
+// The stadium atmosphere (crowd dots, stands, sky, lighting, field striping)
+// used to be redrawn primitive-by-primitive every frame (~2,500 fillRects) —
+// the Pi's GPU dies on path/rect storms but handles drawImage of pre-rendered
+// canvases easily. Everything static is baked ONCE into offscreen canvases at
+// load/resize (and on score / view change), then composited with a handful of
+// drawImage calls per frame. Animated ambience (crowd bob, LED flicker, star
+// twinkle, light flicker) is preserved by baking 3 variant frames and cycling
+// them at ~3.5Hz. No shadowBlur anywhere (the console no-ops it).
+// ============================================================================
+
+function _makeLayer(w, h) {
+  const c = document.createElement('canvas');
+  c.width = Math.max(1, Math.ceil(w * DPR));
+  c.height = Math.max(1, Math.ceil(h * DPR));
+  return c;
+}
+
+// Run drawFn with the module-global `ctx` swapped to an offscreen canvas.
+// (ox, oy) shifts the drawing so world/screen coordinates land inside the
+// layer. Synchronous, so nothing else can observe the swapped ctx.
+function _bakeInto(canvasEl, ox, oy, drawFn) {
+  const main = ctx;
+  ctx = canvasEl.getContext('2d');
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, canvasEl.width, canvasEl.height);
+  ctx.setTransform(DPR, 0, 0, DPR, ox * DPR, oy * DPR);
+  try { drawFn(); } finally { ctx = main; }
+}
+
+// ── Stadium backdrop: 3 animation variants per view ──
+// Variant sample times are chosen so the traveling crowd wave is off-screen
+// (a fixed mid-crowd bump would look like a glitch when frames cycle); the
+// crowd still shimmers via per-dot bob + LED/star/light flicker differences.
+const STADIUM_FRAME_T = [0.35, 7.4, 15.4];
+const _stadiumLayers = {
+  batting:  { key: '', frames: null },
+  pitching: { key: '', frames: null },
+};
+
+function drawStadiumBackdrop(timeMs, pitching, horizon) {
+  const slot = _stadiumLayers[pitching ? 'pitching' : 'batting'];
+  const key = `${W}x${H}x${DPR}|${horizon.toFixed(1)}|${game.homeScore | 0}-${game.awayScore | 0}`;
+  if (slot.key !== key || !slot.frames) {
+    slot.key = key;
+    slot.frames = [];
+    for (let i = 0; i < STADIUM_FRAME_T.length; i++) {
+      const c = _makeLayer(W, H);
+      const t = STADIUM_FRAME_T[i];
+      _bakeInto(c, 0, 0, () => {
+        // Exact same stack (and order) the per-frame path used to draw.
+        drawSky(horizon, t);
+        drawStars(horizon, t);
+        // Clouds drift very slowly — freeze them at one time so the cycling
+        // variants don't jitter them back and forth.
+        drawClouds(horizon, STADIUM_FRAME_T[0]);
+        drawStadiumSilhouette(horizon);
+        if (!pitching) drawScoreboard(horizon, t);
+        drawLightTowers(horizon, t);
+        drawCrowd(horizon, t);
+        if (!pitching) {
+          drawOutfieldWall(horizon);
+          drawFoulPoles(horizon);
+        }
+        drawAtmosphericHaze(horizon);
+        drawGrass(horizon);
+        if (!pitching) drawFieldPerspective();
+      });
+      slot.frames.push(c);
+    }
+  }
+  ctx.drawImage(slot.frames[((timeMs / 280) | 0) % slot.frames.length], 0, 0, W, H);
+}
+
+// ── Small radial-gradient glow sprites (ball shadow / trail / release flash).
+// The gradients' colour-stop alphas are proportional to a single per-frame
+// alpha, so we bake them once at full strength and modulate globalAlpha. ──
+function _radialSprite(size, stops) {
+  const c = document.createElement('canvas');
+  c.width = c.height = size;
+  const g2 = c.getContext('2d');
+  const grad = g2.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+  for (const [o, col] of stops) grad.addColorStop(o, col);
+  g2.fillStyle = grad;
+  g2.fillRect(0, 0, size, size);
+  return c;
+}
+
+// Each pitch type leaves its own trail tint, so kids learn to READ the
+// pitch in flight: white heat = fastball, blue dive = curve, etc.
+// (Hoisted out of drawBall so it isn't re-allocated per frame.)
+const PITCH_TRAIL_RGB = {
+  fastball:  '255,255,255',
+  curveball: '120,205,255',
+  slider:    '255,140,235',
+  changeup:  '170,255,170',
+  sinker:    '255,190,110',
+};
+
+let _glowSpr = null;
+function _ensureGlowSprites() {
+  if (_glowSpr) return _glowSpr;
+  _glowSpr = {
+    // Ball ground shadow: stops (a, 0.35a, 0)
+    shadow: _radialSprite(128, [[0, 'rgba(0,0,0,1)'], [0.6, 'rgba(0,0,0,0.35)'], [1, 'rgba(0,0,0,0)']]),
+    // Release flash: stops (0.75f, 0.30f, 0)
+    flash: _radialSprite(128, [[0, 'rgba(255,255,230,0.75)'], [0.4, 'rgba(255,250,210,0.30)'], [1, 'rgba(255,250,210,0)']]),
+    // Per-pitch-type trail tints (stop 1 → 0)
+    trail: {},
+  };
+  for (const [type, rgb] of Object.entries(PITCH_TRAIL_RGB)) {
+    _glowSpr.trail[type] = _radialSprite(96, [[0, `rgba(${rgb},1)`], [1, `rgba(${rgb},0)`]]);
+  }
+  return _glowSpr;
+}
+
 function drawScene(timeMs) {
+  CAM = activeCam();   // refresh before reading horizonFrac (avoids a stale
+                       // horizon on the first frame after a view flip, which
+                       // would trigger a wasted backdrop re-bake)
   const horizon = H * CAM.horizonFrac;
-  const t = timeMs * 0.001;
   const pitching = (game.view === 'pitching');
 
-  // Layered sky (twilight ballpark vibe — deep blue dome fading to orange glow)
-  drawSky(horizon, t);
-
-  // Distant stars (subtle, only visible against darker upper sky)
-  drawStars(horizon, t);
-
-  // Soft horizon clouds drifting
-  drawClouds(horizon, t);
-
-  // Stadium silhouette (back of stadium). In pitching POV the camera is behind
-  // the mound looking back at home plate — what we'd see in the distance is
-  // the BACKSTOP, dugouts, and home-plate seating. Reuse the same silhouette;
-  // it reads as "stadium beyond home plate" too.
-  drawStadiumSilhouette(horizon);
-
-  // Outfield-only chrome — skip in pitching view (it's geometrically behind us).
-  if (!pitching) {
-    drawScoreboard(horizon, t);
-  }
-
-  // Light towers with bloom — drawn before crowd so towers loom behind seating
-  drawLightTowers(horizon, t);
-
-  // Crowd — dense tiered seating
-  drawCrowd(horizon, t);
-
-  // Outfield wall + foul poles + distance markers only make sense in batting view.
-  if (!pitching) {
-    drawOutfieldWall(horizon);
-    drawFoulPoles(horizon);
-  }
-
-  // Atmospheric haze between camera & stadium
-  drawAtmosphericHaze(horizon);
-
-  // Field (grass) with mowed-pattern wedges
-  drawGrass(horizon);
-
-  // Field details (foul lines + dirt cutout + pitcher mound) are batter-POV only.
-  if (!pitching) drawFieldPerspective();
+  // Stadium atmosphere — sky, stars, clouds, stands, scoreboard, light towers,
+  // crowd, outfield wall, foul poles, haze, grass and field striping — all
+  // pre-baked; one drawImage here. See drawStadiumBackdrop above.
+  drawStadiumBackdrop(timeMs, pitching, horizon);
 
   // Fielders (behind pitcher in depth, but drawn before pitcher so pitcher overlaps if needed)
   drawFielders(timeMs);
 
   // Pitcher — only drawn when the player is BATTING (otherwise we ARE the pitcher)
-  if (game.view !== 'pitching') drawPitcher(timeMs);
+  if (game.view !== 'pitching') drawPitcherCached(timeMs);
 
   // CPU batter at the plate — only drawn when the player is PITCHING.
   // Drawn here so the catcher-foreground / pitcher-shoulder can occlude in front.
-  if (pitching) drawCpuBatter(timeMs);
+  if (pitching) drawCpuBatterCached(timeMs);
 
   // In pitching view, the pitcher's shoulder/arm is between the camera and the ball.
   // Draw the shoulder FIRST so the ball emerges from behind it on release.
@@ -4244,6 +4332,13 @@ function drawScene(timeMs) {
 // ── Pitch release meter: ping-pong needle, green center. Drawn while the
 // pitcher holds the throw; brief result label after release. All gradients,
 // no shadowBlur (Pi console no-ops shadowBlur). ──
+const THROW_METER_ZONES = [
+  [0.00, 0.20, 'rgba(255,90,90,0.5)'],
+  [0.20, 0.38, 'rgba(255,210,80,0.5)'],
+  [0.38, 0.62, 'rgba(110,255,120,0.6)'],
+  [0.62, 0.80, 'rgba(255,210,80,0.5)'],
+  [0.80, 1.00, 'rgba(255,90,90,0.5)'],
+];
 function drawThrowMeter() {
   const showBar = throwMeter.active && game.view === 'pitching';
   const showResult = throwMeter.resultTimer > 0;
@@ -4259,14 +4354,7 @@ function drawThrowMeter() {
     ctx.fillStyle = 'rgba(0,0,0,0.62)';
     ctx.fillRect(mX - 4, mY - 4, mW + 8, mH + 8);
     // Red → yellow → green → yellow → red zones
-    const zones = [
-      [0.00, 0.20, 'rgba(255,90,90,0.5)'],
-      [0.20, 0.38, 'rgba(255,210,80,0.5)'],
-      [0.38, 0.62, 'rgba(110,255,120,0.6)'],
-      [0.62, 0.80, 'rgba(255,210,80,0.5)'],
-      [0.80, 1.00, 'rgba(255,90,90,0.5)'],
-    ];
-    for (const [a, b, col] of zones) {
+    for (const [a, b, col] of THROW_METER_ZONES) {
       ctx.fillStyle = col;
       ctx.fillRect(mX + a * mW, mY, (b - a) * mW, mH);
     }
@@ -5274,19 +5362,61 @@ function _drawBezierLimb(p0, joint, p1, width, color) {
   ctx.stroke();
 }
 
-function drawPitcher(timeMs) {
+// (Pi perf) Between pitches the pitcher's windup saturates and only a subtle
+// breath wobble animates, so he renders from a cached sprite refreshed at
+// ~6.7Hz. While the windup ramps or a pitch is in flight the original live
+// path runs every frame so the throwing motion stays exact. The anim clock
+// (_pitcherPhase) is advanced here in the wrapper on every frame either way.
+const _pitcherSpr = { key: '', canvas: null, x: 0, y: 0, w: 0, h: 0 };
+function drawPitcherCached(timeMs) {
+  // dt approximation for windup ramp (small/clamped — we just need a steady ramp)
+  if (!pitcherAnim._lastMs) pitcherAnim._lastMs = timeMs;
+  const dt = Math.min(0.05, Math.max(0, (timeMs - pitcherAnim._lastMs) / 1000));
+  pitcherAnim._lastMs = timeMs;
+  const pu = _pitcherPhase(timeMs, dt);
+
+  const animating = (game.state === 'inflight') ||
+    (pitcherAnim.windupT > 0 && pitcherAnim.windupT < 1);
+  if (animating) { drawPitcher(timeMs, pu); return; }
+
+  const A = project(0, 0, 60);
+  const center = project(0, 5.8, 60);
+  const feet = project(0, 0.6, 60);
+  if (!A || !center || !feet) { drawPitcher(timeMs, pu); return; }
+  const B = Math.max(40, feet.sy - center.sy) * 1.25;
+
+  const key = `${Math.floor(timeMs / 150)}|${pu.phase}|${pu.u.toFixed(2)}|${W}x${H}x${DPR}`;
+  if (_pitcherSpr.key !== key) {
+    const halfW = Math.ceil(B * 0.8) + 12;
+    const top = Math.ceil(A.sy - center.sy + B * 0.75) + 10;
+    const bot = Math.ceil(B * 0.5) + 10;
+    const w = halfW * 2, h = top + bot;
+    if (!_pitcherSpr.canvas) _pitcherSpr.canvas = document.createElement('canvas');
+    _pitcherSpr.canvas.width = Math.max(1, Math.ceil(w * DPR));
+    _pitcherSpr.canvas.height = Math.max(1, Math.ceil(h * DPR));
+    _bakeInto(_pitcherSpr.canvas, halfW - A.sx, top - A.sy, () => drawPitcher(timeMs, pu));
+    _pitcherSpr.key = key;
+    _pitcherSpr.x = A.sx - halfW; _pitcherSpr.y = A.sy - top;
+    _pitcherSpr.w = w; _pitcherSpr.h = h;
+  }
+  ctx.drawImage(_pitcherSpr.canvas, _pitcherSpr.x, _pitcherSpr.y, _pitcherSpr.w, _pitcherSpr.h);
+}
+
+function drawPitcher(timeMs, pu) {
   // Pitcher stands at z ~ 60 ft, on mound
   const center = project(0, 5.8, 60);
   const feet = project(0, 0.6, 60);
   if (!center || !feet) return;
 
-  // dt approximation for windup ramp (small/clamped — we just need a steady ramp)
-  const nowMs = timeMs;
-  if (!pitcherAnim._lastMs) pitcherAnim._lastMs = nowMs;
-  const dt = Math.min(0.05, Math.max(0, (nowMs - pitcherAnim._lastMs) / 1000));
-  pitcherAnim._lastMs = nowMs;
-
-  const { phase, u } = _pitcherPhase(timeMs, dt);
+  // Phase normally comes pre-computed from drawPitcherCached (which owns the
+  // anim clock); compute it here only if called directly.
+  if (!pu) {
+    if (!pitcherAnim._lastMs) pitcherAnim._lastMs = timeMs;
+    const dt = Math.min(0.05, Math.max(0, (timeMs - pitcherAnim._lastMs) / 1000));
+    pitcherAnim._lastMs = timeMs;
+    pu = _pitcherPhase(timeMs, dt);
+  }
+  const { phase, u } = pu;
   const pose = _currentPose(phase, u, timeMs);
 
   // Body scale: noticeably bigger than original. bodyH is the head->feet pixel distance.
@@ -5428,7 +5558,41 @@ function drawPitcher(timeMs) {
 
 // Draw a baseball with shading, two horseshoe seams (facing parens), and
 // perpendicular stitches when the ball is rendered large enough to see them.
+// (Pi perf) The shaded body and the seam overlay are pre-rendered once into
+// sprites at a reference radius; the per-frame cost is two drawImage calls
+// (the seam sprite spins via a cheap transform rotate) instead of ~22 path
+// ops + 3 gradient allocations. All shading scales linearly with r, so the
+// scaled sprite is visually identical.
+const _ballSpr = { R: 48, key: '', base: null, seams: null, seamsSmall: null };
+
+function _ensureBallSprites() {
+  const key = `${DPR}`;
+  if (_ballSpr.key === key && _ballSpr.base) return;
+  _ballSpr.key = key;
+  const R = _ballSpr.R;
+  _ballSpr.base = _makeLayer(R * 4, R * 4);
+  _bakeInto(_ballSpr.base, R * 2, R * 2, () => _drawBaseballBody(R));
+  _ballSpr.seams = _makeLayer(R * 3, R * 3);
+  _bakeInto(_ballSpr.seams, R * 1.5, R * 1.5, () => _drawBaseballSeams(R, true));
+  _ballSpr.seamsSmall = _makeLayer(R * 3, R * 3);
+  _bakeInto(_ballSpr.seamsSmall, R * 1.5, R * 1.5, () => _drawBaseballSeams(R, false));
+}
+
 function drawBaseball(cx, cy, r, rotation = 0) {
+  _ensureBallSprites();
+  ctx.drawImage(_ballSpr.base, cx - 2 * r, cy - 2 * r, 4 * r, 4 * r);
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.rotate(rotation);
+  // Stitches only read at r >= 10 (same threshold the live path used).
+  const seams = r >= 10 ? _ballSpr.seams : _ballSpr.seamsSmall;
+  ctx.drawImage(seams, -1.5 * r, -1.5 * r, 3 * r, 3 * r);
+  ctx.restore();
+}
+
+// Bake source: shaded ball body centred on the origin (used once per load).
+function _drawBaseballBody(r) {
+  const cx = 0, cy = 0;
   // --- Soft contact shadow on lower-right (sits "under" the ball) ---
   ctx.save();
   const cs = ctx.createRadialGradient(
@@ -5480,11 +5644,10 @@ function drawBaseball(cx, cy, r, rotation = 0) {
   ctx.arc(cx - r * 0.04, cy - r * 0.04, r * 0.98, Math.PI * 0.95, Math.PI * 1.85);
   ctx.stroke();
   ctx.restore();
+}
 
-  ctx.save();
-  ctx.translate(cx, cy);
-  ctx.rotate(rotation);
-
+// Bake source: seams (+ optional stitches) centred on the origin, unrotated.
+function _drawBaseballSeams(r, withStitches) {
   const seamColor = '#c0303a';
   const seamW = Math.max(1, r * 0.10);
   ctx.strokeStyle = seamColor;
@@ -5504,7 +5667,7 @@ function drawBaseball(cx, cy, r, rotation = 0) {
   ctx.stroke();
 
   // Stitches: little ticks across each seam, only when the ball is big enough to see them
-  if (r >= 10) {
+  if (withStitches) {
     ctx.lineWidth = Math.max(1, r * 0.06);
     const stitchCount = 7;
     const stitchLen = r * 0.22;
@@ -5530,8 +5693,6 @@ function drawBaseball(cx, cy, r, rotation = 0) {
       ctx.stroke();
     }
   }
-
-  ctx.restore();
 }
 
 // Sample the pitch trajectory at an arbitrary t (used for trail / anticipation).
@@ -5568,15 +5729,17 @@ function drawBall(p, timeMs) {
     const syR = r * (0.28 + height * 0.04);
     // Alpha: stronger when ball is low and near plate.
     const alpha = clamp(0.45 - height * 0.03, 0.18, 0.45);
-    // Outer soft halo
-    const sg = ctx.createRadialGradient(sh.sx, sh.sy, 0, sh.sx, sh.sy, sxR * softness);
-    sg.addColorStop(0, `rgba(0,0,0,${alpha})`);
-    sg.addColorStop(0.6, `rgba(0,0,0,${alpha * 0.35})`);
-    sg.addColorStop(1, 'rgba(0,0,0,0)');
-    ctx.fillStyle = sg;
-    ctx.beginPath();
-    ctx.ellipse(sh.sx, sh.sy, sxR * softness, syR * softness, 0, 0, Math.PI * 2);
-    ctx.fill();
+    // Outer soft halo — baked radial sprite, alpha-modulated (no per-frame
+    // gradient allocation). The source rect crops the circular gradient to
+    // the same vertical band the old ellipse-clipped fill showed.
+    const g = _ensureGlowSprites();
+    const sxRs = sxR * softness, syRs = syR * softness;
+    const sz = g.shadow.width;
+    const band = sz * (syRs / sxRs);
+    ctx.globalAlpha = alpha;
+    ctx.drawImage(g.shadow, 0, (sz - band) * 0.5, sz, band,
+      sh.sx - sxRs, sh.sy - syRs, sxRs * 2, syRs * 2);
+    ctx.globalAlpha = 1;
     // Tight inner core for a defined "right under the ball" pin
     ctx.fillStyle = `rgba(0,0,0,${alpha * 0.55})`;
     ctx.beginPath();
@@ -5627,16 +5790,9 @@ function drawBall(p, timeMs) {
   const trailSteps = Math.round(8 * speedFactor);
   // Time window the trail covers (in fractional flight units).
   const trailWindow = 0.05 * speedFactor;
-  // Each pitch type leaves its own trail tint, so kids learn to READ the
-  // pitch in flight: white heat = fastball, blue dive = curve, etc.
-  const TRAIL_RGB = {
-    fastball:  '255,255,255',
-    curveball: '120,205,255',
-    slider:    '255,140,235',
-    changeup:  '170,255,170',
-    sinker:    '255,190,110',
-  };
-  const trgb = TRAIL_RGB[p.type] || '255,255,255';
+  // Trail tint per pitch type (PITCH_TRAIL_RGB, hoisted) — baked radial
+  // sprites drawn with globalAlpha instead of per-step gradient allocations.
+  const trailSpr = _ensureGlowSprites().trail[p.type] || _ensureGlowSprites().trail.fastball;
   ctx.save();
   // Additive-ish smear: drawn as tinted circles with rising alpha.
   for (let i = trailSteps; i > 0; i--) {
@@ -5649,14 +5805,10 @@ function drawBall(p, timeMs) {
     const fade = 1 - i / trailSteps;
     const alpha = 0.26 * fade * speedFactor;
     const tr = r * (0.55 + 0.45 * fade);
-    const tg = ctx.createRadialGradient(pp.sx, pp.sy, 0, pp.sx, pp.sy, tr);
-    tg.addColorStop(0, `rgba(${trgb},${alpha})`);
-    tg.addColorStop(1, `rgba(${trgb},0)`);
-    ctx.fillStyle = tg;
-    ctx.beginPath();
-    ctx.arc(pp.sx, pp.sy, tr, 0, Math.PI * 2);
-    ctx.fill();
+    ctx.globalAlpha = alpha;
+    ctx.drawImage(trailSpr, pp.sx - tr, pp.sy - tr, tr * 2, tr * 2);
   }
+  ctx.globalAlpha = 1;
   ctx.restore();
 
   // -------------------------------------------------------------------------
@@ -5684,16 +5836,11 @@ function drawBall(p, timeMs) {
   if (p.t < 0.06) {
     const flashFade = 1 - (p.t / 0.06);
     const flashR = r * (2.4 + flashFade * 1.6);
-    const fg = ctx.createRadialGradient(proj.sx, proj.sy, 0, proj.sx, proj.sy, flashR);
-    fg.addColorStop(0, `rgba(255,255,230,${0.75 * flashFade})`);
-    fg.addColorStop(0.4, `rgba(255,250,210,${0.30 * flashFade})`);
-    fg.addColorStop(1, 'rgba(255,250,210,0)');
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
-    ctx.fillStyle = fg;
-    ctx.beginPath();
-    ctx.arc(proj.sx, proj.sy, flashR, 0, Math.PI * 2);
-    ctx.fill();
+    ctx.globalAlpha = flashFade;
+    ctx.drawImage(_ensureGlowSprites().flash,
+      proj.sx - flashR, proj.sy - flashR, flashR * 2, flashR * 2);
     ctx.restore();
   }
 }
@@ -5739,6 +5886,9 @@ function tickSwingFeedback(dt) {
 // ============================================================================
 // Strike zone (improved: 3D volume, 9-cell grid, target cell highlight)
 // ============================================================================
+// (Pi perf) The zone volume, grid and depth edges are static per view/size —
+// baked once into a sprite; only the target-cell highlight is drawn live.
+const _zoneSpr = { key: '', canvas: null, x: 0, y: 0, w: 0, h: 0 };
 function drawStrikeZone() {
   // Always show the zone when a pitch is in flight (or just after until result)
   if (game.state !== 'inflight' && game.state !== 'result') return;
@@ -5767,7 +5917,69 @@ function drawStrikeZone() {
 
   if ([NTL, NTR, NBL, NBR, FTL, FTR, FBL, FBR].some(c => !c)) return;
 
-  ctx.save();
+  const zoneKey = `${W}x${H}x${DPR}|${game.view}`;
+  if (_zoneSpr.key !== zoneKey || !_zoneSpr.canvas) {
+    let zx0 = Infinity, zy0 = Infinity, zx1 = -Infinity, zy1 = -Infinity;
+    for (const c of [NTL, NTR, NBL, NBR, FTL, FTR, FBL, FBR]) {
+      zx0 = Math.min(zx0, c.sx); zx1 = Math.max(zx1, c.sx);
+      zy0 = Math.min(zy0, c.sy); zy1 = Math.max(zy1, c.sy);
+    }
+    zx0 = Math.floor(zx0) - 4; zy0 = Math.floor(zy0) - 4;
+    const zw = Math.ceil(zx1) + 4 - zx0, zh = Math.ceil(zy1) + 4 - zy0;
+    _zoneSpr.canvas = _makeLayer(zw, zh);
+    _zoneSpr.key = zoneKey;
+    _zoneSpr.x = zx0; _zoneSpr.y = zy0; _zoneSpr.w = zw; _zoneSpr.h = zh;
+    _bakeInto(_zoneSpr.canvas, -zx0, -zy0, () => {
+      ctx.save();
+      _drawStrikeZoneStatic(NTL, NTR, NBL, NBR, FTL, FTR, FBL, FBR);
+      ctx.restore();
+    });
+  }
+  ctx.drawImage(_zoneSpr.canvas, _zoneSpr.x, _zoneSpr.y, _zoneSpr.w, _zoneSpr.h);
+
+  // ── When ball is close to plate, highlight the target cell (live) ──
+  if (p && p.t > 0.65) {
+    const fadeIn = Math.min(1, (p.t - 0.65) / 0.25);
+    // Determine which of 3 columns (left/center/right) and 3 rows (top/mid/bot)
+    const cellX = clamp(Math.floor(((p.targetX - X0) / (X1 - X0)) * 3), 0, 2);
+    const cellY = clamp(2 - Math.floor(((p.targetY - Y0) / (Y1 - Y0)) * 3), 0, 2); // flip: row 0=top
+
+    const inZone = inStrikeZone(p.targetX, p.targetY);
+    const cellColor = inZone
+      ? `rgba(255, 80, 80, ${0.28 * fadeIn})`
+      : `rgba(80, 200, 255, ${0.22 * fadeIn})`;
+
+    // Compute screen corners for the highlighted cell on the near face
+    const dxFrac = (X1 - X0) / 3;
+    const dyFrac = (Y1 - Y0) / 3;
+    const cx0 = X0 + cellX * dxFrac;
+    const cx1 = cx0 + dxFrac;
+    const cy0 = Y0 + (2 - cellY) * dyFrac;  // bottom of row (world y, smaller)
+    const cy1 = cy0 + dyFrac;
+
+    const cTL = project(cx0, cy1, Z_NEAR);
+    const cTR = project(cx1, cy1, Z_NEAR);
+    const cBR = project(cx1, cy0, Z_NEAR);
+    const cBL = project(cx0, cy0, Z_NEAR);
+    if (cTL && cTR && cBR && cBL) {
+      ctx.fillStyle = cellColor;
+      ctx.beginPath();
+      ctx.moveTo(cTL.sx, cTL.sy);
+      ctx.lineTo(cTR.sx, cTR.sy);
+      ctx.lineTo(cBR.sx, cBR.sy);
+      ctx.lineTo(cBL.sx, cBL.sy);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+}
+
+// Bake source for the static strike-zone sprite (all faces, grid, edges).
+function _drawStrikeZoneStatic(NTL, NTR, NBL, NBR, FTL, FTR, FBL, FBR) {
+  const X0 = -0.78, X1 = 0.78;
+  const Y0 = 1.55,  Y1 = 3.75;
+  const pitching = (game.view === 'pitching');
+  const Z_NEAR = pitching ? 2.0 : 0.5;
 
   // ── Back face (faintest) ──
   ctx.fillStyle = 'rgba(100, 180, 255, 0.04)';
@@ -5816,42 +6028,6 @@ function drawStrikeZone() {
   ctx.lineTo(NBL.sx, NBL.sy);
   ctx.closePath();
   ctx.fill();
-
-  // ── When ball is close to plate, highlight the target cell ──
-  if (p && p.t > 0.65) {
-    const fadeIn = Math.min(1, (p.t - 0.65) / 0.25);
-    // Determine which of 3 columns (left/center/right) and 3 rows (top/mid/bot)
-    const cellX = clamp(Math.floor(((p.targetX - X0) / (X1 - X0)) * 3), 0, 2);
-    const cellY = clamp(2 - Math.floor(((p.targetY - Y0) / (Y1 - Y0)) * 3), 0, 2); // flip: row 0=top
-
-    const inZone = inStrikeZone(p.targetX, p.targetY);
-    const cellColor = inZone
-      ? `rgba(255, 80, 80, ${0.28 * fadeIn})`
-      : `rgba(80, 200, 255, ${0.22 * fadeIn})`;
-
-    // Compute screen corners for the highlighted cell on the near face
-    const dxFrac = (X1 - X0) / 3;
-    const dyFrac = (Y1 - Y0) / 3;
-    const cx0 = X0 + cellX * dxFrac;
-    const cx1 = cx0 + dxFrac;
-    const cy0 = Y0 + (2 - cellY) * dyFrac;  // bottom of row (world y, smaller)
-    const cy1 = cy0 + dyFrac;
-
-    const cTL = project(cx0, cy1, Z_NEAR);
-    const cTR = project(cx1, cy1, Z_NEAR);
-    const cBR = project(cx1, cy0, Z_NEAR);
-    const cBL = project(cx0, cy0, Z_NEAR);
-    if (cTL && cTR && cBR && cBL) {
-      ctx.fillStyle = cellColor;
-      ctx.beginPath();
-      ctx.moveTo(cTL.sx, cTL.sy);
-      ctx.lineTo(cTR.sx, cTR.sy);
-      ctx.lineTo(cBR.sx, cBR.sy);
-      ctx.lineTo(cBL.sx, cBL.sy);
-      ctx.closePath();
-      ctx.fill();
-    }
-  }
 
   // ── Near face grid lines (9 cells) ──
   const zoneAlpha = 0.35;
@@ -5915,13 +6091,12 @@ function drawStrikeZone() {
   ctx.lineTo(FBL.sx, FBL.sy);
   ctx.closePath();
   ctx.stroke();
-
-  ctx.restore();
 }
 
 // ============================================================================
 // Canvas-drawn overlays: timing meter + pitch type label
 // ============================================================================
+const _timingMeterSpr = { key: '', canvas: null };
 function drawTimingMeter(p) {
   // Only during inflight
   if (!p) return;
@@ -5945,34 +6120,38 @@ function drawTimingMeter(p) {
   ctx.save();
   ctx.globalAlpha = alpha;
 
-  // Track background
-  ctx.fillStyle = 'rgba(0,0,0,0.55)';
-  ctx.fillRect(mX - 2, mY - 2, mW + 4, mH + 4);
-
-  // Perfect window (center 20%)
-  const perfectW = mW * 0.18;
-  const perfectX = mX + mW * 0.5 - perfectW * 0.5;
-  ctx.fillStyle = 'rgba(120,255,120,0.35)';
-  ctx.fillRect(perfectX, mY, perfectW, mH);
-
-  // Good window (center 40%)
-  const goodW = mW * 0.38;
-  const goodX = mX + mW * 0.5 - goodW * 0.5;
-  ctx.fillStyle = 'rgba(255,220,80,0.18)';
-  ctx.fillRect(goodX, mY, goodW, mH);
-
-  // Track base
-  ctx.strokeStyle = 'rgba(255,255,255,0.22)';
-  ctx.lineWidth = 1;
-  ctx.strokeRect(mX, mY, mW, mH);
-
-  // Ideal contact tick (center, z=0)
-  ctx.strokeStyle = 'rgba(120,255,120,0.9)';
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.moveTo(mX + mW * 0.5, mY - 3);
-  ctx.lineTo(mX + mW * 0.5, mY + mH + 3);
-  ctx.stroke();
+  // (Pi perf) Static track (background, perfect/good windows, border, ideal
+  // tick) baked once into a sprite; only the ball indicator + label are live.
+  const tmKey = `${mW}x${mH}|${DPR}`;
+  if (_timingMeterSpr.key !== tmKey || !_timingMeterSpr.canvas) {
+    _timingMeterSpr.key = tmKey;
+    _timingMeterSpr.canvas = _makeLayer(mW + 8, mH + 10);
+    _bakeInto(_timingMeterSpr.canvas, 4, 5, () => {
+      // Track background
+      ctx.fillStyle = 'rgba(0,0,0,0.55)';
+      ctx.fillRect(-2, -2, mW + 4, mH + 4);
+      // Perfect window (center 20%)
+      const perfectW = mW * 0.18;
+      ctx.fillStyle = 'rgba(120,255,120,0.35)';
+      ctx.fillRect(mW * 0.5 - perfectW * 0.5, 0, perfectW, mH);
+      // Good window (center 40%)
+      const goodW = mW * 0.38;
+      ctx.fillStyle = 'rgba(255,220,80,0.18)';
+      ctx.fillRect(mW * 0.5 - goodW * 0.5, 0, goodW, mH);
+      // Track base
+      ctx.strokeStyle = 'rgba(255,255,255,0.22)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(0, 0, mW, mH);
+      // Ideal contact tick (center, z=0)
+      ctx.strokeStyle = 'rgba(120,255,120,0.9)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(mW * 0.5, -3);
+      ctx.lineTo(mW * 0.5, mH + 3);
+      ctx.stroke();
+    });
+  }
+  ctx.drawImage(_timingMeterSpr.canvas, mX - 4, mY - 5, mW + 8, mH + 10);
 
   // Ball position indicator along the meter
   // z goes from 60 (pitcher) to ~-3 (past plate). Map z=8 → left, z=-4 → right
@@ -6033,7 +6212,34 @@ let contactTriggered = false; // track rising edge of contactDone
 // CPU batter render (only in pitching view): full body at the plate.
 // Uses the existing perspective so the figure shrinks with depth, but the bat
 // sweep angles are screen-local for readability.
+// (Pi perf) While idle the batter is pixel-static, so he renders from a
+// cached sprite (1 drawImage). During a swing the original live path runs so
+// the animation is exact.
 // ---------------------------------------------------------------------------
+const _cpuBatterSpr = { key: '', canvas: null, x: 0, y: 0, w: 0, h: 0 };
+function drawCpuBatterCached(timeMs) {
+  const cb = game.cpuBat;
+  if (cb && cb.swinging) { drawCpuBatter(timeMs); return; }
+  const head = project(-2.0, 5.8, 0.6);
+  const feet = project(-2.0, 0.2, 0.6);
+  if (!head || !feet) return;
+  const key = `${W}x${H}x${DPR}`;
+  if (_cpuBatterSpr.key !== key || !_cpuBatterSpr.canvas) {
+    const cx = (head.sx + feet.sx) * 0.5;
+    const bodyH = Math.max(40, feet.sy - head.sy);
+    const halfW = Math.ceil(bodyH * 0.85) + 12;   // bat tip reaches ~0.6·bodyH sideways
+    const top = Math.ceil(bodyH * 0.35) + 12;     // bat cocked over the shoulder
+    const bot = Math.ceil(bodyH * 1.05) + 12;     // down past the cleats
+    const w = halfW * 2, h = top + bot;
+    _cpuBatterSpr.canvas = _makeLayer(w, h);
+    _cpuBatterSpr.key = key;
+    _cpuBatterSpr.x = cx - halfW; _cpuBatterSpr.y = head.sy - top;
+    _cpuBatterSpr.w = w; _cpuBatterSpr.h = h;
+    _bakeInto(_cpuBatterSpr.canvas, halfW - cx, top - head.sy, () => drawCpuBatter(0));
+  }
+  ctx.drawImage(_cpuBatterSpr.canvas, _cpuBatterSpr.x, _cpuBatterSpr.y, _cpuBatterSpr.w, _cpuBatterSpr.h);
+}
+
 function drawCpuBatter(timeMs) {
   // Position: right-handed batter stands on the LEFT side of the plate (from
   // pitcher's POV that puts him on the SCREEN-LEFT, x≈-2.0). Heel is at z≈0.5.
@@ -6187,6 +6393,7 @@ function drawCpuBatter(timeMs) {
 // Pitching view foreground: over-the-shoulder hint + faint catcher far-away.
 // Drawn after the ball + fielders so it sits on top of the field.
 // ---------------------------------------------------------------------------
+const _pitchFgSpr = { key: '', canvas: null, y: 0 };
 function drawPitchingForeground(timeMs) {
   // Pitcher's right shoulder + arm in the lower-right foreground.
   // Phases: rest (0) → cocked (0.5) → release (1).
@@ -6204,21 +6411,50 @@ function drawPitchingForeground(timeMs) {
   const S = Math.min(W, H);
   ctx.save();
 
-  // Lower-right shoulder silhouette — keep it modest so it doesn't eat the frame
+  // (Pi perf) The shoulder + glove-arm silhouettes are static per canvas size —
+  // baked once into a bottom-band layer. Only the throwing arm draws live.
   const anchorX = W * 0.82;
   const anchorY = H + S * 0.05;
   const shoulderRX = S * 0.36;
   const shoulderRY = S * 0.30;
-  ctx.fillStyle = '#cfd5e2';
-  ctx.beginPath();
-  ctx.ellipse(anchorX, anchorY, shoulderRX, shoulderRY, 0, 0, Math.PI * 2);
-  ctx.fill();
-  // Subtle shadow on the jersey edge
-  ctx.strokeStyle = 'rgba(20,30,60,0.30)';
-  ctx.lineWidth = 4;
-  ctx.beginPath();
-  ctx.ellipse(anchorX, anchorY, shoulderRX, shoulderRY, 0, Math.PI, Math.PI * 2);
-  ctx.stroke();
+  const fgKey = `${W}x${H}x${DPR}`;
+  if (_pitchFgSpr.key !== fgKey || !_pitchFgSpr.canvas) {
+    const y0 = Math.floor(H - S * 0.25 - 6);
+    _pitchFgSpr.canvas = _makeLayer(W, H - y0);
+    _pitchFgSpr.key = fgKey;
+    _pitchFgSpr.y = y0;
+    _bakeInto(_pitchFgSpr.canvas, 0, -y0, () => {
+      // Lower-right shoulder silhouette — keep it modest so it doesn't eat the frame
+      ctx.fillStyle = '#cfd5e2';
+      ctx.beginPath();
+      ctx.ellipse(anchorX, anchorY, shoulderRX, shoulderRY, 0, 0, Math.PI * 2);
+      ctx.fill();
+      // Subtle shadow on the jersey edge
+      ctx.strokeStyle = 'rgba(20,30,60,0.30)';
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      ctx.ellipse(anchorX, anchorY, shoulderRX, shoulderRY, 0, Math.PI, Math.PI * 2);
+      ctx.stroke();
+      // Glove arm (lower-left foreground) — small jersey + glove peek.
+      // Disjoint from the throwing arm's sweep, so baking it under the arm
+      // is pixel-identical to the old draw order.
+      ctx.fillStyle = '#cfd5e2';
+      ctx.beginPath();
+      ctx.ellipse(W * 0.06, H + S * 0.02, S * 0.22, S * 0.18, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#4a2e14';
+      ctx.beginPath();
+      ctx.ellipse(W * 0.13, H * 0.99, S * 0.07, S * 0.06, -0.2, 0, Math.PI * 2);
+      ctx.fill();
+      // Glove webbing highlight
+      ctx.fillStyle = 'rgba(255, 220, 170, 0.35)';
+      ctx.beginPath();
+      ctx.ellipse(W * 0.13, H * 0.985, S * 0.04, S * 0.025, -0.2, 0, Math.PI * 2);
+      ctx.fill();
+    });
+  }
+  ctx.drawImage(_pitchFgSpr.canvas, 0, _pitchFgSpr.y,
+    W, H - _pitchFgSpr.y);
 
   // ── Throwing arm: shoulder → elbow → wrist with jersey sleeve + bare forearm ──
   // Shoulder pivot sits at the upper-left curve of the silhouette
@@ -6331,21 +6567,6 @@ function drawPitchingForeground(timeMs) {
     ctx.stroke();
   }
 
-  // Glove arm (lower-left foreground) — small jersey + glove peek
-  ctx.fillStyle = '#cfd5e2';
-  ctx.beginPath();
-  ctx.ellipse(W * 0.06, H + S * 0.02, S * 0.22, S * 0.18, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = '#4a2e14';
-  ctx.beginPath();
-  ctx.ellipse(W * 0.13, H * 0.99, S * 0.07, S * 0.06, -0.2, 0, Math.PI * 2);
-  ctx.fill();
-  // Glove webbing highlight
-  ctx.fillStyle = 'rgba(255, 220, 170, 0.35)';
-  ctx.beginPath();
-  ctx.ellipse(W * 0.13, H * 0.985, S * 0.04, S * 0.025, -0.2, 0, Math.PI * 2);
-  ctx.fill();
-
   ctx.restore();
 }
 
@@ -6373,85 +6594,28 @@ function drawPitchAimMarker() {
   ctx.restore();
 }
 
-function drawForeground(timeMs) {
-  const swingT = game.bat.swingT;
-  const swinging = game.bat.swinging;
-  const lastResult = game.lastResult;
+// (Pi perf) Batting-view foreground layers:
+//  - catcher + umpire silhouettes: static per canvas size → baked band layer
+//  - the detailed bat (forearms, gloves, knob, grip, barrel, grain, logo):
+//    baked once in bat-local coordinates, then translate/rotate + 1 drawImage
+//    per frame (it used to cost ~45 path ops + 6 gradient allocations/frame)
+//  - batter helmet rim + earflap (drawn OVER the bat): second static layer
+const _batFgSpr = { key: '', catcher: null, cy: 0, helmet: null, hy: 0 };
+const _batSpr = { key: '', canvas: null, x0: -56, y0: -26, w: 0, h: 0 };
 
-  // ---- Bat geometry ----
-  // Right-handed batter: bat is cocked over the back-RIGHT shoulder at rest,
-  // sweeps across the body, and follows through over the LEFT shoulder.
-  // From the camera-behind-plate POV that means tip at upper-right at rest,
-  // through near-vertical at contact, and upper-left at follow-through.
-  const handX = W * 0.54;
-  const handY = H * 0.88 - (game.bat.aimY || 0) * 36;
-  const restA = -Math.PI * 0.28;   // upper-right (over back shoulder)
-  const endA  = -Math.PI * 0.82;   // upper-left (follow-through)
-  let bAngle = restA;
-  if (swinging) {
-    bAngle = lerp(restA, endA, ease(swingT));
-  }
+function _ensureBatSprite(batLenRaw) {
+  const batLen = Math.round(batLenRaw);
+  const key = `${batLen}|${DPR}`;
+  if (_batSpr.key === key && _batSpr.canvas) return;
+  _batSpr.key = key;
+  _batSpr.w = batLen + 82 - _batSpr.x0;
+  _batSpr.h = 26 - _batSpr.y0;
+  _batSpr.canvas = _makeLayer(_batSpr.w, _batSpr.h);
+  _bakeInto(_batSpr.canvas, -_batSpr.x0, -_batSpr.y0, () => _drawBatLocal(batLen));
+}
 
-  const f_proj = Math.min(W, H * 1.6) * 0.75;
-  const ballYAtPlate = H * CAM.horizonFrac + (CAM.height - 2.5) * f_proj / CAM.back;
-  // Tune barrel length so the bat tip sweeps through the ball's plate Y at contact (angle ≈ -π/2)
-  const desiredLen = handY - ballYAtPlate;
-  const batLen = Math.max(170, Math.min(H * 0.55, desiredLen - 70));
-
-  // Knob is at pivot offset -32 along local x; barrel tip is at 70 + batLen
-  // Convert bat tip to screen for motion-blur and whiff trail
-  const cosA = Math.cos(bAngle), sinA = Math.sin(bAngle);
-  function localToScreen(lx, ly) {
-    return { x: handX + lx * cosA - ly * sinA, y: handY + lx * sinA + ly * cosA };
-  }
-  const barrelTip = localToScreen(70 + batLen + 6, 0);
-  const barrelMid = localToScreen(70 + batLen * 0.55, 0);
-
-  // ---- Spawn contact particles on rising edge ----
-  const isContact = game.bat.contactDone && lastResult && lastResult.kind !== 'whiff';
-  if (isContact && !contactTriggered) {
-    contactTriggered = true;
-    const sparkProj = project(0, 2.6, 0);
-    const sx = sparkProj ? sparkProj.sx : W * 0.5;
-    const sy = sparkProj ? sparkProj.sy : H * 0.52;
-    const isHard = lastResult.kind === 'homerun' || lastResult.kind === 'triple';
-    const count = isHard ? 32 : 20;
-    contactParticles = [];
-    for (let i = 0; i < count; i++) {
-      const a = Math.random() * Math.PI * 2;
-      const spd = 60 + Math.random() * (isHard ? 280 : 160);
-      contactParticles.push({
-        x: sx, y: sy,
-        vx: Math.cos(a) * spd,
-        vy: Math.sin(a) * spd - (isHard ? 40 : 20),
-        life: 1.0,
-        decay: 1.4 + Math.random() * 1.2,
-        r: 1.5 + Math.random() * (isHard ? 4.5 : 3.0),
-        hue: Math.random() < 0.65 ? 50 : (Math.random() < 0.5 ? 20 : 0),
-        bright: true,
-        isLine: Math.random() < 0.45,
-        lineLen: 8 + Math.random() * 22,
-      });
-    }
-  }
-  if (!game.bat.contactDone) {
-    contactTriggered = false;
-  }
-
-  // ---- Spawn whiff trail on miss ----
-  if (game.bat.contactDone && lastResult && lastResult.kind === 'whiff' && !contactTriggered) {
-    contactTriggered = true;
-    // A quick slash mark — a few streaks where the barrel passed
-    whiffTrails = [];
-    for (let i = 0; i < 4; i++) {
-      const frac = 0.3 + i * 0.17;
-      const lx = 70 + batLen * frac;
-      const tip = localToScreen(lx, (i % 2 === 0 ? -4 : 4));
-      whiffTrails.push({ x: tip.x, y: tip.y, life: 1.0, decay: 4.5 });
-    }
-  }
-
-  // ---- Draw catcher silhouette ----
+// Bake source: catcher + umpire silhouettes (static per canvas size).
+function _drawCatcherUmpire() {
   // Catcher crouched at home plate — back of helmet + hunched body + mitt
   const catcherCX = W * 0.5;
   // Bottom-of-screen blob base — the catcher body
@@ -6537,6 +6701,127 @@ function drawForeground(timeMs) {
   ctx.beginPath();
   ctx.roundRect(umpX - umpHeadR * 0.92, umpHeadY - umpHeadR * 0.72, umpHeadR * 1.84, umpHeadR * 1.4, 3);
   ctx.stroke();
+}
+
+// Bake source: batter helmet rim + earflap (drawn OVER the bat, static).
+function _drawBatterHelmetRim() {
+  // A dark elliptical arc representing the top edge of the batter's helmet
+  const helmRimCX = W * 0.5 + W * 0.04; // slight right offset (right-handed batter)
+  const helmRimY = H + 10;              // just below screen bottom
+  const helmRimRX = W * 0.38;
+  const helmRimRY = H * 0.22;
+  // Main helmet dome silhouette
+  ctx.fillStyle = '#0c0c14';
+  ctx.beginPath();
+  ctx.ellipse(helmRimCX, helmRimY, helmRimRX, helmRimRY, 0, Math.PI, Math.PI * 2);
+  ctx.fill();
+  // Slight sheen on helmet surface
+  ctx.strokeStyle = 'rgba(80,80,140,0.22)';
+  ctx.lineWidth = 2.5;
+  ctx.beginPath();
+  ctx.ellipse(helmRimCX - helmRimRX * 0.1, helmRimY - helmRimRY * 0.3,
+    helmRimRX * 0.55, helmRimRY * 0.18, -0.1, Math.PI * 1.05, Math.PI * 1.55);
+  ctx.stroke();
+
+  // Earflap — left side (facing pitcher, right-handed batter)
+  const eflap_cx = W * 0.5 - W * 0.28;
+  const eflap_cy = H + 4;
+  ctx.fillStyle = '#0e0e1a';
+  ctx.beginPath();
+  ctx.ellipse(eflap_cx, eflap_cy, W * 0.09, H * 0.09, -0.4, Math.PI, Math.PI * 2.15);
+  ctx.fill();
+}
+
+function drawForeground(timeMs) {
+  const swingT = game.bat.swingT;
+  const swinging = game.bat.swinging;
+  const lastResult = game.lastResult;
+
+  // ---- Bat geometry ----
+  // Right-handed batter: bat is cocked over the back-RIGHT shoulder at rest,
+  // sweeps across the body, and follows through over the LEFT shoulder.
+  // From the camera-behind-plate POV that means tip at upper-right at rest,
+  // through near-vertical at contact, and upper-left at follow-through.
+  const handX = W * 0.54;
+  const handY = H * 0.88 - (game.bat.aimY || 0) * 36;
+  const restA = -Math.PI * 0.28;   // upper-right (over back shoulder)
+  const endA  = -Math.PI * 0.82;   // upper-left (follow-through)
+  let bAngle = restA;
+  if (swinging) {
+    bAngle = lerp(restA, endA, ease(swingT));
+  }
+
+  const f_proj = Math.min(W, H * 1.6) * 0.75;
+  const ballYAtPlate = H * CAM.horizonFrac + (CAM.height - 2.5) * f_proj / CAM.back;
+  // Tune barrel length so the bat tip sweeps through the ball's plate Y at contact (angle ≈ -π/2)
+  const desiredLen = handY - ballYAtPlate;
+  const batLen = Math.max(170, Math.min(H * 0.55, desiredLen - 70));
+
+  // Knob is at pivot offset -32 along local x; barrel tip is at 70 + batLen
+  // Convert bat tip to screen for motion-blur and whiff trail
+  const cosA = Math.cos(bAngle), sinA = Math.sin(bAngle);
+  function localToScreen(lx, ly) {
+    return { x: handX + lx * cosA - ly * sinA, y: handY + lx * sinA + ly * cosA };
+  }
+  const barrelTip = localToScreen(70 + batLen + 6, 0);
+  const barrelMid = localToScreen(70 + batLen * 0.55, 0);
+
+  // ---- Spawn contact particles on rising edge ----
+  const isContact = game.bat.contactDone && lastResult && lastResult.kind !== 'whiff';
+  if (isContact && !contactTriggered) {
+    contactTriggered = true;
+    const sparkProj = project(0, 2.6, 0);
+    const sx = sparkProj ? sparkProj.sx : W * 0.5;
+    const sy = sparkProj ? sparkProj.sy : H * 0.52;
+    const isHard = lastResult.kind === 'homerun' || lastResult.kind === 'triple';
+    const count = isHard ? 32 : 20;
+    contactParticles = [];
+    for (let i = 0; i < count; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const spd = 60 + Math.random() * (isHard ? 280 : 160);
+      contactParticles.push({
+        x: sx, y: sy,
+        vx: Math.cos(a) * spd,
+        vy: Math.sin(a) * spd - (isHard ? 40 : 20),
+        life: 1.0,
+        decay: 1.4 + Math.random() * 1.2,
+        r: 1.5 + Math.random() * (isHard ? 4.5 : 3.0),
+        hue: Math.random() < 0.65 ? 50 : (Math.random() < 0.5 ? 20 : 0),
+        bright: true,
+        isLine: Math.random() < 0.45,
+        lineLen: 8 + Math.random() * 22,
+      });
+    }
+  }
+  if (!game.bat.contactDone) {
+    contactTriggered = false;
+  }
+
+  // ---- Spawn whiff trail on miss ----
+  if (game.bat.contactDone && lastResult && lastResult.kind === 'whiff' && !contactTriggered) {
+    contactTriggered = true;
+    // A quick slash mark — a few streaks where the barrel passed
+    whiffTrails = [];
+    for (let i = 0; i < 4; i++) {
+      const frac = 0.3 + i * 0.17;
+      const lx = 70 + batLen * frac;
+      const tip = localToScreen(lx, (i % 2 === 0 ? -4 : 4));
+      whiffTrails.push({ x: tip.x, y: tip.y, life: 1.0, decay: 4.5 });
+    }
+  }
+
+  // ---- Catcher + umpire silhouettes (baked static layer) ----
+  const fgKey = `${W}x${H}x${DPR}`;
+  if (_batFgSpr.key !== fgKey || !_batFgSpr.catcher) {
+    _batFgSpr.key = fgKey;
+    _batFgSpr.cy = Math.max(0, Math.floor(Math.min(H * 0.755 - W * 0.022, H * 0.77 - 22) - 10));
+    _batFgSpr.catcher = _makeLayer(W, H - _batFgSpr.cy);
+    _bakeInto(_batFgSpr.catcher, 0, -_batFgSpr.cy, _drawCatcherUmpire);
+    _batFgSpr.hy = Math.max(0, Math.floor(H * 0.78));
+    _batFgSpr.helmet = _makeLayer(W, H - _batFgSpr.hy);
+    _bakeInto(_batFgSpr.helmet, 0, -_batFgSpr.hy, _drawBatterHelmetRim);
+  }
+  ctx.drawImage(_batFgSpr.catcher, 0, _batFgSpr.cy, W, H - _batFgSpr.cy);
 
   // ---- Bat motion-blur streaks during fast part of swing ----
   if (swinging && swingT > 0.25 && swingT < 0.75) {
@@ -6562,11 +6847,23 @@ function drawForeground(timeMs) {
     }
   }
 
-  // ---- Draw the bat ----
+  // ---- Draw the bat — pre-baked sprite, spun with a cheap transform ----
+  _ensureBatSprite(batLen);
   ctx.save();
   ctx.translate(handX, handY);
   ctx.rotate(bAngle);
+  ctx.drawImage(_batSpr.canvas, _batSpr.x0, _batSpr.y0, _batSpr.w, _batSpr.h);
+  ctx.restore();
 
+  // ---- Helmet rim + earflap (baked, drawn over the bat) ----
+  ctx.drawImage(_batFgSpr.helmet, 0, _batFgSpr.hy, W, H - _batFgSpr.hy);
+
+  _drawForegroundFx(timeMs);
+}
+
+// Bake source: the detailed bat + forearms/gloves in bat-local coordinates
+// (origin = hand pivot, +x toward the barrel tip, unrotated).
+function _drawBatLocal(batLen) {
   // --- Forearms (two, side by side) ---
   // Bottom hand forearm (left in grip)
   const skinLight = '#d4a870';
@@ -6783,36 +7080,10 @@ function drawForeground(timeMs) {
   ctx.fillText('N', logoX, logoY);
 
   ctx.restore(); // end grain clip
+}
 
-  ctx.restore(); // end bat transform
-
-  // ---- Helmet rim hint — curved silhouette at very bottom of screen ----
-  // A dark elliptical arc representing the top edge of the batter's helmet
-  const helmRimCX = W * 0.5 + W * 0.04; // slight right offset (right-handed batter)
-  const helmRimY = H + 10;              // just below screen bottom
-  const helmRimRX = W * 0.38;
-  const helmRimRY = H * 0.22;
-  // Main helmet dome silhouette
-  ctx.fillStyle = '#0c0c14';
-  ctx.beginPath();
-  ctx.ellipse(helmRimCX, helmRimY, helmRimRX, helmRimRY, 0, Math.PI, Math.PI * 2);
-  ctx.fill();
-  // Slight sheen on helmet surface
-  ctx.strokeStyle = 'rgba(80,80,140,0.22)';
-  ctx.lineWidth = 2.5;
-  ctx.beginPath();
-  ctx.ellipse(helmRimCX - helmRimRX * 0.1, helmRimY - helmRimRY * 0.3,
-    helmRimRX * 0.55, helmRimRY * 0.18, -0.1, Math.PI * 1.05, Math.PI * 1.55);
-  ctx.stroke();
-
-  // Earflap — left side (facing pitcher, right-handed batter)
-  const eflap_cx = W * 0.5 - W * 0.28;
-  const eflap_cy = H + 4;
-  ctx.fillStyle = '#0e0e1a';
-  ctx.beginPath();
-  ctx.ellipse(eflap_cx, eflap_cy, W * 0.09, H * 0.09, -0.4, Math.PI, Math.PI * 2.15);
-  ctx.fill();
-
+// Contact particles / shockwave ring / whiff trail — live transient effects.
+function _drawForegroundFx(timeMs) {
   // ---- Update & draw contact particles ----
   if (contactParticles.length > 0) {
     const dt = 1 / 60; // approximate per-frame
@@ -6998,12 +7269,49 @@ function tickFielders(dt, timeMs) {
   }
 }
 
+// Persistent draw-order array (re-sorted in place — no per-frame allocation).
+let _fielderDrawOrder = null;
 function drawFielders(timeMs) {
+  if (!_fielderDrawOrder) _fielderDrawOrder = fielders.slice();
   // Draw back-to-front (largest z first) for correct overlap.
-  const sorted = fielders.slice().sort((a, b) => b.z - a.z);
-  for (const f of sorted) {
-    drawFielder(f, timeMs);
+  _fielderDrawOrder.sort((a, b) => b.z - a.z);
+  for (const f of _fielderDrawOrder) {
+    drawFielderCached(f, timeMs);
   }
+}
+
+// (Pi perf) A standing fielder is pixel-static, so each fielder keeps a small
+// cached sprite (2 drawImage-able: shadow + body baked together) anchored at
+// his ground position. Any fielder that is animating — running, catching,
+// jumping, or reacting to a homer — falls back to the original live path
+// drawing so the motion stays exact.
+function drawFielderCached(f, timeMs) {
+  if (f.id === 'C') return;
+  const animating = f.catching || f.frustrated || f.jump > 0 ||
+    (f.moveDur > 0 && f.moveT < 1);
+  if (animating) { drawFielder(f, timeMs); return; }
+
+  const A = project(f.x, 0, f.z);      // ground anchor
+  const feet = project(f.x, 0.4, f.z);
+  const head = project(f.x, 5.6, f.z);
+  if (!A || !feet || !head) { drawFielder(f, timeMs); return; }
+  const bodyH = Math.max(14, feet.sy - head.sy);
+
+  const key = `${f.x.toFixed(1)}|${f.z.toFixed(1)}|${W}x${H}x${DPR}|${game.view}`;
+  if (f._sprKey !== key) {
+    const halfW = Math.ceil(bodyH * 0.6) + 10;
+    const top = Math.ceil(bodyH * 1.7) + 10;
+    const bot = Math.ceil(bodyH * 0.25) + 8;
+    const w = halfW * 2, h = top + bot;
+    if (!f._spr) f._spr = document.createElement('canvas');
+    f._spr.width = Math.max(1, Math.ceil(w * DPR));
+    f._spr.height = Math.max(1, Math.ceil(h * DPR));
+    // Bake with the idle bob frozen at t=0 (amplitude is sub-pixel).
+    _bakeInto(f._spr, halfW - A.sx, top - A.sy, () => drawFielder(f, 0));
+    f._sprKey = key;
+    f._sprW = w; f._sprH = h; f._sprAX = halfW; f._sprAY = top;
+  }
+  ctx.drawImage(f._spr, A.sx - f._sprAX, A.sy - f._sprAY, f._sprW, f._sprH);
 }
 
 function drawFielder(f, timeMs) {
@@ -7586,7 +7894,14 @@ function drawHitBall() {
 // ============================================================================
 // Mini diamond (bases display) — broadcast style
 // ============================================================================
+let _diamondKey = null;
 function drawDiamond() {
+  // (Pi perf) The mini diamond only changes when base occupancy changes or a
+  // runner animation is playing — skip the (small-canvas) redraw otherwise.
+  const dKey = `${game.bases[0] ? 1 : 0}${game.bases[1] ? 1 : 0}${game.bases[2] ? 1 : 0}`;
+  if (runnerAnims.length === 0 && dKey === _diamondKey) return;
+  _diamondKey = runnerAnims.length > 0 ? null : dKey;
+
   const c = dctx;
   c.clearRect(0, 0, 220, 220);
 
