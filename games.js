@@ -47,5 +47,13 @@ window.GAMES_DATA = [
     "status": "PRESS START",
     "icon": "rocket",
     "source": "https://screamrocket.onrender.com/"
+  },
+  {
+    "slug": "hiss-and-run",
+    "title": "HISS & RUN",
+    "genre": "TRAFFIC",
+    "status": "PRESS START",
+    "icon": "snake",
+    "source": "https://hissandrun.onrender.com/"
   }
 ];
