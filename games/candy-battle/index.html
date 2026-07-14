@@ -42,6 +42,7 @@ const BOARD_PX = COLS * STEP - GAP;   // 426
 const BOARD_PY = ROWS * STEP - GAP;   // 426
 const P1_BX  = 20;
 const P2_BX  = CW - 20 - BOARD_PX;   // 834
+const SOLO_BX = Math.floor((CW - BOARD_PX) / 2); // 427 — centered board for solo
 const BOARD_TOP = Math.floor((CH - BOARD_PY) / 2) + 38; // ~189
 
 const T_GUMDROP=0, T_STAR=1, T_HEART=2, T_SWIRL=3, T_JELLY=4;
@@ -55,21 +56,26 @@ const CANDY_DARK   = ['#B03060','#A07000','#A02020','#5B2C6F','#1A7A40'];
 const CANDY_LIGHT  = ['#FFB3D1','#FFED80','#FF9999','#D7BDE2','#82E0AA'];
 
 const MATCH_TIME = 150000; // 2:30
-const WIN_SCORE  = 5000;
+const WIN_SCORE  = 3000;   // sudden-victory threshold (kid-reachable; timer decides otherwise)
 const RUBBER_BAND_DELTA = 500;
+const CPU_METER_RATE = 0.4; // easy CPU fills its choco meter slowly → garbage attacks are rare
 const METER_MAX = 1000;
 const FALL_SPD  = 1100;   // px per second
 
-// CPU cadence: think-time before planning a move. The visible cursor walk
-// (~0.11s/cell) adds ~0.5-1.3s on top, so the effective pace stays kid-fair.
-const CPU_SLOW_MIN=800,  CPU_SLOW_MAX=1600;
-const CPU_FAST_MIN=300,  CPU_FAST_MAX=800;
+// CPU cadence: think-time before planning a move. Deliberately gentle so the
+// kids win comfortably — the visible cursor walk (~0.11s/cell) adds more on top.
+const CPU_SLOW_MIN=2600, CPU_SLOW_MAX=4200;
+const CPU_FAST_MIN=1900, CPU_FAST_MAX=2900;
 
 const MAX_PARTICLES = 200;
 const MAX_POPUPS    = 20;
 
 // Game states
 const S_TITLE=0, S_MATCH=1, S_PAUSED=2, S_WINNER=3;
+
+// Modes
+const MODE_SOLO=0, MODE_CPU=1, MODE_2P=2;
+const MODE_NAMES=['SOLO','VS CPU','2 PLAYERS'];
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CANVAS
@@ -1101,11 +1107,11 @@ class Board {
 class CPU {
   constructor(board){
     this.board=board;
-    this.timer=2.0;
+    this.timer=2.6;
     this.move=null;   // planned [c1,r1,c2,r2]
     this.stepT=0;     // delay between visible cursor steps
   }
-  reset(){ this.timer=2.0; this.move=null; }
+  reset(){ this.timer=2.6; this.move=null; }
   update(dt, fast){
     const b=this.board;
     if(!b.idle()){ this.move=null; return; }
@@ -1226,14 +1232,17 @@ function inRect(x,y,rx,ry,rw,rh){ return x>=rx&&x<rx+rw&&y>=ry&&y<ry+rh; }
 function pointerMenu(wx,wy){
   if(inRect(wx,wy,CW-52,8,42,26)){ Audio.init(); Audio.toggleMute(); return true; }
   if(gameState===S_TITLE){
-    if(inRect(wx,wy,CW/2-250,385,200,54)){ Audio.init(); startMatch(false); }
-    else if(inRect(wx,wy,CW/2+50,385,200,54)){ Audio.init(); startMatch(true); }
+    // Tap a mode row to launch it (rows mirror drawTitle's layout)
+    const btnY=352, rowH=46, bw=300, bx=CW/2-bw/2;
+    for(let i=0;i<3;i++){
+      if(inRect(wx,wy,bx,btnY+i*rowH,bw,rowH-8)){ Audio.init(); menuSel=i; startMatch(i); return true; }
+    }
     return true;
   }
   if(gameState===S_PAUSED){ gameState=S_MATCH; Audio.bgStart(); return true; }
   if(gameState===S_WINNER){
     if(inRect(wx,wy,CW/2-220,CH/2+54,440,30)){ gameState=S_TITLE; gameBoard1=gameBoard2=gameCPU=null; }
-    else { winnerTimer=0; startMatch(twoPlayer); }
+    else { winnerTimer=0; startMatch(gameMode); }
     return true;
   }
   return false;
@@ -1307,21 +1316,32 @@ canvas.addEventListener('mouseup',e=>{
 let gameState = S_TITLE;
 let gameBoard1=null, gameBoard2=null, gameCPU=null;
 let matchTimer=MATCH_TIME;
+let gameMode=MODE_SOLO;   // MODE_SOLO | MODE_CPU | MODE_2P
+let soloMode=false;
 let twoPlayer=false;
+let menuSel=0;            // highlighted title option (0..2)
 let winnerIdx=-1;
 let winnerTimer=0;
+let newBest=false;
 let titleAnim=0;
-let p2JoinSecs=-1; // P2 mid-solo join request: second at which ✕ was pressed
+let p2JoinSecs=-1; // P2 mid-match join request (CPU mode only): second at which ✕ was pressed
 
-function startMatch(vs){
-  twoPlayer=vs;
+function startMatch(mode){
+  gameMode=mode;
+  soloMode=(mode===MODE_SOLO);
+  twoPlayer=(mode===MODE_2P);
   p2JoinSecs=-1;
-  gameBoard1=new Board(P1_BX,0);
-  gameBoard2=new Board(P2_BX,1);
-  // Wire attack callbacks
-  gameBoard1.attackCallback=(cols)=>{ if(gameBoard2) gameBoard2.addChocoChunks(cols); };
-  gameBoard2.attackCallback=(cols)=>{ if(gameBoard1) gameBoard1.addChocoChunks(cols); };
-  gameCPU=vs?null:new CPU(gameBoard2);
+  gameBoard1=new Board(soloMode?SOLO_BX:P1_BX,0);
+  if(soloMode){
+    // Relaxed single-board mode: no opponent, no incoming garbage.
+    gameBoard2=null; gameCPU=null;
+    gameBoard1.attackCallback=null;
+  } else {
+    gameBoard2=new Board(P2_BX,1);
+    gameBoard1.attackCallback=(cols)=>{ if(gameBoard2) gameBoard2.addChocoChunks(cols); };
+    gameBoard2.attackCallback=(cols)=>{ if(gameBoard1) gameBoard1.addChocoChunks(cols); };
+    gameCPU=(mode===MODE_CPU)?new CPU(gameBoard2):null;
+  }
   matchTimer=MATCH_TIME;
   winnerIdx=-1;
   gameState=S_MATCH;
@@ -1411,11 +1431,23 @@ function drawStars(t){
 // ═══════════════════════════════════════════════════════════════════════════════
 function updateTitle(dt){
   titleAnim+=dt;
-  // Input
-  if(inp1.jSouth||inp1.jStart){ Audio.init(); startMatch(false); return; }
-  if(inp2.jSouth||inp2.jStart){ Audio.init(); startMatch(true); return; }
-  if(keys['Digit1']&&!prevKeys['Digit1']){ Audio.init(); startMatch(false); return; }
-  if(keys['Digit2']&&!prevKeys['Digit2']){ Audio.init(); startMatch(true); return; }
+
+  // P1 navigates the mode list (either axis works — kids mash directions)
+  if(inp1.jUp||inp1.jLt)   menuSel=(menuSel+2)%3;
+  if(inp1.jDn||inp1.jRt)   menuSel=(menuSel+1)%3;
+  // P2 can nudge the highlight too
+  if(inp2.jUp||inp2.jLt)   menuSel=(menuSel+2)%3;
+  if(inp2.jDn||inp2.jRt)   menuSel=(menuSel+1)%3;
+
+  // P1 confirms the highlighted mode
+  if(inp1.jSouth||inp1.jStart){ Audio.init(); startMatch(menuSel); return; }
+  // P2 pressing ✕ jumps straight into a 2-player match (drop-in convention)
+  if(inp2.jSouth||inp2.jStart){ Audio.init(); startMatch(MODE_2P); return; }
+
+  // Keyboard shortcuts: 1=solo, 2=vs cpu, 3=2P
+  if(keys['Digit1']&&!prevKeys['Digit1']){ Audio.init(); startMatch(MODE_SOLO); return; }
+  if(keys['Digit2']&&!prevKeys['Digit2']){ Audio.init(); startMatch(MODE_CPU);  return; }
+  if(keys['Digit3']&&!prevKeys['Digit3']){ Audio.init(); startMatch(MODE_2P);   return; }
   if(keys['KeyM']&&!prevKeys['KeyM']) Audio.toggleMute();
 }
 
@@ -1445,33 +1477,39 @@ function drawTitle(){
     ctx.drawImage(sprites[t][sp],-CELL/2,-CELL/2); ctx.restore();
   }
 
-  // Buttons
-  const btnY=385;
+  // Mode list — navigable (the selected row glows + shows a ▸ marker)
+  const btnY=352, rowH=46, bw=300, bx=CW/2-bw/2;
+  const subs=['JUST YOU · BEAT YOUR BEST','EASY COMPUTER','TWO PLAYERS · HEAD TO HEAD'];
+  const cols=['#FF6B9D','#FFD700','#35E0FF'];
   ctx.save(); ctx.textAlign='center';
-  // 1P
-  const p1=0.8+0.2*Math.sin(titleAnim*3.5);
-  ctx.fillStyle=`rgba(255,107,157,${p1})`; ctx.fillRect(CW/2-250,btnY,200,54);
-  ctx.strokeStyle='rgba(255,255,255,0.7)'; ctx.lineWidth=2; ctx.strokeRect(CW/2-250,btnY,200,54);
-  ctx.font="15px 'Press Start 2P',monospace"; ctx.fillStyle='#fff';
-  ctx.fillText('1P SOLO',CW/2-150,btnY+33);
-  // 2P
-  const p2=0.8+0.2*Math.sin(titleAnim*3.5+1.2);
-  ctx.fillStyle=`rgba(53,224,255,${p2})`; ctx.fillRect(CW/2+50,btnY,200,54);
-  ctx.strokeStyle='rgba(255,255,255,0.7)'; ctx.lineWidth=2; ctx.strokeRect(CW/2+50,btnY,200,54);
-  ctx.fillStyle='#fff'; ctx.fillText('2P VS',CW/2+150,btnY+33);
+  for(let i=0;i<3;i++){
+    const y=btnY+i*rowH, sel=(i===menuSel);
+    const pulse=sel?0.55+0.45*Math.sin(titleAnim*5):0.2;
+    ctx.fillStyle=sel?`rgba(255,255,255,${0.12+0.10*Math.sin(titleAnim*5)})`:'rgba(255,255,255,0.05)';
+    ctx.fillRect(bx,y,bw,rowH-8);
+    ctx.strokeStyle=sel?cols[i]:'rgba(255,255,255,0.18)';
+    ctx.lineWidth=sel?3:1.5; ctx.strokeRect(bx,y,bw,rowH-8);
+    ctx.font="15px 'Press Start 2P',monospace";
+    ctx.fillStyle=sel?'#fff':'rgba(255,255,255,0.55)';
+    ctx.fillText(MODE_NAMES[i],CW/2,y+22);
+    if(sel){
+      ctx.fillStyle=cols[i];
+      ctx.fillText('▸',bx-2,y+22);
+      ctx.font="7px 'Press Start 2P',monospace"; ctx.fillStyle='rgba(255,255,255,0.7)';
+      ctx.fillText(subs[i],CW/2,y+34);
+    }
+  }
 
+  const hy=btnY+3*rowH+8;
   ctx.font="9px 'Press Start 2P',monospace"; ctx.fillStyle='rgba(200,200,200,0.85)';
-  ctx.fillText('P1: ✕ / SPACE TO START',CW/2,btnY+75);
+  ctx.fillText('▲▼ PICK    ✕ / START — GO',CW/2,hy);
   const jp=0.55+0.45*Math.sin(titleAnim*4);
   ctx.fillStyle=`rgba(53,224,255,${jp})`;
-  ctx.fillText('P2 PRESS ✕ TO JOIN',CW/2,btnY+94);
+  ctx.fillText('OR P2 PRESS ✕ TO JOIN 2P',CW/2,hy+18);
 
   const best=localStorage.getItem('candybattle_best')||'0';
   ctx.fillStyle='#FFD700'; ctx.font="10px 'Press Start 2P',monospace";
-  ctx.fillText('BEST: '+best,CW/2,btnY+120);
-
-  ctx.fillStyle='#666'; ctx.font="9px 'Press Start 2P',monospace";
-  ctx.fillText('M = MUTE',CW/2,btnY+142);
+  ctx.fillText('BEST: '+best,CW/2,hy+42);
   ctx.restore();
 
   drawMuteBtn();
@@ -1488,11 +1526,12 @@ function updateMatch(dt){
     gameState=S_PAUSED; Audio.bgStop(); return;
   }
 
-  // P2 drop-in mid-solo: ✕ requests join; CPU swaps out at the next second
-  if(!twoPlayer){
+  // P2 drop-in (CPU mode only): ✕ requests join; CPU swaps out at the next second.
+  // Solo stays solo (single centered board); 2P is already two humans.
+  if(gameMode===MODE_CPU){
     if(inp2.jSouth&&p2JoinSecs<0) p2JoinSecs=Math.floor(matchTimer/1000);
     if(p2JoinSecs>=0&&Math.floor(matchTimer/1000)<p2JoinSecs){
-      twoPlayer=true; gameCPU=null; p2JoinSecs=-1;
+      gameMode=MODE_2P; twoPlayer=true; gameCPU=null; p2JoinSecs=-1;
       gameBoard2.selOn=false;
       spawnPop(P2_BX+BOARD_PX/2,BOARD_TOP+BOARD_PY/2,'P2 JOINED!','#35E0FF');
     }
@@ -1500,36 +1539,47 @@ function updateMatch(dt){
 
   // P1 input
   handleCursorMove(gameBoard1,inp1);
-  // P2 input
+  // P2 input (versus modes only)
   if(twoPlayer) handleCursorMove(gameBoard2,inp2);
 
-  // Rubber-band: trailing player's chocolate meter charges 25% faster
-  gameBoard1.meterRate=(gameBoard2.score>gameBoard1.score+RUBBER_BAND_DELTA)?1.25:1;
-  gameBoard2.meterRate=(gameBoard1.score>gameBoard2.score+RUBBER_BAND_DELTA)?1.25:1;
+  if(soloMode){
+    gameBoard1.meterRate=1;
+    gameBoard1.update(dt);
+  } else {
+    // Rubber-band: trailing player's chocolate meter charges 25% faster
+    gameBoard1.meterRate=(gameBoard2.score>gameBoard1.score+RUBBER_BAND_DELTA)?1.25:1;
+    gameBoard2.meterRate=(gameBoard1.score>gameBoard2.score+RUBBER_BAND_DELTA)?1.25:1;
+    // Easy CPU fills its choco meter slowly so it rarely dumps garbage on the kid
+    if(gameCPU) gameBoard2.meterRate*=CPU_METER_RATE;
 
-  // CPU (speeds up a little when trailing)
-  const cpuTrailing=(gameBoard1.score>gameBoard2.score+RUBBER_BAND_DELTA);
-  if(!twoPlayer&&gameCPU) gameCPU.update(dt,cpuTrailing);
+    // CPU (speeds up a little when trailing)
+    const cpuTrailing=(gameBoard1.score>gameBoard2.score+RUBBER_BAND_DELTA);
+    if(gameCPU) gameCPU.update(dt,cpuTrailing);
 
-  // Board ticks
-  gameBoard1.update(dt);
-  gameBoard2.update(dt);
+    gameBoard1.update(dt);
+    gameBoard2.update(dt);
+  }
 
   // Mute
   if(keys['KeyM']&&!prevKeys['KeyM']) Audio.toggleMute();
 
   // Win check
   let w=-1;
-  if(gameBoard1.score>=WIN_SCORE) w=0;
-  else if(gameBoard2.score>=WIN_SCORE) w=1;
-  else if(matchTimer<=0) w=(gameBoard1.score>=gameBoard2.score)?0:1;
+  if(soloMode){
+    if(matchTimer<=0) w=0;                         // solo: clock runs out → show score
+  } else {
+    if(gameBoard1.score>=WIN_SCORE) w=0;
+    else if(gameBoard2.score>=WIN_SCORE) w=1;
+    else if(matchTimer<=0) w=(gameBoard1.score>=gameBoard2.score)?0:1;
+  }
   if(w>=0){
     winnerIdx=w; gameState=S_WINNER; winnerTimer=0;
     Audio.bgStop(); Audio.winnerSfx(); spawnConfetti();
     // Best score is human-only: CPU runs don't set records
     const best=twoPlayer?Math.max(gameBoard1.score,gameBoard2.score):gameBoard1.score;
     const prev=parseInt(localStorage.getItem('candybattle_best')||'0');
-    if(best>prev) localStorage.setItem('candybattle_best',String(best));
+    newBest=best>prev;
+    if(newBest) localStorage.setItem('candybattle_best',String(best));
   }
 }
 
@@ -1585,11 +1635,52 @@ function drawMatchHUD(){
   drawMeter(P2_BX,my,gameBoard2.meter,gameBoard2.mFlash,1);
 }
 
+function drawSoloHUD(){
+  ctx.save(); ctx.textAlign='center';
+  const cx=SOLO_BX+BOARD_PX/2;
+
+  // Score above the board
+  ctx.font="10px 'Press Start 2P',monospace"; ctx.fillStyle='#FF6B9D';
+  ctx.fillText('SCORE',cx,BOARD_TOP-52);
+  ctx.font="30px 'Press Start 2P',monospace"; ctx.fillStyle='#fff';
+  ctx.fillText(gameBoard1.score,cx,BOARD_TOP-18);
+
+  const midY=BOARD_TOP+BOARD_PY/2;
+
+  // TIME panel — left of the board
+  const lx=Math.floor(SOLO_BX/2);
+  const secs=Math.max(0,Math.floor(matchTimer/1000));
+  const tm=`${Math.floor(secs/60)}:${String(secs%60).padStart(2,'0')}`;
+  const tcolor=matchTimer<30000?(Math.sin(Date.now()*0.012)>0?'#FF4444':'#fff'):'#FFD700';
+  ctx.font="11px 'Press Start 2P',monospace"; ctx.fillStyle='#888';
+  ctx.fillText('TIME',lx,midY-24);
+  ctx.font="26px 'Press Start 2P',monospace"; ctx.fillStyle=tcolor;
+  ctx.fillText(tm,lx,midY+12);
+
+  // BEST panel — right of the board
+  const rx=SOLO_BX+BOARD_PX+Math.floor((CW-(SOLO_BX+BOARD_PX))/2);
+  const best=localStorage.getItem('candybattle_best')||'0';
+  ctx.font="11px 'Press Start 2P',monospace"; ctx.fillStyle='#888';
+  ctx.fillText('BEST',rx,midY-24);
+  ctx.font="16px 'Press Start 2P',monospace"; ctx.fillStyle='#FFD700';
+  ctx.fillText(best,rx,midY+8);
+  ctx.restore();
+
+  // Meter under the board — full triggers a positive "sugar rush" self-clear
+  const my=BOARD_TOP+BOARD_PY+12;
+  drawMeter(SOLO_BX,my,gameBoard1.meter,gameBoard1.mFlash,0);
+}
+
 function drawMatch(){
   drawMatchBg();
-  gameBoard1.draw(true,  true);
-  gameBoard2.draw(false, twoPlayer||true); // always show CPU cursor
-  drawMatchHUD();
+  if(soloMode){
+    gameBoard1.draw(true,true);
+    drawSoloHUD();
+  } else {
+    gameBoard1.draw(true,  true);
+    gameBoard2.draw(false, true); // always show P2/CPU cursor
+    drawMatchHUD();
+  }
   drawParts();
   drawPops();
   drawMuteBtn();
@@ -1630,7 +1721,7 @@ function updateWinner(dt){
   winnerTimer+=dt;
   tickConfetti(dt);
   if(inp1.jSouth||inp2.jSouth){        // rematch from ANY pad
-    winnerTimer=0;startMatch(twoPlayer);
+    winnerTimer=0;startMatch(gameMode);
   } else if(inp1.jEast||inp2.jEast){   // back to title
     winnerTimer=0;gameState=S_TITLE;gameBoard1=gameBoard2=gameCPU=null;
   }
@@ -1644,8 +1735,8 @@ function drawWinner(){
   const wpc=winnerIdx===0?'#FF6B9D':'#35E0FF';
   ctx.strokeStyle=wpc; ctx.lineWidth=3; ctx.strokeRect(CW/2-340,CH/2-168,680,262);
   drawConfetti();
-  const wname=winnerIdx===0?'P1 WINS!':(twoPlayer?'P2 WINS!':'CPU WINS!');
-  const wcol=winnerIdx===0?'#FF6B9D':'#35E0FF';
+  const wname=soloMode?"TIME'S UP!":(winnerIdx===0?'P1 WINS!':(twoPlayer?'P2 WINS!':'CPU WINS!'));
+  const wcol=soloMode?'#FFD700':(winnerIdx===0?'#FF6B9D':'#35E0FF');
   const pulse=1+0.06*Math.sin(winnerTimer*5.5);
   ctx.save(); ctx.textAlign='center';
   ctx.save();
@@ -1655,8 +1746,21 @@ function drawWinner(){
   ctx.fillStyle=wcol; ctx.fillText(wname,0,0);
   ctx.restore();
 
-  ctx.font="18px 'Press Start 2P',monospace"; ctx.fillStyle='#fff';
-  ctx.fillText(`P1: ${gameBoard1.score}     ${twoPlayer?'P2':'CPU'}: ${gameBoard2.score}`,CW/2,CH/2-20);
+  if(soloMode){
+    ctx.font="18px 'Press Start 2P',monospace"; ctx.fillStyle='#fff';
+    ctx.fillText(`SCORE: ${gameBoard1.score}`,CW/2,CH/2-24);
+    ctx.font="12px 'Press Start 2P',monospace";
+    if(newBest){
+      const nb=0.5+0.5*Math.sin(winnerTimer*7);
+      ctx.fillStyle=`rgba(255,215,0,${nb})`; ctx.fillText('★ NEW BEST! ★',CW/2,CH/2+4);
+    } else {
+      ctx.fillStyle='#FFD700';
+      ctx.fillText('BEST: '+(localStorage.getItem('candybattle_best')||'0'),CW/2,CH/2+4);
+    }
+  } else {
+    ctx.font="18px 'Press Start 2P',monospace"; ctx.fillStyle='#fff';
+    ctx.fillText(`P1: ${gameBoard1.score}     ${twoPlayer?'P2':'CPU'}: ${gameBoard2.score}`,CW/2,CH/2-20);
+  }
 
   ctx.font="12px 'Press Start 2P',monospace"; ctx.fillStyle='#FFD700';
   ctx.fillText('✕ / SPACE — REMATCH',CW/2,CH/2+42);
@@ -1721,11 +1825,16 @@ window.__cb={
   get b2(){return gameBoard2;},
   get cpu(){return gameCPU;},
   get twoP(){return twoPlayer;},
+  get mode(){return gameMode;},
+  get solo(){return soloMode;},
+  get menuSel(){return menuSel;},
+  set menuSel(v){menuSel=v;},
+  start(m){startMatch(m);},
   get winner(){return winnerIdx;},
   get timer(){return matchTimer;},
   set timer(v){matchTimer=v;},
   pops, parts,
-  C:{COLS,ROWS,T_EMPTY,T_CHOCO,SP_NONE,SP_STRIPE_H,SP_STRIPE_V,SP_WRAPPED,METER_MAX,WIN_SCORE},
+  C:{COLS,ROWS,T_EMPTY,T_CHOCO,SP_NONE,SP_STRIPE_H,SP_STRIPE_V,SP_WRAPPED,METER_MAX,WIN_SCORE,MODE_SOLO,MODE_CPU,MODE_2P},
 };
 </script>
 <!-- injected by scripts/bundle-games.sh — back-to-arcade overlay -->
