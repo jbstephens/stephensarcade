@@ -63,8 +63,9 @@ count. Use the `/new-game` skill for the full checklist.
 
 - `node --check` the extracted inline JS.
 - Headless Chrome + CDP harness with stubbed `navigator.getGamepads`
-  (fake standard-mapping pads injected before page scripts): drive every
-  state — menus, gameplay, pause/resume, death, restart, 2P join/down —
+  (fake standard-mapping pads injected before page scripts) — ALWAYS
+  launch test Chrome with `--mute-audio` (headless still plays sound
+  through the host Mac's speakers otherwise): drive every state — menus, gameplay, pause/resume, death, restart, 2P join/down —
   asserting zero console errors. Keyboard-only regression too.
 - Instrument the 2D context prototype to count per-frame ops vs budget.
 - CDP screenshots at 1280x720 (plus tablet/phone if UI changed) — actually
