@@ -63,5 +63,13 @@ window.GAMES_DATA = [
     "status": "PRESS START",
     "icon": "nyan",
     "source": "https://nyancatracing.onrender.com/"
+  },
+  {
+    "slug": "candy-battle",
+    "title": "CANDY BATTLE",
+    "genre": "MATCH-3",
+    "status": "PRESS START",
+    "icon": "candy",
+    "source": "https://candybattle.onrender.com/"
   }
 ];

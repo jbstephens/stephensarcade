@@ -1,0 +1,1805 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Candy Battle">
+<title>Candy Battle</title>
+<link rel="icon" href="data:,">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+<script src="https://ses.q5labs.co/lib/controller.js"></script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box;-webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent;-webkit-touch-callout:none;}
+html,body{width:100%;height:100%;overflow:hidden;background:#0a0a1a;touch-action:none;}
+#game{position:fixed;inset:0;display:block;}
+</style>
+<!-- Google Analytics — injected by scripts/inject-back-button.py at bundle time -->
+<script id="__arcade_ga" async src="https://www.googletagmanager.com/gtag/js?id=G-T7N4WEJJEL"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+  gtag('config', 'G-T7N4WEJJEL');
+</script>
+
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+'use strict';
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CONSTANTS
+// ═══════════════════════════════════════════════════════════════════════════════
+const CW = 1280, CH = 720;
+const COLS = 8, ROWS = 8;
+const CELL = 52, GAP = 2, STEP = CELL + GAP;
+const BOARD_PX = COLS * STEP - GAP;   // 426
+const BOARD_PY = ROWS * STEP - GAP;   // 426
+const P1_BX  = 20;
+const P2_BX  = CW - 20 - BOARD_PX;   // 834
+const BOARD_TOP = Math.floor((CH - BOARD_PY) / 2) + 38; // ~189
+
+const T_GUMDROP=0, T_STAR=1, T_HEART=2, T_SWIRL=3, T_JELLY=4;
+const T_EMPTY=5, T_CHOCO=6;
+const NUM_TYPES = 5;
+
+const SP_NONE=0, SP_STRIPE_H=1, SP_STRIPE_V=2, SP_WRAPPED=3;
+
+const CANDY_COLORS = ['#FF6B9D','#FFD700','#FF4444','#9B59B6','#2ECC71'];
+const CANDY_DARK   = ['#B03060','#A07000','#A02020','#5B2C6F','#1A7A40'];
+const CANDY_LIGHT  = ['#FFB3D1','#FFED80','#FF9999','#D7BDE2','#82E0AA'];
+
+const MATCH_TIME = 150000; // 2:30
+const WIN_SCORE  = 5000;
+const RUBBER_BAND_DELTA = 500;
+const METER_MAX = 1000;
+const FALL_SPD  = 1100;   // px per second
+
+// CPU cadence: think-time before planning a move. The visible cursor walk
+// (~0.11s/cell) adds ~0.5-1.3s on top, so the effective pace stays kid-fair.
+const CPU_SLOW_MIN=800,  CPU_SLOW_MAX=1600;
+const CPU_FAST_MIN=300,  CPU_FAST_MAX=800;
+
+const MAX_PARTICLES = 200;
+const MAX_POPUPS    = 20;
+
+// Game states
+const S_TITLE=0, S_MATCH=1, S_PAUSED=2, S_WINNER=3;
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CANVAS
+// ═══════════════════════════════════════════════════════════════════════════════
+const canvas = document.getElementById('game');
+const ctx    = canvas.getContext('2d');
+canvas.width = CW; canvas.height = CH;
+
+function resize() {
+  const s = Math.min(window.innerWidth/CW, window.innerHeight/CH);
+  canvas.style.cssText = `position:fixed;left:${(window.innerWidth-CW*s)/2}px;top:${(window.innerHeight-CH*s)/2}px;width:${CW*s}px;height:${CH*s}px;display:block;`;
+}
+resize();
+window.addEventListener('resize', resize);
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SPRITE PRE-RENDER
+// ═══════════════════════════════════════════════════════════════════════════════
+// sprites[type][special_flag 0-3]
+const sprites = [];
+const sprChoco    = document.createElement('canvas');
+const sprChocoBar = document.createElement('canvas');
+
+(function buildSprites() {
+  const S = CELL;
+  function mc() { const c=document.createElement('canvas'); c.width=c.height=S; return c; }
+
+  function star5(g, cx, cy, outer, inner) {
+    g.beginPath();
+    for (let i=0;i<10;i++){
+      const a=(i*Math.PI/5)-Math.PI/2;
+      const r=i%2===0?outer:inner;
+      const x=cx+Math.cos(a)*r, y=cy+Math.sin(a)*r;
+      if(i===0) g.moveTo(x,y); else g.lineTo(x,y);
+    }
+    g.closePath();
+  }
+
+  function heart(g, cx, cy, r) {
+    const s=r*0.88;
+    g.beginPath();
+    g.moveTo(cx, cy+s*0.38);
+    g.bezierCurveTo(cx+s,cy-s*0.1, cx+s,cy-s*0.88, cx,cy-s*0.26);
+    g.bezierCurveTo(cx-s,cy-s*0.88, cx-s,cy-s*0.1, cx,cy+s*0.38);
+    g.closePath();
+  }
+
+  function bean(g, cx, cy, r) {
+    g.beginPath();
+    g.ellipse(cx+r*0.05, cy, r*0.62, r*0.84, Math.PI*0.08, 0, Math.PI*2);
+    g.closePath();
+  }
+
+  const SHAPES = ['circle','star','heart','swirl','bean'];
+
+  for (let t=0; t<NUM_TYPES; t++) {
+    sprites[t] = [];
+    const col=CANDY_COLORS[t], dark=CANDY_DARK[t], light=CANDY_LIGHT[t];
+    const shape=SHAPES[t];
+
+    for (let sp=0; sp<=3; sp++) {
+      const c = mc(); const g = c.getContext('2d');
+      const cx=S/2, cy=S/2, r=S/2-3;
+
+      // Main shape fill
+      if      (shape==='circle') { g.beginPath(); g.arc(cx,cy,r,0,Math.PI*2); g.closePath(); }
+      else if (shape==='star')   { star5(g,cx,cy,r,r*0.44); }
+      else if (shape==='heart')  { heart(g,cx,cy,r); }
+      else if (shape==='swirl')  { g.beginPath(); g.arc(cx,cy,r,0,Math.PI*2); g.closePath(); }
+      else if (shape==='bean')   { bean(g,cx,cy,r); }
+      g.fillStyle = col; g.fill();
+      g.strokeStyle = dark; g.lineWidth=2; g.stroke();
+
+      // Radial highlight (no shadowBlur)
+      const hg=g.createRadialGradient(cx-r*0.3,cy-r*0.35,r*0.05,cx,cy,r);
+      hg.addColorStop(0,'rgba(255,255,255,0.78)');
+      hg.addColorStop(0.35,'rgba(255,255,255,0.18)');
+      hg.addColorStop(1,'rgba(0,0,0,0.22)');
+      g.fillStyle=hg;
+      if(shape==='circle'||shape==='swirl'){g.beginPath();g.arc(cx,cy,r,0,Math.PI*2);g.fill();}
+      else g.fill();
+
+      // Swirl decoration
+      if (shape==='swirl') {
+        g.save();g.globalCompositeOperation='source-over';
+        g.strokeStyle=light; g.lineWidth=2.5; g.lineCap='round';
+        g.beginPath();
+        for(let a=0;a<Math.PI*1.6;a+=0.07){
+          const pr=(a/(Math.PI*1.6))*r*0.78;
+          const px=cx+Math.cos(a)*pr, py=cy+Math.sin(a)*pr;
+          if(a<0.07) g.moveTo(px,py); else g.lineTo(px,py);
+        }
+        g.stroke(); g.restore();
+      }
+
+      // Specular
+      g.beginPath(); g.arc(cx-r*0.32,cy-r*0.36,r*0.13,0,Math.PI*2);
+      g.fillStyle='rgba(255,255,255,0.82)'; g.fill();
+
+      // Special overlays
+      if (sp===SP_STRIPE_H) {
+        g.globalAlpha=0.55;
+        for(let i=0;i<3;i++){g.fillStyle=light;g.fillRect(3,S*0.22+i*S*0.25,S-6,5);}
+        g.globalAlpha=1;
+      } else if (sp===SP_STRIPE_V) {
+        g.globalAlpha=0.55;
+        for(let i=0;i<3;i++){g.fillStyle=light;g.fillRect(S*0.22+i*S*0.25,3,5,S-6);}
+        g.globalAlpha=1;
+      } else if (sp===SP_WRAPPED) {
+        const rg=g.createRadialGradient(cx,cy,r*0.35,cx,cy,r);
+        rg.addColorStop(0,'rgba(255,255,255,0)');
+        rg.addColorStop(0.75,'rgba(255,255,255,0)');
+        rg.addColorStop(1,'rgba(255,255,255,0.65)');
+        g.fillStyle=rg;
+        g.beginPath();g.arc(cx,cy,r,0,Math.PI*2);g.fill();
+        g.fillStyle='#fff';
+        [[cx-r*0.6,cy-r*0.6],[cx+r*0.6,cy-r*0.6],[cx-r*0.6,cy+r*0.6],[cx+r*0.6,cy+r*0.6]]
+          .forEach(([sx,sy])=>{g.beginPath();g.arc(sx,sy,2.5,0,Math.PI*2);g.fill();});
+      }
+      sprites[t][sp] = c;
+    }
+  }
+
+  // Chocolate block
+  sprChoco.width=sprChoco.height=CELL;
+  {
+    const g=sprChoco.getContext('2d');
+    g.fillStyle='#6B3410'; g.beginPath(); g.roundRect(1,1,CELL-2,CELL-2,6); g.fill();
+    g.strokeStyle='#3D1C06'; g.lineWidth=2;
+    g.beginPath();g.moveTo(CELL/2,2);g.lineTo(CELL/2,CELL-2);g.stroke();
+    g.beginPath();g.moveTo(2,CELL/2);g.lineTo(CELL-2,CELL/2);g.stroke();
+    const hg=g.createLinearGradient(0,0,0,CELL);
+    hg.addColorStop(0,'rgba(255,190,130,0.32)');hg.addColorStop(0.5,'rgba(255,190,130,0)');
+    g.fillStyle=hg; g.beginPath(); g.roundRect(1,1,CELL-2,CELL-2,6); g.fill();
+  }
+
+  // Chocolate bar slab (full board width × 3 rows)
+  const BW=BOARD_PX, BH=3*STEP-GAP;
+  sprChocoBar.width=BW; sprChocoBar.height=BH;
+  {
+    const g=sprChocoBar.getContext('2d');
+    g.fillStyle='#7B4A1E'; g.fillRect(0,0,BW,BH);
+    g.strokeStyle='#3D1C06'; g.lineWidth=3;
+    for(let c=1;c<COLS;c++){const x=c*STEP-GAP/2;g.beginPath();g.moveTo(x,0);g.lineTo(x,BH);g.stroke();}
+    for(let r=1;r<3;r++){const y=r*STEP-GAP/2;g.beginPath();g.moveTo(0,y);g.lineTo(BW,y);g.stroke();}
+    // Gold foil
+    g.fillStyle='#C8940F'; g.fillRect(0,0,BW,15);
+    const wg=g.createLinearGradient(0,0,BW,0);
+    wg.addColorStop(0,'rgba(255,248,180,0)');wg.addColorStop(0.3,'rgba(255,248,180,0.65)');wg.addColorStop(0.7,'rgba(255,248,180,0)');
+    g.fillStyle=wg; g.fillRect(0,0,BW,15);
+    // Overall sheen
+    const sg=g.createLinearGradient(0,0,0,BH);
+    sg.addColorStop(0,'rgba(255,200,140,0.28)');sg.addColorStop(0.5,'rgba(255,200,140,0)');sg.addColorStop(1,'rgba(0,0,0,0.32)');
+    g.fillStyle=sg; g.fillRect(0,0,BW,BH);
+    g.strokeStyle='#1E0900'; g.lineWidth=4; g.strokeRect(2,2,BW-4,BH-4);
+  }
+})();
+
+// Pre-rendered cursor / selection / meter sprites (zero per-frame path ops)
+const sprCursor=[document.createElement('canvas'),document.createElement('canvas')];
+const sprSel=document.createElement('canvas');
+const sprMeter=[document.createElement('canvas'),document.createElement('canvas')];
+(function buildUISprites(){
+  const CURSOR_COLORS=['#FFFFFF','#35E0FF'];
+  for(let k=0;k<2;k++){
+    const c=sprCursor[k]; c.width=c.height=CELL+2;
+    const g=c.getContext('2d');
+    g.strokeStyle=CURSOR_COLORS[k]; g.lineWidth=3;
+    g.strokeRect(2,2,CELL-2,CELL-2);
+    g.lineWidth=4; const tk=9;
+    const corners=[[1,1],[CELL+1,1],[1,CELL+1],[CELL+1,CELL+1]];
+    const dirs=[[1,1],[-1,1],[1,-1],[-1,-1]];
+    for(let i=0;i<4;i++){
+      const [cx2,cy2]=corners[i]; const [dx,dy]=dirs[i];
+      g.beginPath();
+      g.moveTo(cx2,cy2+dy*tk); g.lineTo(cx2,cy2); g.lineTo(cx2+dx*tk,cy2);
+      g.stroke();
+    }
+  }
+  sprSel.width=sprSel.height=CELL;
+  { const g=sprSel.getContext('2d');
+    g.strokeStyle='#FFD700'; g.lineWidth=4; g.strokeRect(4,4,CELL-8,CELL-8); }
+  const METER_COLORS=['#FF6B9D','#35E0FF'];
+  for(let k=0;k<2;k++){
+    const c=sprMeter[k]; c.width=BOARD_PX; c.height=14;
+    const g=c.getContext('2d');
+    const mg=g.createLinearGradient(0,0,BOARD_PX,0);
+    mg.addColorStop(0,METER_COLORS[k]); mg.addColorStop(1,'#ffffff');
+    g.fillStyle=mg; g.fillRect(0,0,BOARD_PX,14);
+  }
+})();
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// AUDIO
+// ═══════════════════════════════════════════════════════════════════════════════
+const Audio = (function(){
+  let ac=null, bgTimeout=null, noteIdx=0;
+  let muted = localStorage.getItem('candybattle_mute')==='1';
+
+  function init() {
+    if(ac) return;
+    try{ ac=new(window.AudioContext||window.webkitAudioContext)(); }catch(e){}
+  }
+
+  function osc(freq,type,vol,dur,t0){
+    if(!ac||muted) return;
+    const o=ac.createOscillator(), g=ac.createGain();
+    o.type=type; o.frequency.value=freq;
+    g.gain.setValueAtTime(vol,t0);
+    g.gain.exponentialRampToValueAtTime(0.0001,t0+dur);
+    o.connect(g);g.connect(ac.destination);
+    o.start(t0);o.stop(t0+dur+0.01);
+  }
+
+  function pop(combo){
+    init();
+    if(!ac||muted) return;
+    const t=ac.currentTime;
+    const base=280+combo*90;
+    osc(base,'sine',0.3,0.09,t);
+    osc(base*1.5,'triangle',0.18,0.07,t+0.04);
+    if(combo>0) osc(base*2,'sine',0.12,0.05,t+0.07);
+  }
+
+  function fail(){
+    init();
+    if(!ac||muted) return;
+    const t=ac.currentTime;
+    osc(160,'triangle',0.22,0.09,t);
+    osc(120,'triangle',0.18,0.1,t+0.07);
+  }
+
+  function meterFull(){
+    init();
+    if(!ac||muted) return;
+    const t=ac.currentTime;
+    [523,659,784,1047].forEach((f,i)=>osc(f,'square',0.22,0.12,t+i*0.1));
+  }
+
+  function crunch(){
+    init();
+    if(!ac||muted) return;
+    const t=ac.currentTime;
+    const o=ac.createOscillator(), g=ac.createGain();
+    o.type='sawtooth';
+    o.frequency.setValueAtTime(100,t);
+    o.frequency.exponentialRampToValueAtTime(28,t+0.55);
+    g.gain.setValueAtTime(0.55,t);g.gain.exponentialRampToValueAtTime(0.0001,t+0.65);
+    o.connect(g);g.connect(ac.destination);o.start(t);o.stop(t+0.7);
+    osc(440,'square',0.32,0.06,t);
+    osc(220,'sawtooth',0.38,0.18,t+0.06);
+    osc(660,'sine',0.2,0.04,t+0.02);
+  }
+
+  function winnerSfx(){
+    init();
+    if(!ac||muted) return;
+    const t=ac.currentTime;
+    [523,659,784,1047,1319,1568].forEach((f,i)=>osc(f,'square',0.24,0.16,t+i*0.11));
+  }
+
+  const MELODY=[262,330,392,523,440,392,330,262,294,370,440,587,523,440,392,349,
+                330,415,494,659,587,494,415,330,349,440,523,698,659,523,440,392];
+  function bgStart(){
+    init();
+    if(!ac||bgTimeout) return;
+    const tick=()=>{
+      if(!ac||muted){bgTimeout=null;return;}
+      const f=MELODY[noteIdx%MELODY.length], nd=0.21;
+      osc(f,'square',0.055,nd*0.82,ac.currentTime);
+      noteIdx++;
+      bgTimeout=setTimeout(tick, nd*1000);
+    };
+    tick();
+  }
+  function bgStop(){if(bgTimeout){clearTimeout(bgTimeout);bgTimeout=null;}}
+
+  function toggleMute(){
+    muted=!muted;
+    localStorage.setItem('candybattle_mute',muted?'1':'0');
+    if(muted) bgStop();
+    else bgStart();
+    return muted;
+  }
+
+  return{init,pop,fail,meterFull,crunch,winnerSfx,bgStart,bgStop,toggleMute,get muted(){return muted;}};
+})();
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PARTICLE POOL
+// ═══════════════════════════════════════════════════════════════════════════════
+const parts = [];
+for(let i=0;i<MAX_PARTICLES;i++) parts.push({x:0,y:0,vx:0,vy:0,color:'#fff',r:4,life:0,maxLife:1,on:false});
+
+function spawnParts(x,y,color,n){
+  let s=0;
+  for(let i=0;i<parts.length&&s<n;i++){
+    if(!parts[i].on){
+      const p=parts[i];p.on=true;p.x=x;p.y=y;p.color=color;
+      p.r=2.5+Math.random()*5;
+      const a=Math.random()*Math.PI*2, sp=60+Math.random()*190;
+      p.vx=Math.cos(a)*sp;p.vy=Math.sin(a)*sp-90;
+      p.life=0.5+Math.random()*0.45;p.maxLife=p.life;s++;
+    }
+  }
+}
+
+function tickParts(dt){
+  for(let i=0;i<parts.length;i++){
+    const p=parts[i];if(!p.on) continue;
+    p.x+=p.vx*dt;p.y+=p.vy*dt;p.vy+=310*dt;p.life-=dt;
+    if(p.life<=0) p.on=false;
+  }
+}
+
+function drawParts(){
+  for(let i=0;i<parts.length;i++){
+    const p=parts[i];if(!p.on) continue;
+    const a=Math.max(0,p.life/p.maxLife);
+    const s=p.r*a;
+    ctx.globalAlpha=a;ctx.fillStyle=p.color;
+    ctx.fillRect(p.x-s,p.y-s,s*2,s*2);
+  }
+  ctx.globalAlpha=1;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// POPUP POOL
+// ═══════════════════════════════════════════════════════════════════════════════
+const pops = [];
+for(let i=0;i<MAX_POPUPS;i++) pops.push({x:0,y:0,text:'',color:'#fff',life:0,maxLife:1,scale:1,on:false});
+
+function spawnPop(x,y,text,color){
+  for(let i=0;i<pops.length;i++){
+    if(!pops[i].on){
+      const p=pops[i];p.on=true;p.x=x;p.y=y;p.text=text;p.color=color;
+      p.life=1.1;p.maxLife=1.1;p.scale=0.4;return;
+    }
+  }
+}
+
+function tickPops(dt){
+  for(let i=0;i<pops.length;i++){
+    const p=pops[i];if(!p.on) continue;
+    p.life-=dt;p.y-=38*dt;p.scale=Math.min(1.1,p.scale+dt*4.5);
+    if(p.life<=0) p.on=false;
+  }
+}
+
+function drawPops(){
+  ctx.save();ctx.textAlign='center';
+  ctx.font="bold 13px 'Press Start 2P',monospace";
+  for(let i=0;i<pops.length;i++){
+    const p=pops[i];if(!p.on) continue;
+    const a=Math.min(1,(p.life/(p.maxLife*0.45)));
+    ctx.globalAlpha=a;
+    ctx.save();ctx.translate(p.x,p.y);ctx.scale(p.scale,p.scale);
+    ctx.fillStyle='#000';ctx.fillText(p.text,2,2);
+    ctx.fillStyle=p.color;ctx.fillText(p.text,0,0);
+    ctx.restore();
+  }
+  ctx.globalAlpha=1;ctx.restore();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CONFETTI
+// ═══════════════════════════════════════════════════════════════════════════════
+const confetti=[];
+for(let i=0;i<80;i++) confetti.push({x:0,y:0,vx:0,vy:0,color:'#fff',w:0,h:0,rot:0,rv:0,on:false});
+
+function spawnConfetti(){
+  for(let i=0;i<confetti.length;i++){
+    const c=confetti[i];c.on=true;
+    c.x=Math.random()*CW;c.y=-20-Math.random()*180;
+    c.vx=(Math.random()-0.5)*130;c.vy=70+Math.random()*160;
+    c.color=CANDY_COLORS[Math.floor(Math.random()*NUM_TYPES)];
+    c.w=5+Math.random()*10;c.h=3+Math.random()*6;
+    c.rot=Math.random()*Math.PI*2;c.rv=(Math.random()-0.5)*6;
+  }
+}
+
+function tickConfetti(dt){
+  for(let i=0;i<confetti.length;i++){
+    const c=confetti[i];if(!c.on) continue;
+    c.x+=c.vx*dt;c.y+=c.vy*dt;c.rot+=c.rv*dt;
+    if(c.y>CH+40) c.on=false;
+  }
+}
+
+function drawConfetti(){
+  ctx.save();
+  for(let i=0;i<confetti.length;i++){
+    const c=confetti[i];if(!c.on) continue;
+    ctx.save();ctx.translate(c.x,c.y);ctx.rotate(c.rot);
+    ctx.fillStyle=c.color;ctx.fillRect(-c.w/2,-c.h/2,c.w,c.h);
+    ctx.restore();
+  }
+  ctx.restore();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// BOARD
+// ═══════════════════════════════════════════════════════════════════════════════
+class Board {
+  constructor(bx, idx) {
+    this.bx=bx; this.by=BOARD_TOP; this.idx2=idx;
+    this.types   = new Uint8Array(64);
+    this.special = new Uint8Array(64);
+    this.fall    = new Float32Array(64); // negative = above (falling down)
+    this.shk     = new Float32Array(64); // x wiggle
+    this.clearT  = new Float32Array(64); // shrink timer
+    this.pend    = new Uint8Array(64);   // marked for removal when pop anim ends
+
+    this.score  = 0;
+    this.meter  = 0;
+    this.mFlash = 0;
+    this.combo  = 0;
+
+    // Cursor state
+    this.curC=3; this.curR=3;
+    this.selOn=false; this.selC=0; this.selR=0;
+
+    // Board-level shake
+    this.shakeX=0; this.shakeY=0;
+
+    // Processing pipeline state
+    // idle → swapping → clearing → popping → falling → clearing … → idle
+    this.phase='idle';
+    this.fallDone=false;
+
+    // Swap animation state {c1,r1,c2,r2,t,ok}
+    this.swapAnim=null;
+
+    // Rubber-band meter fill multiplier (set each frame by updateMatch)
+    this.meterRate=1;
+
+    // Choco bar
+    this.barOn=false; this.barPhase=0; this.barT=0; this.barY=0;
+    this.barCallback=null;
+
+    // Wiggle
+    this.wiggOn=false; this.wiggT=0;
+
+    // Choco bar pending delay
+    this.chocoBarPending=0;
+
+    // Opponent callback: (cols[]) called when choco bar smashes
+    this.attackCallback=null;
+
+    this.fill();
+  }
+
+  ci(c,r){ return r*COLS+c; }
+
+  // Fill board with no initial matches
+  fill(){
+    for(let r=0;r<ROWS;r++){
+      for(let c=0;c<COLS;c++){
+        let t,tries=0;
+        do{ t=Math.floor(Math.random()*NUM_TYPES); tries++; }
+        while(tries<20 && this._wouldInit3(c,r,t));
+        this.types[this.ci(c,r)]=t;
+        this.special[this.ci(c,r)]=SP_NONE;
+        this.fall[this.ci(c,r)]=0;
+        this.shk[this.ci(c,r)]=0;
+        this.clearT[this.ci(c,r)]=0;
+        this.pend[this.ci(c,r)]=0;
+      }
+    }
+    this.phase='idle';
+    this.swapAnim=null;
+    this.chocoBarPending=0;
+  }
+
+  _wouldInit3(c,r,t){
+    if(c>=2 && this.types[this.ci(c-1,r)]===t && this.types[this.ci(c-2,r)]===t) return true;
+    if(r>=2 && this.types[this.ci(c,r-1)]===t && this.types[this.ci(c,r-2)]===t) return true;
+    return false;
+  }
+
+  // True when player can make new moves
+  idle(){ return this.phase==='idle' && !this.barOn && !this.wiggOn && this.chocoBarPending<=0; }
+
+  trySwap(c1,r1,c2,r2){
+    if(c1<0||c1>=COLS||r1<0||r1>=ROWS||c2<0||c2>=COLS||r2<0||r2>=ROWS) return false;
+    if(Math.abs(c1-c2)+Math.abs(r1-r2)!==1) return false; // adjacent cells only
+    const i1=this.ci(c1,r1), i2=this.ci(c2,r2);
+    const t1=this.types[i1], t2=this.types[i2];
+    if(t1===T_EMPTY||t2===T_EMPTY||t1===T_CHOCO||t2===T_CHOCO) return false;
+    const ok=this._testSwap(c1,r1,c2,r2);
+    // Animate: valid swaps slide then commit; invalid swaps slide and bounce back.
+    this.swapAnim={c1,r1,c2,r2,t:0,ok};
+    this.phase='swapping';
+    if(!ok) Audio.fail();
+    return ok;
+  }
+
+  // Returns array of cell indices matched
+  _scanMatches(){
+    const hit=new Uint8Array(64);
+    // Rows
+    for(let r=0;r<ROWS;r++){
+      let s=0;
+      for(let c=1;c<=COLS;c++){
+        const t=this.types[this.ci(s,r)];
+        if(c<COLS && this.types[this.ci(c,r)]===t && t<T_EMPTY){
+          // continue
+        } else {
+          if(c-s>=3) for(let k=s;k<c;k++) hit[this.ci(k,r)]=1;
+          s=c;
+        }
+      }
+    }
+    // Cols
+    for(let c=0;c<COLS;c++){
+      let s=0;
+      for(let r=1;r<=ROWS;r++){
+        const t=this.types[this.ci(c,s)];
+        if(r<ROWS && this.types[this.ci(c,r)]===t && t<T_EMPTY){
+          // continue
+        } else {
+          if(r-s>=3) for(let k=s;k<r;k++) hit[this.ci(c,k)]=1;
+          s=r;
+        }
+      }
+    }
+
+    // Expand via specials
+    const result=[];
+    for(let i=0;i<64;i++) if(hit[i]) result.push(i);
+
+    // Specials chaining (one pass is usually enough)
+    const extra=new Set();
+    for(const i of result){
+      const sp=this.special[i];
+      const c=i%COLS, r=Math.floor(i/COLS);
+      if(sp===SP_STRIPE_H){ for(let c2=0;c2<COLS;c2++) extra.add(this.ci(c2,r)); }
+      if(sp===SP_STRIPE_V){ for(let r2=0;r2<ROWS;r2++) extra.add(this.ci(c,r2)); }
+      if(sp===SP_WRAPPED){
+        for(let dr=-1;dr<=1;dr++) for(let dc=-1;dc<=1;dc++){
+          const nr=r+dr,nc=c+dc;
+          if(nr>=0&&nr<ROWS&&nc>=0&&nc<COLS) extra.add(this.ci(nc,nr));
+        }
+      }
+    }
+    // Specials in extra also chain
+    for(const i of extra){
+      if(hit[i]) continue;
+      const sp=this.special[i];
+      const c=i%COLS, r=Math.floor(i/COLS);
+      if(sp===SP_STRIPE_H){ for(let c2=0;c2<COLS;c2++) extra.add(this.ci(c2,r)); }
+      if(sp===SP_STRIPE_V){ for(let r2=0;r2<ROWS;r2++) extra.add(this.ci(c,r2)); }
+      if(sp===SP_WRAPPED){
+        for(let dr=-1;dr<=1;dr++) for(let dc=-1;dc<=1;dc++){
+          const nr=r+dr,nc=c+dc;
+          if(nr>=0&&nr<ROWS&&nc>=0&&nc<COLS) extra.add(this.ci(nc,nr));
+        }
+      }
+    }
+    for(const i of extra) if(!hit[i]) result.push(i);
+    return result;
+  }
+
+  // Determine special candy creation from run length/shape.
+  // match-4 → striped (orientation matches the run); match-5 → wrapped;
+  // L/T (row run + col run sharing a cell) → wrapped at the corner.
+  _specialsFromMatches(matchSet){
+    const out=[]; // {c,r,sp,type}
+    const rowMask=new Uint8Array(64), colMask=new Uint8Array(64);
+    const runsR=[], runsC=[];
+    // Row runs (>=3 same-type cells, all matched)
+    for(let r=0;r<ROWS;r++){
+      let s=0;
+      for(let c=1;c<=COLS;c++){
+        const t=this.types[this.ci(s,r)];
+        const cont=c<COLS&&this.types[this.ci(c,r)]===t&&t<T_EMPTY&&matchSet.has(this.ci(c,r))&&matchSet.has(this.ci(s,r));
+        if(!cont){
+          const len=c-s;
+          if(len>=3&&t<T_EMPTY&&matchSet.has(this.ci(s,r))){
+            runsR.push({fixed:r,s,len,type:t});
+            for(let k=s;k<c;k++) rowMask[this.ci(k,r)]=1;
+          }
+          s=c;
+        }
+      }
+    }
+    // Col runs
+    for(let c=0;c<COLS;c++){
+      let s=0;
+      for(let r=1;r<=ROWS;r++){
+        const t=this.types[this.ci(c,s)];
+        const cont=r<ROWS&&this.types[this.ci(c,r)]===t&&t<T_EMPTY&&matchSet.has(this.ci(c,r))&&matchSet.has(this.ci(c,s));
+        if(!cont){
+          const len=r-s;
+          if(len>=3&&t<T_EMPTY&&matchSet.has(this.ci(c,s))){
+            runsC.push({fixed:c,s,len,type:t});
+            for(let k=s;k<r;k++) colMask[this.ci(c,k)]=1;
+          }
+          s=r;
+        }
+      }
+    }
+    // L/T intersections → wrapped at the shared cell
+    for(let i=0;i<64;i++){
+      if(rowMask[i]&&colMask[i]){
+        out.push({c:i%COLS,r:Math.floor(i/COLS),sp:SP_WRAPPED,type:this.types[i]});
+      }
+    }
+    // Straight runs → striped (4) / wrapped (5+), unless the run is part of an L/T
+    for(const run of runsR){
+      let crossed=false;
+      for(let k=run.s;k<run.s+run.len;k++) if(colMask[this.ci(k,run.fixed)]) {crossed=true;break;}
+      if(crossed) continue;
+      const mid=run.s+Math.floor((run.len-1)/2);
+      if(run.len===4)      out.push({c:mid,r:run.fixed,sp:SP_STRIPE_H,type:run.type});
+      else if(run.len>=5)  out.push({c:mid,r:run.fixed,sp:SP_WRAPPED,type:run.type});
+    }
+    for(const run of runsC){
+      let crossed=false;
+      for(let k=run.s;k<run.s+run.len;k++) if(rowMask[this.ci(run.fixed,k)]) {crossed=true;break;}
+      if(crossed) continue;
+      const mid=run.s+Math.floor((run.len-1)/2);
+      if(run.len===4)      out.push({c:run.fixed,r:mid,sp:SP_STRIPE_V,type:run.type});
+      else if(run.len>=5)  out.push({c:run.fixed,r:mid,sp:SP_WRAPPED,type:run.type});
+    }
+    return out;
+  }
+
+  _applyClearing(){
+    const matched=this._scanMatches();
+    if(matched.length===0){
+      // Outstanding fall offsets (e.g. incoming choco chunks) still animate
+      for(let i=0;i<64;i++) if(this.fall[i]<0){ this.phase='falling'; return true; }
+      this.phase='idle'; this.combo=0; this._checkMoves(); return false;
+    }
+
+    const matchSet=new Set(matched);
+    const newSpecs=this._specialsFromMatches(matchSet);
+    const specMap={};
+    for(const s of newSpecs) specMap[this.ci(s.c,s.r)]=s;
+
+    // Score
+    const pts=matched.length*30*(this.combo+1);
+    this.score+=pts;
+    const mx=this.bx+BOARD_PX/2, my=this.by+BOARD_PY/2;
+    spawnPop(mx,my,'+'+pts,'#fff');
+
+    if(this.combo===1) spawnPop(mx,my-38,'SWEET!','#FFD700');
+    else if(this.combo===2) spawnPop(mx,my-38,'TASTY!','#FF6B9D');
+    else if(this.combo>=3) spawnPop(mx,my-38,'DELICIOUS!','#9B59B6');
+
+    // Meter fill (bigger matches/cascades fill faster; trailing player +25%)
+    const fill=matched.length*35*(1+this.combo*0.5)*this.meterRate;
+    const wasMax=(this.meter>=METER_MAX);
+    this.meter=Math.min(METER_MAX,this.meter+fill);
+
+    Audio.pop(this.combo);
+    this.combo++;
+
+    // Particles + pop anims (types stay until the shrink finishes)
+    for(const i of matched){
+      const c2=i%COLS, r2=Math.floor(i/COLS);
+      spawnParts(this.bx+c2*STEP+CELL/2,this.by+r2*STEP+CELL/2, CANDY_COLORS[this.types[i]]||'#fff',5);
+      if(specMap[i]){
+        this.special[i]=specMap[i].sp; // this cell becomes the new special candy
+        this.clearT[i]=0; this.pend[i]=0;
+      } else {
+        this.clearT[i]=0.14;
+        this.pend[i]=1;
+      }
+    }
+
+    // Clear choco blocks adjacent to matched cells
+    for(const i of matched){
+      const c2=i%COLS, r2=Math.floor(i/COLS);
+      for(const [dc,dr] of [[-1,0],[1,0],[0,-1],[0,1]]){
+        const nc=c2+dc,nr=r2+dr;
+        if(nc>=0&&nc<COLS&&nr>=0&&nr<ROWS){
+          const ni=this.ci(nc,nr);
+          if(this.types[ni]===T_CHOCO&&!this.pend[ni]){
+            spawnParts(this.bx+nc*STEP+CELL/2,this.by+nr*STEP+CELL/2,'#8B4513',4);
+            this.clearT[ni]=0.14;
+            this.pend[ni]=1;
+            this.score+=50;
+          }
+        }
+      }
+    }
+
+    // Meter full?
+    if(!wasMax && this.meter>=METER_MAX){
+      this.meter=0;
+      this.mFlash=0.55;
+      Audio.meterFull();
+      this.chocoBarPending=0.35; // delay before bar drops
+    }
+
+    this.phase='popping';
+    return true;
+  }
+
+  // Pop anim finished: remove pending cells, then gravity
+  _finishPopping(){
+    for(let i=0;i<64;i++){
+      if(this.pend[i]){
+        this.types[i]=T_EMPTY; this.special[i]=SP_NONE; this.pend[i]=0;
+      }
+    }
+    this._compactGravity();
+    this.phase='falling';
+  }
+
+  _startChocoBar(attackCallback){
+    this.barOn=true; this.barPhase=0; this.barT=0;
+    this.barStartY =this.by-(3*STEP+GAP);            // start above board
+    this.barTargetY=this.by+BOARD_PY-(3*STEP-GAP);   // resting on bottom 3 rows
+    this.barY=this.barStartY;
+    this.barCallback=attackCallback;
+    this.shakeX=10;
+    Audio.crunch();
+  }
+
+  addChocoChunks(cols){
+    const shuffled=[...cols];
+    for(let i=shuffled.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [shuffled[i],shuffled[j]]=[shuffled[j],shuffled[i]]; }
+    for(const c of shuffled){
+      // Drop into column from top (first empty from top or override row 0)
+      let placed=false;
+      for(let r=0;r<4;r++){
+        const i=this.ci(c,r);
+        if(this.types[i]===T_EMPTY){
+          this.types[i]=T_CHOCO; this.special[i]=SP_NONE; this.fall[i]=-3*STEP;
+          placed=true; break;
+        }
+      }
+      if(!placed){
+        // Force into row 0
+        const i=this.ci(c,0);
+        this.types[i]=T_CHOCO; this.special[i]=SP_NONE; this.fall[i]=-3*STEP;
+      }
+    }
+    this.shakeX=7;
+    // If idle, kick off processing
+    if(this.phase==='idle'){
+      this.combo=0;
+      this._compactGravity();
+      this.phase='falling';
+    }
+  }
+
+  // Compact grid and set up fall offsets (call once, then animate separately)
+  _compactGravity(){
+    for(let c=0;c<COLS;c++){
+      let wr=ROWS-1;
+      for(let r=ROWS-1;r>=0;r--){
+        const i=this.ci(c,r);
+        if(this.types[i]!==T_EMPTY){
+          if(r!==wr){
+            const wi=this.ci(c,wr);
+            this.types[wi]=this.types[i]; this.special[wi]=this.special[i];
+            this.fall[wi]=-(wr-r)*STEP;
+            this.types[i]=T_EMPTY; this.special[i]=SP_NONE; this.fall[i]=0;
+          }
+          wr--;
+        }
+      }
+      // Fill new candies from top
+      for(let r=wr;r>=0;r--){
+        const i=this.ci(c,r);
+        this.types[i]=Math.floor(Math.random()*NUM_TYPES);
+        this.special[i]=SP_NONE;
+        this.fall[i]=-(wr-r+1)*STEP;
+      }
+    }
+  }
+
+  _checkMoves(){
+    if(!this.hasMoves()){ this._wiggle(); }
+  }
+
+  hasMoves(){
+    for(let r=0;r<ROWS;r++){
+      for(let c=0;c<COLS;c++){
+        const t=this.types[this.ci(c,r)];
+        if(t>=T_EMPTY) continue;
+        // Swap right
+        if(c+1<COLS){ const t2=this.types[this.ci(c+1,r)]; if(t2<T_EMPTY&&this._testSwap(c,r,c+1,r)) return true; }
+        // Swap down
+        if(r+1<ROWS){ const t2=this.types[this.ci(c,r+1)]; if(t2<T_EMPTY&&this._testSwap(c,r,c,r+1)) return true; }
+      }
+    }
+    return false;
+  }
+
+  _testSwap(c1,r1,c2,r2){
+    const i1=this.ci(c1,r1), i2=this.ci(c2,r2);
+    const t1=this.types[i1], t2=this.types[i2];
+    const s1=this.special[i1], s2=this.special[i2];
+    this.types[i1]=t2; this.types[i2]=t1;
+    this.special[i1]=s2; this.special[i2]=s1;
+    const has=this._scanMatches().length>0;
+    this.types[i1]=t1; this.types[i2]=t2;
+    this.special[i1]=s1; this.special[i2]=s2;
+    return has;
+  }
+
+  _wiggle(){
+    this.wiggOn=true; this.wiggT=0.85;
+  }
+
+  findMove(){
+    // Return [c1,r1,c2,r2] of a valid move or null
+    const order=[];
+    for(let r=0;r<ROWS;r++) for(let c=0;c<COLS;c++){
+      if(c+1<COLS) order.push([c,r,c+1,r]);
+      if(r+1<ROWS) order.push([c,r,c,r+1]);
+    }
+    // Shuffle
+    for(let k=order.length-1;k>0;k--){const j=Math.floor(Math.random()*(k+1));[order[k],order[j]]=[order[j],order[k]];}
+    for(const m of order){
+      const [c1,r1,c2,r2]=m;
+      const t1=this.types[this.ci(c1,r1)], t2=this.types[this.ci(c2,r2)];
+      if(t1>=T_EMPTY||t2>=T_EMPTY) continue;
+      if(this._testSwap(c1,r1,c2,r2)) return m;
+    }
+    return null;
+  }
+
+  update(dt){
+    // Board shake decay
+    if(this.shakeX>0) this.shakeX=Math.max(0,this.shakeX-dt*55);
+    if(this.shakeY>0) this.shakeY=Math.max(0,this.shakeY-dt*55);
+    if(this.mFlash>0) this.mFlash=Math.max(0,this.mFlash-dt);
+
+    // Choco bar pending timer
+    if(this.chocoBarPending>0){
+      this.chocoBarPending=Math.max(0,this.chocoBarPending-dt);
+      if(this.chocoBarPending===0 && !this.barOn){
+        this._startChocoBar(this.attackCallback);
+      }
+    }
+
+    // Clear anim timers
+    let anyClear=false;
+    for(let i=0;i<64;i++){
+      if(this.clearT[i]>0){ this.clearT[i]=Math.max(0,this.clearT[i]-dt); anyClear=true; }
+    }
+
+    // Wiggle
+    if(this.wiggOn){
+      this.wiggT=Math.max(0,this.wiggT-dt);
+      const amp=5*(this.wiggT/0.85);
+      const t=Date.now()*0.018;
+      for(let i=0;i<64;i++) this.shk[i]=Math.sin(t+i*0.7)*amp;
+      if(this.wiggT<=0){
+        this.wiggOn=false;this.shk.fill(0);
+        this.fill();
+      }
+      return;
+    }
+
+    // Choco bar animation
+    if(this.barOn){
+      this.barT+=dt;
+      if(this.barPhase===0){
+        // Slide down to bottom 3 rows
+        const target=this.by+BOARD_PY-(3*STEP-GAP);
+        const spd=3*STEP/0.38;
+        this.barY=Math.min(target,this.barY+spd*dt);
+        if(this.barT>=0.38){ this.barPhase=1; this.barT=0; this.shakeY=14; }
+      } else if(this.barPhase===1){
+        // Rumble
+        this.shakeX=Math.sin(this.barT*65)*7;
+        if(this.barT>=0.22){ this.barPhase=2; this.barT=0; }
+      } else if(this.barPhase===2){
+        // Shatter
+        const pts=this._smashBottom3();
+        spawnPop(this.bx+BOARD_PX/2,this.by+BOARD_PY-1.5*STEP,'CRUNCH! +'+pts,'#FFD700');
+        for(let c=0;c<COLS;c++) spawnParts(this.bx+c*STEP+CELL/2,this.by+BOARD_PY-CELL,'#7B4A1E',4);
+        // Trigger gravity after smash
+        this._compactGravity();
+        if(this.phase==='idle'||this.phase==='falling') this.phase='falling';
+        // Attack opponent
+        if(this.barCallback){
+          const pool=[0,1,2,3,4,5,6,7];
+          const n=4+Math.floor(Math.random()*3);
+          const cols=[];
+          for(let k=0;k<n;k++){const ri=Math.floor(Math.random()*pool.length);cols.push(pool.splice(ri,1)[0]);}
+          this.barCallback(cols);
+        }
+        this.barPhase=3; this.barT=0;
+      } else if(this.barPhase===3){
+        if(this.barT>=0.32){this.barOn=false;this.barCallback=null;}
+      }
+      return;
+    }
+
+    // Swap animation (valid: slide 0.13s then commit; invalid: there-and-back)
+    if(this.phase==='swapping'){
+      const sa=this.swapAnim;
+      sa.t+=dt;
+      const done = sa.ok ? sa.t>=0.13 : sa.t>=0.26;
+      if(done){
+        if(sa.ok){
+          const i1=this.ci(sa.c1,sa.r1), i2=this.ci(sa.c2,sa.r2);
+          const t1=this.types[i1], s1=this.special[i1];
+          this.types[i1]=this.types[i2]; this.special[i1]=this.special[i2];
+          this.types[i2]=t1; this.special[i2]=s1;
+        }
+        this.combo=0;
+        // Always run the clearing scan — it settles any choco chunks that
+        // arrived mid-swap even when the swap itself was invalid.
+        this.phase='clearing';
+        this.swapAnim=null;
+      }
+      return;
+    }
+
+    // Pop animation wait, then remove + gravity
+    if(this.phase==='popping'){
+      if(!anyClear) this._finishPopping();
+      return;
+    }
+    if(anyClear) return;
+
+    // Phase machine
+    if(this.phase==='falling'){
+      // Animate existing fall offsets
+      const spd=FALL_SPD*dt;
+      let any=false;
+      for(let i=0;i<64;i++){
+        if(this.fall[i]<0){ this.fall[i]=Math.min(0,this.fall[i]+spd); any=true; }
+      }
+      if(!any){ this.phase='clearing'; }
+    }
+    if(this.phase==='clearing'){
+      if(!this._applyClearing()){ /* went to idle */ }
+    }
+  }
+
+  _smashBottom3(){
+    let pts=0;
+    for(let r=ROWS-3;r<ROWS;r++){
+      for(let c=0;c<COLS;c++){
+        const i=this.ci(c,r);
+        if(this.types[i]!==T_EMPTY){pts+=40;this.types[i]=T_EMPTY;this.special[i]=SP_NONE;}
+      }
+    }
+    this.score+=pts;
+    return pts;
+  }
+
+  draw(isP1, showCursor){
+    const sx=Math.sin(Date.now()*0.031)*this.shakeX;
+    const sy=Math.sin(Date.now()*0.047)*this.shakeY;
+    const bx=this.bx+sx, by=this.by+sy;
+
+    // Background panel
+    ctx.fillStyle='#0D1B3E';
+    ctx.fillRect(bx-5,by-5,BOARD_PX+10,BOARD_PY+10);
+    ctx.strokeStyle=isP1?'#FF6B9D':'#35E0FF';
+    ctx.lineWidth=3;
+    ctx.strokeRect(bx-5,by-5,BOARD_PX+10,BOARD_PY+10);
+
+    // Cell backgrounds
+    ctx.fillStyle='#0A1229';
+    for(let r=0;r<ROWS;r++){
+      for(let c=0;c<COLS;c++){
+        ctx.fillRect(bx+c*STEP,by+r*STEP,CELL,CELL);
+      }
+    }
+
+    // Swap slide offsets
+    const sa=(this.phase==='swapping')?this.swapAnim:null;
+    let sox=0,soy=0;
+    if(sa){
+      const p = sa.ok ? Math.min(1,sa.t/0.13)
+                      : (sa.t<0.13 ? sa.t/0.13 : Math.max(0,1-(sa.t-0.13)/0.13));
+      sox=(sa.c2-sa.c1)*STEP*p; soy=(sa.r2-sa.r1)*STEP*p;
+    }
+
+    // Candies
+    for(let r=0;r<ROWS;r++){
+      for(let c=0;c<COLS;c++){
+        const i=this.ci(c,r);
+        const t=this.types[i], sp=this.special[i];
+        if(t===T_EMPTY) continue;
+        let px=bx+c*STEP+(this.shk[i]||0);
+        let py=by+r*STEP+(this.fall[i]||0);
+        if(sa){
+          if(c===sa.c1&&r===sa.r1){ px+=sox; py+=soy; }
+          else if(c===sa.c2&&r===sa.r2){ px-=sox; py-=soy; }
+        }
+        const ct=this.clearT[i];
+        if(ct>0){
+          const sc=ct/0.14;
+          ctx.save(); ctx.translate(px+CELL/2,py+CELL/2); ctx.scale(sc,sc); ctx.globalAlpha=sc;
+          ctx.drawImage(t===T_CHOCO?sprChoco:sprites[t][sp],-CELL/2,-CELL/2);
+          ctx.restore(); ctx.globalAlpha=1;
+        } else {
+          ctx.drawImage(t===T_CHOCO?sprChoco:sprites[t][sp],px,py);
+        }
+      }
+    }
+
+    // Selection highlight (pre-rendered sprite — no per-frame path ops)
+    if(this.selOn){
+      ctx.drawImage(sprSel,bx+this.selC*STEP,by+this.selR*STEP);
+    }
+
+    // Cursor (pre-rendered sprite, alpha pulse)
+    if(showCursor && !this.barOn){
+      const px=bx+this.curC*STEP, py=by+this.curR*STEP;
+      ctx.globalAlpha=0.65+0.35*Math.sin(Date.now()*0.007);
+      ctx.drawImage(sprCursor[isP1?0:1],px-1,py-1);
+      ctx.globalAlpha=1;
+    }
+
+    // Choco bar
+    if(this.barOn && this.barPhase<3){
+      ctx.drawImage(sprChocoBar,bx,this.barY+sy);
+    }
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CPU AI
+// ═══════════════════════════════════════════════════════════════════════════════
+class CPU {
+  constructor(board){
+    this.board=board;
+    this.timer=2.0;
+    this.move=null;   // planned [c1,r1,c2,r2]
+    this.stepT=0;     // delay between visible cursor steps
+  }
+  reset(){ this.timer=2.0; this.move=null; }
+  update(dt, fast){
+    const b=this.board;
+    if(!b.idle()){ this.move=null; return; }
+    if(!this.move){
+      this.timer-=dt;
+      if(this.timer<=0){
+        const m=b.findMove();
+        if(m){ this.move=m; this.stepT=0.1; }
+        else { b._wiggle(); this._resetTimer(fast); }
+      }
+      return;
+    }
+    // Walk the cursor one cell at a time so kids can SEE the CPU thinking
+    this.stepT-=dt;
+    if(this.stepT>0) return;
+    this.stepT=0.11;
+    const [c1,r1,c2,r2]=this.move;
+    if(b.curC!==c1||b.curR!==r1){
+      if(b.curC<c1) b.curC++; else if(b.curC>c1) b.curC--;
+      else if(b.curR<r1) b.curR++; else b.curR--;
+      return;
+    }
+    if(!b.selOn){ b.selOn=true; b.selC=c1; b.selR=r1; this.stepT=0.18; return; }
+    b.selOn=false;
+    b.trySwap(c1,r1,c2,r2);
+    b.curC=c2; b.curR=r2;
+    this.move=null;
+    this._resetTimer(fast);
+  }
+  _resetTimer(fast){
+    const mn=fast?CPU_FAST_MIN:CPU_SLOW_MIN;
+    const mx=fast?CPU_FAST_MAX:CPU_SLOW_MAX;
+    this.timer=(mn+Math.random()*(mx-mn))/1000;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INPUT
+// ═══════════════════════════════════════════════════════════════════════════════
+const keys={};
+const prevKeys={};
+document.addEventListener('keydown',e=>{keys[e.code]=true;});
+document.addEventListener('keyup',e=>{keys[e.code]=false;});
+
+const inp1={up:false,dn:false,lt:false,rt:false,south:false,east:false,start:false,
+            jUp:false,jDn:false,jLt:false,jRt:false,jSouth:false,jEast:false,jStart:false};
+const inp2={up:false,dn:false,lt:false,rt:false,south:false,east:false,start:false,
+            jUp:false,jDn:false,jLt:false,jRt:false,jSouth:false,jEast:false,jStart:false};
+const prev1={up:false,dn:false,lt:false,rt:false,south:false,east:false,start:false};
+const prev2={up:false,dn:false,lt:false,rt:false,south:false,east:false,start:false};
+
+// Hoisted scratch objects — no per-frame allocations
+const c1={up:false,dn:false,lt:false,rt:false,south:false,east:false,start:false};
+const c2={up:false,dn:false,lt:false,rt:false,south:false,east:false,start:false};
+
+function readInput(){
+  c1.up=c1.dn=c1.lt=c1.rt=c1.south=c1.east=c1.start=false;
+  c2.up=c2.dn=c2.lt=c2.rt=c2.south=c2.east=c2.start=false;
+
+  if(window.ArcadeController){
+    const p1=window.ArcadeController.pad(0);
+    if(p1.connected){
+      c1.up=p1.button('up')||p1.axis('ly')<-0.45;
+      c1.dn=p1.button('down')||p1.axis('ly')>0.45;
+      c1.lt=p1.button('left')||p1.axis('lx')<-0.45;
+      c1.rt=p1.button('right')||p1.axis('lx')>0.45;
+      c1.south=p1.button('south');
+      c1.east=p1.button('east');
+      c1.start=p1.button('start');
+    }
+    const p2=window.ArcadeController.pad(1);
+    if(p2.connected){
+      c2.up=p2.button('up')||p2.axis('ly')<-0.45;
+      c2.dn=p2.button('down')||p2.axis('ly')>0.45;
+      c2.lt=p2.button('left')||p2.axis('lx')<-0.45;
+      c2.rt=p2.button('right')||p2.axis('lx')>0.45;
+      c2.south=p2.button('south');
+      c2.east=p2.button('east');
+      c2.start=p2.button('start');
+    }
+  }
+
+  // Keyboard (P1)
+  c1.up   =c1.up   ||keys['ArrowUp'];
+  c1.dn   =c1.dn   ||keys['ArrowDown'];
+  c1.lt   =c1.lt   ||keys['ArrowLeft'];
+  c1.rt   =c1.rt   ||keys['ArrowRight'];
+  c1.south=c1.south||keys['Space']||keys['Enter']||keys['KeyZ'];
+  c1.east =c1.east ||keys['KeyX']||keys['Backspace'];
+  c1.start=c1.start||keys['KeyP'];
+
+  // Snapshot just-pressed
+  function snap(inp,cur,prev2){
+    inp.up=cur.up; inp.dn=cur.dn; inp.lt=cur.lt; inp.rt=cur.rt;
+    inp.south=cur.south; inp.east=cur.east; inp.start=cur.start;
+    inp.jUp=cur.up&&!prev2.up; inp.jDn=cur.dn&&!prev2.dn;
+    inp.jLt=cur.lt&&!prev2.lt; inp.jRt=cur.rt&&!prev2.rt;
+    inp.jSouth=cur.south&&!prev2.south; inp.jEast=cur.east&&!prev2.east;
+    inp.jStart=cur.start&&!prev2.start;
+    Object.assign(prev2,cur);
+  }
+  snap(inp1,c1,prev1); snap(inp2,c2,prev2);
+}
+
+// Touch + mouse: tap-select + swipe-to-swap on left board, plus tappable
+// menus (title buttons / pause resume / winner rematch / mute button) so
+// iPad and desktop mouse stay first-class per house rules.
+let touchSel={on:false,c:-1,r:-1,sx:0,sy:0};
+
+function canvasCoords(clientX,clientY){
+  const rect=canvas.getBoundingClientRect();
+  return [(clientX-rect.left)*(CW/rect.width),(clientY-rect.top)*(CH/rect.height)];
+}
+function inRect(x,y,rx,ry,rw,rh){ return x>=rx&&x<rx+rw&&y>=ry&&y<ry+rh; }
+
+// Menu taps for non-board states + the mute button everywhere.
+// Returns true when the tap was consumed (board logic must not run).
+function pointerMenu(wx,wy){
+  if(inRect(wx,wy,CW-52,8,42,26)){ Audio.init(); Audio.toggleMute(); return true; }
+  if(gameState===S_TITLE){
+    if(inRect(wx,wy,CW/2-250,385,200,54)){ Audio.init(); startMatch(false); }
+    else if(inRect(wx,wy,CW/2+50,385,200,54)){ Audio.init(); startMatch(true); }
+    return true;
+  }
+  if(gameState===S_PAUSED){ gameState=S_MATCH; Audio.bgStart(); return true; }
+  if(gameState===S_WINNER){
+    if(inRect(wx,wy,CW/2-220,CH/2+54,440,30)){ gameState=S_TITLE; gameBoard1=gameBoard2=gameCPU=null; }
+    else { winnerTimer=0; startMatch(twoPlayer); }
+    return true;
+  }
+  return false;
+}
+
+function boardPointerStart(wx,wy){
+  if(pointerMenu(wx,wy)) return;
+  if(gameState!==S_MATCH||!gameBoard1) return;
+  const c2=Math.floor((wx-P1_BX)/STEP);
+  const r2=Math.floor((wy-BOARD_TOP)/STEP);
+  if(c2>=0&&c2<COLS&&r2>=0&&r2<ROWS){
+    touchSel.on=true; touchSel.c=c2; touchSel.r=r2;
+    touchSel.sx=wx; touchSel.sy=wy;
+    if(gameBoard1.idle()){gameBoard1.curC=c2;gameBoard1.curR=r2;}
+  }
+}
+
+function boardPointerEnd(wx,wy){
+  if(!touchSel.on) return;
+  touchSel.on=false;
+  if(gameState!==S_MATCH||!gameBoard1||!gameBoard1.idle()) return;
+  const dx=wx-touchSel.sx, dy=wy-touchSel.sy;
+  const adx=Math.abs(dx),ady=Math.abs(dy);
+  if(adx<10&&ady<10){
+    // Tap — select / deselect / swap-if-adjacent / re-select
+    const c2=touchSel.c, r2=touchSel.r;
+    const b=gameBoard1;
+    if(!b.selOn){ b.selOn=true; b.selC=c2; b.selR=r2; }
+    else if(b.selC===c2&&b.selR===r2){ b.selOn=false; }
+    else if(Math.abs(b.selC-c2)+Math.abs(b.selR-r2)===1){
+      b.trySwap(b.selC,b.selR,c2,r2); b.selOn=false;
+    }
+    else { b.selC=c2; b.selR=r2; } // too far — re-select the tapped candy
+  } else {
+    // Swipe
+    const dc=adx>ady?(dx>0?1:-1):0, dr=adx>ady?0:(dy>0?1:-1);
+    const c2=touchSel.c, r2=touchSel.r;
+    gameBoard1.trySwap(c2,r2,c2+dc,r2+dr);
+    gameBoard1.selOn=false;
+  }
+}
+
+canvas.addEventListener('touchstart',e=>{
+  e.preventDefault();
+  const t=e.changedTouches[0];
+  const [wx,wy]=canvasCoords(t.clientX,t.clientY);
+  boardPointerStart(wx,wy);
+},{passive:false});
+
+canvas.addEventListener('touchend',e=>{
+  e.preventDefault();
+  const t=e.changedTouches[0];
+  const [wx,wy]=canvasCoords(t.clientX,t.clientY);
+  boardPointerEnd(wx,wy);
+},{passive:false});
+
+// Mouse mirrors touch. touchstart's preventDefault suppresses the synthetic
+// mouse events on touch devices, so these never double-fire.
+canvas.addEventListener('mousedown',e=>{
+  const [wx,wy]=canvasCoords(e.clientX,e.clientY);
+  boardPointerStart(wx,wy);
+});
+canvas.addEventListener('mouseup',e=>{
+  const [wx,wy]=canvasCoords(e.clientX,e.clientY);
+  boardPointerEnd(wx,wy);
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// GAME STATE
+// ═══════════════════════════════════════════════════════════════════════════════
+let gameState = S_TITLE;
+let gameBoard1=null, gameBoard2=null, gameCPU=null;
+let matchTimer=MATCH_TIME;
+let twoPlayer=false;
+let winnerIdx=-1;
+let winnerTimer=0;
+let titleAnim=0;
+let p2JoinSecs=-1; // P2 mid-solo join request: second at which ✕ was pressed
+
+function startMatch(vs){
+  twoPlayer=vs;
+  p2JoinSecs=-1;
+  gameBoard1=new Board(P1_BX,0);
+  gameBoard2=new Board(P2_BX,1);
+  // Wire attack callbacks
+  gameBoard1.attackCallback=(cols)=>{ if(gameBoard2) gameBoard2.addChocoChunks(cols); };
+  gameBoard2.attackCallback=(cols)=>{ if(gameBoard1) gameBoard1.addChocoChunks(cols); };
+  gameCPU=vs?null:new CPU(gameBoard2);
+  matchTimer=MATCH_TIME;
+  winnerIdx=-1;
+  gameState=S_MATCH;
+  Audio.bgStart();
+}
+
+function handleCursorMove(board,inp){
+  if(!board.idle()) return;
+
+  if(board.selOn){
+    // When candy is selected: direction = swap in that direction; south/east = deselect
+    let dc=0,dr=0;
+    if(inp.jUp)  dr=-1;
+    if(inp.jDn)  dr=1;
+    if(inp.jLt)  dc=-1;
+    if(inp.jRt)  dc=1;
+    if(dc||dr){
+      const ok=board.trySwap(board.selC,board.selR,board.selC+dc,board.selR+dr);
+      board.selOn=false;
+      // Move cursor to target regardless
+      board.curC=Math.max(0,Math.min(COLS-1,board.selC+dc));
+      board.curR=Math.max(0,Math.min(ROWS-1,board.selR+dr));
+    } else if(inp.jSouth){
+      // Second south on same cell = deselect
+      board.selOn=false;
+    } else if(inp.jEast){
+      board.selOn=false;
+    }
+  } else {
+    // Normal cursor movement
+    if(inp.jUp)  board.curR=Math.max(0,board.curR-1);
+    if(inp.jDn)  board.curR=Math.min(ROWS-1,board.curR+1);
+    if(inp.jLt)  board.curC=Math.max(0,board.curC-1);
+    if(inp.jRt)  board.curC=Math.min(COLS-1,board.curC+1);
+    if(inp.jSouth){
+      board.selOn=true; board.selC=board.curC; board.selR=board.curR;
+    }
+    if(inp.jEast){ board.selOn=false; }
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DRAW HELPERS
+// ═══════════════════════════════════════════════════════════════════════════════
+function drawMeter(bx,by,meter,flash,pi){
+  const w=BOARD_PX, h=14;
+  const color=pi===0?'#FF6B9D':'#35E0FF';
+  ctx.fillStyle='#111827'; ctx.fillRect(bx,by,w,h);
+  if(meter>0){
+    const fw=Math.max(1,Math.floor((meter/METER_MAX)*w));
+    if(flash>0){
+      ctx.fillStyle='#fff';
+      ctx.fillRect(bx,by,fw,h);
+    } else {
+      ctx.drawImage(sprMeter[pi],0,0,fw,h,bx,by,fw,h);
+    }
+  }
+  ctx.strokeStyle=color; ctx.lineWidth=2; ctx.strokeRect(bx,by,w,h);
+  // Label
+  ctx.save(); ctx.font="8px 'Press Start 2P',monospace"; ctx.textAlign='center';
+  ctx.fillStyle=flash>0?'#FFD700':'#ccc';
+  ctx.fillText('CHOCO METER',bx+w/2,by+h-3);
+  ctx.restore();
+}
+
+function drawMuteBtn(){
+  const mx=CW-52,my=8;
+  ctx.fillStyle='rgba(0,0,0,0.55)'; ctx.fillRect(mx,my,42,26);
+  ctx.strokeStyle='#444'; ctx.lineWidth=1; ctx.strokeRect(mx,my,42,26);
+  ctx.font='14px sans-serif'; ctx.textAlign='center';
+  ctx.fillStyle=Audio.muted?'#555':'#eee';
+  ctx.fillText(Audio.muted?'🔇':'🔊',mx+21,my+20);
+}
+
+function drawStars(t){
+  ctx.fillStyle='#fff';
+  for(let i=0;i<55;i++){
+    const sx=((i*137.5)%CW), sy=((i*97.3)%CH);
+    const br=0.25+0.75*Math.sin(t*1.8+i*0.9);
+    ctx.globalAlpha=br*0.45; ctx.fillRect(sx,sy,2,2);
+  }
+  ctx.globalAlpha=1;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TITLE SCREEN
+// ═══════════════════════════════════════════════════════════════════════════════
+function updateTitle(dt){
+  titleAnim+=dt;
+  // Input
+  if(inp1.jSouth||inp1.jStart){ Audio.init(); startMatch(false); return; }
+  if(inp2.jSouth||inp2.jStart){ Audio.init(); startMatch(true); return; }
+  if(keys['Digit1']&&!prevKeys['Digit1']){ Audio.init(); startMatch(false); return; }
+  if(keys['Digit2']&&!prevKeys['Digit2']){ Audio.init(); startMatch(true); return; }
+  if(keys['KeyM']&&!prevKeys['KeyM']) Audio.toggleMute();
+}
+
+function drawTitle(){
+  ctx.fillStyle='#0a0a1a'; ctx.fillRect(0,0,CW,CH);
+  drawStars(titleAnim);
+
+  // Title text
+  const ty=190+Math.sin(titleAnim*1.6)*7;
+  ctx.save(); ctx.textAlign='center';
+  ctx.font="42px 'Press Start 2P',monospace";
+  ctx.fillStyle='#3D0025'; ctx.fillText('CANDY',CW/2+4,ty+4);
+  ctx.fillStyle='#FF6B9D'; ctx.fillText('CANDY',CW/2,ty);
+  ctx.fillStyle='#4D3900'; ctx.fillText('BATTLE',CW/2+4,ty+58);
+  ctx.fillStyle='#FFD700'; ctx.fillText('BATTLE',CW/2,ty+54);
+  ctx.restore();
+
+  // Floating candy decorations
+  const decs=[
+    [CW/2-270,ty-14,T_GUMDROP,SP_NONE],[CW/2+230,ty-14,T_STAR,SP_NONE],
+    [CW/2-255,ty+44,T_HEART,SP_NONE],  [CW/2+210,ty+44,T_JELLY,SP_NONE],
+    [CW/2-215,ty+108,T_SWIRL,SP_WRAPPED],[CW/2+170,ty+108,T_GUMDROP,SP_STRIPE_H],
+  ];
+  for(const [dx2,dy,t,sp] of decs){
+    const s=0.88+0.12*Math.sin(titleAnim*2.2+dx2*0.01);
+    ctx.save(); ctx.translate(dx2,dy); ctx.scale(s,s);
+    ctx.drawImage(sprites[t][sp],-CELL/2,-CELL/2); ctx.restore();
+  }
+
+  // Buttons
+  const btnY=385;
+  ctx.save(); ctx.textAlign='center';
+  // 1P
+  const p1=0.8+0.2*Math.sin(titleAnim*3.5);
+  ctx.fillStyle=`rgba(255,107,157,${p1})`; ctx.fillRect(CW/2-250,btnY,200,54);
+  ctx.strokeStyle='rgba(255,255,255,0.7)'; ctx.lineWidth=2; ctx.strokeRect(CW/2-250,btnY,200,54);
+  ctx.font="15px 'Press Start 2P',monospace"; ctx.fillStyle='#fff';
+  ctx.fillText('1P SOLO',CW/2-150,btnY+33);
+  // 2P
+  const p2=0.8+0.2*Math.sin(titleAnim*3.5+1.2);
+  ctx.fillStyle=`rgba(53,224,255,${p2})`; ctx.fillRect(CW/2+50,btnY,200,54);
+  ctx.strokeStyle='rgba(255,255,255,0.7)'; ctx.lineWidth=2; ctx.strokeRect(CW/2+50,btnY,200,54);
+  ctx.fillStyle='#fff'; ctx.fillText('2P VS',CW/2+150,btnY+33);
+
+  ctx.font="9px 'Press Start 2P',monospace"; ctx.fillStyle='rgba(200,200,200,0.85)';
+  ctx.fillText('P1: ✕ / SPACE TO START',CW/2,btnY+75);
+  const jp=0.55+0.45*Math.sin(titleAnim*4);
+  ctx.fillStyle=`rgba(53,224,255,${jp})`;
+  ctx.fillText('P2 PRESS ✕ TO JOIN',CW/2,btnY+94);
+
+  const best=localStorage.getItem('candybattle_best')||'0';
+  ctx.fillStyle='#FFD700'; ctx.font="10px 'Press Start 2P',monospace";
+  ctx.fillText('BEST: '+best,CW/2,btnY+120);
+
+  ctx.fillStyle='#666'; ctx.font="9px 'Press Start 2P',monospace";
+  ctx.fillText('M = MUTE',CW/2,btnY+142);
+  ctx.restore();
+
+  drawMuteBtn();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MATCH
+// ═══════════════════════════════════════════════════════════════════════════════
+function updateMatch(dt){
+  matchTimer-=dt*1000;
+
+  // Pause — START from either pad (house rule)
+  if(inp1.jStart||inp2.jStart){
+    gameState=S_PAUSED; Audio.bgStop(); return;
+  }
+
+  // P2 drop-in mid-solo: ✕ requests join; CPU swaps out at the next second
+  if(!twoPlayer){
+    if(inp2.jSouth&&p2JoinSecs<0) p2JoinSecs=Math.floor(matchTimer/1000);
+    if(p2JoinSecs>=0&&Math.floor(matchTimer/1000)<p2JoinSecs){
+      twoPlayer=true; gameCPU=null; p2JoinSecs=-1;
+      gameBoard2.selOn=false;
+      spawnPop(P2_BX+BOARD_PX/2,BOARD_TOP+BOARD_PY/2,'P2 JOINED!','#35E0FF');
+    }
+  }
+
+  // P1 input
+  handleCursorMove(gameBoard1,inp1);
+  // P2 input
+  if(twoPlayer) handleCursorMove(gameBoard2,inp2);
+
+  // Rubber-band: trailing player's chocolate meter charges 25% faster
+  gameBoard1.meterRate=(gameBoard2.score>gameBoard1.score+RUBBER_BAND_DELTA)?1.25:1;
+  gameBoard2.meterRate=(gameBoard1.score>gameBoard2.score+RUBBER_BAND_DELTA)?1.25:1;
+
+  // CPU (speeds up a little when trailing)
+  const cpuTrailing=(gameBoard1.score>gameBoard2.score+RUBBER_BAND_DELTA);
+  if(!twoPlayer&&gameCPU) gameCPU.update(dt,cpuTrailing);
+
+  // Board ticks
+  gameBoard1.update(dt);
+  gameBoard2.update(dt);
+
+  // Mute
+  if(keys['KeyM']&&!prevKeys['KeyM']) Audio.toggleMute();
+
+  // Win check
+  let w=-1;
+  if(gameBoard1.score>=WIN_SCORE) w=0;
+  else if(gameBoard2.score>=WIN_SCORE) w=1;
+  else if(matchTimer<=0) w=(gameBoard1.score>=gameBoard2.score)?0:1;
+  if(w>=0){
+    winnerIdx=w; gameState=S_WINNER; winnerTimer=0;
+    Audio.bgStop(); Audio.winnerSfx(); spawnConfetti();
+    // Best score is human-only: CPU runs don't set records
+    const best=twoPlayer?Math.max(gameBoard1.score,gameBoard2.score):gameBoard1.score;
+    const prev=parseInt(localStorage.getItem('candybattle_best')||'0');
+    if(best>prev) localStorage.setItem('candybattle_best',String(best));
+  }
+}
+
+function drawMatchBg(){
+  ctx.fillStyle='#0a0a1a'; ctx.fillRect(0,0,CW,CH);
+}
+
+function drawMatchHUD(){
+  ctx.save(); ctx.textAlign='center';
+
+  // P1 labels
+  ctx.font="10px 'Press Start 2P',monospace"; ctx.fillStyle='#FF6B9D';
+  ctx.fillText('P1',P1_BX+BOARD_PX/2,BOARD_TOP-54);
+  ctx.font="20px 'Press Start 2P',monospace"; ctx.fillStyle='#fff';
+  ctx.fillText(gameBoard1.score,P1_BX+BOARD_PX/2,BOARD_TOP-30);
+
+  // P2 labels
+  ctx.font="10px 'Press Start 2P',monospace";
+  ctx.fillStyle=twoPlayer?'#35E0FF':'#888';
+  ctx.fillText(twoPlayer?'P2':'CPU',P2_BX+BOARD_PX/2,BOARD_TOP-54);
+  if(!twoPlayer){
+    ctx.font="8px 'Press Start 2P',monospace";
+    const hb=0.45+0.4*Math.sin(Date.now()*0.004);
+    ctx.fillStyle=`rgba(53,224,255,${hb})`;
+    ctx.fillText(p2JoinSecs>=0?'P2 JOINING...':'P2 PRESS ✕ TO JOIN',P2_BX+BOARD_PX/2,BOARD_TOP-8);
+  }
+  ctx.font="20px 'Press Start 2P',monospace"; ctx.fillStyle='#fff';
+  ctx.fillText(gameBoard2.score,P2_BX+BOARD_PX/2,BOARD_TOP-30);
+
+  // Center
+  const cx=640;
+  const secs=Math.max(0,Math.floor(matchTimer/1000));
+  const tm=`${Math.floor(secs/60)}:${String(secs%60).padStart(2,'0')}`;
+  const tcolor=matchTimer<30000?(Math.sin(Date.now()*0.012)>0?'#FF4444':'#fff'):'#FFD700';
+  ctx.font="26px 'Press Start 2P',monospace"; ctx.fillStyle=tcolor;
+  ctx.fillText(tm,cx,BOARD_TOP+BOARD_PY/2-18);
+  ctx.font="22px 'Press Start 2P',monospace"; ctx.fillStyle='#FFD700';
+  ctx.fillText('⚡VS⚡',cx,BOARD_TOP+BOARD_PY/2+22);
+
+  // Target progress
+  ctx.font="8px 'Press Start 2P',monospace"; ctx.fillStyle='#666';
+  ctx.fillText('FIRST TO '+WIN_SCORE,cx,BOARD_TOP+BOARD_PY/2+52);
+  const barW=90,barH=9,barY=BOARD_TOP+BOARD_PY/2+60;
+  ctx.fillStyle='#222'; ctx.fillRect(cx-barW-4,barY,barW,barH); ctx.fillRect(cx+4,barY,barW,barH);
+  ctx.fillStyle='#FF6B9D'; ctx.fillRect(cx-barW-4,barY,barW*Math.min(1,gameBoard1.score/WIN_SCORE),barH);
+  ctx.fillStyle='#35E0FF'; ctx.fillRect(cx+4,barY,barW*Math.min(1,gameBoard2.score/WIN_SCORE),barH);
+
+  ctx.restore();
+
+  // Meters
+  const my=BOARD_TOP+BOARD_PY+12;
+  drawMeter(P1_BX,my,gameBoard1.meter,gameBoard1.mFlash,0);
+  drawMeter(P2_BX,my,gameBoard2.meter,gameBoard2.mFlash,1);
+}
+
+function drawMatch(){
+  drawMatchBg();
+  gameBoard1.draw(true,  true);
+  gameBoard2.draw(false, twoPlayer||true); // always show CPU cursor
+  drawMatchHUD();
+  drawParts();
+  drawPops();
+  drawMuteBtn();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PAUSE
+// ═══════════════════════════════════════════════════════════════════════════════
+function updatePaused(){
+  if(inp1.jStart||inp2.jStart){
+    gameState=S_MATCH;Audio.bgStart();
+  } else if(inp1.jEast||inp2.jEast){
+    gameState=S_TITLE; gameBoard1=gameBoard2=gameCPU=null;
+  }
+  if(keys['KeyM']&&!prevKeys['KeyM']) Audio.toggleMute();
+}
+
+function drawPaused(){
+  ctx.fillStyle='rgba(0,0,0,0.72)'; ctx.fillRect(0,0,CW,CH);
+  // Solid panel so the match timer/VS text can't bleed through behind the menu
+  ctx.fillStyle='#0a0a1a'; ctx.fillRect(CW/2-300,CH/2-118,600,178);
+  ctx.strokeStyle='#FFD700'; ctx.lineWidth=3; ctx.strokeRect(CW/2-300,CH/2-118,600,178);
+  ctx.save(); ctx.textAlign='center';
+  ctx.font="38px 'Press Start 2P',monospace"; ctx.fillStyle='#FFD700';
+  ctx.fillText('PAUSED',CW/2,CH/2-60);
+  ctx.font="13px 'Press Start 2P',monospace"; ctx.fillStyle='#fff';
+  ctx.fillText('START — RESUME',CW/2,CH/2+4);
+  ctx.fillStyle='#aaa'; ctx.font="11px 'Press Start 2P',monospace";
+  ctx.fillText('EAST / ○  — QUIT TO TITLE',CW/2,CH/2+38);
+  ctx.restore();
+  drawMuteBtn();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// WINNER
+// ═══════════════════════════════════════════════════════════════════════════════
+function updateWinner(dt){
+  winnerTimer+=dt;
+  tickConfetti(dt);
+  if(inp1.jSouth||inp2.jSouth){        // rematch from ANY pad
+    winnerTimer=0;startMatch(twoPlayer);
+  } else if(inp1.jEast||inp2.jEast){   // back to title
+    winnerTimer=0;gameState=S_TITLE;gameBoard1=gameBoard2=gameCPU=null;
+  }
+  if(keys['KeyM']&&!prevKeys['KeyM']) Audio.toggleMute();
+}
+
+function drawWinner(){
+  ctx.fillStyle='rgba(0,0,0,0.82)'; ctx.fillRect(0,0,CW,CH);
+  // Solid panel so the match timer/VS text can't bleed through behind the menu
+  ctx.fillStyle='#0a0a1a'; ctx.fillRect(CW/2-340,CH/2-168,680,262);
+  const wpc=winnerIdx===0?'#FF6B9D':'#35E0FF';
+  ctx.strokeStyle=wpc; ctx.lineWidth=3; ctx.strokeRect(CW/2-340,CH/2-168,680,262);
+  drawConfetti();
+  const wname=winnerIdx===0?'P1 WINS!':(twoPlayer?'P2 WINS!':'CPU WINS!');
+  const wcol=winnerIdx===0?'#FF6B9D':'#35E0FF';
+  const pulse=1+0.06*Math.sin(winnerTimer*5.5);
+  ctx.save(); ctx.textAlign='center';
+  ctx.save();
+  ctx.translate(CW/2,CH/2-90); ctx.scale(pulse,pulse);
+  ctx.font="46px 'Press Start 2P',monospace";
+  ctx.fillStyle='rgba(0,0,0,0.5)'; ctx.fillText(wname,4,4);
+  ctx.fillStyle=wcol; ctx.fillText(wname,0,0);
+  ctx.restore();
+
+  ctx.font="18px 'Press Start 2P',monospace"; ctx.fillStyle='#fff';
+  ctx.fillText(`P1: ${gameBoard1.score}     ${twoPlayer?'P2':'CPU'}: ${gameBoard2.score}`,CW/2,CH/2-20);
+
+  ctx.font="12px 'Press Start 2P',monospace"; ctx.fillStyle='#FFD700';
+  ctx.fillText('✕ / SPACE — REMATCH',CW/2,CH/2+42);
+  ctx.fillStyle='#999'; ctx.font="10px 'Press Start 2P',monospace";
+  ctx.fillText('EAST / ○  — TITLE',CW/2,CH/2+72);
+  ctx.restore();
+  drawMuteBtn();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MAIN LOOP
+// ═══════════════════════════════════════════════════════════════════════════════
+let lastTs=0;
+
+function loop(ts){
+  const dt=Math.min(0.05,(ts-lastTs)/1000);
+  lastTs=ts;
+
+  readInput();
+
+  switch(gameState){
+    case S_TITLE:
+      updateTitle(dt);
+      drawTitle();
+      break;
+    case S_MATCH:
+      updateMatch(dt);
+      drawMatch();
+      tickParts(dt);
+      tickPops(dt);
+      break;
+    case S_PAUSED:
+      updatePaused();
+      if(gameState===S_TITLE){ drawTitle(); break; } // quit this frame
+      drawMatch();
+      if(gameState===S_PAUSED) drawPaused();
+      break;
+    case S_WINNER:
+      updateWinner(dt);
+      if(gameState===S_TITLE){ drawTitle(); break; } // quit this frame
+      drawMatch();
+      if(gameState===S_WINNER) drawWinner();
+      tickParts(dt);
+      tickPops(dt);
+      break;
+  }
+
+  // Copy current keys to prev
+  for(const k in keys) prevKeys[k]=keys[k];
+  for(const k in prevKeys) if(!(k in keys)) prevKeys[k]=false;
+
+  requestAnimationFrame(loop);
+}
+
+requestAnimationFrame(ts=>{ lastTs=ts; requestAnimationFrame(loop); });
+
+// Tiny read/write debug handle for the arcade's headless CDP verification
+// harness (no gameplay effect; also handy on the console devtools).
+window.__cb={
+  get state(){return gameState;},
+  get b1(){return gameBoard1;},
+  get b2(){return gameBoard2;},
+  get cpu(){return gameCPU;},
+  get twoP(){return twoPlayer;},
+  get winner(){return winnerIdx;},
+  get timer(){return matchTimer;},
+  set timer(v){matchTimer=v;},
+  pops, parts,
+  C:{COLS,ROWS,T_EMPTY,T_CHOCO,SP_NONE,SP_STRIPE_H,SP_STRIPE_V,SP_WRAPPED,METER_MAX,WIN_SCORE},
+};
+</script>
+<!-- injected by scripts/bundle-games.sh — back-to-arcade overlay -->
+<a id="__arcade_back" href="/" style="position:fixed;top:max(10px,env(safe-area-inset-top));left:max(10px,env(safe-area-inset-left));z-index:2147483647;font:bold 10px/1 -apple-system,BlinkMacSystemFont,'Segoe UI',monospace;letter-spacing:2px;color:#ffd23f;background:rgba(10,14,39,0.82);border:2px solid #ffd23f;padding:8px 10px 7px;text-decoration:none;border-radius:3px;box-shadow:2px 2px 0 rgba(255,69,113,0.65);-webkit-tap-highlight-color:transparent;-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);">&#9664; ARCADE</a>
+
+<!-- injected by scripts/bundle-games.sh — hold PS (or SELECT+START) on any gamepad to return to the arcade menu -->
+<script id="__arcade_pad_exit">
+(function () {
+  var HOLD_MS = 1000;
+  var heldSince = 0;
+  var leaving = false;
+  function comboDown(gp) {
+    var b = gp.buttons;
+    var ps = b[16] && b[16].pressed;
+    var selectStart = b[8] && b[8].pressed && b[9] && b[9].pressed;
+    return !!(ps || selectStart);
+  }
+  function tick(now) {
+    if (leaving) return;
+    var pads = navigator.getGamepads ? navigator.getGamepads() : [];
+    var down = false;
+    for (var i = 0; i < pads.length; i++) {
+      if (pads[i] && pads[i].connected && comboDown(pads[i])) { down = true; break; }
+    }
+    var btn = document.getElementById('__arcade_back');
+    if (!down) {
+      heldSince = 0;
+      if (btn) { btn.style.transform = ''; btn.style.boxShadow = ''; }
+    } else {
+      if (!heldSince) heldSince = now;
+      var progress = (now - heldSince) / HOLD_MS;
+      if (btn) {
+        btn.style.transform = 'scale(' + (1 + 0.35 * Math.min(progress, 1)) + ')';
+        btn.style.transformOrigin = 'top left';
+        btn.style.boxShadow = '0 0 ' + Math.round(18 * Math.min(progress, 1)) + 'px #ffd23f';
+      }
+      if (progress >= 1) { leaving = true; location.href = '/'; return; }
+    }
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+})();
+</script>
+
+<!-- injected by scripts/bundle-games.sh — low-effects mode for the Pi console.
+     Canvas shadowBlur (neon glow) costs a GPU blur pass per glowing sprite;
+     the Pi 5 drops from ~50fps to ~13fps with it on. The console kiosk loads
+     the arcade with ?fx=low, the launcher persists the flag in localStorage,
+     and this overlay no-ops shadowBlur in every bundled game. Visit with
+     ?fx=full to turn glows back on. -->
+<script id="__arcade_lowfx">
+(function () {
+  var on = false;
+  try {
+    if (/[?&]fx=low\b/.test(location.search)) { on = true; localStorage.setItem('arcade_lowfx', '1'); }
+    else if (/[?&]fx=full\b/.test(location.search)) { localStorage.setItem('arcade_lowfx', '0'); }
+    else { on = localStorage.getItem('arcade_lowfx') === '1'; }
+  } catch (e) {}
+  if (!on) return;
+  try {
+    Object.defineProperty(CanvasRenderingContext2D.prototype, 'shadowBlur', {
+      set: function () {}, get: function () { return 0; }
+    });
+  } catch (e) {}
+  // Console mode: no mouse exists, so never show a cursor. And CSS
+  // backdrop-filter re-blurs the animating canvas under every frosted panel
+  // on every frame — measured 17fps -> 60fps in Ninth Inning on the Pi by
+  // disabling it. Panels keep their translucent rgba backgrounds.
+  try {
+    document.head.insertAdjacentHTML('beforeend',
+      '<style>* { cursor: none !important; backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }</style>');
+  } catch (e) {}
+})();
+</script>
+
+</body>
+</html>
