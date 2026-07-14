@@ -51,9 +51,11 @@ const NUM_TYPES = 5;
 
 const SP_NONE=0, SP_STRIPE_H=1, SP_STRIPE_V=2, SP_WRAPPED=3;
 
-const CANDY_COLORS = ['#FF6B9D','#FFD700','#FF4444','#9B59B6','#2ECC71'];
-const CANDY_DARK   = ['#B03060','#A07000','#A02020','#5B2C6F','#1A7A40'];
-const CANDY_LIGHT  = ['#FFB3D1','#FFED80','#FF9999','#D7BDE2','#82E0AA'];
+// Heart is a deep crimson (not the old #FF4444) so it can't be confused with
+// the pink gumdrop at TV distance; the shape is also enlarged (see heart()).
+const CANDY_COLORS = ['#FF6B9D','#FFD700','#E01030','#9B59B6','#2ECC71'];
+const CANDY_DARK   = ['#B03060','#A07000','#8A0A1E','#5B2C6F','#1A7A40'];
+const CANDY_LIGHT  = ['#FFB3D1','#FFED80','#FF8080','#D7BDE2','#82E0AA'];
 
 const MATCH_TIME = 150000; // 2:30
 const WIN_SCORE  = 3000;   // sudden-victory threshold (kid-reachable; timer decides otherwise)
@@ -64,8 +66,10 @@ const FALL_SPD  = 1100;   // px per second
 
 // CPU cadence: think-time before planning a move. Deliberately gentle so the
 // kids win comfortably — the visible cursor walk (~0.11s/cell) adds more on top.
-const CPU_SLOW_MIN=2600, CPU_SLOW_MAX=4200;
-const CPU_FAST_MIN=1900, CPU_FAST_MAX=2900;
+const CPU_SLOW_MIN=2600, CPU_SLOW_MAX=4200;   // normal
+const CPU_FAST_MIN=1900, CPU_FAST_MAX=2900;   // trailing → catch up a little
+const CPU_AHEAD_MIN=4400, CPU_AHEAD_MAX=6800; // ahead → dawdle so the kid can catch up
+const CPU_COLD_START=5.5;                     // first move delay — the kid always scores first
 
 const MAX_PARTICLES = 200;
 const MAX_POPUPS    = 20;
@@ -98,6 +102,7 @@ window.addEventListener('resize', resize);
 const sprites = [];
 const sprChoco    = document.createElement('canvas');
 const sprChocoBar = document.createElement('canvas');
+const sprSugarBar = document.createElement('canvas'); // bright SOLO variant (a bonus, not an attack)
 
 (function buildSprites() {
   const S = CELL;
@@ -115,7 +120,7 @@ const sprChocoBar = document.createElement('canvas');
   }
 
   function heart(g, cx, cy, r) {
-    const s=r*0.88;
+    const s=r*0.99; // enlarged so the heart reads clearly vs the round candies
     g.beginPath();
     g.moveTo(cx, cy+s*0.38);
     g.bezierCurveTo(cx+s,cy-s*0.1, cx+s,cy-s*0.88, cx,cy-s*0.26);
@@ -158,42 +163,46 @@ const sprChocoBar = document.createElement('canvas');
       if(shape==='circle'||shape==='swirl'){g.beginPath();g.arc(cx,cy,r,0,Math.PI*2);g.fill();}
       else g.fill();
 
-      // Swirl decoration
+      // Swirl decoration — bold white pinwheel so it's not "just a purple ball"
       if (shape==='swirl') {
         g.save();g.globalCompositeOperation='source-over';
-        g.strokeStyle=light; g.lineWidth=2.5; g.lineCap='round';
-        g.beginPath();
-        for(let a=0;a<Math.PI*1.6;a+=0.07){
-          const pr=(a/(Math.PI*1.6))*r*0.78;
-          const px=cx+Math.cos(a)*pr, py=cy+Math.sin(a)*pr;
-          if(a<0.07) g.moveTo(px,py); else g.lineTo(px,py);
+        g.lineCap='round';
+        for(const [ss,lw] of [['#3A1050',5.5],['#FFFFFF',3.5]]){
+          g.strokeStyle=ss; g.lineWidth=lw;
+          g.beginPath();
+          for(let a=0;a<Math.PI*1.6;a+=0.07){
+            const pr=(a/(Math.PI*1.6))*r*0.78;
+            const px=cx+Math.cos(a)*pr, py=cy+Math.sin(a)*pr;
+            if(a<0.07) g.moveTo(px,py); else g.lineTo(px,py);
+          }
+          g.stroke();
         }
-        g.stroke(); g.restore();
+        g.restore();
       }
 
       // Specular
       g.beginPath(); g.arc(cx-r*0.32,cy-r*0.36,r*0.13,0,Math.PI*2);
       g.fillStyle='rgba(255,255,255,0.82)'; g.fill();
 
-      // Special overlays
+      // Special overlays — bold & high-contrast so a kid clearly sees they
+      // made something special (the old pastel/low-alpha versions vanished).
       if (sp===SP_STRIPE_H) {
-        g.globalAlpha=0.55;
-        for(let i=0;i<3;i++){g.fillStyle=light;g.fillRect(3,S*0.22+i*S*0.25,S-6,5);}
-        g.globalAlpha=1;
+        for(let i=0;i<3;i++){const y=S*0.22+i*S*0.25;
+          g.fillStyle='rgba(0,0,0,0.5)'; g.fillRect(3,y-1,S-6,9);
+          g.fillStyle='rgba(255,255,255,0.9)'; g.fillRect(3,y,S-6,7);}
       } else if (sp===SP_STRIPE_V) {
-        g.globalAlpha=0.55;
-        for(let i=0;i<3;i++){g.fillStyle=light;g.fillRect(S*0.22+i*S*0.25,3,5,S-6);}
-        g.globalAlpha=1;
+        for(let i=0;i<3;i++){const x=S*0.22+i*S*0.25;
+          g.fillStyle='rgba(0,0,0,0.5)'; g.fillRect(x-1,3,9,S-6);
+          g.fillStyle='rgba(255,255,255,0.9)'; g.fillRect(x,3,7,S-6);}
       } else if (sp===SP_WRAPPED) {
-        const rg=g.createRadialGradient(cx,cy,r*0.35,cx,cy,r);
-        rg.addColorStop(0,'rgba(255,255,255,0)');
-        rg.addColorStop(0.75,'rgba(255,255,255,0)');
-        rg.addColorStop(1,'rgba(255,255,255,0.65)');
-        g.fillStyle=rg;
-        g.beginPath();g.arc(cx,cy,r,0,Math.PI*2);g.fill();
+        // Bold white ring + corner sparkles so wrapped candies pop
+        g.strokeStyle='rgba(0,0,0,0.45)'; g.lineWidth=6;
+        g.beginPath();g.arc(cx,cy,r*0.66,0,Math.PI*2);g.stroke();
+        g.strokeStyle='rgba(255,255,255,0.92)'; g.lineWidth=3.5;
+        g.beginPath();g.arc(cx,cy,r*0.66,0,Math.PI*2);g.stroke();
         g.fillStyle='#fff';
         [[cx-r*0.6,cy-r*0.6],[cx+r*0.6,cy-r*0.6],[cx-r*0.6,cy+r*0.6],[cx+r*0.6,cy+r*0.6]]
-          .forEach(([sx,sy])=>{g.beginPath();g.arc(sx,sy,2.5,0,Math.PI*2);g.fill();});
+          .forEach(([sx,sy])=>{g.beginPath();g.arc(sx,sy,3.5,0,Math.PI*2);g.fill();});
       }
       sprites[t][sp] = c;
     }
@@ -232,32 +241,62 @@ const sprChocoBar = document.createElement('canvas');
     g.fillStyle=sg; g.fillRect(0,0,BW,BH);
     g.strokeStyle='#1E0900'; g.lineWidth=4; g.strokeRect(2,2,BW-4,BH-4);
   }
+
+  // Bright candy-striped "sugar" slab — the SOLO bonus reskin (looks like a
+  // reward, not a menacing brown chocolate bar crashing onto the kid's board)
+  sprSugarBar.width=BW; sprSugarBar.height=BH;
+  {
+    const g=sprSugarBar.getContext('2d');
+    const bg=g.createLinearGradient(0,0,0,BH);
+    bg.addColorStop(0,'#FF9ECB'); bg.addColorStop(0.5,'#FF6B9D'); bg.addColorStop(1,'#E24E86');
+    g.fillStyle=bg; g.fillRect(0,0,BW,BH);
+    // diagonal candy stripes
+    g.save(); g.beginPath(); g.rect(0,0,BW,BH); g.clip();
+    g.lineWidth=14; g.strokeStyle='rgba(255,255,255,0.5)';
+    for(let x=-BH;x<BW;x+=40){ g.beginPath(); g.moveTo(x,BH); g.lineTo(x+BH,0); g.stroke(); }
+    g.restore();
+    g.fillStyle='#FFE94A'; g.fillRect(0,0,BW,15); // gold foil top
+    const sh=g.createLinearGradient(0,0,0,BH);
+    sh.addColorStop(0,'rgba(255,255,255,0.4)');sh.addColorStop(0.5,'rgba(255,255,255,0)');sh.addColorStop(1,'rgba(0,0,0,0.18)');
+    g.fillStyle=sh; g.fillRect(0,0,BW,BH);
+    g.strokeStyle='#fff'; g.lineWidth=4; g.strokeRect(2,2,BW-4,BH-4);
+  }
 })();
 
-// Pre-rendered cursor / selection / meter sprites (zero per-frame path ops)
+// Pre-rendered cursor / selection / meter / coach sprites (zero per-frame path ops)
 const sprCursor=[document.createElement('canvas'),document.createElement('canvas')];
 const sprSel=document.createElement('canvas');
 const sprMeter=[document.createElement('canvas'),document.createElement('canvas')];
+const sprHintArrow=document.createElement('canvas'); // right-pointing chevron (rotated when drawn)
+const sprXbtn=document.createElement('canvas');       // PS cross-button glyph for no-read hints
+const sprModeIcon=[document.createElement('canvas'),document.createElement('canvas'),document.createElement('canvas')]; // SOLO / VS CPU / 2P
 (function buildUISprites(){
   const CURSOR_COLORS=['#FFFFFF','#35E0FF'];
   for(let k=0;k<2;k++){
     const c=sprCursor[k]; c.width=c.height=CELL+2;
     const g=c.getContext('2d');
-    g.strokeStyle=CURSOR_COLORS[k]; g.lineWidth=3;
-    g.strokeRect(2,2,CELL-2,CELL-2);
-    g.lineWidth=4; const tk=9;
+    // Black halo first so the bright frame survives over any candy, then color.
+    const tk=10;
     const corners=[[1,1],[CELL+1,1],[1,CELL+1],[CELL+1,CELL+1]];
     const dirs=[[1,1],[-1,1],[1,-1],[-1,-1]];
-    for(let i=0;i<4;i++){
-      const [cx2,cy2]=corners[i]; const [dx,dy]=dirs[i];
-      g.beginPath();
-      g.moveTo(cx2,cy2+dy*tk); g.lineTo(cx2,cy2); g.lineTo(cx2+dx*tk,cy2);
-      g.stroke();
+    for(const [col,rw,bw] of [['rgba(0,0,0,0.6)',7,8],[CURSOR_COLORS[k],4,5]]){
+      g.strokeStyle=col; g.lineWidth=rw;
+      g.strokeRect(2,2,CELL-2,CELL-2);
+      g.lineWidth=bw;
+      for(let i=0;i<4;i++){
+        const [cx2,cy2]=corners[i]; const [dx,dy]=dirs[i];
+        g.beginPath();
+        g.moveTo(cx2,cy2+dy*tk); g.lineTo(cx2,cy2); g.lineTo(cx2+dx*tk,cy2);
+        g.stroke();
+      }
     }
   }
+  // Selection: bold white+magenta double ring (NOT gold — gold collides with the star)
   sprSel.width=sprSel.height=CELL;
   { const g=sprSel.getContext('2d');
-    g.strokeStyle='#FFD700'; g.lineWidth=4; g.strokeRect(4,4,CELL-8,CELL-8); }
+    g.strokeStyle='rgba(0,0,0,0.55)'; g.lineWidth=7; g.strokeRect(3,3,CELL-6,CELL-6);
+    g.strokeStyle='#FFFFFF'; g.lineWidth=5; g.strokeRect(3,3,CELL-6,CELL-6);
+    g.strokeStyle='#FF3EA5'; g.lineWidth=2; g.strokeRect(3,3,CELL-6,CELL-6); }
   const METER_COLORS=['#FF6B9D','#35E0FF'];
   for(let k=0;k<2;k++){
     const c=sprMeter[k]; c.width=BOARD_PX; c.height=14;
@@ -265,6 +304,41 @@ const sprMeter=[document.createElement('canvas'),document.createElement('canvas'
     const mg=g.createLinearGradient(0,0,BOARD_PX,0);
     mg.addColorStop(0,METER_COLORS[k]); mg.addColorStop(1,'#ffffff');
     g.fillStyle=mg; g.fillRect(0,0,BOARD_PX,14);
+  }
+  // Coach: fat right-pointing chevron with a dark outline
+  { sprHintArrow.width=sprHintArrow.height=CELL;
+    const g=sprHintArrow.getContext('2d'); const m=CELL/2;
+    g.lineJoin='round'; g.lineCap='round';
+    for(const [col,lw] of [['rgba(0,0,0,0.6)',16],['#FFE94A',10]]){
+      g.strokeStyle=col; g.lineWidth=lw;
+      g.beginPath(); g.moveTo(m-9,m-13); g.lineTo(m+11,m); g.lineTo(m-9,m+13); g.stroke();
+    }
+  }
+  // Coach: PlayStation cross (✕) button — blue circle + white cross
+  { sprXbtn.width=sprXbtn.height=40;
+    const g=sprXbtn.getContext('2d'); const m=20;
+    g.fillStyle='#2A3FBF'; g.beginPath(); g.arc(m,m,17,0,Math.PI*2); g.fill();
+    g.strokeStyle='rgba(255,255,255,0.9)'; g.lineWidth=2; g.beginPath(); g.arc(m,m,17,0,Math.PI*2); g.stroke();
+    g.strokeStyle='#fff'; g.lineWidth=4.5; g.lineCap='round';
+    g.beginPath(); g.moveTo(m-7,m-7); g.lineTo(m+7,m+7); g.moveTo(m+7,m-7); g.lineTo(m-7,m+7); g.stroke(); }
+
+  // Mode icons — so a non-reader can tell SOLO / VS CPU / 2 PLAYERS apart
+  { const sz=40;
+    for(let i=0;i<3;i++){ const c=sprModeIcon[i]; c.width=c.height=sz; const g=c.getContext('2d');
+      if(i===0){ // SOLO — one candy
+        g.drawImage(sprites[T_GUMDROP][SP_NONE],(sz-26)/2,(sz-26)/2,26,26);
+      } else if(i===1){ // VS CPU — friendly robot
+        g.fillStyle='#9AA6C0'; g.beginPath(); g.roundRect(6,11,28,25,5); g.fill();
+        g.strokeStyle='#5A6480'; g.lineWidth=2; g.stroke();
+        g.fillStyle='#35E0FF'; g.fillRect(12,19,6,6); g.fillRect(24,19,6,6);
+        g.fillStyle='#3A4160'; g.fillRect(15,30,12,3);
+        g.strokeStyle='#9AA6C0'; g.lineWidth=2; g.beginPath(); g.moveTo(20,11); g.lineTo(20,5); g.stroke();
+        g.fillStyle='#FF6B9D'; g.beginPath(); g.arc(20,4,3,0,Math.PI*2); g.fill();
+      } else { // 2 PLAYERS — two candies
+        g.drawImage(sprites[T_GUMDROP][SP_NONE],1,9,23,23);
+        g.drawImage(sprites[T_JELLY][SP_NONE],16,12,23,23);
+      }
+    }
   }
 })();
 
@@ -301,11 +375,25 @@ const Audio = (function(){
   }
 
   function fail(){
+    // Gentle neutral "boop" — a kid experimenting shouldn't hear a failure buzzer.
     init();
     if(!ac||muted) return;
     const t=ac.currentTime;
-    osc(160,'triangle',0.22,0.09,t);
-    osc(120,'triangle',0.18,0.1,t+0.07);
+    osc(330,'sine',0.11,0.07,t);
+  }
+
+  function sparkle(){ // happy rising twinkle for the SOLO sugar-rush bonus
+    init();
+    if(!ac||muted) return;
+    const t=ac.currentTime;
+    [784,988,1319,1568].forEach((f,i)=>osc(f,'triangle',0.16,0.13,t+i*0.06));
+  }
+
+  function shuffle(){ // friendly chime when the board reshuffles (no moves left)
+    init();
+    if(!ac||muted) return;
+    const t=ac.currentTime;
+    [440,554,659].forEach((f,i)=>osc(f,'sine',0.14,0.12,t+i*0.05));
   }
 
   function meterFull(){
@@ -361,7 +449,7 @@ const Audio = (function(){
     return muted;
   }
 
-  return{init,pop,fail,meterFull,crunch,winnerSfx,bgStart,bgStop,toggleMute,get muted(){return muted;}};
+  return{init,pop,fail,sparkle,shuffle,meterFull,crunch,winnerSfx,bgStart,bgStop,toggleMute,get muted(){return muted;}};
 })();
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -476,6 +564,12 @@ function drawConfetti(){
   ctx.restore();
 }
 
+// One-time "how to play" coach: teaches select→swap for a non-reading kid the
+// first time, then never shows again (persisted). Cleared the moment the
+// player's first valid swap lands.
+let taught = localStorage.getItem('candybattle_taught')==='1';
+function markTaught(){ if(!taught){ taught=true; try{localStorage.setItem('candybattle_taught','1');}catch(e){} } }
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // BOARD
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -497,6 +591,7 @@ class Board {
     // Cursor state
     this.curC=3; this.curR=3;
     this.selOn=false; this.selC=0; this.selR=0;
+    this.idleT=0;    // seconds this board has sat idle & unselected (drives the coach)
 
     // Board-level shake
     this.shakeX=0; this.shakeY=0;
@@ -524,6 +619,9 @@ class Board {
 
     // Opponent callback: (cols[]) called when choco bar smashes
     this.attackCallback=null;
+
+    // SOLO board reskins the choco meter payoff as a positive "sugar rush"
+    this.sugar=false;
 
     this.fill();
   }
@@ -569,8 +667,9 @@ class Board {
     // Animate: valid swaps slide then commit; invalid swaps slide and bounce back.
     this.swapAnim={c1,r1,c2,r2,t:0,ok};
     this.phase='swapping';
+    this.idleT=0;
     if(!ok) Audio.fail();
-    return ok;
+    return ok; // callers markTaught() on a HUMAN swap (CPU swaps must not dismiss the coach)
   }
 
   // Returns array of cell indices matched
@@ -723,7 +822,10 @@ class Board {
     const mx=this.bx+BOARD_PX/2, my=this.by+BOARD_PY/2;
     spawnPop(mx,my,'+'+pts,'#fff');
 
-    if(this.combo===1) spawnPop(mx,my-38,'SWEET!','#FFD700');
+    // A happy word on EVERY match — the fun shouldn't be gated behind cascades
+    // (a young kid rarely triggers combo>=1). Bigger runs / cascades escalate.
+    if(this.combo===0) spawnPop(mx,my-38, matched.length>=4?'YUMMY!':'YUM!','#2ECC71');
+    else if(this.combo===1) spawnPop(mx,my-38,'SWEET!','#FFD700');
     else if(this.combo===2) spawnPop(mx,my-38,'TASTY!','#FF6B9D');
     else if(this.combo>=3) spawnPop(mx,my-38,'DELICIOUS!','#9B59B6');
 
@@ -738,7 +840,7 @@ class Board {
     // Particles + pop anims (types stay until the shrink finishes)
     for(const i of matched){
       const c2=i%COLS, r2=Math.floor(i/COLS);
-      spawnParts(this.bx+c2*STEP+CELL/2,this.by+r2*STEP+CELL/2, CANDY_COLORS[this.types[i]]||'#fff',5);
+      spawnParts(this.bx+c2*STEP+CELL/2,this.by+r2*STEP+CELL/2, CANDY_COLORS[this.types[i]]||'#fff',8);
       if(specMap[i]){
         this.special[i]=specMap[i].sp; // this cell becomes the new special candy
         this.clearT[i]=0; this.pend[i]=0;
@@ -794,8 +896,9 @@ class Board {
     this.barTargetY=this.by+BOARD_PY-(3*STEP-GAP);   // resting on bottom 3 rows
     this.barY=this.barStartY;
     this.barCallback=attackCallback;
-    this.shakeX=10;
-    Audio.crunch();
+    // SOLO = a gentle sugar-rush bonus; VS = a chunky chocolate slam.
+    if(this.sugar){ this.shakeX=4; Audio.sparkle(); }
+    else { this.shakeX=10; Audio.crunch(); }
   }
 
   addChocoChunks(cols){
@@ -884,6 +987,9 @@ class Board {
 
   _wiggle(){
     this.wiggOn=true; this.wiggT=0.85;
+    // Tell the kid the board is HELPING (reshuffling), not glitching.
+    spawnPop(this.bx+BOARD_PX/2,this.by+BOARD_PY/2,'NEW CANDIES!','#35E0FF');
+    Audio.shuffle();
   }
 
   findMove(){
@@ -909,6 +1015,9 @@ class Board {
     if(this.shakeX>0) this.shakeX=Math.max(0,this.shakeX-dt*55);
     if(this.shakeY>0) this.shakeY=Math.max(0,this.shakeY-dt*55);
     if(this.mFlash>0) this.mFlash=Math.max(0,this.mFlash-dt);
+
+    // Coach idle timer: how long the board has sat waiting for a first move
+    if(this.idle() && !this.selOn) this.idleT+=dt; else this.idleT=0;
 
     // Choco bar pending timer
     if(this.chocoBarPending>0){
@@ -953,15 +1062,20 @@ class Board {
       } else if(this.barPhase===2){
         // Shatter
         const pts=this._smashBottom3();
-        spawnPop(this.bx+BOARD_PX/2,this.by+BOARD_PY-1.5*STEP,'CRUNCH! +'+pts,'#FFD700');
-        for(let c=0;c<COLS;c++) spawnParts(this.bx+c*STEP+CELL/2,this.by+BOARD_PY-CELL,'#7B4A1E',4);
+        if(this.sugar){
+          spawnPop(this.bx+BOARD_PX/2,this.by+BOARD_PY-1.5*STEP,'SUGAR RUSH! +'+pts,'#FFE94A');
+          for(let c=0;c<COLS;c++) spawnParts(this.bx+c*STEP+CELL/2,this.by+BOARD_PY-CELL,CANDY_COLORS[c%NUM_TYPES],6);
+        } else {
+          spawnPop(this.bx+BOARD_PX/2,this.by+BOARD_PY-1.5*STEP,'CRUNCH! +'+pts,'#FFD700');
+          for(let c=0;c<COLS;c++) spawnParts(this.bx+c*STEP+CELL/2,this.by+BOARD_PY-CELL,'#7B4A1E',4);
+        }
         // Trigger gravity after smash
         this._compactGravity();
         if(this.phase==='idle'||this.phase==='falling') this.phase='falling';
-        // Attack opponent
+        // Attack opponent (fewer garbage blocks — a board buried in brown is demoralizing)
         if(this.barCallback){
           const pool=[0,1,2,3,4,5,6,7];
-          const n=4+Math.floor(Math.random()*3);
+          const n=3+Math.floor(Math.random()*2); // 3-4 (was 4-6)
           const cols=[];
           for(let k=0;k<n;k++){const ri=Math.floor(Math.random()*pool.length);cols.push(pool.splice(ri,1)[0]);}
           this.barCallback(cols);
@@ -1028,7 +1142,7 @@ class Board {
     return pts;
   }
 
-  draw(isP1, showCursor){
+  draw(isP1, showCursor, showCoach){
     const sx=Math.sin(Date.now()*0.031)*this.shakeX;
     const sy=Math.sin(Date.now()*0.047)*this.shakeY;
     const bx=this.bx+sx, by=this.by+sy;
@@ -1081,22 +1195,53 @@ class Board {
       }
     }
 
-    // Selection highlight (pre-rendered sprite — no per-frame path ops)
+    // Selected candy: bold ring + a happy bounce, drawn ON TOP so "I picked
+    // this up" is unmistakable (the old thin gold box vanished under the cursor).
     if(this.selOn){
-      ctx.drawImage(sprSel,bx+this.selC*STEP,by+this.selR*STEP);
+      const px=bx+this.selC*STEP, py=by+this.selR*STEP;
+      ctx.drawImage(sprSel,px,py);
+      const i=this.ci(this.selC,this.selR), t=this.types[i], sp=this.special[i];
+      if(t!==T_EMPTY){
+        const s=1.0+0.14*Math.abs(Math.sin(Date.now()*0.009));
+        ctx.save(); ctx.translate(px+CELL/2,py+CELL/2); ctx.scale(s,s);
+        ctx.drawImage(t===T_CHOCO?sprChoco:sprites[t][sp],-CELL/2,-CELL/2); ctx.restore();
+      }
     }
 
-    // Cursor (pre-rendered sprite, alpha pulse)
+    // Cursor (pre-rendered sprite, alpha pulse; floor raised so it never fades out)
     if(showCursor && !this.barOn){
       const px=bx+this.curC*STEP, py=by+this.curR*STEP;
-      ctx.globalAlpha=0.65+0.35*Math.sin(Date.now()*0.007);
+      ctx.globalAlpha=0.8+0.2*Math.sin(Date.now()*0.007);
       ctx.drawImage(sprCursor[isP1?0:1],px-1,py-1);
       ctx.globalAlpha=1;
     }
 
-    // Choco bar
+    // First-time coach (no reading required): teaches select→swap, then never
+    // shows again once the player's first valid swap lands.
+    if(showCoach && !taught && !this.barOn && this.idle()){
+      const now=Date.now();
+      if(this.selOn){
+        // "push a direction!" — a fat arrow on each in-bounds neighbor
+        const dirs=[[0,-1,-Math.PI/2],[0,1,Math.PI/2],[-1,0,Math.PI],[1,0,0]];
+        const b=3+2*Math.sin(now*0.012);
+        for(const [dc,dr,rot] of dirs){
+          const nc=this.selC+dc, nr=this.selR+dr;
+          if(nc<0||nc>=COLS||nr<0||nr>=ROWS) continue;
+          const ccx=bx+nc*STEP+CELL/2, ccy=by+nr*STEP+CELL/2;
+          ctx.save(); ctx.translate(ccx+Math.cos(rot)*b,ccy+Math.sin(rot)*b); ctx.rotate(rot);
+          ctx.drawImage(sprHintArrow,-CELL/2,-CELL/2); ctx.restore();
+        }
+      } else if(this.idleT>1.2){
+        // "press ✕ here!" — a bouncing cross-button above the cursor
+        const px=bx+this.curC*STEP+CELL/2, py=by+this.curR*STEP;
+        const b=6*Math.abs(Math.sin(now*0.006));
+        ctx.drawImage(sprXbtn, px-20, py-48-b);
+      }
+    }
+
+    // Choco / sugar bar
     if(this.barOn && this.barPhase<3){
-      ctx.drawImage(sprChocoBar,bx,this.barY+sy);
+      ctx.drawImage(this.sugar?sprSugarBar:sprChocoBar,bx,this.barY+sy);
     }
   }
 }
@@ -1107,12 +1252,12 @@ class Board {
 class CPU {
   constructor(board){
     this.board=board;
-    this.timer=2.6;
+    this.timer=CPU_COLD_START;
     this.move=null;   // planned [c1,r1,c2,r2]
     this.stepT=0;     // delay between visible cursor steps
   }
-  reset(){ this.timer=2.6; this.move=null; }
-  update(dt, fast){
+  reset(){ this.timer=CPU_COLD_START; this.move=null; }
+  update(dt, tier){
     const b=this.board;
     if(!b.idle()){ this.move=null; return; }
     if(!this.move){
@@ -1120,7 +1265,7 @@ class CPU {
       if(this.timer<=0){
         const m=b.findMove();
         if(m){ this.move=m; this.stepT=0.1; }
-        else { b._wiggle(); this._resetTimer(fast); }
+        else { b._wiggle(); this._resetTimer(tier); }
       }
       return;
     }
@@ -1139,11 +1284,13 @@ class CPU {
     b.trySwap(c1,r1,c2,r2);
     b.curC=c2; b.curR=r2;
     this.move=null;
-    this._resetTimer(fast);
+    this._resetTimer(tier);
   }
-  _resetTimer(fast){
-    const mn=fast?CPU_FAST_MIN:CPU_SLOW_MIN;
-    const mx=fast?CPU_FAST_MAX:CPU_SLOW_MAX;
+  _resetTimer(tier){
+    let mn,mx;
+    if(tier==='trailing'){ mn=CPU_FAST_MIN; mx=CPU_FAST_MAX; }
+    else if(tier==='ahead'){ mn=CPU_AHEAD_MIN; mx=CPU_AHEAD_MAX; }
+    else { mn=CPU_SLOW_MIN; mx=CPU_SLOW_MAX; }
     this.timer=(mn+Math.random()*(mx-mn))/1000;
   }
 }
@@ -1251,8 +1398,9 @@ function pointerMenu(wx,wy){
 function boardPointerStart(wx,wy){
   if(pointerMenu(wx,wy)) return;
   if(gameState!==S_MATCH||!gameBoard1) return;
-  const c2=Math.floor((wx-P1_BX)/STEP);
-  const r2=Math.floor((wy-BOARD_TOP)/STEP);
+  // Use the actual board origin (SOLO centers it; versus puts P1 on the left)
+  const c2=Math.floor((wx-gameBoard1.bx)/STEP);
+  const r2=Math.floor((wy-gameBoard1.by)/STEP);
   if(c2>=0&&c2<COLS&&r2>=0&&r2<ROWS){
     touchSel.on=true; touchSel.c=c2; touchSel.r=r2;
     touchSel.sx=wx; touchSel.sy=wy;
@@ -1266,21 +1414,21 @@ function boardPointerEnd(wx,wy){
   if(gameState!==S_MATCH||!gameBoard1||!gameBoard1.idle()) return;
   const dx=wx-touchSel.sx, dy=wy-touchSel.sy;
   const adx=Math.abs(dx),ady=Math.abs(dy);
-  if(adx<10&&ady<10){
+  if(adx<22&&ady<22){ // forgive wiggly kid taps (was 10px) before treating it as a swipe
     // Tap — select / deselect / swap-if-adjacent / re-select
     const c2=touchSel.c, r2=touchSel.r;
     const b=gameBoard1;
     if(!b.selOn){ b.selOn=true; b.selC=c2; b.selR=r2; }
     else if(b.selC===c2&&b.selR===r2){ b.selOn=false; }
     else if(Math.abs(b.selC-c2)+Math.abs(b.selR-r2)===1){
-      b.trySwap(b.selC,b.selR,c2,r2); b.selOn=false;
+      if(b.trySwap(b.selC,b.selR,c2,r2)) markTaught(); b.selOn=false;
     }
     else { b.selC=c2; b.selR=r2; } // too far — re-select the tapped candy
   } else {
     // Swipe
     const dc=adx>ady?(dx>0?1:-1):0, dr=adx>ady?0:(dy>0?1:-1);
     const c2=touchSel.c, r2=touchSel.r;
-    gameBoard1.trySwap(c2,r2,c2+dc,r2+dr);
+    if(gameBoard1.trySwap(c2,r2,c2+dc,r2+dr)) markTaught();
     gameBoard1.selOn=false;
   }
 }
@@ -1323,6 +1471,7 @@ let menuSel=0;            // highlighted title option (0..2)
 let winnerIdx=-1;
 let winnerTimer=0;
 let newBest=false;
+let isDraw=false;
 let titleAnim=0;
 let p2JoinSecs=-1; // P2 mid-match join request (CPU mode only): second at which ✕ was pressed
 
@@ -1333,9 +1482,11 @@ function startMatch(mode){
   p2JoinSecs=-1;
   gameBoard1=new Board(soloMode?SOLO_BX:P1_BX,0);
   if(soloMode){
-    // Relaxed single-board mode: no opponent, no incoming garbage.
+    // Relaxed single-board mode: no opponent, no incoming garbage. The choco
+    // meter still fills but pays off as a bright, friendly "sugar rush".
     gameBoard2=null; gameCPU=null;
     gameBoard1.attackCallback=null;
+    gameBoard1.sugar=true;
   } else {
     gameBoard2=new Board(P2_BX,1);
     gameBoard1.attackCallback=(cols)=>{ if(gameBoard2) gameBoard2.addChocoChunks(cols); };
@@ -1360,6 +1511,7 @@ function handleCursorMove(board,inp){
     if(inp.jRt)  dc=1;
     if(dc||dr){
       const ok=board.trySwap(board.selC,board.selR,board.selC+dc,board.selR+dr);
+      if(ok) markTaught();
       board.selOn=false;
       // Move cursor to target regardless
       board.curC=Math.max(0,Math.min(COLS-1,board.selC+dc));
@@ -1467,9 +1619,9 @@ function drawTitle(){
 
   // Floating candy decorations
   const decs=[
-    [CW/2-270,ty-14,T_GUMDROP,SP_NONE],[CW/2+230,ty-14,T_STAR,SP_NONE],
-    [CW/2-255,ty+44,T_HEART,SP_NONE],  [CW/2+210,ty+44,T_JELLY,SP_NONE],
-    [CW/2-215,ty+108,T_SWIRL,SP_WRAPPED],[CW/2+170,ty+108,T_GUMDROP,SP_STRIPE_H],
+    [CW/2-292,ty-14,T_GUMDROP,SP_NONE],[CW/2+252,ty-14,T_STAR,SP_NONE],
+    [CW/2-262,ty+44,T_HEART,SP_NONE],  [CW/2+222,ty+44,T_JELLY,SP_NONE],
+    [CW/2-222,ty+108,T_SWIRL,SP_WRAPPED],[CW/2+184,ty+108,T_GUMDROP,SP_STRIPE_H],
   ];
   for(const [dx2,dy,t,sp] of decs){
     const s=0.88+0.12*Math.sin(titleAnim*2.2+dx2*0.01);
@@ -1489,9 +1641,13 @@ function drawTitle(){
     ctx.fillRect(bx,y,bw,rowH-8);
     ctx.strokeStyle=sel?cols[i]:'rgba(255,255,255,0.18)';
     ctx.lineWidth=sel?3:1.5; ctx.strokeRect(bx,y,bw,rowH-8);
+    // Picto-icon at the left so non-readers can tell the modes apart
+    ctx.globalAlpha=sel?1:0.55;
+    ctx.drawImage(sprModeIcon[i],bx+9,y+(rowH-8)/2-20);
+    ctx.globalAlpha=1;
     ctx.font="15px 'Press Start 2P',monospace";
     ctx.fillStyle=sel?'#fff':'rgba(255,255,255,0.55)';
-    ctx.fillText(MODE_NAMES[i],CW/2,y+22);
+    ctx.fillText(MODE_NAMES[i],CW/2+16,y+22);
     if(sel){
       ctx.fillStyle=cols[i];
       ctx.fillText('▸',bx-2,y+22);
@@ -1552,9 +1708,14 @@ function updateMatch(dt){
     // Easy CPU fills its choco meter slowly so it rarely dumps garbage on the kid
     if(gameCPU) gameBoard2.meterRate*=CPU_METER_RATE;
 
-    // CPU (speeds up a little when trailing)
-    const cpuTrailing=(gameBoard1.score>gameBoard2.score+RUBBER_BAND_DELTA);
-    if(gameCPU) gameCPU.update(dt,cpuTrailing);
+    // CPU pace: catch up a touch when behind, but DAWDLE when ahead so the kid
+    // can reel it back in — the felt experience of a runaway CPU is what stings.
+    if(gameCPU){
+      let tier='normal';
+      if(gameBoard1.score>gameBoard2.score+RUBBER_BAND_DELTA) tier='trailing';
+      else if(gameBoard2.score>gameBoard1.score+RUBBER_BAND_DELTA) tier='ahead';
+      gameCPU.update(dt,tier);
+    }
 
     gameBoard1.update(dt);
     gameBoard2.update(dt);
@@ -1564,13 +1725,17 @@ function updateMatch(dt){
   if(keys['KeyM']&&!prevKeys['KeyM']) Audio.toggleMute();
 
   // Win check
-  let w=-1;
+  let w=-1; isDraw=false;
   if(soloMode){
     if(matchTimer<=0) w=0;                         // solo: clock runs out → show score
   } else {
     if(gameBoard1.score>=WIN_SCORE) w=0;
     else if(gameBoard2.score>=WIN_SCORE) w=1;
-    else if(matchTimer<=0) w=(gameBoard1.score>=gameBoard2.score)?0:1;
+    else if(matchTimer<=0){
+      // A close finish is a friendly draw rather than "CPU WINS!"
+      if(Math.abs(gameBoard1.score-gameBoard2.score)<=300){ isDraw=true; w=0; }
+      else w=(gameBoard1.score>gameBoard2.score)?0:1;
+    }
   }
   if(w>=0){
     winnerIdx=w; gameState=S_WINNER; winnerTimer=0;
@@ -1601,8 +1766,8 @@ function drawMatchHUD(){
   ctx.fillStyle=twoPlayer?'#35E0FF':'#888';
   ctx.fillText(twoPlayer?'P2':'CPU',P2_BX+BOARD_PX/2,BOARD_TOP-54);
   if(!twoPlayer){
-    ctx.font="8px 'Press Start 2P',monospace";
-    const hb=0.45+0.4*Math.sin(Date.now()*0.004);
+    ctx.font="10px 'Press Start 2P',monospace";
+    const hb=0.6+0.3*Math.sin(Date.now()*0.004);
     ctx.fillStyle=`rgba(53,224,255,${hb})`;
     ctx.fillText(p2JoinSecs>=0?'P2 JOINING...':'P2 PRESS ✕ TO JOIN',P2_BX+BOARD_PX/2,BOARD_TOP-8);
   }
@@ -1620,10 +1785,10 @@ function drawMatchHUD(){
   ctx.fillText('⚡VS⚡',cx,BOARD_TOP+BOARD_PY/2+22);
 
   // Target progress
-  ctx.font="8px 'Press Start 2P',monospace"; ctx.fillStyle='#666';
+  ctx.font="9px 'Press Start 2P',monospace"; ctx.fillStyle='#AAA';
   ctx.fillText('FIRST TO '+WIN_SCORE,cx,BOARD_TOP+BOARD_PY/2+52);
-  const barW=90,barH=9,barY=BOARD_TOP+BOARD_PY/2+60;
-  ctx.fillStyle='#222'; ctx.fillRect(cx-barW-4,barY,barW,barH); ctx.fillRect(cx+4,barY,barW,barH);
+  const barW=94,barH=12,barY=BOARD_TOP+BOARD_PY/2+60;
+  ctx.fillStyle='#333'; ctx.fillRect(cx-barW-4,barY,barW,barH); ctx.fillRect(cx+4,barY,barW,barH);
   ctx.fillStyle='#FF6B9D'; ctx.fillRect(cx-barW-4,barY,barW*Math.min(1,gameBoard1.score/WIN_SCORE),barH);
   ctx.fillStyle='#35E0FF'; ctx.fillRect(cx+4,barY,barW*Math.min(1,gameBoard2.score/WIN_SCORE),barH);
 
@@ -1647,11 +1812,11 @@ function drawSoloHUD(){
 
   const midY=BOARD_TOP+BOARD_PY/2;
 
-  // TIME panel — left of the board
+  // TIME panel — left of the board (no red panic-strobe: SOLO is the chill mode)
   const lx=Math.floor(SOLO_BX/2);
   const secs=Math.max(0,Math.floor(matchTimer/1000));
   const tm=`${Math.floor(secs/60)}:${String(secs%60).padStart(2,'0')}`;
-  const tcolor=matchTimer<30000?(Math.sin(Date.now()*0.012)>0?'#FF4444':'#fff'):'#FFD700';
+  const tcolor=matchTimer<20000?'#FFB84A':'#FFD700';
   ctx.font="11px 'Press Start 2P',monospace"; ctx.fillStyle='#888';
   ctx.fillText('TIME',lx,midY-24);
   ctx.font="26px 'Press Start 2P',monospace"; ctx.fillStyle=tcolor;
@@ -1674,11 +1839,11 @@ function drawSoloHUD(){
 function drawMatch(){
   drawMatchBg();
   if(soloMode){
-    gameBoard1.draw(true,true);
+    gameBoard1.draw(true,true,true); // coach on the human's board
     drawSoloHUD();
   } else {
-    gameBoard1.draw(true,  true);
-    gameBoard2.draw(false, true); // always show P2/CPU cursor
+    gameBoard1.draw(true,  true, true);       // P1 is always human → coach
+    gameBoard2.draw(false, true, twoPlayer);  // coach on P2 only when a human
     drawMatchHUD();
   }
   drawParts();
@@ -1732,11 +1897,11 @@ function drawWinner(){
   ctx.fillStyle='rgba(0,0,0,0.82)'; ctx.fillRect(0,0,CW,CH);
   // Solid panel so the match timer/VS text can't bleed through behind the menu
   ctx.fillStyle='#0a0a1a'; ctx.fillRect(CW/2-340,CH/2-168,680,262);
-  const wpc=winnerIdx===0?'#FF6B9D':'#35E0FF';
+  const wpc=(soloMode||isDraw)?'#FFD700':(winnerIdx===0?'#FF6B9D':'#35E0FF');
   ctx.strokeStyle=wpc; ctx.lineWidth=3; ctx.strokeRect(CW/2-340,CH/2-168,680,262);
   drawConfetti();
-  const wname=soloMode?"TIME'S UP!":(winnerIdx===0?'P1 WINS!':(twoPlayer?'P2 WINS!':'CPU WINS!'));
-  const wcol=soloMode?'#FFD700':(winnerIdx===0?'#FF6B9D':'#35E0FF');
+  const wname=soloMode?'GREAT JOB!':(isDraw?'GREAT GAME!':(winnerIdx===0?'P1 WINS!':(twoPlayer?'P2 WINS!':'CPU WINS!')));
+  const wcol=(soloMode||isDraw)?'#FFD700':(winnerIdx===0?'#FF6B9D':'#35E0FF');
   const pulse=1+0.06*Math.sin(winnerTimer*5.5);
   ctx.save(); ctx.textAlign='center';
   ctx.save();
@@ -1831,8 +1996,11 @@ window.__cb={
   set menuSel(v){menuSel=v;},
   start(m){startMatch(m);},
   get winner(){return winnerIdx;},
+  get draw(){return isDraw;},
   get timer(){return matchTimer;},
   set timer(v){matchTimer=v;},
+  get taught(){return taught;},
+  set taught(v){taught=!!v;},
   pops, parts,
   C:{COLS,ROWS,T_EMPTY,T_CHOCO,SP_NONE,SP_STRIPE_H,SP_STRIPE_V,SP_WRAPPED,METER_MAX,WIN_SCORE,MODE_SOLO,MODE_CPU,MODE_2P},
 };
