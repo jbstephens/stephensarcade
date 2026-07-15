@@ -71,5 +71,13 @@ window.GAMES_DATA = [
     "status": "PRESS START",
     "icon": "candy",
     "source": "https://candybattle.onrender.com/"
+  },
+  {
+    "slug": "island-forge",
+    "title": "ISLAND FORGE",
+    "genre": "BUILDER",
+    "status": "PRESS START",
+    "icon": "island",
+    "source": "https://islandforge.onrender.com/"
   }
 ];

@@ -1,0 +1,2695 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Island Forge">
+<title>Island Forge</title>
+<script src="https://ses.q5labs.co/lib/controller.js"></script>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box;
+      -webkit-user-select:none; user-select:none;
+      -webkit-tap-highlight-color:transparent; -webkit-touch-callout:none; }
+  html, body { width:100%; height:100%; overflow:hidden; background:#0a1c2e;
+      font-family:Verdana, system-ui, sans-serif; touch-action:none; }
+  #game { position:absolute; left:50%; top:50%; transform:translate(-50%,-50%);
+      image-rendering:pixelated; background:#0a1c2e; }
+
+  /* Touch controls (iPad) — chunky kid-thumb buttons, hidden when a pad is active */
+  .tc { position:fixed; bottom:max(16px, env(safe-area-inset-bottom));
+      display:none; gap:14px; z-index:5; align-items:flex-end; }
+  .tc-left  { left:max(16px, env(safe-area-inset-left)); flex-direction:column; align-items:flex-start; }
+  .tc-right { right:max(16px, env(safe-area-inset-right)); flex-direction:row; }
+  body.input-touch.in-play .tc { display:flex; }
+  body.input-pad .tc { display:none !important; }
+  .tbtn { border-radius:18px; border:3px solid rgba(255,255,255,0.5);
+      background:rgba(20,40,60,0.55); color:#fff; font-family:inherit;
+      font-weight:900; letter-spacing:1px; pointer-events:auto;
+      display:flex; align-items:center; justify-content:center;
+      width:96px; height:64px; font-size:16px; touch-action:none; }
+  .tbtn:active { background:rgba(120,200,255,0.45); transform:scale(0.94); }
+  .tbtn.big { width:104px; height:104px; border-radius:50%; font-size:44px;
+      background:rgba(90,200,120,0.35); border-color:rgba(160,255,180,0.7); }
+  .tbtn.small { width:80px; height:80px; border-radius:50%; font-size:34px;
+      background:rgba(220,90,80,0.3); border-color:rgba(255,170,150,0.65); }
+  #tbPause { position:fixed; top:max(52px, env(safe-area-inset-top));
+      right:max(14px, env(safe-area-inset-right)); width:60px; height:60px;
+      border-radius:50%; border:3px solid rgba(255,255,255,0.5);
+      background:rgba(20,40,60,0.55); color:#fff; font-size:22px; font-weight:900;
+      display:none; align-items:center; justify-content:center; z-index:6;
+      font-family:inherit; touch-action:manipulation; }
+  body.input-touch.in-play #tbPause { display:flex; }
+  body.input-pad #tbPause { display:none !important; }
+</style>
+<!-- Google Analytics — injected by scripts/inject-back-button.py at bundle time -->
+<script id="__arcade_ga" async src="https://www.googletagmanager.com/gtag/js?id=G-T7N4WEJJEL"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+  gtag('config', 'G-T7N4WEJJEL');
+</script>
+
+</head>
+<body>
+<canvas id="game" width="1280" height="720"></canvas>
+<div class="tc tc-left">
+  <button class="tbtn" id="tbBuild">BUILD</button>
+  <button class="tbtn" id="tbStats">STATS</button>
+</div>
+<div class="tc tc-right">
+  <button class="tbtn small" id="tbB">✕</button>
+  <button class="tbtn big" id="tbA">✓</button>
+</div>
+<button id="tbPause">❚❚</button>
+<script>
+'use strict';
+/* ═══════════════════════════════════════════════════════════════════════
+   ISLAND FORGE — Stephens Arcade
+   Kid-friendly incremental island builder. One file, zero assets:
+   every sprite is baked into offscreen canvases at load, all audio is
+   WebAudio synth. Per-frame hot path is drawImage + transforms only —
+   all static content (ocean, land, pipes, buildings, trees) lives in ONE
+   background canvas rebuilt only when the island changes.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+const W = 1280, H = 720, TILE = 32, GW = 40, GH = 22, GY0 = 8;
+const CX = 20, CYG = 11;                       // island centre in grid coords
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+ctx.imageSmoothingEnabled = false;
+
+function fit() {
+  const s = Math.min(innerWidth / W, innerHeight / H);
+  canvas.style.width  = Math.floor(W * s) + 'px';
+  canvas.style.height = Math.floor(H * s) + 'px';
+}
+addEventListener('resize', fit); fit();
+
+/* ───── tiny utils ───── */
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+function mulberry(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+function hash2(x, y) {
+  let h = (x * 374761393 + y * 668265263) ^ ((x + 7) * (y + 13) * 1274126177);
+  h = (h ^ (h >>> 13)) >>> 0;
+  return (h % 1024) / 1024;
+}
+function fmt(n) {
+  n = Math.floor(n);
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+  if (n >= 1e4) return (n / 1e3).toFixed(1) + 'K';
+  return '' + n;
+}
+const tX = gx => gx * TILE, tY = gy => GY0 + gy * TILE;
+
+/* ───── storage ───── */
+const SLOT_KEY = i => 'islandforge_slot' + i;
+function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+function lsDel(k) { try { localStorage.removeItem(k); } catch (e) {} }
+let best = parseInt(lsGet('islandforge_best') || '0', 10) || 0;
+let muted = lsGet('islandforge_mute') === '1';
+
+/* ───── audio (all synthesized, context created lazily on first gesture) ───── */
+let actx = null, musNext = 0, chordI = 0;
+function ensureAudio() {
+  if (!actx) {
+    const A = window.AudioContext || window.webkitAudioContext;
+    if (A) { actx = new A(); musNext = actx.currentTime + 0.4; }
+  }
+  if (actx && actx.state === 'suspended') actx.resume();
+}
+function blip(freq, dur, type, vol, sweepTo) {
+  if (!actx || muted) return;
+  const t0 = actx.currentTime;
+  const o = actx.createOscillator(), g = actx.createGain();
+  o.type = type || 'square';
+  o.frequency.setValueAtTime(freq, t0);
+  if (sweepTo != null) o.frequency.exponentialRampToValueAtTime(Math.max(20, sweepTo), t0 + dur);
+  g.gain.setValueAtTime(vol || 0.06, t0);
+  g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+  o.connect(g).connect(actx.destination);
+  o.start(t0); o.stop(t0 + dur + 0.02);
+}
+function noiseBurst(dur, peak, lp0, lp1) {
+  if (!actx || muted) return;
+  const t0 = actx.currentTime, sr = actx.sampleRate;
+  const buf = actx.createBuffer(1, Math.floor(sr * dur), sr);
+  const d = buf.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / d.length * 0.5);
+  const src = actx.createBufferSource(); src.buffer = buf;
+  const f = actx.createBiquadFilter(); f.type = 'lowpass';
+  f.frequency.setValueAtTime(lp0, t0);
+  f.frequency.exponentialRampToValueAtTime(Math.max(30, lp1), t0 + dur);
+  const g = actx.createGain();
+  g.gain.setValueAtTime(0.0001, t0);
+  g.gain.exponentialRampToValueAtTime(peak, t0 + 0.015);
+  g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+  src.connect(f).connect(g).connect(actx.destination);
+  src.start(t0); src.stop(t0 + dur + 0.05);
+}
+let lastTickSnd = 0;
+const SFX = {
+  ui:       () => blip(520, 0.05, 'square', 0.04, 640),
+  confirm:  () => { blip(660, 0.07, 'triangle', 0.07); setTimeout(() => blip(990, 0.09, 'triangle', 0.07), 60); },
+  cancel:   () => blip(330, 0.09, 'square', 0.05, 200),
+  chop:     () => { noiseBurst(0.07, 0.12, 1600, 500); blip(190, 0.06, 'square', 0.07, 120); },
+  mine:     () => { noiseBurst(0.06, 0.12, 2600, 900); blip(560, 0.05, 'square', 0.05, 340); },
+  place:    () => { blip(240, 0.1, 'triangle', 0.09, 480); noiseBurst(0.1, 0.08, 900, 300); },
+  remove:   () => { noiseBurst(0.14, 0.1, 1200, 200); blip(300, 0.12, 'square', 0.05, 90); },
+  coin:     () => { const t = performance.now(); if (t - lastTickSnd < 120) return; lastTickSnd = t;
+                    blip(880, 0.05, 'triangle', 0.045, 1320); },
+  pop:      () => blip(500, 0.08, 'sine', 0.08, 900),
+  fanfare:  () => { [523, 659, 784, 1047].forEach((f, i) => setTimeout(() => blip(f, 0.22, 'triangle', 0.09), i * 130)); },
+  legendary:() => { [660, 880, 1100, 1320, 1760].forEach((f, i) => setTimeout(() => blip(f, 0.18, 'triangle', 0.08), i * 90)); },
+  crate:    () => { blip(200, 0.1, 'square', 0.07, 400); setTimeout(() => blip(400, 0.12, 'square', 0.06, 800), 90); },
+  hungry:   () => blip(420, 0.12, 'sine', 0.05, 300),
+  power:    () => { [440, 660, 880].forEach((f, i) => setTimeout(() => blip(f, 0.14, 'sawtooth', 0.05, f * 1.4), i * 70)); },
+  count:    () => blip(700, 0.14, 'square', 0.08),
+  rumble:   () => { noiseBurst(2.8, 0.26, 400, 60); blip(60, 2.6, 'sawtooth', 0.14, 30); },
+  firework: () => { noiseBurst(0.25, 0.12, 2400, 200); blip(1200, 0.2, 'triangle', 0.04, 300); },
+  hatch:    () => { [520, 700, 940].forEach((f, i) => setTimeout(() => blip(f, 0.1, 'sine', 0.07), i * 80)); },
+};
+/* cozy ambient loop — soft pad chords + pentatonic plucks, scheduled ahead */
+const CHORDS = [[130.8, 196, 329.6], [110, 164.8, 261.6], [87.3, 130.8, 220], [98, 146.8, 246.9]];
+const PENTA = [261.6, 293.7, 329.6, 392, 440, 523.3, 587.3, 659.3];
+function musicTick() {
+  if (!actx || muted) return;
+  const now = actx.currentTime;
+  if (musNext < now - 4) musNext = now + 0.1;
+  while (musNext < now + 0.5) {
+    const t0 = musNext, ch = CHORDS[chordI % CHORDS.length]; chordI++;
+    for (const f of ch) {
+      const o = actx.createOscillator(), g = actx.createGain();
+      o.type = 'sine'; o.frequency.value = f;
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.linearRampToValueAtTime(0.02, t0 + 0.8);
+      g.gain.linearRampToValueAtTime(0.0001, t0 + 3.1);
+      o.connect(g).connect(actx.destination); o.start(t0); o.stop(t0 + 3.2);
+    }
+    for (let i = 0; i < 4; i++) {
+      if (Math.random() < 0.35) continue;
+      const t1 = t0 + i * 0.8 + (Math.random() < 0.3 ? 0.4 : 0);
+      const f = PENTA[(Math.random() * PENTA.length) | 0];
+      const o = actx.createOscillator(), g = actx.createGain();
+      o.type = 'triangle'; o.frequency.value = f;
+      g.gain.setValueAtTime(0.0001, t1);
+      g.gain.linearRampToValueAtTime(0.035, t1 + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, t1 + 0.7);
+      o.connect(g).connect(actx.destination); o.start(t1); o.stop(t1 + 0.75);
+    }
+    musNext += 3.2;
+  }
+}
+
+/* ───── resources & buildings data (ALL balance lives here) ───── */
+const RES_LIST = ['wood', 'stone', 'food', 'ore', 'metal', 'parts', 'power', 'science'];
+const RES_AGE  = { wood: 1, stone: 1, food: 2, ore: 3, metal: 3, parts: 3, power: 4, science: 5 };
+const RES_COL  = { wood: '#e0a35c', stone: '#c2cbd4', food: '#ff8f6b', ore: '#a99bf0',
+                   metal: '#e8eef4', parts: '#ffd24a', power: '#59e0ff', science: '#7dff9a', pop: '#ffd1a1' };
+const AGE_NAMES = [null, 'CAMPFIRE', 'FARMING', 'INDUSTRY', 'ELECTRICITY', 'SCIENCE'];
+const AGE_SUBS  = [null, 'Chop wood, build cabins!', 'Grow food for your people!',
+                   'Dig ore, forge metal!', 'Light up the island!', 'Reach for the stars!'];
+
+const B = {
+  campfire:  { name: 'CAMPFIRE',  age: 1, size: 1, cost: {}, special: true },
+  lumberhut: { name: 'LUMBER HUT', age: 1, size: 1, cost: { wood: 8 },             prod: { wood: 1 },   pipe: ['campfire'] },
+  quarry:    { name: 'QUARRY',     age: 1, size: 1, cost: { wood: 10, stone: 4 },  prod: { stone: 0.8 },pipe: ['lumberhut', 'campfire'] },
+  cabin:     { name: 'CABIN',      age: 1, size: 1, cost: { wood: 14, stone: 8 },  pop: 4,              pipe: ['campfire'] },
+  farm:      { name: 'FARM',       age: 2, size: 1, cost: { wood: 18 },            prod: { food: 1.2 }, pipe: ['cabin', 'campfire'] },
+  well:      { name: 'WELL',       age: 2, size: 1, cost: { stone: 20 },           aura: true,          pipe: ['farm', 'cabin'] },
+  bakery:    { name: 'BAKERY',     age: 2, size: 1, cost: { wood: 25, stone: 15 }, cons: { food: 0.4 }, prod: { food: 1.6 }, pipe: ['farm'] },
+  mine:      { name: 'MINE',       age: 3, size: 1, cost: { wood: 30, stone: 25 }, prod: { ore: 1 },    pipe: ['quarry', 'campfire'] },
+  smelter:   { name: 'SMELTER',    age: 3, size: 1, cost: { wood: 15, stone: 40 }, cons: { ore: 0.8 },  prod: { metal: 0.5 }, pipe: ['mine'] },
+  factory:   { name: 'FACTORY',    age: 3, size: 2, cost: { stone: 30, metal: 15 },cons: { metal: 0.3 },prod: { parts: 0.25 }, pipe: ['smelter', 'mine'] },
+  windmill:  { name: 'WINDMILL',   age: 4, size: 1, cost: { wood: 40, metal: 10 }, prod: { power: 4 },  wire: true },
+  solar:     { name: 'SOLAR PANEL',age: 4, size: 1, cost: { metal: 20, parts: 8 }, prod: { power: 6 },  wire: true },
+  battery:   { name: 'BATTERY',    age: 4, size: 1, cost: { metal: 20, parts: 10 },prod: { power: 2 },  wire: true },
+  lab:       { name: 'LAB',        age: 5, size: 1, cost: { metal: 30, parts: 15 },prod: { science: 0.6 }, needPower: 3, wire: true },
+  roboshed:  { name: 'ROBO HELPER',age: 5, size: 1, cost: { metal: 20, parts: 12 },robot: true,         needPower: 1, wire: true },
+  launchpad: { name: 'LAUNCH PAD', age: 5, size: 2, cost: { stone: 40, metal: 60, parts: 30 }, needPower: 4, wire: true },
+  giantmill: { name: 'GIANT WINDMILL', age: 4, size: 1, cost: {}, prod: { power: 12 }, wire: true, special: true },
+  statue:    { name: 'GOLD STATUE', age: 5, size: 1, cost: {}, special: true },
+};
+const ROCKET_COST = { metal: 150, parts: 80, science: 40 };
+const REQ_NEXT = {
+  1: { text: 'BUILD 3 CABINS · REACH 12 POP',
+       prog: () => Math.min(cnt('cabin') / 3, pop / 12),
+       ok:   () => cnt('cabin') >= 3 && pop >= 12 },
+  2: { text: 'REACH 30 POP · KEEP FOOD RISING',
+       prog: () => Math.min(pop / 30, (rates.food || 0) > 0 ? 1 : 0.6),
+       ok:   () => pop >= 30 && (rates.food || 0) > 0 },
+  3: { text: 'FORGE 80 METAL + PARTS',
+       prog: () => Math.min(1, (life.metal + life.parts) / 80),
+       ok:   () => life.metal + life.parts >= 80 },
+  4: { text: 'MAKE 8 POWER · REACH 60 POP',
+       prog: () => Math.min(powerInc / 8, pop / 60),
+       ok:   () => powerInc >= 8 && pop >= 60 },
+};
+
+/* ───── global game state ───── */
+let T = 0;                                    // global animation clock (s)
+let scene = 'title';                          // title | name | play
+let slotSel = 0, slots = [null, null, null], curSlot = 0;
+let nameSt = null;                            // { slot, name, r, c }
+let confirmErase = null;                      // { slot, yes }
+let modal = null;                             // { title, lines[] }
+let banners = [];                             // [{ title, sub, t, dur, legendary }]
+let paused = false, pauseOwner = 0, pauseIdx = 0, statsOpen = false;
+
+let age = 1, seed = 1, islandName = 'ISLE', legends = false, rocketDone = false;
+let res = {}, life = { metal: 0, parts: 0 };
+let pop = 2, popF = 2, hungry = false, firstPowerDone = false;
+let powerInc = 0, powerDem = 0, islandPowered = false;
+let rates = {};
+let buildings = [], seqN = 1, occ = [];
+let flora = [];
+let pipes = [], anims = [];
+let crate = null, crateT = 300;
+let robots = [], drake = null, egg = null;
+let rocketSeq = null;
+let players = [];
+let playtime = 0, autosaveT = 0, simAcc = 0;
+let landAge = [], coast = [];
+let bgDirty = false, terrainDirty = false;
+let shakeAmt = 0;
+let landSalt = [0, 0, 0];
+
+/* ═══════════════════════════════════════════════════════════════════════
+   SPRITE ATLAS — everything baked once at load. P() draws chunky 2x
+   "16px art" pixels; gradients/ellipses are fine HERE (load time only).
+   ═══════════════════════════════════════════════════════════════════════ */
+const SPR = {};
+function C(w, h) {
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const g = c.getContext('2d'); g.imageSmoothingEnabled = false;
+  return [c, g];
+}
+function S(w, h, fn) {          // w,h in art units (1 unit = 2px)
+  const [c, g] = C(w * 2, h * 2);
+  const P = (x, y, ww, hh, col) => { g.fillStyle = col; g.fillRect(Math.round(x * 2), Math.round(y * 2), Math.round(ww * 2), Math.round(hh * 2)); };
+  fn(g, P);
+  return c;
+}
+function rr(g, x, y, w, h, r) {
+  g.beginPath();
+  g.moveTo(x + r, y);
+  g.arcTo(x + w, y, x + w, y + h, r);
+  g.arcTo(x + w, y + h, x, y + h, r);
+  g.arcTo(x, y + h, x, y, r);
+  g.arcTo(x, y, x + w, y, r);
+  g.closePath();
+}
+function shad(g, cx, cy, rx, ry) {
+  g.fillStyle = 'rgba(15,40,30,0.28)';
+  g.beginPath(); g.ellipse(cx, cy, rx, ry, 0, 0, 6.3); g.fill();
+}
+function glowDot(r, col) {      // baked radial glow sprite
+  const [c, g] = C(r * 2, r * 2);
+  const gr = g.createRadialGradient(r, r, 1, r, r, r);
+  gr.addColorStop(0, col); gr.addColorStop(0.5, col.slice(0, 7) + '88'); gr.addColorStop(1, col.slice(0, 7) + '00');
+  g.fillStyle = gr; g.fillRect(0, 0, r * 2, r * 2);
+  return c;
+}
+
+function initSprites() {
+  /* terrain tiles (16 units = 32px) */
+  /* 5 grass shades, dark→light, picked by smooth noise for mottled patches */
+  const GRASS_BASE = ['#4c9c45', '#52a64a', '#57b04f', '#5cb954', '#62c15a'];
+  const GRASS_DARK = ['#438c3d', '#489642', '#4da046', '#52a94b', '#57b250'];
+  const GRASS_LITE = ['#57ad4f', '#5db755', '#63c159', '#68c95f', '#6ed165'];
+  SPR.grass = [0, 1, 2, 3, 4].map(v => S(16, 16, (g, P) => {
+    P(0, 0, 16, 16, GRASS_BASE[v]);
+    for (let i = 0; i < 16; i++) {
+      const x = (i * 7 + v * 5) % 16, y = (i * 11 + v * 3 + 2) % 16;
+      P(x, y, 1, 1, i % 3 ? GRASS_DARK[v] : GRASS_LITE[v]);
+    }
+    if (v >= 3) { P((v * 3) % 12 + 2, (v * 5) % 12 + 2, 1, 2, '#7ed07a'); }
+  }));
+  /* tiny decor stamped on some grass tiles during the terrain bake */
+  SPR.flower = ['#ffd1e0', '#f6e97e', '#fefefe', '#ffb28a'].map(c => S(3, 3, (g, P) => {
+    P(1, 0, 1, 3, c); P(0, 1, 3, 1, c); P(1, 1, 1, 1, '#f5c542');
+  }));
+  SPR.pebble = S(3, 2, (g, P) => { P(0, 0.6, 3, 1.4, '#9aa2ab'); P(0.6, 0, 1.8, 1, '#b8bfc7'); });
+  SPR.tuft = S(4, 3, (g, P) => { P(0, 1, 1, 2, '#7ed07a'); P(1.5, 0, 1, 3, '#8ed88a'); P(3, 1, 1, 2, '#7ed07a'); });
+  SPR.sand = S(16, 16, (g, P) => {
+    P(0, 0, 16, 16, '#ecd794');
+    for (let i = 0; i < 12; i++) P((i * 5 + 3) % 16, (i * 7 + 1) % 16, 1, 1, i % 2 ? '#dbc27b' : '#f7e8b4');
+  });
+  SPR.shallow = S(16, 16, (g, P) => {
+    P(0, 0, 16, 16, '#3f97c9');
+    for (let i = 0; i < 6; i++) P((i * 6 + 2) % 15, (i * 9 + 4) % 15, 2, 1, '#57aad6');
+  });
+  SPR.foam = [0, 1].map(v => S(16, 16, (g, P) => {
+    for (let i = 0; i < 5; i++) P((i * 4 + v * 2 + 1) % 14, (i * 6 + v * 5 + 2) % 14, 2, 1, 'rgba(230,248,255,0.85)');
+  }));
+
+  /* trees & rocks — bottom-anchored, 16x22 units (32x44 px) */
+  const mkTree = (stage, golden) => S(16, 22, (g, P) => {
+    shad(g, 16, 40, 10 - stage * 2, 3.5);
+    const tD = golden ? '#9a7328' : '#6e4023', tL = golden ? '#b98d38' : '#8a5530';
+    const c1 = golden ? '#a37a10' : '#2c7a3a', c2 = golden ? '#dda428' : '#3a9a49', c3 = golden ? '#f4cc4e' : '#54bd62';
+    if (stage === 0) {
+      P(7, 13, 2, 8, tD); P(7, 13, 1, 8, tL);
+      P(2, 8, 12, 6, c1);
+      P(3, 4, 10, 6, c2);
+      P(5, 2, 6, 4, c2);
+      P(5, 3, 5, 3, c3); P(4, 6, 4, 3, c3);
+      P(6, 2, 2, 1, golden ? '#fff7c9' : '#8ed88a');
+      if (golden) { P(4, 9, 1, 1, '#fff7c9'); P(11, 6, 1, 1, '#fff7c9'); P(9, 11, 1, 1, '#fff7c9'); }
+      else { P(4, 10, 1, 1, '#e85f5f'); P(10, 6, 1, 1, '#e85f5f'); P(11, 11, 1, 1, '#e85f5f'); }
+    } else if (stage === 1) {
+      P(7, 13, 2, 8, tD); P(7, 13, 1, 8, tL);
+      P(4, 9, 8, 5, c1);
+      P(5, 6, 6, 5, c2);
+      P(6, 7, 3, 2, c3);
+    } else {
+      P(6.5, 16, 3, 5, tD); P(6.5, 16, 1.4, 5, tL);
+      P(5, 14, 3, 3, c2); P(8.5, 15, 2.5, 2, c2);
+    }
+  });
+  SPR.tree = [mkTree(0), mkTree(1), mkTree(2)];
+  SPR.gold = [mkTree(0, 1), mkTree(0, 1), mkTree(0, 1)];
+  SPR.rock = [0, 1, 2].map(st => S(16, 12, (g, P) => {
+    shad(g, 16, 20, 10 - st * 2, 3);
+    const sz = [1, 0.75, 0.5][st], w = 12 * sz, h = 8 * sz, x0 = 8 - w / 2, y0 = 10 - h;
+    P(x0, y0 + 1, w, h - 1, '#767d85');
+    P(x0 + 1, y0, w - 2, h - 2, '#8f979f');
+    P(x0 + 2, y0 + 1, w / 2, 2, '#aab1b8');
+    P(x0 + w - 3, y0 + h - 3, 2, 1, '#5f666e');
+  }));
+
+  /* campfire + flame frames */
+  SPR.b = {}; SPR.bLit = {};
+  SPR.b.campfire = SPR.bLit.campfire = S(16, 16, (g, P) => {
+    const gr = g.createRadialGradient(16, 24, 2, 16, 24, 15);
+    gr.addColorStop(0, 'rgba(255,170,60,0.45)'); gr.addColorStop(1, 'rgba(255,170,60,0)');
+    g.fillStyle = gr; g.fillRect(0, 6, 32, 26);
+    shad(g, 16, 28, 12, 3.5);
+    P(3, 9, 3, 2.4, '#6d747c'); P(10, 8.6, 3, 2.4, '#6d747c');
+    P(1.6, 11.4, 3, 2.4, '#8f979f'); P(11.6, 11.2, 3, 2.4, '#8f979f');
+    P(3.4, 13.4, 3, 2.4, '#9aa2ab'); P(9.6, 13.6, 3, 2.4, '#9aa2ab');
+    P(6.4, 14.2, 3.4, 2.2, '#8f979f');
+    [[3, 9], [10, 8.6], [1.6, 11.4], [11.6, 11.2], [3.4, 13.4], [9.6, 13.6]].forEach(q => P(q[0] + 0.4, q[1] + 0.3, 2.2, 0.8, '#c2c9d1'));
+    P(4.6, 11.6, 7, 1.6, '#6e4023'); P(5, 11.2, 6, 1, '#8a5530');
+    P(6, 10, 4.4, 1.4, '#4a2c18');
+    P(6.6, 12.2, 3, 1, '#2b1c10');
+  });
+  SPR.flame = [0, 1, 2].map(v => S(10, 12, (g, P) => {
+    const w = [5, 6.4, 5.4][v], h = [9, 10.5, 8][v];
+    P(5 - w / 2, 11 - h, w, h, '#ff7a1a');
+    P(5 - w / 2 + 0.8, 12 - h, w - 1.6, h - 2.4, '#ffb42a');
+    P(5 - w / 2 + 1.6, 13 - h + v * 0.4, w - 3.2, h - 4.6, '#ffe27a');
+    P(4.4, 8.4 - h / 2, 1.2, 2, '#fff8d0');
+  }));
+
+  /* ── buildings (bottom-anchored; size2 = 32 units/64px wide) ── */
+  const houseWin = (g, P, x, y, lit) => {
+    P(x, y, 2, 2, lit ? '#ffd75e' : '#39301f');
+    if (lit) P(x - 0.5, y - 0.5, 3, 3, 'rgba(255,215,94,0.25)');
+  };
+  const mk = (k, w, h, fn) => {
+    SPR.b[k]    = S(w, h, (g, P) => fn(g, P, false));
+    SPR.bLit[k] = S(w, h, (g, P) => fn(g, P, true));
+  };
+  mk('lumberhut', 16, 18, (g, P, lit) => {
+    shad(g, 16, 33, 13, 4);
+    for (let i = 0; i < 4; i++) P(2, 9 + i * 2, 11, 2, i % 2 ? '#8a5c33' : '#9c6b3d');
+    P(1, 5, 13, 4, '#6e4526'); P(2, 4, 11, 2, '#7d5230');
+    P(9, 12, 3, 5, '#4a3018'); houseWin(g, P, 4, 11, lit);
+    P(13, 14, 3, 2, '#8a5c33'); P(13.5, 13, 2, 1, '#9c6b3d');   // log pile
+  });
+  mk('quarry', 16, 14, (g, P) => {
+    shad(g, 16, 25, 13, 3.5);
+    P(2, 5, 12, 8, '#6d747c'); P(3, 6, 10, 6, '#5a6068');
+    P(4, 7, 3, 2, '#9aa2ab'); P(9, 9, 3, 2, '#9aa2ab'); P(6, 10, 2, 1, '#848b93');
+    P(1, 3, 1, 10, '#8a5c33'); P(1, 3, 8, 1, '#8a5c33'); P(8, 4, 0.7, 3, '#c9b26a');
+  });
+  mk('cabin', 16, 18, (g, P, lit) => {
+    shad(g, 16, 33, 13, 4);
+    P(2, 9, 12, 8, '#c98850'); P(2, 9, 12, 1, '#b57741');
+    P(1, 4, 14, 5, '#a8402f'); P(2, 3, 12, 2, '#c1523c'); P(0.7, 8, 14.6, 1, '#7e3023');
+    P(10, 12, 3, 5, '#5f3a22'); P(10.4, 12.4, 2.2, 4.6, '#4a2c18');
+    houseWin(g, P, 4, 11, lit);
+    P(3, 1, 2, 3, '#8f979f');
+  });
+  mk('farm', 16, 14, (g, P) => {
+    shad(g, 16, 25, 14, 3);
+    P(1, 4, 14, 9, '#7a5433');
+    for (let r = 0; r < 4; r++) {
+      P(1.5, 5 + r * 2.2, 13, 1, '#6a4629');
+      for (let i = 0; i < 5; i++) P(2.5 + i * 2.6, 4.6 + r * 2.2, 1, 1, i % 2 ? '#5fc45f' : '#83d873');
+    }
+    P(0.5, 3, 1, 3, '#9c6b3d'); P(14.5, 3, 1, 3, '#9c6b3d');
+  });
+  mk('well', 16, 18, (g, P) => {
+    shad(g, 16, 33, 10, 3.5);
+    P(3, 11, 10, 6, '#98a0a8'); P(4, 12, 8, 4, '#6d747c'); P(5, 13, 6, 2, '#20344a');
+    P(3.5, 11, 2, 1, '#b8bfc7'); P(10, 15, 2, 1, '#b8bfc7');
+    P(3, 5, 1, 7, '#8a5c33'); P(12, 5, 1, 7, '#8a5c33');
+    P(1.5, 3, 13, 2.5, '#6e4526'); P(2.5, 2, 11, 1.5, '#7d5230');
+    P(7.5, 6, 1, 4, '#5f3a22'); P(6.5, 9, 3, 2, '#9c6b3d');
+  });
+  mk('bakery', 16, 20, (g, P, lit) => {
+    shad(g, 16, 37, 13, 4);
+    P(2, 10, 12, 9, '#e0b98a'); P(2, 10, 12, 1, '#c9a172');
+    P(1, 6, 14, 4, '#b0653a'); P(2, 5, 12, 2, '#c47948');
+    P(10, 1, 3, 6, '#8f979f'); P(10.5, 0.5, 2, 1, '#6d747c');
+    P(9, 13, 3, 6, '#5f3a22'); houseWin(g, P, 4, 13, lit);
+    P(3.5, 8.6, 6, 2.6, '#7a4a2b'); P(4.5, 9.2, 4, 1.4, '#f0c063'); P(5.5, 9.6, 2, 0.6, '#c98a3a');
+  });
+  mk('mine', 16, 16, (g, P) => {
+    shad(g, 16, 29, 13, 4);
+    P(1, 5, 14, 10, '#7d848c'); P(2, 4, 12, 2, '#8f979f'); P(3, 7, 3, 2, '#9aa2ab'); P(11, 6, 2, 2, '#9aa2ab');
+    P(5, 8, 6, 7, '#2a2f36'); P(6, 9, 4, 6, '#15181d');
+    P(4.4, 7.4, 1.2, 8, '#8a5c33'); P(10.4, 7.4, 1.2, 8, '#8a5c33'); P(4, 6.8, 8, 1.2, '#9c6b3d');
+    P(6, 14.4, 4, 0.8, '#5a4a30');
+  });
+  mk('smelter', 16, 28, (g, P, lit) => {
+    shad(g, 16, 53, 13, 4);
+    P(10.6, 0.8, 3.8, 14, '#5f666e'); P(10.6, 0.8, 1.4, 14, '#727a83'); P(10, 0, 5, 1.6, '#4a5058');
+    P(11.4, 3, 2.2, 1, '#3f454c'); P(11.4, 6, 2.2, 1, '#3f454c');
+    P(2, 15, 12, 12, '#84766a'); P(2, 15, 12, 1, '#6f6357');
+    P(2, 15, 1.4, 12, '#96887a'); P(3, 17, 3, 2, '#96887a'); P(10, 19, 3, 2, '#96887a');
+    P(1.4, 12, 13.2, 3.4, '#6f6357'); P(2.4, 11, 11.2, 1.6, '#84766a');
+    P(4, 21, 8, 6, '#4a4038');
+    P(5, 22, 6, 5, lit ? '#ff8a2a' : '#c65f16');
+    P(6, 23, 4, 3, lit ? '#ffc23a' : '#e88a20');
+    P(6.8, 23.6, 2.4, 1.6, lit ? '#ffe98a' : '#f0a83a');
+    P(3, 9, 7, 3, '#6f6357'); P(4, 8, 5, 1, '#84766a');
+  });
+  mk('factory', 32, 32, (g, P, lit) => {
+    shad(g, 32, 61, 28, 5);
+    P(24, 0, 3.4, 12, '#6d747c'); P(24, 0, 1.2, 12, '#7d8892'); P(23.4, -0.4, 4.6, 1.6, '#575e66');
+    P(28.4, 3, 2.6, 9, '#5f666e'); P(28.4, 3, 1, 9, '#6d7883'); P(28, 2.4, 3.4, 1.4, '#4a5058');
+    P(2, 14, 28, 17, '#a86446'); P(2, 14, 28, 1, '#8f5238'); P(2, 14, 1.4, 17, '#b87454');
+    for (let i = 0; i < 4; i++) { P(2 + i * 7, 9, 7, 5, '#5c6670'); P(2 + i * 7, 9, 3.5, 5, '#6d7883'); }
+    for (let i = 0; i < 3; i++) houseWin(g, P, 4 + i * 4, 17, lit);
+    for (let i = 0; i < 3; i++) houseWin(g, P, 16 + i * 4, 21, lit);
+    P(20, 23, 6, 8, '#4a3a30'); P(20.8, 23.8, 4.4, 7.2, '#3a2c22');
+    P(6, 22, 8, 8, '#8f5238'); P(7, 23, 6, 6, '#5c6670');   // gear mount plate
+    P(27, 25, 3, 3, '#ffd24a'); P(27.4, 25.4, 2.2, 2.2, '#2b2f34');  // hazard box
+  });
+  mk('windmill', 16, 26, (g, P, lit) => {
+    shad(g, 16, 49, 10, 3.5);
+    P(5, 8, 6, 17, '#e8dcc4'); P(5, 8, 2, 17, '#f4ecd9'); P(9.6, 8, 1.4, 17, '#cfc2a6');
+    P(4, 6, 8, 3, '#b0653a'); P(5, 5, 6, 1.4, '#c47948');
+    P(6.8, 19, 2.4, 6, '#5f3a22'); houseWin(g, P, 7, 12, lit);
+    P(7.2, 7.2, 1.6, 1.6, '#5c4630');
+  });
+  mk('solar', 16, 14, (g, P) => {
+    shad(g, 16, 25, 13, 3.5);
+    P(6, 9, 4, 4, '#6d747c');
+    P(1, 2, 14, 8, '#e8eef4');
+    P(2, 3, 12, 6, '#2f6fd0');
+    for (let i = 1; i < 4; i++) P(2 + i * 3, 3, 0.6, 6, '#1d4fa0');
+    P(2, 5.7, 12, 0.6, '#1d4fa0');
+    P(3, 3.5, 3, 1, '#7fb2f0');
+  });
+  mk('battery', 16, 20, (g, P, lit) => {
+    shad(g, 16, 37, 10, 3.5);
+    P(4, 4, 8, 15, '#7d848c'); P(4.6, 4.6, 6.8, 13.8, '#5c6670'); P(4.6, 4.6, 2, 13.8, '#6d7883');
+    P(6, 2, 4, 2.4, '#9aa2ab');
+    for (let i = 0; i < 3; i++) P(6, 15 - i * 3.4, 4, 2, lit ? '#4de08a' : '#2e5a44');
+    P(7, 6, 2, 3, '#ffd24a'); P(7.6, 6.6, 0.8, 1.8, '#c9a01a');
+  });
+  mk('lab', 16, 26, (g, P, lit) => {
+    shad(g, 16, 49, 13, 4);
+    P(7.4, 0, 0.8, 6, '#9aa2ab'); P(6.6, 0, 2.4, 1, '#c9d2da');   // antenna
+    P(7, 2.4, 1.6, 1.6, lit ? '#ff6b6b' : '#8a3a3a');
+    P(2, 15, 12, 10, '#e6eef2'); P(2, 15, 12, 1, '#c8d4da'); P(2, 15, 1.2, 10, '#f4f9fb');
+    g.fillStyle = lit ? '#54ccdd' : '#3fa8b9';
+    g.beginPath(); g.ellipse(16, 31, 12, 12, 0, 3.24, 6.2); g.fill();
+    g.fillStyle = lit ? '#8ae4f0' : '#57bcc9';
+    g.beginPath(); g.ellipse(13, 31, 6, 8, 0, 3.4, 5.6); g.fill();
+    g.fillStyle = '#2f8a99'; g.fillRect(4, 29, 24, 3);
+    P(11, 19, 3, 6, '#2a3a44'); houseWin(g, P, 4, 18, lit);
+    P(4, 21, 3, 3.4, '#d7f7e0'); P(4.6, 22, 1.8, 2, '#5fe08a');
+  });
+  mk('roboshed', 16, 18, (g, P, lit) => {
+    shad(g, 16, 33, 12, 4);
+    P(2, 8, 12, 9, '#9aa4ae'); P(2, 8, 12, 1.4, '#7d8892');
+    P(1.4, 6, 13.2, 2.4, '#6d7883'); P(2.4, 5, 11.2, 1.4, '#7d8892');
+    P(6, 11, 4, 6, '#39424c'); P(6.8, 11.8, 2.4, 4.4, lit ? '#59e0ff' : '#27343c');
+    P(12, 1, 0.8, 5, '#5c6670'); P(11.6, 0.4, 1.6, 1.4, '#ff5f4a');
+    P(3.4, 10, 2, 2, lit ? '#59e0ff' : '#39424c');
+  });
+  mk('launchpad', 32, 30, (g, P, lit) => {
+    shad(g, 32, 57, 28, 5);
+    P(2, 18, 28, 11, '#8d949c'); P(3, 19, 26, 9, '#7d848c');
+    P(4, 20, 24, 7, '#6d747c');
+    for (let i = 0; i < 6; i++) P(4 + i * 4, 26.4, 2.4, 1.4, i % 2 ? '#ffd24a' : '#2b2f34');
+    P(26, 1, 2.4, 18, '#c0402f'); P(26, 1, 1, 18, '#d95a44');       // gantry mast
+    P(22, 4, 6, 1, '#c0402f'); P(22, 9, 6, 1, '#c0402f'); P(22, 14, 6, 1, '#c0402f');
+    P(23.2, 1, 1, 18, '#d95a44');
+    P(25.4, 0, 3.6, 1.2, '#8a2a1e'); P(26.8, -1, 0.8, 1.4, lit ? '#ff8a8a' : '#8a2a1e');
+    P(8, 21.4, 12, 4, '#565d65'); P(9, 22, 10, 2.8, '#464d55');
+  });
+  mk('giantmill', 20, 32, (g, P, lit) => {
+    shad(g, 20, 61, 12, 4);
+    P(6.5, 8, 7, 23, '#efe4cd'); P(6.5, 8, 2.4, 23, '#f8f2e4'); P(11.6, 8, 1.9, 23, '#d5c8ab');
+    P(5, 5.4, 10, 3.4, '#d9a520'); P(6, 4.4, 8, 1.6, '#f0c542');
+    P(8.4, 24, 3.2, 7, '#5f3a22'); houseWin(g, P, 9, 14, lit);
+    P(9.2, 6.6, 1.8, 1.8, '#7a5a1a');
+  });
+  mk('statue', 16, 24, (g, P) => {
+    const gr = g.createRadialGradient(16, 26, 2, 16, 26, 17);
+    gr.addColorStop(0, 'rgba(255,220,110,0.4)'); gr.addColorStop(1, 'rgba(255,220,110,0)');
+    g.fillStyle = gr; g.fillRect(0, 4, 32, 44);
+    shad(g, 16, 45, 11, 3.5);
+    P(4, 18, 8, 5, '#9aa2ab'); P(5, 17, 6, 1.4, '#b8bfc7'); P(4.6, 18.6, 6.8, 3.8, '#848b93');
+    P(6.4, 8, 3.2, 3, '#f0c542');
+    P(5.8, 11, 4.4, 5, '#e8b93a'); P(6.2, 11.4, 1.4, 4, '#ffe27a');
+    P(4.6, 11.4, 1.4, 3.6, '#d9a520'); P(10, 11.4, 1.4, 3.6, '#d9a520');
+    P(6.2, 16, 1.6, 2, '#d9a520'); P(8.2, 16, 1.6, 2, '#d9a520');
+    P(6.8, 8.4, 1, 1, '#7a5a1a');
+  });
+
+  /* animated overlay bits */
+  SPR.blades = S(20, 20, (g, P) => {
+    g.translate(20, 20);
+    for (let i = 0; i < 4; i++) {
+      g.rotate(Math.PI / 2);
+      g.fillStyle = '#f7f3e8'; g.fillRect(-1.6, -18, 3.2, 15);
+      g.fillStyle = '#d8d2c0'; g.fillRect(1.6 - 1.6, -18, 1.4, 15);
+    }
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.fillStyle = '#5c4630'; g.fillRect(17, 17, 6, 6);
+  });
+  SPR.bladesBig = S(28, 28, (g, P) => {
+    g.translate(28, 28);
+    for (let i = 0; i < 4; i++) {
+      g.rotate(Math.PI / 2);
+      g.fillStyle = '#ffe9a8'; g.fillRect(-2.2, -26, 4.4, 21);
+      g.fillStyle = '#d9a520'; g.fillRect(0.6, -26, 1.6, 21);
+    }
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.fillStyle = '#7a5a1a'; g.fillRect(24, 24, 8, 8);
+  });
+  SPR.gear = S(8, 8, (g, P) => {
+    g.translate(8, 8);
+    g.fillStyle = '#c9d2da';
+    for (let i = 0; i < 4; i++) { g.rotate(Math.PI / 4); g.fillRect(-1.6, -7.4, 3.2, 14.8); }
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.beginPath(); g.arc(8, 8, 4.6, 0, 6.3); g.fillStyle = '#c9d2da'; g.fill();
+    g.beginPath(); g.arc(8, 8, 2, 0, 6.3); g.fillStyle = '#5c6670'; g.fill();
+  });
+  SPR.fglow = [glowDot(9, '#ff9a3a'), glowDot(7, '#ffc23a')];
+  SPR.bglow = glowDot(10, '#4de08a');
+  SPR.glint = S(8, 3, (g, P) => { P(0, 1, 8, 1, 'rgba(255,255,255,0.9)'); P(3, 0, 2, 3, 'rgba(255,255,255,0.9)'); });
+
+  /* pipes / dots / arcs */
+  SPR.dot = glowDot(5, '#ffcf6a');
+  SPR.arc = [0, 1].map(v => S(7, 7, (g, P) => {
+    const c = '#61e8ff';
+    if (v === 0) { P(0, 3, 2, 1, c); P(2, 1, 2, 3, c); P(4, 3, 2, 2, c); P(5, 2, 2, 1, '#c9f6ff'); }
+    else { P(0, 2, 2, 2, c); P(2, 3, 2, 2, c); P(3, 0, 1, 3, '#c9f6ff'); P(4, 2, 3, 1, c); }
+  }));
+
+  /* particles */
+  SPR.leaf = S(4, 4, (g, P) => { P(0, 1, 3, 2, '#4cb45a'); P(1, 0, 2, 2, '#63c159'); });
+  SPR.chip = S(4, 4, (g, P) => { P(0, 1, 3, 2, '#8f979f'); P(1, 0, 2, 1, '#aab1b8'); });
+  SPR.crumb = S(3, 3, (g, P) => { P(0, 0, 3, 3, '#e0a35c'); });
+  SPR.puff = [5, 8, 11].map(r => glowDot(r, '#b9c2ca'));
+  SPR.puffDark = [5, 8].map(r => glowDot(r, '#8a8f96'));
+  SPR.spark = [0, 1].map(v => S(5, 5, (g, P) => {
+    const c = v ? '#fff7c9' : '#ffe27a';
+    P(2, 0, 1, 5, c); P(0, 2, 5, 1, c); if (v) P(2, 2, 1, 1, '#ffffff');
+  }));
+  SPR.sparkB = [0, 1].map(v => S(5, 5, (g, P) => {
+    const c = v ? '#c9f6ff' : '#61e8ff';
+    P(2, 0, 1, 5, c); P(0, 2, 5, 1, c);
+  }));
+  SPR.fw = ['#ff6b6b', '#ffd24a', '#59e0ff', '#7dff9a', '#f0a5f0', '#ffffff'].map(c => glowDot(5, c));
+  SPR.flameP = glowDot(7, '#ff9a3a');
+  SPR.heart = S(6, 6, (g, P) => { P(1, 1, 2, 2, '#ff6b8a'); P(3, 1, 2, 2, '#ff6b8a'); P(1, 2, 4, 2, '#ff6b8a'); P(2, 4, 2, 1, '#ff6b8a'); });
+
+  /* ghost tint tiles + markers + bubbles */
+  SPR.tileOK = S(16, 16, (g, P) => P(0.5, 0.5, 15, 15, 'rgba(90,230,120,0.4)'));
+  SPR.tileNO = S(16, 16, (g, P) => P(0.5, 0.5, 15, 15, 'rgba(240,80,70,0.45)'));
+  SPR.mark = S(7, 6, (g, P) => { P(1, 0, 5, 2, '#ffd24a'); P(2, 2, 3, 2, '#ffd24a'); P(3, 4, 1, 2, '#ffd24a'); });
+  const mkBub = (fn) => S(10, 11, (g, P) => {
+    g.fillStyle = '#fffef2'; rr(g, 1, 1, 18, 15, 5); g.fill();
+    g.fillStyle = '#fffef2'; g.beginPath(); g.moveTo(7, 15); g.lineTo(13, 15); g.lineTo(10, 21); g.closePath(); g.fill();
+    fn(g, P);
+  });
+  SPR.bubHungry = mkBub((g, P) => { P(4.4, 1.6, 1.4, 4, '#e05a3a'); P(4.4, 6.2, 1.4, 1.4, '#e05a3a'); });
+  SPR.bubPower  = mkBub((g, P) => { P(4.6, 1.4, 2, 2.6, '#2a9fd0'); P(3.6, 3.6, 2, 1.4, '#2a9fd0'); P(4.4, 4.6, 2, 2.8, '#2a9fd0'); });
+
+  /* crate / egg / drake / robot */
+  SPR.crate = S(14, 12, (g, P) => {
+    shad(g, 14, 22, 10, 3);
+    P(1, 2, 12, 9, '#9c6b3d'); P(1, 2, 12, 1.4, '#b07c48'); P(1, 9.6, 12, 1.4, '#8a5c33');
+    P(1, 2, 1.4, 9, '#7a4a2b'); P(11.6, 2, 1.4, 9, '#7a4a2b');
+    P(6.3, 2, 1.4, 9, '#5f3a22'); P(1, 6, 12, 1.2, '#5f3a22');
+  });
+  SPR.crateOpen = S(14, 14, (g, P) => {
+    shad(g, 14, 26, 10, 3);
+    P(1, 6, 12, 7, '#9c6b3d'); P(1, 6, 1.4, 7, '#7a4a2b'); P(11.6, 6, 1.4, 7, '#7a4a2b');
+    P(1, 6, 12, 1, '#b07c48');
+    P(0, 2, 6, 2, '#8a5c33'); P(8, 2, 6, 2, '#8a5c33');
+    const gr = g.createRadialGradient(14, 14, 1, 14, 14, 10);
+    gr.addColorStop(0, 'rgba(255,240,150,0.9)'); gr.addColorStop(1, 'rgba(255,240,150,0)');
+    g.fillStyle = gr; g.fillRect(2, 2, 24, 16);
+  });
+  SPR.egg = S(8, 10, (g, P) => {
+    shad(g, 8, 18, 6, 2.4);
+    P(2, 2, 4, 7, '#c9a6e8'); P(1.4, 4, 5.2, 4, '#c9a6e8'); P(2.6, 2.6, 1.4, 2, '#e2ccf4');
+    P(3, 5, 1.4, 1.4, '#8a5fb0'); P(5, 3.6, 1, 1, '#8a5fb0'); P(2.4, 7, 1, 1, '#8a5fb0');
+  });
+  SPR.drake = [0, 1].map(v => S(11, 9, (g, P) => {
+    shad(g, 11, 16, 6, 2);
+    P(2, 3, 6, 4, '#7ac95e');
+    P(7, 2, 3, 3, '#7ac95e'); P(8, 2.6, 1, 1, '#2b2f34'); P(9.6, 3.4, 1, 1, '#ffb2c9');
+    P(0.4, 4, 2, 1.4, '#5fa848');
+    P(3, 3 - (v ? 2 : 0.4), 3, 2, '#a3e08a');
+    P(3.6, 7, 1, 1.4, '#5fa848'); P(5.6, 7, 1, 1.4, '#5fa848');
+  }));
+  SPR.robot = [0, 1].map(v => S(12, 14, (g, P) => {
+    shad(g, 12, 26, 8, 2.6);
+    P(3, 3, 6, 5, '#9aa4ae'); P(3, 3, 6, 1.2, '#b8c2cc');
+    P(4.2, 4.4, 3.6, 2, '#27343c'); P(4.8 + (v ? 1 : 0), 4.8, 1.4, 1.2, '#59e0ff');
+    P(5.6, 1, 0.8, 2, '#6d7883'); P(5.2, 0.2, 1.6, 1, '#ff5f4a');
+    P(2.6, 8, 6.8, 3.4, '#7d8892'); P(3.2, 8.6, 2, 2, '#ffd24a');
+    P(2.6, 11.4, 6.8, 1.8, '#39424c');
+    P((v ? 2 : 3), 11.8, 2, 1.2, '#20262c'); P((v ? 7 : 6), 11.8, 2, 1.2, '#20262c');
+  }));
+
+  /* avatars — 12x16 units (24x32px). dirs: 0 down, 1 up, 2 side */
+  const mkAv = (shirt, shirtD, hair, skin) => {
+    const dirs = [];
+    for (let d = 0; d < 3; d++) {
+      dirs.push([0, 1, 2].map(f => S(12, 16, (g, P) => {
+        shad(g, 12, 29, 7, 2.4);
+        const step = f === 0 ? 0 : (f === 1 ? 1 : -1);
+        P(3.4 + (step > 0 ? 0.8 : 0), 13, 2, 2.4, '#4a3018');
+        P(6.6 + (step < 0 ? -0.8 : 0), 13, 2, 2.4, '#4a3018');
+        P(3, 8, 6, 5.4, shirt);
+        P(3, 8, 1.4, 5.4, shirtD);
+        P(1.8, 8.4, 1.4, 3 + (step ? 0.8 : 0), skin);
+        P(8.8, 8.4, 1.4, 3 - (step ? 0.8 : 0), skin);
+        P(3, 2, 6, 6, skin);
+        if (d === 0) {
+          P(3, 1.4, 6, 2.6, hair); P(2.6, 2, 1, 3, hair); P(8.4, 2, 1, 3, hair);
+          P(4.2, 5, 1.2, 1.4, '#2b2018'); P(6.6, 5, 1.2, 1.4, '#2b2018');
+          P(5.2, 6.8, 1.6, 0.6, '#c9765a');
+        } else if (d === 1) {
+          P(3, 1.4, 6, 4.4, hair); P(2.6, 2, 1, 3, hair); P(8.4, 2, 1, 3, hair);
+        } else {
+          P(3, 1.4, 6, 2.6, hair); P(2.6, 2, 1, 4, hair);
+          P(7, 5, 1.2, 1.4, '#2b2018');
+        }
+      })));
+    }
+    return dirs;
+  };
+  SPR.av = [
+    mkAv('#3a7bd5', '#2c5fa8', '#6e4526', '#f0c090'),   // P1 — blue shirt, brown hair
+    mkAv('#d54a3a', '#a83a2c', '#2b2018', '#e8b07a'),   // P2 — red shirt, dark hair
+  ];
+
+  /* HUD resource icons (20px) */
+  const mkIcon = fn => S(10, 10, fn);
+  SPR.icon = {
+    wood:  mkIcon((g, P) => { P(1, 3, 8, 4, '#9c6b3d'); P(1, 3, 8, 1.4, '#b07c48'); P(8, 3.6, 1.4, 2.8, '#e0b98a'); P(8.4, 4.4, 0.6, 1.2, '#9c6b3d'); }),
+    stone: mkIcon((g, P) => { P(2, 4, 6, 4, '#8f979f'); P(3, 3, 4, 2, '#aab1b8'); P(3, 7, 3, 1, '#6d747c'); }),
+    food:  mkIcon((g, P) => { P(2.6, 3, 5, 5, '#e8543a'); P(3.4, 2.6, 3.4, 1, '#e8543a'); P(3.4, 3.6, 1.4, 1.6, '#ff8a70'); P(4.8, 1, 0.8, 2, '#5f3a22'); P(5.6, 1.2, 1.6, 1, '#4cb45a'); }),
+    ore:   mkIcon((g, P) => { P(2, 4, 6, 4, '#6a5fa8'); P(3, 3, 4, 2, '#8a7fd0'); P(4, 4.6, 2, 1.4, '#c9bcf4'); }),
+    metal: mkIcon((g, P) => { P(1.6, 5.4, 7, 3, '#c9d2da'); P(2.4, 4.4, 5.4, 1.4, '#e8eef4'); P(2.4, 3, 5.4, 1.4, '#aab6c0'); }),
+    parts: mkIcon((g) => {
+      g.translate(10, 10); g.fillStyle = '#e8b93a';
+      for (let i = 0; i < 4; i++) { g.rotate(Math.PI / 4); g.fillRect(-1.4, -8.4, 2.8, 16.8); }
+      g.setTransform(1, 0, 0, 1, 0, 0);
+      g.beginPath(); g.arc(10, 10, 5, 0, 6.3); g.fillStyle = '#e8b93a'; g.fill();
+      g.beginPath(); g.arc(10, 10, 2.2, 0, 6.3); g.fillStyle = '#8a6a14'; g.fill();
+    }),
+    power: mkIcon((g, P) => { P(4.6, 0.6, 2.6, 3.4, '#ffe27a'); P(3.2, 3.6, 3, 1.8, '#ffd24a'); P(4.4, 5, 2.6, 4.4, '#ffd24a'); }),
+    science: mkIcon((g, P) => { P(4.2, 1, 1.6, 3, '#c9d2da'); P(3, 4, 4, 5, '#7dff9a'); P(2.4, 7, 5.2, 2, '#4cd674'); P(3.6, 0.4, 2.8, 1, '#e8eef4'); }),
+    pop:   mkIcon((g, P) => { P(3, 1.4, 4, 4, '#f0c090'); P(3, 0.8, 4, 1.4, '#6e4526'); P(2.2, 5.6, 5.6, 4, '#3a7bd5'); }),
+  };
+
+  /* UI chrome panels */
+  SPR.hudBar = (() => {
+    const [c, g] = C(W, 44);
+    const gr = g.createLinearGradient(0, 0, 0, 44);
+    gr.addColorStop(0, 'rgba(9,26,40,0.92)'); gr.addColorStop(1, 'rgba(13,36,54,0.86)');
+    g.fillStyle = gr; g.fillRect(0, 0, W, 40);
+    g.fillStyle = 'rgba(120,200,255,0.35)'; g.fillRect(0, 40, W, 2);
+    g.fillStyle = 'rgba(0,0,0,0.25)'; g.fillRect(0, 42, W, 2);
+    return c;
+  })();
+  const panel = (w, h, border) => {
+    const [c, g] = C(w, h);
+    g.fillStyle = 'rgba(0,0,0,0.3)'; rr(g, 6, 8, w - 8, h - 8, 16); g.fill();
+    const gr = g.createLinearGradient(0, 0, 0, h);
+    gr.addColorStop(0, '#173a52'); gr.addColorStop(1, '#0d2537');
+    g.fillStyle = gr; rr(g, 0, 0, w - 6, h - 6, 16); g.fill();
+    g.strokeStyle = border || '#5fb8e8'; g.lineWidth = 3; rr(g, 2, 2, w - 10, h - 10, 14); g.stroke();
+    g.strokeStyle = 'rgba(255,255,255,0.12)'; g.lineWidth = 1; rr(g, 6, 6, w - 18, h - 18, 11); g.stroke();
+    return c;
+  };
+  SPR.menuP   = panel(1240, 106);
+  SPR.statsP  = panel(660, 480);
+  SPR.pauseP  = panel(420, 330);
+  SPR.bannerP = panel(780, 132, '#ffd24a');
+  SPR.modalP  = panel(620, 380, '#ffd24a');
+  SPR.nameP   = panel(760, 480);
+  SPR.card    = panel(640, 100);
+  SPR.cardSel = (() => {
+    const [c, g] = C(640, 100);
+    g.drawImage(SPR.card, 0, 0);
+    g.strokeStyle = '#ffd24a'; g.lineWidth = 4; rr(g, 3, 3, 628, 88, 13); g.stroke();
+    return c;
+  })();
+  SPR.pbar = (() => {
+    const [c, g] = C(170, 14);
+    g.fillStyle = 'rgba(0,0,0,0.5)'; rr(g, 0, 0, 170, 14, 7); g.fill();
+    g.strokeStyle = 'rgba(255,255,255,0.4)'; g.lineWidth = 2; rr(g, 1, 1, 168, 12, 6); g.stroke();
+    return c;
+  })();
+  SPR.pfill = (() => {
+    const [c, g] = C(164, 8);
+    const gr = g.createLinearGradient(0, 0, 164, 0);
+    gr.addColorStop(0, '#4cd674'); gr.addColorStop(1, '#b8f04a');
+    g.fillStyle = gr; rr(g, 0, 0, 164, 8, 4); g.fill();
+    return c;
+  })();
+  SPR.cell = (() => {   // build-menu cell backing
+    const [c, g] = C(92, 78);
+    g.fillStyle = 'rgba(9,26,40,0.75)'; rr(g, 1, 1, 90, 76, 8); g.fill();
+    g.strokeStyle = 'rgba(120,180,220,0.35)'; g.lineWidth = 2; rr(g, 2, 2, 88, 74, 7); g.stroke();
+    return c;
+  })();
+  SPR.cellSel = (() => {
+    const [c, g] = C(96, 82);
+    g.fillStyle = 'rgba(30,70,100,0.9)'; rr(g, 1, 1, 94, 80, 9); g.fill();
+    g.strokeStyle = '#ffd24a'; g.lineWidth = 3; rr(g, 2, 2, 92, 78, 8); g.stroke();
+    return c;
+  })();
+
+  /* rocket */
+  SPR.rocket = S(20, 46, (g, P) => {
+    P(7, 12, 6, 28, '#eef2f6'); P(7, 12, 2, 28, '#ffffff'); P(11.4, 12, 1.6, 28, '#c8d0d8');
+    P(7, 3, 6, 9, '#e04a38'); P(7.8, 1.4, 4.4, 2.4, '#e04a38'); P(8.8, 0.2, 2.4, 1.8, '#e04a38');
+    P(7.8, 3.4, 1.6, 8, '#f0705e');
+    P(8.2, 15, 3.6, 3.6, '#59c9f0'); P(8.8, 15.6, 1.6, 1.6, '#c9f0ff');
+    P(8.2, 15, 3.6, 0.8, '#3f97c9');
+    P(7.4, 23, 5.2, 0.8, '#c0402f'); P(7.4, 30, 5.2, 0.8, '#c0402f');
+    P(4, 32, 3, 8, '#e04a38'); P(13, 32, 3, 8, '#e04a38');
+    P(4, 32, 1.2, 8, '#f0705e'); P(13, 32, 1.2, 8, '#f0705e');
+    P(7.6, 40, 4.8, 2.4, '#8f979f'); P(8.4, 42.4, 3.2, 1.4, '#6d747c');
+  });
+  SPR.rflame = [0, 1].map(v => S(12, 20, (g, P) => {
+    const h = v ? 17 : 13;
+    P(3, 0, 6, h, '#ff8a2a'); P(4, 0, 4, h - 3, '#ffc23a'); P(5, 0, 2, h / 2, '#fff3b0');
+    P(2, 0, 1, h - 6, '#ff8a2a'); P(9, 0, 1, h - 6, '#ff8a2a');
+  }));
+
+  /* bolt icon for power meter + star */
+  SPR.star = S(9, 9, (g, P) => {
+    P(4, 0, 1, 9, '#ffd24a'); P(0, 4, 9, 1, '#ffd24a');
+    P(2, 2, 1, 1, '#ffd24a'); P(6, 2, 1, 1, '#ffd24a'); P(2, 6, 1, 1, '#ffd24a'); P(6, 6, 1, 1, '#ffd24a');
+    P(3, 3, 3, 3, '#fff3b0');
+  });
+
+  /* logo */
+  SPR.logo = (() => {
+    const [c, g] = C(820, 170);
+    g.textAlign = 'center';
+    const draw = (txt, y, size, fill1, fill2) => {
+      g.font = '900 ' + size + 'px Verdana, sans-serif';
+      g.lineWidth = 12; g.lineJoin = 'round'; g.strokeStyle = '#123048';
+      g.strokeText(txt, 410, y);
+      const gr = g.createLinearGradient(0, y - size, 0, y);
+      gr.addColorStop(0, fill1); gr.addColorStop(1, fill2);
+      g.fillStyle = gr; g.fillText(txt, 410, y);
+    };
+    draw('ISLAND', 74, 66, '#aef09a', '#3fae4f');
+    draw('FORGE', 156, 72, '#ffe27a', '#e8862a');
+    return c;
+  })();
+
+  /* title backdrop — cozy dusk ocean with a tiny island */
+  SPR.titleBG = (() => {
+    const [c, g] = C(W, H);
+    const sky = g.createLinearGradient(0, 0, 0, H);
+    sky.addColorStop(0, '#16344f'); sky.addColorStop(0.5, '#1e5077'); sky.addColorStop(1, '#2a6f9e');
+    g.fillStyle = sky; g.fillRect(0, 0, W, H);
+    g.fillStyle = 'rgba(255,255,255,0.5)';
+    for (let i = 0; i < 40; i++) g.fillRect((i * 97 + 31) % W, (i * 53 + 17) % 200, 2, 2);
+    for (let i = 0; i < 26; i++) {
+      g.fillStyle = 'rgba(140,210,240,0.18)';
+      g.fillRect((i * 173 + 60) % W, 330 + (i * 67) % 360, 40 + (i * 29) % 60, 3);
+    }
+    const isle = (cx2, cy2, rx, ry) => {
+      g.fillStyle = '#ecd794'; g.beginPath(); g.ellipse(cx2, cy2, rx, ry, 0, 0, 6.3); g.fill();
+      g.fillStyle = '#57b04f'; g.beginPath(); g.ellipse(cx2, cy2 - 6, rx * 0.8, ry * 0.72, 0, 0, 6.3); g.fill();
+    };
+    isle(168, 440, 110, 32);
+    g.drawImage(SPR.tree[0], 96, 368);
+    g.drawImage(SPR.b.cabin, 150, 384);
+    g.drawImage(SPR.b.campfire, 208, 396);
+    isle(1112, 480, 104, 30);
+    g.drawImage(SPR.b.windmill, 1064, 400);
+    g.drawImage(SPR.blades, 1060, 392);
+    g.drawImage(SPR.tree[0], 1136, 408);
+    g.drawImage(SPR.tree[1], 1170, 420);
+    return c;
+  })();
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   WORLD — organic island mask per age, terrain layer, static bg layer,
+   decorative auto-pipes. Terrain/bg are rebuilt ONLY on island changes.
+   ═══════════════════════════════════════════════════════════════════════ */
+const [terrainC, tg] = C(W, H);
+const [bgC, bgg] = C(W, H);
+const RX = [0, 6.4, 8.6, 10.8, 13.2, 15.4];
+const RY = [0, 4.8, 6.2, 7.6, 8.8, 10.0];
+
+function genIsland(sd) {
+  seed = sd;
+  const rng = mulberry(sd);
+  landSalt = [rng() * 6.28, rng() * 6.28, rng() * 6.28];
+  landAge = [];
+  for (let gy = 0; gy < GH; gy++) {
+    landAge[gy] = [];
+    for (let gx = 0; gx < GW; gx++) {
+      let a = 0;
+      if (gx >= 1 && gx < GW - 1 && gy >= 1 && gy < GH - 1) {
+        for (let k = 1; k <= 5; k++) {
+          const dx = (gx - CX) / RX[k], dy = (gy - CYG) / RY[k];
+          const r = Math.hypot(dx, dy);
+          const ang = Math.atan2(dy, dx);
+          const wob = 1 + 0.13 * Math.sin(ang * 3 + landSalt[0]) + 0.09 * Math.sin(ang * 5 + landSalt[1]) + 0.05 * Math.sin(ang * 7 + landSalt[2]);
+          if (r < wob * 0.82 || (k === 1 && Math.hypot(gx - CX, gy - CYG) < 2.2)) { a = k; break; }
+        }
+      }
+      landAge[gy][gx] = a;
+    }
+  }
+  occ = [];
+  for (let gy = 0; gy < GH; gy++) { occ[gy] = []; for (let gx = 0; gx < GW; gx++) occ[gy][gx] = null; }
+}
+const isLand = (gx, gy) => gx >= 0 && gy >= 0 && gx < GW && gy < GH && landAge[gy][gx] > 0 && landAge[gy][gx] <= age;
+const isLandPx = (x, y) => isLand(Math.floor(x / TILE), Math.floor((y - GY0) / TILE));
+function sandAt(gx, gy) {
+  return isLand(gx, gy) && (!isLand(gx - 1, gy) || !isLand(gx + 1, gy) || !isLand(gx, gy - 1) || !isLand(gx, gy + 1));
+}
+function floraAt(gx, gy) {
+  for (const f of flora) if (!f.gone && f.gx === gx && f.gy === gy) return f;
+  return null;
+}
+function tileBuildable(gx, gy) {
+  return isLand(gx, gy) && !occ[gy][gx] && !floraAt(gx, gy) && !(crate && crate.gx === gx && crate.gy === gy);
+}
+function scatterFlora(forAge) {
+  const rng = mulberry(seed * 7 + forAge * 131);
+  const free = [];
+  let trees = 0, rocks = 0;
+  for (let gy = 0; gy < GH; gy++) for (let gx = 0; gx < GW; gx++) {
+    if (landAge[gy][gx] !== forAge) continue;
+    if (sandAt(gx, gy)) continue;
+    if (Math.hypot(gx - CX, gy - CYG) < 2.5) continue;
+    if (occ[gy][gx] || floraAt(gx, gy)) continue;
+    const r = rng();
+    if (r < 0.12) { flora.push({ type: 'tree', gx, gy, hits: 0, gone: false, regrowT: 0, shakeT: 0, golden: false }); trees++; }
+    else if (r < 0.17) { flora.push({ type: 'rock', gx, gy, hits: 0, gone: false, regrowT: 0, shakeT: 0, golden: false }); rocks++; }
+    else free.push({ gx, gy });
+  }
+  /* kid-proof guarantee — a starting island MUST have enough to chop */
+  const needT = (forAge === 1 ? 5 : 2) - trees, needR = (forAge === 1 ? 3 : 1) - rocks;
+  for (let i = free.length - 1; i > 0; i--) {
+    const j = (rng() * (i + 1)) | 0;
+    const tmp = free[i]; free[i] = free[j]; free[j] = tmp;
+  }
+  for (let i = 0; i < needT && free.length; i++) {
+    const t = free.pop();
+    flora.push({ type: 'tree', gx: t.gx, gy: t.gy, hits: 0, gone: false, regrowT: 0, shakeT: 0, golden: false });
+  }
+  for (let i = 0; i < needR && free.length; i++) {
+    const t = free.pop();
+    flora.push({ type: 'rock', gx: t.gx, gy: t.gy, hits: 0, gone: false, regrowT: 0, shakeT: 0, golden: false });
+  }
+}
+
+/* ── pipes (purely decorative) ── */
+function pipeAnchor(b) {
+  const s = B[b.k].size || 1;
+  return { x: tX(b.gx) + s * 16, y: tY(b.gy) + s * 16 };
+}
+function nearestOf(kinds, b, before) {
+  let bst = null, bd = 1e9;
+  for (const o of buildings) {
+    if (o === b) continue;
+    if (before && o.seq >= b.seq) continue;
+    let match = false;
+    for (const k of kinds) if (o.k === k || (k === '@power' && B[o.k].wire && (B[o.k].prod || {}).power)) match = true;
+    if (!match) continue;
+    const d = Math.hypot(o.gx - b.gx, o.gy - b.gy);
+    if (d < bd) { bd = d; bst = o; }
+  }
+  return bst;
+}
+function recomputePipes() {
+  pipes = [];
+  const sorted = buildings.slice().sort((a, b2) => a.seq - b2.seq);
+  for (const b of sorted) {
+    const def = B[b.k];
+    if (def.special && b.k !== 'giantmill' && b.k !== 'statue') continue;
+    let target = null, power = false;
+    if (def.wire) {
+      target = nearestOf(['@power'], b, true);
+      power = !!target;
+      if (!target) target = nearestOf(def.pipe || ['factory', 'smelter', 'campfire'], b, true) || nearestOf(['campfire'], b, false);
+    } else if (b.k === 'statue') {
+      target = nearestOf(['campfire'], b, false);
+    } else if (def.pipe) {
+      for (const kind of def.pipe) { target = nearestOf([kind], b, true); if (target) break; }
+      if (!target) target = nearestOf(['campfire'], b, false);
+    }
+    if (!target) continue;
+    const a = pipeAnchor(b), c = pipeAnchor(target);
+    let pts;
+    if (Math.abs(c.x - a.x) > Math.abs(c.y - a.y)) pts = [a, { x: c.x, y: a.y }, c];
+    else pts = [a, { x: a.x, y: c.y }, c];
+    let len = 0;
+    for (let i = 1; i < pts.length; i++) len += Math.abs(pts[i].x - pts[i - 1].x) + Math.abs(pts[i].y - pts[i - 1].y);
+    if (len < 8) continue;
+    pipes.push({ pts, len, power });
+  }
+  terrainDirty = true;
+}
+function drawPipes(g) {
+  for (const p of pipes) {
+    g.lineJoin = 'round'; g.lineCap = 'round';
+    g.strokeStyle = p.power ? '#24445a' : '#6a4f2e'; g.lineWidth = 7;
+    g.beginPath(); g.moveTo(p.pts[0].x, p.pts[0].y);
+    for (let i = 1; i < p.pts.length; i++) g.lineTo(p.pts[i].x, p.pts[i].y);
+    g.stroke();
+    g.strokeStyle = p.power ? '#3f9cc4' : '#c98f4e'; g.lineWidth = 3;
+    g.stroke();
+    for (const q of p.pts) {
+      g.fillStyle = p.power ? '#2c586e' : '#7a5a33';
+      g.beginPath(); g.arc(q.x, q.y, 5, 0, 6.3); g.fill();
+      g.fillStyle = p.power ? '#5fc4e8' : '#e0aa62';
+      g.beginPath(); g.arc(q.x, q.y, 2, 0, 6.3); g.fill();
+    }
+  }
+}
+function pipePos(p, d) {
+  for (let i = 1; i < p.pts.length; i++) {
+    const sl = Math.abs(p.pts[i].x - p.pts[i - 1].x) + Math.abs(p.pts[i].y - p.pts[i - 1].y);
+    if (d <= sl) {
+      const f = sl ? d / sl : 0;
+      return { x: p.pts[i - 1].x + (p.pts[i].x - p.pts[i - 1].x) * f,
+               y: p.pts[i - 1].y + (p.pts[i].y - p.pts[i - 1].y) * f };
+    }
+    d -= sl;
+  }
+  return p.pts[p.pts.length - 1];
+}
+
+function rebuildTerrain() {
+  terrainDirty = false;
+  const gr = tg.createLinearGradient(0, 0, 0, H);
+  gr.addColorStop(0, '#2b7db8'); gr.addColorStop(1, '#175a92');
+  tg.fillStyle = gr; tg.fillRect(0, 0, W, H);
+  /* soft turquoise halo under the island so it sits IN the water */
+  const halo = tg.createRadialGradient(CX * TILE + 16, tY(CYG) + 16, 60, CX * TILE + 16, tY(CYG) + 16, 460);
+  halo.addColorStop(0, 'rgba(120,215,255,0.13)'); halo.addColorStop(1, 'rgba(120,215,255,0)');
+  tg.fillStyle = halo; tg.fillRect(0, 0, W, H);
+  tg.fillStyle = 'rgba(10,50,90,0.25)';
+  for (let i = 0; i < 90; i++) {
+    const x = (i * 211 + 40) % W, y = (i * 127 + 60) % H;
+    if (!isLandPx(x, y)) tg.fillRect(x, y, 26, 3);
+  }
+  tg.fillStyle = 'rgba(200,235,255,0.14)';
+  for (let i = 0; i < 60; i++) {
+    const x = (i * 173 + 90) % W, y = (i * 149 + 20) % H;
+    if (!isLandPx(x, y)) tg.fillRect(x, y, 14, 2);
+  }
+  const nearLandR = (gx, gy, r) => {
+    for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++)
+      if (isLand(gx + dx, gy + dy)) return true;
+    return false;
+  };
+  coast = [];
+  for (let gy = 0; gy < GH; gy++) for (let gx = 0; gx < GW; gx++) {
+    if (isLand(gx, gy)) continue;
+    if (nearLandR(gx, gy, 1)) {
+      tg.drawImage(SPR.shallow, tX(gx), tY(gy));
+      tg.drawImage(SPR.foam[(gx + gy) % 2], tX(gx), tY(gy));
+      coast.push({ x: tX(gx) + 16, y: tY(gy) + 16 });
+    } else if (nearLandR(gx, gy, 2)) {
+      tg.globalAlpha = 0.4;                       // second, fainter shallow ring
+      tg.drawImage(SPR.shallow, tX(gx), tY(gy));
+      tg.globalAlpha = 1;
+    }
+  }
+  /* land tiles: mottled grass via smooth value noise + beach sand */
+  const vn = (x, y, sx, sy) => {
+    const fx = x / sx, fy = y / sy;
+    const x0 = Math.floor(fx), y0 = Math.floor(fy);
+    const sm = t => t * t * (3 - 2 * t);
+    const u = sm(fx - x0), v = sm(fy - y0);
+    const h = (a, b) => hash2(a * 13 + 7, b * 17 + 3);
+    return (h(x0, y0) * (1 - u) + h(x0 + 1, y0) * u) * (1 - v)
+         + (h(x0, y0 + 1) * (1 - u) + h(x0 + 1, y0 + 1) * u) * v;
+  };
+  const mots = (gx, gy) => vn(gx, gy, 5, 4) * 0.65 + vn(gx + 31, gy + 17, 2, 2) * 0.35;
+  for (let gy = 0; gy < GH; gy++) for (let gx = 0; gx < GW; gx++) {
+    if (!isLand(gx, gy)) continue;
+    const x = tX(gx), y = tY(gy);
+    if (sandAt(gx, gy)) {
+      tg.drawImage(SPR.sand, x, y);
+      /* wet edge on each water-facing side */
+      tg.fillStyle = 'rgba(150,115,60,0.4)';
+      if (!isLand(gx, gy + 1)) tg.fillRect(x, y + 27, 32, 5);
+      if (!isLand(gx, gy - 1)) tg.fillRect(x, y, 32, 4);
+      if (!isLand(gx - 1, gy)) tg.fillRect(x, y, 4, 32);
+      if (!isLand(gx + 1, gy)) tg.fillRect(x + 28, y, 4, 32);
+    } else {
+      tg.drawImage(SPR.grass[Math.min(4, Math.floor(mots(gx, gy) * 5))], x, y);
+      /* occasional flowers / pebbles / tufts (deterministic per tile) */
+      const d = hash2(gx * 3 + 1, gy * 5 + 2);
+      const ox = 4 + Math.floor(hash2(gx + 9, gy + 4) * 18), oy = 4 + Math.floor(hash2(gx + 2, gy + 11) * 18);
+      if (d < 0.06) tg.drawImage(SPR.flower[Math.floor(d * 66) % 4], x + ox, y + oy);
+      else if (d < 0.09) tg.drawImage(SPR.pebble, x + ox, y + oy);
+      else if (d < 0.16) tg.drawImage(SPR.tuft, x + ox, y + oy);
+    }
+  }
+  /* south-facing cliff lip: the island reads as raised out of the sea */
+  for (let gy = 0; gy < GH; gy++) for (let gx = 0; gx < GW; gx++) {
+    if (!isLand(gx, gy) || isLand(gx, gy + 1)) continue;
+    const x = tX(gx), y = tY(gy);
+    tg.fillStyle = '#c9a568'; tg.fillRect(x, y + 26, 32, 4);
+    tg.fillStyle = '#8a6538'; tg.fillRect(x, y + 30, 32, 2);
+  }
+  drawPipes(tg);
+  bgDirty = true;
+}
+function rebuildBG() {
+  bgDirty = false;
+  bgg.drawImage(terrainC, 0, 0);
+  const items = [];
+  for (const f of flora) if (!f.gone && f.shakeT <= 0) items.push({ y: tY(f.gy) + 32, f });
+  for (const b of buildings) items.push({ y: tY(b.gy) + (B[b.k].size || 1) * 32, b });
+  items.sort((a, b2) => a.y - b2.y);
+  for (const it of items) {
+    if (it.f) drawFlora(bgg, it.f);
+    else drawBuilding(bgg, it.b);
+  }
+}
+function floraSprite(f) {
+  if (f.type === 'tree') return (f.golden ? SPR.gold : SPR.tree)[Math.min(f.hits, 2)];
+  return SPR.rock[Math.min(f.hits, 2)];
+}
+function drawFlora(g, f, shake) {
+  const s = floraSprite(f);
+  const ox = shake ? Math.sin(T * 42) * 2 : 0;
+  g.drawImage(s, tX(f.gx) + ox, tY(f.gy) + 32 - s.height);
+}
+function drawBuilding(g, b) {
+  const lit = islandPowered && b.k !== 'campfire';
+  const s = (lit ? SPR.bLit : SPR.b)[b.k];
+  g.drawImage(s, tX(b.gx), tY(b.gy) + (B[b.k].size || 1) * 32 - s.height);
+}
+
+/* ── animated overlay registry (rebuilt when buildings change) ── */
+function recomputeAnims() {
+  anims = [];
+  for (const b of buildings) {
+    const x = tX(b.gx), y = tY(b.gy);
+    switch (b.k) {
+      case 'campfire': anims.push({ t: 'flame', x: x + 10, y: y + 2, b }); break;
+      case 'smelter':  anims.push({ t: 'furnace', x: x + 16, y: y + 24, b });
+                       anims.push({ t: 'smoke', x: x + 25, y: y - 24, b, cool: Math.random() }); break;
+      case 'factory':  anims.push({ t: 'gear', x: x + 20, y: y + 24, b });
+                       anims.push({ t: 'smoke', x: x + 51, y: y - 26, b, cool: Math.random() });
+                       anims.push({ t: 'smoke', x: x + 60, y: y - 22, b, cool: Math.random() }); break;
+      case 'bakery':   anims.push({ t: 'smoke', x: x + 23, y: y - 14, b, cool: Math.random(), soft: true }); break;
+      case 'windmill': anims.push({ t: 'blades', x: x + 16, y: y - 3, b, sp: 1.6 + Math.random() * 0.5 }); break;
+      case 'giantmill':anims.push({ t: 'bladesBig', x: x + 20, y: y - 14, b, sp: 1.1 }); break;
+      case 'solar':    anims.push({ t: 'glint', x: x + 6, y: y + 6, b, cool: Math.random() * 4 }); break;
+      case 'battery':  anims.push({ t: 'bglow', x: x + 16, y: y + 6, b }); break;
+      case 'lab':      anims.push({ t: 'bubbles', x: x + 9, y: y + 8, b, cool: Math.random() }); break;
+      case 'well':     anims.push({ t: 'aura', x: x + 16, y: y + 8, b, cool: Math.random() }); break;
+      case 'statue':   anims.push({ t: 'aura', x: x + 16, y: y + 2, b, cool: Math.random(), gold: true }); break;
+    }
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   POOLS — particles / floaty texts / pipe dots (no per-frame allocation:
+   fixed arrays, dead slots recycled).
+   ═══════════════════════════════════════════════════════════════════════ */
+const P_MAX = 96, parts = [];
+for (let i = 0; i < P_MAX; i++) parts.push({ on: false });
+function spawnP(x, y, spr, o) {
+  o = o || {};
+  for (let i = 0; i < P_MAX; i++) {
+    const p = parts[i];
+    if (p.on) continue;
+    p.on = true; p.x = x; p.y = y; p.spr = spr;
+    p.vx = o.vx !== undefined ? o.vx : (Math.random() - 0.5) * 60;
+    p.vy = o.vy !== undefined ? o.vy : -40 - Math.random() * 40;
+    p.g = o.g !== undefined ? o.g : 140;
+    p.life = o.life || 0.7; p.t = 0;
+    p.fade = o.fade !== false;
+    p.tx = o.tx !== undefined ? o.tx : null;   // homing target (HUD pops)
+    p.ty = o.ty !== undefined ? o.ty : null;
+    p.sp = 150;
+    return p;
+  }
+  return null;
+}
+const F_MAX = 14, floats = [];
+for (let i = 0; i < F_MAX; i++) floats.push({ on: false });
+function addFloat(x, y, str, color, icon) {
+  for (let i = 0; i < F_MAX; i++) {
+    const f = floats[i];
+    if (f.on) continue;
+    f.on = true; f.x = x; f.y = y; f.str = str; f.color = color || '#fff';
+    f.icon = icon || null; f.t = 0;
+    return;
+  }
+}
+const D_MAX = 22, dots = [];
+for (let i = 0; i < D_MAX; i++) dots.push({ on: false });
+let dotSpawnT = 0, dotRR = 0;
+function updateDots(dt) {
+  dotSpawnT -= dt;
+  if (dotSpawnT <= 0 && pipes.length) {
+    dotSpawnT = Math.max(0.08, 1.6 / pipes.length);
+    for (let tries = 0; tries < pipes.length; tries++) {
+      const pipe = pipes[dotRR++ % pipes.length];
+      if (pipe.power && !islandPowered) continue;
+      for (let i = 0; i < D_MAX; i++) {
+        if (dots[i].on) continue;
+        dots[i].on = true; dots[i].pipe = pipe; dots[i].d = 0;
+        dots[i].frame = 0;
+        tries = 99; break;
+      }
+      break;
+    }
+  }
+  for (let i = 0; i < D_MAX; i++) {
+    const d = dots[i];
+    if (!d.on) continue;
+    d.d += dt * (d.pipe.power ? 150 : 55);
+    if (d.d >= d.pipe.len || pipes.indexOf(d.pipe) === -1) d.on = false;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   ECONOMY — fixed 1s tick. One shared global pool; placement never
+   affects function. All numbers live in B / REQ_NEXT above.
+   ═══════════════════════════════════════════════════════════════════════ */
+const cnt = k => { let n = 0; for (const b of buildings) if (b.k === k) n++; return n; };
+function canAfford(cost) { for (const r in cost) if ((res[r] || 0) < cost[r]) return false; return true; }
+function payCost(cost) { for (const r in cost) res[r] -= cost[r]; }
+function refund(cost) { for (const r in cost) res[r] += cost[r]; }
+
+function economyTick() {
+  const wellBonus = cnt('well') > 0 ? 1.5 : 1;
+  powerInc = 0; powerDem = 0;
+  const inc = {};
+  for (const b of buildings) {
+    const d = B[b.k];
+    if (d.prod && d.prod.power) powerInc += d.prod.power;
+    if (d.needPower) powerDem += d.needPower;
+  }
+  let avail = powerInc;
+  const sorted = buildings.slice().sort((a, b2) => a.seq - b2.seq);
+  for (const b of sorted) {
+    const d = B[b.k];
+    b.idle = null;
+    if (d.needPower) {
+      if (avail >= d.needPower) { avail -= d.needPower; b.powered = true; }
+      else { b.powered = false; b.idle = 'power'; continue; }
+    }
+    if (d.cons) {
+      let ok = true;
+      for (const r in d.cons) if ((res[r] || 0) < d.cons[r]) ok = false;
+      if (!ok) { b.idle = 'input'; continue; }
+      for (const r in d.cons) { res[r] -= d.cons[r]; inc[r] = (inc[r] || 0) - d.cons[r]; }
+    }
+    if (d.prod) for (const r in d.prod) {
+      if (r === 'power') continue;
+      let amt = d.prod[r];
+      if (b.k === 'farm') amt *= wellBonus;
+      res[r] += amt; inc[r] = (inc[r] || 0) + amt;
+      if (r === 'metal') life.metal += amt;
+      if (r === 'parts') life.parts += amt;
+    }
+  }
+  /* population eats (age 2+); never dies — growth just pauses */
+  const eat = age >= 2 ? pop * 0.05 : 0;
+  const before = res.food;
+  res.food = Math.max(0, res.food - eat);
+  hungry = age >= 2 && res.food <= 0 && eat > 0 && (inc.food || 0) <= eat;
+  inc.food = (inc.food || 0) - Math.min(eat, before);
+  const cap = 2 + 4 * cnt('cabin');
+  if (popF < cap && (age < 2 || !hungry)) popF = Math.min(cap, popF + 0.5);
+  pop = Math.floor(popF);
+  if (pop > best) { best = pop; lsSet('islandforge_best', '' + best); }
+  rates = inc; rates.power = powerInc - powerDem;
+  const nowPowered = powerInc > 0;
+  if (nowPowered !== islandPowered) {
+    islandPowered = nowPowered;
+    bgDirty = true;
+    if (nowPowered && !firstPowerDone) {
+      firstPowerDone = true;
+      banners.push({ title: 'POWER ONLINE!', sub: 'The island comes alive!', t: 0, dur: 2.6 });
+      SFX.power();
+    }
+  }
+  /* mystery crate — every 4–6 minutes of active play */
+  if (!crate && scene === 'play') {
+    crateT -= 1;
+    if (crateT <= 0) spawnCrate();
+  }
+  /* age advancement */
+  const rq = REQ_NEXT[age];
+  if (rq && rq.ok()) ageUp();
+}
+
+function ageUp() {
+  if (age >= 5) return;
+  age++;
+  banners.push({ title: 'AGE ' + age + ' — ' + AGE_NAMES[age] + '!', sub: AGE_SUBS[age], t: 0, dur: 3.4 });
+  SFX.fanfare();
+  scatterFlora(age);
+  for (let gy = 0; gy < GH; gy++) for (let gx = 0; gx < GW; gx++) {
+    if (landAge[gy][gx] === age && hash2(gx + age, gy) < 0.4)
+      spawnP(tX(gx) + 16, tY(gy) + 16, SPR.spark[0], { vy: -30, g: 0, life: 1.2 });
+  }
+  recomputePipes(); recomputeAnims();
+  terrainDirty = true;
+  saveGame();
+}
+
+/* ── building placement ── */
+function validAt(k, gx, gy) {
+  const s = B[k].size || 1;
+  if (gx < 0 || gy < 0 || gx + s > GW || gy + s > GH) return false;
+  for (let dy = 0; dy < s; dy++) for (let dx = 0; dx < s; dx++)
+    if (!tileBuildable(gx + dx, gy + dy) || sandAt(gx + dx, gy + dy)) return false;
+  return true;
+}
+function addBuilding(k, gx, gy) {
+  const b = { k, gx, gy, seq: seqN++, idle: null, powered: false };
+  buildings.push(b);
+  const s = B[k].size || 1;
+  for (let dy = 0; dy < s; dy++) for (let dx = 0; dx < s; dx++) occ[gy + dy][gx + dx] = b;
+  recomputePipes(); recomputeAnims();
+  bgDirty = true;
+  return b;
+}
+function placeBuilding(k, gx, gy) {
+  if (!validAt(k, gx, gy) || !canAfford(B[k].cost)) return false;
+  payCost(B[k].cost);
+  const b = addBuilding(k, gx, gy);
+  if (B[k].robot) spawnRobot(tX(gx) + 16, tY(gy) + 40);
+  SFX.place();
+  const s = B[k].size || 1;
+  for (let i = 0; i < 8; i++)
+    spawnP(tX(gx) + s * 16 + (Math.random() - 0.5) * s * 26, tY(gy) + s * 30, SPR.puff[1], { vy: -25, g: -10, life: 0.5 });
+  b.popT = 0.35;
+  return true;
+}
+function removeBuilding(b) {
+  if (B[b.k].special) return false;
+  const s = B[b.k].size || 1;
+  for (let dy = 0; dy < s; dy++) for (let dx = 0; dx < s; dx++) occ[b.gy + dy][b.gx + dx] = null;
+  buildings.splice(buildings.indexOf(b), 1);
+  refund(B[b.k].cost);
+  SFX.remove();
+  addFloat(tX(b.gx) + s * 16, tY(b.gy), 'REFUNDED!', '#7dff9a');
+  for (let i = 0; i < 6; i++)
+    spawnP(tX(b.gx) + s * 16, tY(b.gy) + s * 16, SPR.puff[0], { life: 0.5 });
+  recomputePipes(); recomputeAnims();
+  bgDirty = true;
+  return true;
+}
+
+/* ── mystery crates ── */
+function spawnCrate() {
+  const beach = [];
+  for (let gy = 0; gy < GH; gy++) for (let gx = 0; gx < GW; gx++)
+    if (sandAt(gx, gy) && !occ[gy][gx] && !floraAt(gx, gy)) beach.push({ gx, gy });
+  if (!beach.length) { crateT = 60; return; }
+  const t = beach[(Math.random() * beach.length) | 0];
+  crate = { gx: t.gx, gy: t.gy, t: 0, opening: 0 };
+  SFX.crate();
+}
+const GIFTS = ['goldtree', 'robot', 'giantmill', 'treasure', 'egg'];
+function openCrate() {
+  if (!crate || crate.opening) return;
+  crate.opening = 0.0001;
+  SFX.crate();
+}
+function nearestFreeGrass(gx, gy) {
+  for (let r = 0; r < 8; r++) for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) {
+    const x = gx + dx, y = gy + dy;
+    if (tileBuildable(x, y) && !sandAt(x, y)) return { gx: x, gy: y };
+  }
+  return null;
+}
+function revealCrate() {
+  const cx2 = tX(crate.gx) + 16, cy2 = tY(crate.gy) + 8;
+  let g = GIFTS[(Math.random() * GIFTS.length) | 0];
+  if (g === 'egg' && (drake || egg)) g = 'treasure';
+  if (g === 'robot' && robots.length >= 4) g = 'treasure';
+  if (g === 'giantmill' && cnt('giantmill') >= 3) g = 'treasure';
+  let label = '';
+  if (g === 'goldtree') {
+    const t = nearestFreeGrass(crate.gx, crate.gy);
+    if (t) { flora.push({ type: 'tree', gx: t.gx, gy: t.gy, hits: 0, gone: false, regrowT: 0, shakeT: 0, golden: true }); bgDirty = true; }
+    label = 'GOLDEN TREE! 3x wood forever!';
+  } else if (g === 'robot') {
+    spawnRobot(cx2, cy2 + 16); label = 'ROBOT HELPER! It harvests for you!';
+  } else if (g === 'giantmill') {
+    const t = nearestFreeGrass(crate.gx, crate.gy);
+    if (t) addBuilding('giantmill', t.gx, t.gy);
+    label = 'GIANT WINDMILL! +12 power!';
+  } else if (g === 'treasure') {
+    const mult = age * 60;
+    res.wood += mult; res.stone += mult;
+    if (age >= 2) res.food += mult;
+    if (age >= 3) { res.ore += mult / 2; res.metal += mult / 3; res.parts += mult / 4; }
+    if (age >= 5) res.science += 10;
+    label = 'TREASURE! A pile of everything!';
+  } else {
+    egg = { x: cx2, y: cy2 + 18, t: 0 }; label = 'DRAGON EGG! Keep it warm...';
+  }
+  banners.push({ title: 'LEGENDARY!', sub: label, t: 0, dur: 3.2, legendary: true });
+  SFX.legendary();
+  for (let i = 0; i < 14; i++) spawnP(cx2, cy2, SPR.spark[i % 2], { life: 1 });
+  crate = null;
+  crateT = 240 + Math.random() * 120;
+}
+
+/* ── robots & drake ── */
+function spawnRobot(x, y) {
+  robots.push({ x, y, tx: x, ty: y, cool: 0, frame: 0, targ: null });
+}
+function updateRobot(r, dt) {
+  if (!r.targ || r.targ.gone) {
+    r.targ = null;
+    let bd = 1e9;
+    for (const f of flora) {
+      if (f.gone) continue;
+      const d = Math.hypot(tX(f.gx) + 16 - r.x, tY(f.gy) + 24 - r.y);
+      if (d < bd) { bd = d; r.targ = f; }
+    }
+  }
+  if (r.targ) {
+    const tx2 = tX(r.targ.gx) + 16, ty2 = tY(r.targ.gy) + 26;
+    const d = Math.hypot(tx2 - r.x, ty2 - r.y);
+    if (d > 26) {
+      const nx = r.x + (tx2 - r.x) / d * 70 * dt, ny = r.y + (ty2 - r.y) / d * 70 * dt;
+      if (isLandPx(nx, ny)) { r.x = nx; r.y = ny; }
+      else if (isLandPx(nx, r.y)) r.x = nx;
+      else if (isLandPx(r.x, ny)) r.y = ny;
+      else r.targ = null;
+      r.frame += dt * 6;
+    } else {
+      r.cool -= dt;
+      if (r.cool <= 0) { r.cool = 1.1; harvestFlora(r.targ, r.x, r.y - 10); }
+    }
+  }
+}
+function updateDrake(dr, dt) {
+  const owner = players[0];
+  if (!owner) return;
+  const tx2 = owner.x - 26, ty2 = owner.y - 6;
+  dr.x += (tx2 - dr.x) * Math.min(1, dt * 3);
+  dr.y += (ty2 - dr.y) * Math.min(1, dt * 3);
+  dr.frame += dt * 5;
+}
+
+/* ── harvesting (shared by players & robots) ── */
+function harvestFlora(f, px2, py2) {
+  if (f.gone) return;
+  f.shakeT = 0.28;
+  bgDirty = true;
+  if (f.type === 'tree') {
+    const amt = f.golden ? 6 : 2;
+    res.wood += amt;
+    addFloat(tX(f.gx) + 16, tY(f.gy) - 4, '+' + amt, RES_COL.wood, 'wood');
+    for (let i = 0; i < 4; i++) spawnP(tX(f.gx) + 16, tY(f.gy) + 8, f.golden ? SPR.spark[0] : SPR.leaf, { life: 0.6 });
+    SFX.chop();
+  } else {
+    res.stone += 2;
+    addFloat(tX(f.gx) + 16, tY(f.gy) - 4, '+2', RES_COL.stone, 'stone');
+    for (let i = 0; i < 4; i++) spawnP(tX(f.gx) + 16, tY(f.gy) + 12, SPR.chip, { life: 0.5 });
+    SFX.mine();
+  }
+  SFX.coin();
+  if (!f.golden) {
+    f.hits++;
+    if (f.hits >= 3) { f.gone = true; f.hits = 0; f.regrowT = 35 + Math.random() * 15; }
+  }
+}
+
+/* ── rocket sequence ── */
+function buyRocket() {
+  if (!canAfford(ROCKET_COST) || rocketDone || rocketSeq) return false;
+  const pad = buildings.find(b => b.k === 'launchpad');
+  if (!pad) return false;
+  payCost(ROCKET_COST);
+  rocketSeq = { phase: 'count', t: 0, n: 3, pad, ry: 0, fw: 0 };
+  SFX.count();
+  return true;
+}
+function updateRocket(dt) {
+  const q = rocketSeq;
+  q.t += dt;
+  if (q.phase === 'count') {
+    if (q.t > 1) {
+      q.t = 0; q.n--;
+      if (q.n <= 0) { q.phase = 'lift'; q.t = 0; SFX.rumble(); }
+      else SFX.count();
+    }
+    shakeAmt = 1.5;
+  } else if (q.phase === 'lift') {
+    q.ry = 60 * q.t * q.t;
+    shakeAmt = Math.max(0, 7 - q.t * 2);
+    if (Math.random() < 0.6) {
+      const px2 = tX(q.pad.gx) + 32 + (Math.random() - 0.5) * 16;
+      spawnP(px2, tY(q.pad.gy) + 40 - q.ry + 40, SPR.flameP, { vy: 60, vx: (Math.random() - 0.5) * 80, g: -20, life: 0.5 });
+      spawnP(px2 + (Math.random() - 0.5) * 20, tY(q.pad.gy) + 46, SPR.puff[2], { vy: -10, vx: (Math.random() - 0.5) * 100, g: -14, life: 0.9 });
+    }
+    if (q.t > 3.4) {
+      q.phase = 'stars'; q.t = 0; shakeAmt = 0;
+      banners.push({ title: 'YOU REACHED THE STARS!', sub: 'The island enters the AGE OF LEGENDS', t: 0, dur: 4.5, legendary: true });
+    }
+  } else if (q.phase === 'stars') {
+    q.fw -= dt;
+    if (q.fw <= 0) {
+      q.fw = 0.35;
+      SFX.firework();
+      const fx = 200 + Math.random() * (W - 400), fy = 100 + Math.random() * 260;
+      const spr = SPR.fw[(Math.random() * SPR.fw.length) | 0];
+      for (let i = 0; i < 12; i++) {
+        const a = i / 12 * 6.28, sp = 60 + Math.random() * 60;
+        spawnP(fx, fy, spr, { vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, g: 30, life: 1.1 });
+      }
+    }
+    if (q.t > 4.5) {
+      rocketDone = true; legends = true; rocketSeq = null;
+      const t = nearestFreeGrass(CX + 2, CYG);
+      if (t) addBuilding('statue', t.gx, t.gy);
+      saveGame();
+    }
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   SAVE / LOAD — 3 slots + autosave + offline progress (½ rate, 8h cap)
+   ═══════════════════════════════════════════════════════════════════════ */
+function thumbURL() {
+  try {
+    const [c, g] = C(96, 54);
+    g.drawImage(bgC, 0, 0, W, H, 0, 0, 96, 54);
+    return c.toDataURL('image/png');
+  } catch (e) { return null; }
+}
+function saveGame() {
+  if (scene !== 'play') return;
+  const s = {
+    v: 1, name: islandName, seed, age, legends, rocketDone, firstPowerDone,
+    res, life, popF, playtime, crateT, rates, savedAt: Date.now(),
+    buildings: buildings.filter(b => b.k !== 'campfire').map(b => [b.k, b.gx, b.gy]),
+    flora: flora.map(f => [f.type, f.gx, f.gy, f.golden ? 1 : 0, f.hits, f.gone ? Math.ceil(f.regrowT) : 0]),
+    robots: robots.length, drake: !!drake,
+    thumb: thumbURL(),
+  };
+  lsSet(SLOT_KEY(curSlot), JSON.stringify(s));
+  loadSlotSummaries();
+}
+function loadSlotSummaries() {
+  for (let i = 0; i < 3; i++) {
+    const raw = lsGet(SLOT_KEY(i));
+    if (!raw) { slots[i] = null; continue; }
+    try {
+      const s = JSON.parse(raw);
+      slots[i] = { name: s.name, age: s.age, pop: Math.floor(s.popF), legends: s.legends, thumb: null, thumbURL: s.thumb };
+      if (s.thumb) {
+        const img = new Image();
+        img.onload = (function (slot) { return function () { slot.thumb = img; }; })(slots[i]);
+        img.src = s.thumb;
+      }
+    } catch (e) { slots[i] = null; }
+  }
+}
+function resetWorldState() {
+  res = { wood: 0, stone: 0, food: 0, ore: 0, metal: 0, parts: 0, science: 0 };
+  life = { metal: 0, parts: 0 };
+  pop = 2; popF = 2; hungry = false; firstPowerDone = false;
+  powerInc = 0; powerDem = 0; islandPowered = false;
+  buildings = []; seqN = 1; flora = []; pipes = []; anims = [];
+  crate = null; crateT = 260 + Math.random() * 90;
+  robots = []; drake = null; egg = null; rocketSeq = null; rocketDone = false; legends = false;
+  rates = {}; playtime = 0; simAcc = 0; autosaveT = 0;
+  banners = []; modal = null; paused = false; statsOpen = false;
+  for (const p of parts) p.on = false;
+  for (const f of floats) f.on = false;
+  for (const d of dots) d.on = false;
+}
+function startPlay() {
+  scene = 'play';
+  document.body.classList.add('in-play');
+  players = [mkPlayer(0)];
+  terrainDirty = true; bgDirty = true;
+}
+function newGame(slot, nm) {
+  curSlot = slot;
+  islandName = nm;
+  age = 1;
+  resetWorldState();
+  genIsland((Date.now() % 100000) + slot * 7 + 1);
+  scatterFlora(1);
+  addBuilding('campfire', CX, CYG);
+  recomputePipes(); recomputeAnims();
+  startPlay();
+  banners.push({ title: 'AGE 1 — CAMPFIRE!', sub: AGE_SUBS[1], t: 0, dur: 3.2 });
+  SFX.fanfare();
+  saveGame();
+}
+function loadGame(slot) {
+  const raw = lsGet(SLOT_KEY(slot));
+  if (!raw) return false;
+  let s;
+  try { s = JSON.parse(raw); } catch (e) { return false; }
+  curSlot = slot;
+  resetWorldState();
+  islandName = s.name || 'ISLE';
+  legends = !!s.legends; rocketDone = !!s.rocketDone; firstPowerDone = !!s.firstPowerDone;
+  age = 1;
+  genIsland(s.seed || 1);
+  age = s.age || 1;
+  res = Object.assign({ wood: 0, stone: 0, food: 0, ore: 0, metal: 0, parts: 0, science: 0 }, s.res);
+  life = Object.assign({ metal: 0, parts: 0 }, s.life);
+  popF = s.popF || 2; pop = Math.floor(popF);
+  playtime = s.playtime || 0; crateT = s.crateT || 280;
+  addBuilding('campfire', CX, CYG);
+  for (const bb of (s.buildings || [])) {
+    if (B[bb[0]] && validAt(bb[0], bb[1], bb[2])) addBuilding(bb[0], bb[1], bb[2]);
+    else if (B[bb[0]]) addBuilding(bb[0], bb[1], bb[2]);   // trust save even if flora landed there
+  }
+  flora = [];
+  for (const ff of (s.flora || [])) {
+    flora.push({ type: ff[0], gx: ff[1], gy: ff[2], golden: !!ff[3], hits: ff[4] || 0,
+                 gone: ff[5] > 0, regrowT: ff[5] || 0, shakeT: 0 });
+  }
+  for (let i = 0; i < (s.robots || 0); i++) spawnRobot(tX(CX) + 16 + i * 10, tY(CYG) + 50);
+  if (s.drake) drake = { x: tX(CX), y: tY(CYG), frame: 0 };
+  recomputePipes(); recomputeAnims();
+  startPlay();
+  islandPowered = false;   // recomputed on first tick
+  economyTick(); simAcc = 0;
+  /* offline progress */
+  const elapsed = clamp((Date.now() - (s.savedAt || Date.now())) / 1000, 0, 8 * 3600);
+  if (elapsed > 60 && s.rates) {
+    const lines = [];
+    for (const r of RES_LIST) {
+      if (r === 'power') continue;
+      const rate = s.rates[r] || 0;
+      if (rate <= 0) continue;
+      const gain = Math.floor(rate * elapsed * 0.5);
+      if (gain < 1) continue;
+      res[r] += gain;
+      lines.push({ icon: r, str: '+' + fmt(gain) + ' ' + r.toUpperCase() });
+    }
+    if (lines.length) {
+      modal = { title: 'WELCOME BACK!', sub: 'Your island kept working:', lines };
+      SFX.legendary();
+    }
+  }
+  return true;
+}
+function eraseSlot(i) { lsDel(SLOT_KEY(i)); loadSlotSummaries(); }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   PLAYERS & INPUT — pad (ArcadeController, guarded), keyboard, touch.
+   Menu/pause edges come from the press-EVENT stream; held movement is
+   polled per frame. START = pause. South = confirm. West = build menu.
+   ═══════════════════════════════════════════════════════════════════════ */
+function mkPlayer(pi) {
+  return { pi, x: tX(CX) + 16 + (pi ? 34 : -18), y: tY(CYG) + 74,
+           dir: 0, flip: false, frame: 0, moving: false,
+           mode: 'walk', menuI: 0, placeK: null, target: null, ghost: null };
+}
+function joinP2() {
+  if (players.length !== 1) return;
+  players.push(mkPlayer(1));
+  players[1].x = players[0].x + 30; players[1].y = players[0].y;
+  if (!isLandPx(players[1].x, players[1].y)) { players[1].x = players[0].x; players[1].y = players[0].y; }
+  addFloat(players[1].x, players[1].y - 40, 'P2 JOINS!', '#ff9a8a');
+  SFX.legendary();
+}
+function ghostTile(p) {
+  const s = B[p.placeK] ? (B[p.placeK].size || 1) : 1;
+  if (p.ghost) return p.ghost;
+  return { gx: clamp(Math.floor(p.x / TILE) - (s > 1 ? 0 : 0), 0, GW - s),
+           gy: clamp(Math.floor((p.y - GY0) / TILE) - (s > 1 ? 1 : 0), 0, GH - s) };
+}
+function tileUnder(p) {
+  return { gx: clamp(Math.floor(p.x / TILE), 0, GW - 1), gy: clamp(Math.floor((p.y - GY0) / TILE), 0, GH - 1) };
+}
+function nearFlora(p) {
+  let bst = null, bd = 50;
+  for (const f of flora) {
+    if (f.gone) continue;
+    const d = Math.hypot(tX(f.gx) + 16 - p.x, tY(f.gy) + 22 - p.y);
+    if (d < bd) { bd = d; bst = f; }
+  }
+  return bst;
+}
+function doAction(p) {
+  if (crate && Math.hypot(tX(crate.gx) + 16 - p.x, tY(crate.gy) + 12 - p.y) < 52) { openCrate(); return; }
+  const f = nearFlora(p);
+  if (f) harvestFlora(f, p.x, p.y);
+}
+function menuItems() {
+  const items = [];
+  for (const k in B) {
+    const d = B[k];
+    if (d.special || d.age > age) continue;
+    items.push({ k });
+  }
+  if (age >= 5 && cnt('launchpad') > 0 && !rocketDone && !rocketSeq) items.push({ rocket: true });
+  items.push({ remove: true });
+  return items;
+}
+function updatePlayer(p, dt) {
+  const v = moveVec(p.pi);
+  const inMenu = p.mode === 'menu';
+  let mx = 0, my = 0;
+  if (!inMenu) { mx = v.dx; my = v.dy; }
+  if ((mx || my)) { p.target = null; p.ghost = null; }
+  else if (p.target) {
+    const d = Math.hypot(p.target.x - p.x, p.target.y - p.y);
+    if (d < 6) p.target = null;
+    else { mx = (p.target.x - p.x) / d; my = (p.target.y - p.y) / d; }
+  }
+  p.moving = !!(mx || my);
+  if (p.moving) {
+    const sp = 150 * dt;
+    let nx = clamp(p.x + mx * sp, 8, W - 8), ny = clamp(p.y + my * sp, GY0 + 8, H - 8);
+    if (isLandPx(nx, ny)) { p.x = nx; p.y = ny; }
+    else if (isLandPx(nx, p.y)) { p.x = nx; p.target = null; }
+    else if (isLandPx(p.x, ny)) { p.y = ny; p.target = null; }
+    else p.target = null;
+    p.frame += dt * 7;
+    if (Math.abs(mx) > Math.abs(my)) { p.dir = 2; p.flip = mx < 0; }
+    else p.dir = my < 0 ? 1 : 0;
+  } else p.frame = 0;
+}
+function moveVec(pi) {
+  let dx = 0, dy = 0;
+  if (PADS && PADS[pi] && PADS[pi].connected) {
+    const pd = PADS[pi];
+    dx += pd.axis('lx'); dy += pd.axis('ly');
+    if (pd.button('left')) dx -= 1;
+    if (pd.button('right')) dx += 1;
+    if (pd.button('up')) dy -= 1;
+    if (pd.button('down')) dy += 1;
+  }
+  if (pi === 0) {
+    if (keys.ArrowLeft || keys.KeyA) dx -= 1;
+    if (keys.ArrowRight || keys.KeyD) dx += 1;
+    if (keys.ArrowUp || keys.KeyW) dy -= 1;
+    if (keys.ArrowDown || keys.KeyS) dy += 1;
+  }
+  const m = Math.hypot(dx, dy);
+  if (m > 1) { dx /= m; dy /= m; }
+  return { dx, dy };
+}
+
+/* ── button-edge router (pads + keyboard + touch all land here) ── */
+function onBtn(pi, b) {
+  if (pi > 1) return;
+  if (scene === 'title') { titleBtn(pi, b); return; }
+  if (scene === 'name') { nameBtn(b); return; }
+  /* scene === play */
+  if (modal) {
+    if (b === 'south' || b === 'east' || b === 'start') { modal = null; SFX.confirm(); }
+    return;
+  }
+  if (rocketSeq) return;
+  if (paused) { pauseBtn(pi, b); return; }
+  if (b === 'start') {
+    if (pi === 1 && !players[1]) { joinP2(); return; }
+    paused = true; pauseOwner = pi; pauseIdx = 0; SFX.ui();
+    return;
+  }
+  if (pi === 1 && !players[1]) {
+    if (b === 'south') joinP2();
+    return;
+  }
+  const p = players[pi === 1 ? 1 : 0];
+  if (!p) return;
+  if (statsOpen) {
+    if (b === 'north' || b === 'east' || b === 'south') { statsOpen = false; SFX.ui(); }
+    return;
+  }
+  if (b === 'north') { statsOpen = true; SFX.ui(); return; }
+  if (p.mode === 'walk') {
+    if (b === 'south') doAction(p);
+    else if (b === 'west') { p.mode = 'menu'; p.menuI = 0; SFX.ui(); }
+  } else if (p.mode === 'menu') {
+    const items = menuItems();
+    if (b === 'left') { p.menuI = (p.menuI + items.length - 1) % items.length; SFX.ui(); }
+    else if (b === 'right') { p.menuI = (p.menuI + 1) % items.length; SFX.ui(); }
+    else if (b === 'south') {
+      const it = items[clamp(p.menuI, 0, items.length - 1)];
+      if (it.remove) { p.mode = 'remove'; SFX.confirm(); }
+      else if (it.rocket) {
+        if (buyRocket()) { p.mode = 'walk'; SFX.confirm(); } else SFX.cancel();
+      } else if (canAfford(B[it.k].cost)) { p.mode = 'place'; p.placeK = it.k; p.ghost = null; SFX.confirm(); }
+      else SFX.cancel();
+    }
+    else if (b === 'east' || b === 'west') { p.mode = 'walk'; SFX.cancel(); }
+  } else if (p.mode === 'place') {
+    if (b === 'south') {
+      const g = ghostTile(p);
+      if (!placeBuilding(p.placeK, g.gx, g.gy)) SFX.cancel();
+    }
+    else if (b === 'east') { p.mode = 'menu'; p.ghost = null; SFX.cancel(); }
+    else if (b === 'west') { p.mode = 'walk'; p.ghost = null; SFX.cancel(); }
+  } else if (p.mode === 'remove') {
+    if (b === 'south') {
+      const g = p.ghost || tileUnder(p);
+      const bb = occ[g.gy] && occ[g.gy][g.gx];
+      if (bb && !B[bb.k].special) removeBuilding(bb);
+      else SFX.cancel();
+    }
+    else if (b === 'east') { p.mode = 'menu'; p.ghost = null; SFX.cancel(); }
+    else if (b === 'west') { p.mode = 'walk'; p.ghost = null; SFX.cancel(); }
+  }
+}
+function pauseOptions() {
+  const o = ['RESUME', muted ? 'MUSIC: OFF' : 'MUSIC: ON'];
+  if (pauseOwner === 1 && players[1]) o.push('P2 LEAVE ISLAND');
+  o.push('SAVE & QUIT');
+  return o;
+}
+function pauseBtn(pi, b) {
+  if (pi !== pauseOwner && b !== 'start') return;
+  const opts = pauseOptions();
+  if (b === 'start' || b === 'east') { paused = false; SFX.ui(); return; }
+  if (b === 'up') { pauseIdx = (pauseIdx + opts.length - 1) % opts.length; SFX.ui(); }
+  else if (b === 'down') { pauseIdx = (pauseIdx + 1) % opts.length; SFX.ui(); }
+  else if (b === 'south') {
+    const o = opts[pauseIdx];
+    if (o === 'RESUME') { paused = false; SFX.confirm(); }
+    else if (o.indexOf('MUSIC') === 0) { muted = !muted; lsSet('islandforge_mute', muted ? '1' : '0'); SFX.confirm(); }
+    else if (o === 'P2 LEAVE ISLAND') {
+      players.splice(1, 1); paused = false;
+      addFloat(players[0].x, players[0].y - 40, 'SEE YOU, P2!', '#ff9a8a');
+      SFX.cancel();
+    } else if (o === 'SAVE & QUIT') {
+      saveGame(); paused = false; players = [];
+      scene = 'title'; document.body.classList.remove('in-play');
+      loadSlotSummaries(); SFX.confirm();
+    }
+  }
+}
+function titleBtn(pi, b) {
+  if (confirmErase) {
+    if (b === 'left' || b === 'right') { confirmErase.yes = !confirmErase.yes; SFX.ui(); }
+    else if (b === 'south') {
+      if (confirmErase.yes) { eraseSlot(confirmErase.slot); SFX.remove(); } else SFX.cancel();
+      confirmErase = null;
+    }
+    else if (b === 'east') { confirmErase = null; SFX.cancel(); }
+    return;
+  }
+  if (b === 'up') { slotSel = (slotSel + 2) % 3; SFX.ui(); }
+  else if (b === 'down') { slotSel = (slotSel + 1) % 3; SFX.ui(); }
+  else if (b === 'south' || b === 'start') {
+    SFX.confirm();
+    if (slots[slotSel]) loadGame(slotSel);
+    else { scene = 'name'; nameSt = { slot: slotSel, name: '', r: 0, c: 0 }; }
+  }
+  else if (b === 'east' && slots[slotSel]) { confirmErase = { slot: slotSel, yes: false }; SFX.ui(); }
+}
+const NAME_ROWS = ['ABCDEFGHIJ', 'KLMNOPQRST', 'UVWXYZ.-★♥'];
+function nameBtn(b) {
+  const n = nameSt;
+  if (!n) return;
+  if (b === 'up') { n.r = (n.r + 3) % 4; if (n.r < 3) n.c = Math.min(n.c, 9); else n.c = Math.min(n.c, 2); SFX.ui(); }
+  else if (b === 'down') { n.r = (n.r + 1) % 4; if (n.r === 3) n.c = clamp(Math.floor(n.c / 4), 0, 2); else n.c = Math.min(n.c, 9); SFX.ui(); }
+  else if (b === 'left') { n.c = (n.c + (n.r === 3 ? 2 : 9)) % (n.r === 3 ? 3 : 10); SFX.ui(); }
+  else if (b === 'right') { n.c = (n.c + 1) % (n.r === 3 ? 3 : 10); SFX.ui(); }
+  else if (b === 'east') { n.name = n.name.slice(0, -1); SFX.cancel(); }
+  else if (b === 'start') { finishName(); }
+  else if (b === 'south') {
+    if (n.r < 3) {
+      if (n.name.length < 8) { n.name += NAME_ROWS[n.r][n.c]; SFX.ui(); } else SFX.cancel();
+    } else if (n.c === 0) { if (n.name.length < 8 && n.name.length > 0) { n.name += ' '; SFX.ui(); } }
+    else if (n.c === 1) { n.name = n.name.slice(0, -1); SFX.cancel(); }
+    else finishName();
+  }
+}
+function finishName() {
+  const nm = (nameSt.name || '').trim() || 'ISLE';
+  const slot = nameSt.slot;
+  nameSt = null;
+  SFX.confirm();
+  newGame(slot, nm);
+}
+
+/* ── keyboard ── */
+const keys = {};
+const KMAP = { KeyZ: 'south', Enter: 'south', Space: 'south', KeyX: 'east', Escape: 'east',
+               KeyC: 'west', KeyV: 'north', KeyP: 'start',
+               ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right',
+               KeyW: 'up', KeyS: 'down', KeyA: 'left', KeyD: 'right' };
+addEventListener('keydown', e => {
+  if (KMAP[e.code]) e.preventDefault();
+  if (e.repeat) return;
+  keys[e.code] = true;
+  ensureAudio();
+  const b = KMAP[e.code];
+  if (b) onBtn(0, b);
+});
+addEventListener('keyup', e => { keys[e.code] = false; });
+
+/* ── gamepads (guarded — shell hosts controller.js) ── */
+const AC = window.ArcadeController || null;
+const PADS = AC ? [AC.pad(0), AC.pad(1)] : null;
+if (AC) AC.on('press', e => {
+  if (e.padIndex > 1) return;
+  ensureAudio();
+  onBtn(e.padIndex, e.button);
+});
+
+/* ── touch: DOM buttons + tap-to-walk ── */
+function bindBtn(id, b) {
+  const el = document.getElementById(id);
+  const h = ev => { ev.preventDefault(); ensureAudio(); onBtn(0, b); };
+  el.addEventListener('touchstart', h, { passive: false });
+  el.addEventListener('mousedown', h);
+}
+bindBtn('tbA', 'south'); bindBtn('tbB', 'east');
+bindBtn('tbBuild', 'west'); bindBtn('tbStats', 'north'); bindBtn('tbPause', 'start');
+
+function canvasPoint(ev) {
+  const r = canvas.getBoundingClientRect();
+  const t = ev.touches ? ev.touches[0] : ev;
+  return { x: (t.clientX - r.left) / r.width * W, y: (t.clientY - r.top) / r.height * H };
+}
+function tapAt(x, y) {
+  if (scene === 'title') {
+    if (confirmErase) {
+      if (y > 380 && y < 450) { confirmErase.yes = x < W / 2; onBtn(0, 'south'); }
+      else confirmErase = null;
+      return;
+    }
+    for (let i = 0; i < 3; i++) {
+      const cy2 = 268 + i * 116;
+      if (x > W / 2 - 320 && x < W / 2 + 320 && y > cy2 && y < cy2 + 100) {
+        if (slotSel === i) {
+          if (slots[i] && x > W / 2 + 240) { confirmErase = { slot: i, yes: false }; SFX.ui(); }
+          else onBtn(0, 'south');
+        } else { slotSel = i; SFX.ui(); }
+        return;
+      }
+    }
+    return;
+  }
+  if (scene === 'name') {
+    const n = nameSt;
+    if (!n) return;
+    const x0 = W / 2 - 330, y0 = 262;
+    for (let r2 = 0; r2 < 3; r2++) for (let c2 = 0; c2 < 10; c2++) {
+      if (x > x0 + c2 * 66 && x < x0 + c2 * 66 + 60 && y > y0 + r2 * 72 && y < y0 + r2 * 72 + 62) {
+        n.r = r2; n.c = c2; onBtn(0, 'south'); return;
+      }
+    }
+    const sy = y0 + 3 * 72;
+    for (let c2 = 0; c2 < 3; c2++) {
+      if (x > x0 + c2 * 224 && x < x0 + c2 * 224 + 208 && y > sy && y < sy + 62) {
+        n.r = 3; n.c = c2; onBtn(0, 'south'); return;
+      }
+    }
+    return;
+  }
+  /* play */
+  if (modal) { onBtn(0, 'south'); return; }
+  if (rocketSeq) return;
+  if (paused) {
+    const opts = pauseOptions();
+    const py = H / 2 - 130;
+    for (let i = 0; i < opts.length; i++) {
+      if (y > py + 80 + i * 52 && y < py + 80 + (i + 1) * 52 && x > W / 2 - 180 && x < W / 2 + 180) {
+        pauseIdx = i; onBtn(0, 'south'); return;
+      }
+    }
+    paused = false;
+    return;
+  }
+  if (statsOpen) { statsOpen = false; SFX.ui(); return; }
+  const p = players[0];
+  if (!p) return;
+  if (p.mode === 'menu') {
+    const items = menuItems();
+    const pw = Math.min(1240, items.length * 100 + 24);
+    const x0 = W / 2 - pw / 2, y0 = H - 114;
+    if (y > y0 && y < y0 + 106) {
+      const i = Math.floor((x - x0 - 12) / 100);
+      if (i >= 0 && i < items.length) {
+        if (p.menuI === i) onBtn(0, 'south');
+        else { p.menuI = i; SFX.ui(); }
+      }
+      return;
+    }
+    p.mode = 'walk'; SFX.cancel();
+    return;
+  }
+  if (p.mode === 'place' || p.mode === 'remove') {
+    if (y > 44) {
+      const s = p.placeK && p.mode === 'place' ? (B[p.placeK].size || 1) : 1;
+      p.ghost = { gx: clamp(Math.floor(x / TILE), 0, GW - s), gy: clamp(Math.floor((y - GY0) / TILE), 0, GH - s) };
+      SFX.ui();
+    }
+    return;
+  }
+  if (y > 44) { p.target = { x: clamp(x, 8, W - 8), y: clamp(y, GY0 + 8, H - 8) }; }
+}
+canvas.addEventListener('touchstart', ev => { ev.preventDefault(); ensureAudio(); const q = canvasPoint(ev); tapAt(q.x, q.y); }, { passive: false });
+canvas.addEventListener('mousedown', ev => { ensureAudio(); const q = canvasPoint(ev); tapAt(q.x, q.y); });
+
+/* ═══════════════════════════════════════════════════════════════════════
+   RENDER — per-frame hot path is drawImage + transforms + fillText only.
+   Static world = 1 drawImage of bgC.
+   ═══════════════════════════════════════════════════════════════════════ */
+function txt(s, x, y, size, color, align, weight) {
+  ctx.font = (weight || 700) + ' ' + size + 'px Verdana, sans-serif';
+  ctx.textAlign = align || 'left';
+  ctx.fillStyle = color || '#fff';
+  ctx.fillText(s, x, y);
+}
+function otxt(s, x, y, size, color, align) {
+  ctx.font = '900 ' + size + 'px Verdana, sans-serif';
+  ctx.textAlign = align || 'center';
+  ctx.fillStyle = 'rgba(10,25,40,0.85)';
+  ctx.fillText(s, x + Math.max(1, size / 14), y + Math.max(1, size / 14));
+  ctx.fillStyle = color;
+  ctx.fillText(s, x, y);
+}
+function drawFit(s, cx2, cy2, mw, mh) {
+  const sc = Math.min(mw / s.width, mh / s.height);
+  ctx.drawImage(s, cx2 - s.width * sc / 2, cy2 - s.height * sc / 2, s.width * sc, s.height * sc);
+}
+function extraSprites() {
+  SPR.dim = (() => { const [c, g] = C(W, H); g.fillStyle = 'rgba(5,14,24,0.62)'; g.fillRect(0, 0, W, H); return c; })();
+  SPR.iconRemove = S(11, 11, (g, P) => {
+    g.fillStyle = '#e05a3a'; g.beginPath(); g.arc(11, 11, 10, 0, 6.3); g.fill();
+    g.strokeStyle = '#fff'; g.lineWidth = 4; g.lineCap = 'round';
+    g.beginPath(); g.moveTo(6, 6); g.lineTo(16, 16); g.moveTo(16, 6); g.lineTo(6, 16); g.stroke();
+  });
+}
+
+function renderTitle() {
+  ctx.drawImage(SPR.titleBG, 0, 0);
+  for (let i = 0; i < 7; i++) {
+    const a = 0.35 + 0.35 * Math.sin(T * 2.2 + i * 1.7);
+    ctx.globalAlpha = a;
+    ctx.drawImage(SPR.sparkB[i % 2], 240 + i * 130, 600 + ((i * 53) % 60) - 30);
+  }
+  ctx.globalAlpha = 1;
+  ctx.drawImage(SPR.logo, W / 2 - 410, 42);
+  for (let i = 0; i < 3; i++) {
+    const x = W / 2 - 320, y = 268 + i * 116;
+    ctx.drawImage(i === slotSel ? SPR.cardSel : SPR.card, x, y);
+    const s = slots[i];
+    if (s) {
+      if (s.thumb) ctx.drawImage(s.thumb, x + 18, y + 22, 96, 54);
+      else drawFit(SPR.b.cabin, x + 66, y + 48, 52, 52);
+      otxt(s.name + "'S ISLAND", x + 134, y + 46, 21, '#fff', 'left');
+      txt('AGE ' + s.age + ' — ' + AGE_NAMES[s.age] + ' · POP ' + s.pop, x + 134, y + 76, 14, '#9fd4f0');
+      if (s.legends) { ctx.drawImage(SPR.star, x + 560, y + 26); txt('LEGEND', x + 546, y + 66, 11, '#ffd24a'); }
+      if (i === slotSel) txt('○ ERASE', x + 548, y + 88, 10, '#ff9a8a');
+    } else {
+      otxt('NEW ISLAND', x + 134, y + 52, 20, '#7dff9a', 'left');
+      txt('press ✕ to start building!', x + 134, y + 78, 13, '#9fd4f0');
+      drawFit(SPR.tree[0], x + 66, y + 50, 46, 60);
+    }
+  }
+  const bob = Math.sin(T * 2.5) * 3;
+  drawFit(SPR.mark, W / 2 - 344, 318 + slotSel * 116 + bob, 20, 18);
+  otxt('✕ CHOOSE ISLAND', W / 2, 664, 16, '#fff');
+  txt('P2: PRESS ✕ ON PAD 2 DURING PLAY TO JOIN!', W / 2, 690, 12, '#8fc4e0', 'center');
+  if (best > 0) txt('BEST POPULATION: ' + best, W / 2, 710, 12, '#ffd24a', 'center');
+  if (confirmErase) {
+    ctx.drawImage(SPR.dim, 0, 0);
+    const s = slots[confirmErase.slot];
+    ctx.drawImage(SPR.modalP, W / 2 - 310, 240, 620, 250);
+    otxt('ERASE ' + (s ? s.name + "'S" : 'THIS') + ' ISLAND?', W / 2, 310, 24, '#ff9a8a');
+    txt('It will be gone forever!', W / 2, 345, 14, '#9fd4f0', 'center');
+    otxt('YES', W / 2 - 90, 420, 26, confirmErase.yes ? '#ffd24a' : '#5a7a90');
+    otxt('NO', W / 2 + 90, 420, 26, confirmErase.yes ? '#5a7a90' : '#ffd24a');
+    drawFit(SPR.mark, W / 2 + (confirmErase.yes ? -90 : 90), 442, 18, 16);
+  }
+}
+
+function renderName() {
+  ctx.drawImage(SPR.titleBG, 0, 0);
+  ctx.drawImage(SPR.dim, 0, 0);
+  ctx.drawImage(SPR.nameP, W / 2 - 380, 120, 760, 480);
+  otxt('NAME YOUR ISLAND', W / 2, 176, 28, '#ffd24a');
+  const n = nameSt;
+  const nm = n.name + (((T * 2) | 0) % 2 ? '_' : ' ');
+  otxt(nm, W / 2, 236, 32, '#fff');
+  const x0 = W / 2 - 330, y0 = 262;
+  for (let r2 = 0; r2 < 3; r2++) for (let c2 = 0; c2 < 10; c2++) {
+    const sel = n.r === r2 && n.c === c2;
+    ctx.drawImage(sel ? SPR.cellSel : SPR.cell, x0 + c2 * 66, y0 + r2 * 72, 60, 62);
+    otxt(NAME_ROWS[r2][c2], x0 + c2 * 66 + 30, y0 + r2 * 72 + 42, 24, sel ? '#ffd24a' : '#cfe8f4');
+  }
+  const sy = y0 + 3 * 72, labels = ['SPACE', '⌫ DEL', '✓ DONE'];
+  for (let c2 = 0; c2 < 3; c2++) {
+    const sel = n.r === 3 && n.c === c2;
+    ctx.drawImage(sel ? SPR.cellSel : SPR.cell, x0 + c2 * 224, sy, 208, 62);
+    otxt(labels[c2], x0 + c2 * 224 + 104, sy + 40, 20, sel ? '#ffd24a' : (c2 === 2 ? '#7dff9a' : '#cfe8f4'));
+  }
+  txt('D-PAD MOVE · ✕ PICK · ○ ERASE · START = DONE', W / 2, 640, 13, '#8fc4e0', 'center');
+}
+
+function drawHUD() {
+  ctx.drawImage(SPR.hudBar, 0, 0);
+  otxt('AGE ' + age, 16, 28, 18, '#ffd24a', 'left');
+  const rq = REQ_NEXT[age];
+  ctx.drawImage(SPR.pbar, 108, 8);
+  if (rq) {
+    const w = Math.max(2, Math.floor(clamp(rq.prog(), 0, 1) * 164));
+    ctx.drawImage(SPR.pfill, 0, 0, w, 8, 111, 11, w, 8);
+    txt(rq.text, 108, 37, 9, '#8fc4e0');
+  } else {
+    ctx.drawImage(SPR.pfill, 0, 0, 164, 8, 111, 11, 164, 8);
+    txt(rocketDone ? 'AGE OF LEGENDS ★' : 'BUILD A LAUNCH PAD, THEN THE ROCKET!', 108, 37, 9, '#ffd24a');
+  }
+  let x = 306;
+  for (const r of RES_LIST) {
+    if (RES_AGE[r] > age) continue;
+    ctx.drawImage(SPR.icon[r], x, 8);
+    if (r === 'power') {
+      txt(powerInc + '/' + powerDem, x + 24, 25, 13, powerInc >= powerDem ? RES_COL.power : '#ff9a8a');
+      x += 96;
+    } else {
+      txt(fmt(res[r]), x + 24, 25, 13, RES_COL[r]);
+      x += 88;
+    }
+  }
+  const cap = 2 + 4 * cnt('cabin');
+  ctx.drawImage(SPR.icon.pop, W - 128, 8);
+  txt(pop + '/' + cap, W - 102, 25, 13, hungry ? '#ff9a8a' : RES_COL.pop);
+  if (hungry) txt('NEED FOOD!', W - 128, 38, 9, '#ff9a8a');
+}
+
+function drawMenu(p, yBase) {
+  const items = menuItems();
+  p.menuI = clamp(p.menuI, 0, items.length - 1);
+  const pw = Math.min(1240, items.length * 100 + 24);
+  const x0 = W / 2 - pw / 2;
+  ctx.drawImage(SPR.menuP, x0, yBase, pw, 106);
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i], cx0 = x0 + 12 + i * 100, sel = i === p.menuI;
+    ctx.drawImage(sel ? SPR.cellSel : SPR.cell, cx0, yBase + 14, sel ? 96 : 92, sel ? 82 : 78);
+    if (it.remove) {
+      drawFit(SPR.iconRemove, cx0 + 46, yBase + 46, 34, 34);
+      txt('REMOVE', cx0 + 46, yBase + 84, 10, '#ff9a8a', 'center');
+    } else if (it.rocket) {
+      drawFit(SPR.rocket, cx0 + 46, yBase + 48, 40, 52);
+      txt('ROCKET!', cx0 + 46, yBase + 88, 10, '#ffd24a', 'center');
+    } else {
+      const afford = canAfford(B[it.k].cost);
+      ctx.globalAlpha = afford ? 1 : 0.42;
+      drawFit(SPR.b[it.k], cx0 + 46, yBase + 44, 48, 50);
+      ctx.globalAlpha = 1;
+      txt(B[it.k].name, cx0 + 46, yBase + 86, 8.5, afford ? '#cfe8f4' : '#7a8b98', 'center');
+    }
+  }
+  /* selected item detail above the strip */
+  const it = items[p.menuI];
+  let label, cost = null, desc = '';
+  if (it.remove) { label = 'REMOVE (100% refund!)'; }
+  else if (it.rocket) { label = 'BUILD THE ROCKET!'; cost = ROCKET_COST; }
+  else {
+    label = B[it.k].name; cost = B[it.k].cost;
+    const d = B[it.k];
+    if (d.pop) desc = '+' + d.pop + ' population';
+    else if (d.aura) desc = 'farms +50%!';
+    else if (d.robot) desc = 'a robot friend!';
+    else if (it.k === 'launchpad') desc = 'unlocks the rocket';
+    else if (d.prod) { const r = Object.keys(d.prod)[0]; desc = '+' + d.prod[r] + ' ' + r + '/s'; }
+  }
+  otxt(label, W / 2, yBase - 38, 20, '#fff');
+  if (desc) txt(desc, W / 2, yBase - 16, 12, '#7dff9a', 'center');
+  if (cost) {
+    const entries = Object.keys(cost);
+    let cw = entries.length * 86;
+    let cx1 = W / 2 - cw / 2 + 240;
+    for (const r of entries) {
+      ctx.drawImage(SPR.icon[r], cx1, yBase - 54);
+      txt(fmt(cost[r]), cx1 + 24, yBase - 37, 14, (res[r] || 0) >= cost[r] ? RES_COL[r] : '#ff6b6b');
+      cx1 += 86;
+    }
+  }
+}
+
+function drawGhost(p) {
+  if (p.mode === 'place') {
+    const k = p.placeK, s = B[k].size || 1, g = ghostTile(p);
+    const ok = validAt(k, g.gx, g.gy) && canAfford(B[k].cost);
+    for (let dy = 0; dy < s; dy++) for (let dx = 0; dx < s; dx++)
+      ctx.drawImage(ok ? SPR.tileOK : SPR.tileNO, tX(g.gx + dx), tY(g.gy + dy));
+    ctx.globalAlpha = 0.62;
+    const spr2 = SPR.b[k];
+    ctx.drawImage(spr2, tX(g.gx), tY(g.gy) + s * 32 - spr2.height);
+    ctx.globalAlpha = 1;
+    otxt(ok ? '✕ PLACE' : 'CAN\'T BUILD HERE', tX(g.gx) + s * 16, tY(g.gy) - 8, 13, ok ? '#7dff9a' : '#ff9a8a');
+  } else if (p.mode === 'remove') {
+    const g = p.ghost || tileUnder(p);
+    const bb = occ[g.gy] && occ[g.gy][g.gx];
+    if (bb && !B[bb.k].special) {
+      const s = B[bb.k].size || 1;
+      for (let dy = 0; dy < s; dy++) for (let dx = 0; dx < s; dx++)
+        ctx.drawImage(SPR.tileNO, tX(bb.gx + dx), tY(bb.gy + dy));
+      otxt('✕ REMOVE ' + B[bb.k].name, tX(bb.gx) + s * 16, tY(bb.gy) - 8, 13, '#ff9a8a');
+    } else {
+      ctx.drawImage(SPR.tileNO, tX(g.gx), tY(g.gy));
+      otxt('STAND ON A BUILDING', tX(g.gx) + 16, tY(g.gy) - 8, 12, '#ff9a8a');
+    }
+  }
+}
+
+function drawStats() {
+  ctx.drawImage(SPR.dim, 0, 0);
+  const x = W / 2 - 330, y = 96;
+  ctx.drawImage(SPR.statsP, x, y, 660, 480);
+  otxt(islandName + "'S ISLAND", W / 2, y + 46, 24, '#ffd24a');
+  txt('AGE ' + age + ' — ' + AGE_NAMES[age] + (legends ? ' ★ LEGENDS' : ''), W / 2, y + 72, 14, '#9fd4f0', 'center');
+  const rq = REQ_NEXT[age];
+  if (rq) {
+    txt('NEXT AGE: ' + rq.text, x + 40, y + 104, 12, '#8fc4e0');
+    ctx.drawImage(SPR.pbar, x + 40, y + 114);
+    const w = Math.max(2, Math.floor(clamp(rq.prog(), 0, 1) * 164));
+    ctx.drawImage(SPR.pfill, 0, 0, w, 8, x + 43, y + 117, w, 8);
+  } else txt(rocketDone ? 'AGE OF LEGENDS — keep building!' : 'Build a LAUNCH PAD, then the ROCKET!', x + 40, y + 110, 12, '#ffd24a');
+  let ry = y + 160;
+  for (const r of RES_LIST) {
+    if (RES_AGE[r] > age) continue;
+    ctx.drawImage(SPR.icon[r], x + 40, ry - 15);
+    if (r === 'power') {
+      txt('POWER', x + 70, ry, 13, '#cfe8f4');
+      txt(powerInc + ' made / ' + powerDem + ' used', x + 170, ry, 13, powerInc >= powerDem ? RES_COL.power : '#ff9a8a');
+    } else {
+      txt(r.toUpperCase(), x + 70, ry, 13, '#cfe8f4');
+      txt(fmt(res[r]), x + 170, ry, 13, RES_COL[r]);
+      const rt = rates[r] || 0;
+      txt((rt >= 0 ? '+' : '') + rt.toFixed(1) + '/s', x + 250, ry, 13, rt >= 0 ? '#7dff9a' : '#ff9a8a');
+    }
+    ry += 32;
+  }
+  const cap = 2 + 4 * cnt('cabin');
+  let iy = y + 160;
+  ctx.drawImage(SPR.icon.pop, x + 380, iy - 15);
+  txt('POPULATION', x + 410, iy, 13, '#cfe8f4');
+  txt(pop + ' / ' + cap + (hungry ? '  (hungry!)' : ''), x + 410, iy + 20, 13, hungry ? '#ff9a8a' : RES_COL.pop);
+  iy += 60;
+  txt('BUILDINGS', x + 380, iy, 13, '#cfe8f4');
+  txt('' + (buildings.length - 1), x + 380, iy + 20, 13, '#ffd24a');
+  iy += 60;
+  txt('ROBOTS: ' + robots.length + (drake ? ' · PET DRAKE!' : ''), x + 380, iy, 12, '#9fd4f0');
+  iy += 34;
+  const mins = Math.floor(playtime / 60);
+  txt('PLAY TIME: ' + mins + 'm', x + 380, iy, 12, '#9fd4f0');
+  iy += 34;
+  txt('BEST POP EVER: ' + best, x + 380, iy, 12, '#ffd24a');
+  txt('△ / V — CLOSE', W / 2, y + 452, 13, '#8fc4e0', 'center');
+}
+
+function drawPause() {
+  ctx.drawImage(SPR.dim, 0, 0);
+  const opts = pauseOptions();
+  const x = W / 2 - 210, y = H / 2 - 165;
+  ctx.drawImage(SPR.pauseP, x, y, 420, 330);
+  otxt(pauseOwner === 1 ? 'P2 PAUSED' : 'PAUSED', W / 2, y + 52, 26, '#ffd24a');
+  for (let i = 0; i < opts.length; i++) {
+    const sel = i === pauseIdx;
+    otxt(opts[i], W / 2, y + 112 + i * 52, 19, sel ? '#ffd24a' : '#9fc4d8');
+    if (sel) drawFit(SPR.mark, W / 2 - 150, y + 106 + i * 52, 18, 16);
+  }
+  txt('START = RESUME', W / 2, y + 306, 12, '#8fc4e0', 'center');
+}
+
+function drawModal() {
+  ctx.drawImage(SPR.dim, 0, 0);
+  const x = W / 2 - 310, y = H / 2 - 190;
+  ctx.drawImage(SPR.modalP, x, y, 620, 380);
+  otxt(modal.title, W / 2, y + 56, 28, '#ffd24a');
+  if (modal.sub) txt(modal.sub, W / 2, y + 90, 14, '#9fd4f0', 'center');
+  let ly = y + 130;
+  for (const l of (modal.lines || [])) {
+    if (SPR.icon[l.icon]) ctx.drawImage(SPR.icon[l.icon], W / 2 - 120, ly - 15);
+    txt(l.str, W / 2 - 88, ly, 16, RES_COL[l.icon] || '#fff');
+    ly += 34;
+  }
+  otxt('✕ OK!', W / 2, y + 344, 18, '#7dff9a');
+}
+
+function drawBanner(b) {
+  const sc = Math.min(1, b.t * 4.5);
+  let al = 1;
+  if (b.t > b.dur - 0.4) al = Math.max(0, (b.dur - b.t) / 0.4);
+  ctx.save();
+  ctx.globalAlpha = al;
+  ctx.translate(W / 2, 170);
+  ctx.scale(sc, sc);
+  ctx.drawImage(SPR.bannerP, -390, -66, 780, 132);
+  otxt(b.title, 0, 0, 34, b.legendary ? '#ffd24a' : '#7dff9a');
+  if (b.sub) txt(b.sub, 0, 34, 15, '#cfe8f4', 'center');
+  if (b.legendary) {
+    ctx.drawImage(SPR.spark[((T * 6) | 0) % 2], -360, -40);
+    ctx.drawImage(SPR.spark[((T * 6 + 1) | 0) % 2], 344, -40);
+  }
+  ctx.restore();
+}
+
+function renderPlay() {
+  if (terrainDirty) rebuildTerrain();
+  if (bgDirty) rebuildBG();
+  ctx.save();
+  if (shakeAmt > 0.2) ctx.translate((Math.random() - 0.5) * shakeAmt * 2, (Math.random() - 0.5) * shakeAmt * 2);
+  ctx.drawImage(bgC, 0, 0);
+
+  /* ocean sparkles along the coast */
+  const nspark = Math.min(12, coast.length);
+  for (let i = 0; i < nspark; i++) {
+    const c = coast[(i * 43) % coast.length];
+    ctx.globalAlpha = 0.25 + 0.3 * Math.sin(T * 2.4 + i * 2.1);
+    ctx.drawImage(SPR.sparkB[i % 2], c.x - 5 + ((i * 13) % 11), c.y - 5 + ((i * 7) % 9));
+  }
+  ctx.globalAlpha = 1;
+
+  /* pipe dots & power arcs */
+  for (let i = 0; i < D_MAX; i++) {
+    const d = dots[i];
+    if (!d.on) continue;
+    const q = pipePos(d.pipe, d.d);
+    if (d.pipe.power) ctx.drawImage(SPR.arc[((T * 12) | 0 + i) % 2], q.x - 7, q.y - 7);
+    else ctx.drawImage(SPR.dot, q.x - 5, q.y - 5);
+  }
+
+  /* animated building overlays */
+  for (const a of anims) {
+    switch (a.t) {
+      case 'flame': {
+        const f = SPR.flame[((T * 9) | 0) % 3];
+        ctx.drawImage(f, a.x - 4, a.y + 2 - ((T * 9 | 0) % 3 === 1 ? 2 : 0));
+        break;
+      }
+      case 'furnace':
+        ctx.globalAlpha = 0.55 + 0.3 * Math.sin(T * 7 + a.x);
+        ctx.drawImage(SPR.fglow[((T * 6) | 0) % 2], a.x - 9, a.y - 9);
+        ctx.globalAlpha = 1;
+        break;
+      case 'blades': case 'bladesBig': {
+        const s = a.t === 'blades' ? SPR.blades : SPR.bladesBig;
+        const hw = s.width / 2;
+        ctx.translate(a.x, a.y);
+        ctx.rotate(T * a.sp);
+        ctx.drawImage(s, -hw, -hw);
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        if (shakeAmt > 0.2) ctx.translate((Math.random() - 0.5) * shakeAmt * 2, (Math.random() - 0.5) * shakeAmt * 2);
+        break;
+      }
+      case 'gear':
+        ctx.translate(a.x, a.y);
+        ctx.rotate(T * 1.3);
+        ctx.drawImage(SPR.gear, -8, -8);
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        if (shakeAmt > 0.2) ctx.translate((Math.random() - 0.5) * shakeAmt * 2, (Math.random() - 0.5) * shakeAmt * 2);
+        break;
+      case 'bglow':
+        if (islandPowered) {
+          ctx.globalAlpha = 0.35 + 0.3 * Math.sin(T * 3 + a.x);
+          ctx.drawImage(SPR.bglow, a.x - 10, a.y - 6);
+          ctx.globalAlpha = 1;
+        }
+        break;
+      case 'glint': {
+        const ph = (T * 0.35 + a.cool) % 1;
+        if (ph < 0.16) ctx.drawImage(SPR.glint, a.x + ph * 110, a.y + ph * 26);
+        break;
+      }
+    }
+  }
+
+  /* idle / hungry bubbles */
+  const bob = Math.sin(T * 4) * 2;
+  for (const b of buildings) {
+    if (b.idle === 'power') ctx.drawImage(SPR.bubPower, tX(b.gx) + 6, tY(b.gy) - 26 + bob);
+    else if (b.idle === 'input') ctx.drawImage(SPR.bubHungry, tX(b.gx) + 6, tY(b.gy) - 26 + bob);
+    else if (hungry && b.k === 'cabin') ctx.drawImage(SPR.bubHungry, tX(b.gx) + 6, tY(b.gy) - 26 + bob);
+  }
+
+  /* crate + egg */
+  if (crate) {
+    const cbob = Math.sin(T * 3) * 2;
+    const s = crate.opening ? SPR.crateOpen : SPR.crate;
+    ctx.drawImage(s, tX(crate.gx) + 2, tY(crate.gy) + 26 - s.height + (crate.opening ? -Math.sin(crate.opening * 8) * 4 : cbob));
+    ctx.drawImage(SPR.spark[((T * 5) | 0) % 2], tX(crate.gx) + 11, tY(crate.gy) - 14 + cbob);
+  }
+  if (egg) {
+    ctx.drawImage(SPR.egg, egg.x - 8, egg.y - 18 + Math.sin(T * 6) * 1.5);
+  }
+
+  /* shaking flora (temporarily lifted out of the static bg) */
+  for (const f of flora) if (!f.gone && f.shakeT > 0) drawFlora(ctx, f, true);
+
+  /* harvest target markers */
+  for (const p of players) {
+    if (p.mode !== 'walk') continue;
+    const f = nearFlora(p);
+    if (f) drawFit(SPR.mark, tX(f.gx) + 16, tY(f.gy) - 12 + bob, 16, 14);
+    if (crate && Math.hypot(tX(crate.gx) + 16 - p.x, tY(crate.gy) + 12 - p.y) < 52)
+      otxt('✕ OPEN!', tX(crate.gx) + 16, tY(crate.gy) - 24, 13, '#ffd24a');
+  }
+
+  /* ghosts under everything mobile */
+  for (const p of players) drawGhost(p);
+
+  /* robots, drake, players */
+  for (const r of robots) ctx.drawImage(SPR.robot[(r.frame | 0) % 2], r.x - 12, r.y - 26);
+  if (drake) ctx.drawImage(SPR.drake[(drake.frame | 0) % 2], drake.x - 11, drake.y - 14 + Math.sin(T * 5) * 2);
+  for (const p of players) {
+    const frames = SPR.av[p.pi][p.dir];
+    const spr2 = p.moving ? frames[1 + ((p.frame | 0) % 2)] : frames[0];
+    if (p.flip) {
+      ctx.translate(p.x, 0); ctx.scale(-1, 1);
+      ctx.drawImage(spr2, -12, p.y - 30);
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+    } else ctx.drawImage(spr2, p.x - 12, p.y - 30);
+    if (players.length > 1) otxt('P' + (p.pi + 1), p.x, p.y - 36, 10, p.pi ? '#ff9a8a' : '#8fd4ff');
+  }
+
+  /* rocket sequence */
+  if (rocketSeq) {
+    const q = rocketSeq;
+    const rx = tX(q.pad.gx) + 32 - 20, ry0 = tY(q.pad.gy) + 46 - 92;
+    ctx.drawImage(SPR.rocket, rx, ry0 - q.ry);
+    if (q.phase === 'lift') ctx.drawImage(SPR.rflame[((T * 14) | 0) % 2], rx + 8, ry0 - q.ry + 88);
+    if (q.phase === 'count' && q.n > 0) otxt('' + q.n, W / 2, 300, 130, '#ffd24a');
+    if (q.phase === 'lift' && q.t < 1) otxt('LIFTOFF!', W / 2, 300, 70, '#ff9a4a');
+  } else if (rocketDone) {
+    const pad = buildings.find(b2 => b2.k === 'launchpad');
+    if (pad) ctx.drawImage(SPR.star, tX(pad.gx) + 24, tY(pad.gy) + 18);
+  }
+
+  /* particles + floaty texts */
+  for (let i = 0; i < P_MAX; i++) {
+    const p = parts[i];
+    if (!p.on) continue;
+    if (p.fade) ctx.globalAlpha = clamp(1 - p.t / p.life, 0, 1);
+    ctx.drawImage(p.spr, p.x - p.spr.width / 2, p.y - p.spr.height / 2);
+  }
+  ctx.globalAlpha = 1;
+  for (let i = 0; i < F_MAX; i++) {
+    const f = floats[i];
+    if (!f.on) continue;
+    ctx.globalAlpha = clamp(1.4 - f.t, 0, 1);
+    let fx = f.x;
+    if (f.icon && SPR.icon[f.icon]) { ctx.drawImage(SPR.icon[f.icon], f.x - 22, f.y - f.t * 34 - 14); fx = f.x + 2; }
+    otxt(f.str, fx + (f.icon ? 12 : 0), f.y - f.t * 34, 15, f.color);
+  }
+  ctx.globalAlpha = 1;
+  ctx.restore();
+
+  drawHUD();
+  for (const p of players) if (p.mode === 'menu') drawMenu(p, H - 114 - (p.pi ? 170 : 0));
+  /* contextual hint line (touch users have DOM buttons in this corner) */
+  if (!paused && !modal && !rocketSeq && players[0] &&
+      !(AC && AC.currentInputSource() === 'touch')) {
+    const m = players[0].mode;
+    let hint = '';
+    if (m === 'walk') hint = '✕/Z CHOP · □/C BUILD · △/V STATS';
+    else if (m === 'menu') hint = '◀ ▶ CHOOSE · ✕ OK · ○ BACK';
+    else if (m === 'place') hint = 'WALK TO A SPOT · ✕ PLACE · ○ BACK';
+    else if (m === 'remove') hint = 'STAND ON A BUILDING · ✕ REMOVE · ○ BACK';
+    txt(hint, 12, H - 12, 11, 'rgba(220,240,255,0.75)');
+  }
+  if (statsOpen) drawStats();
+  if (paused) drawPause();
+  if (modal) drawModal();
+  if (banners.length) drawBanner(banners[0]);
+}
+
+function render() {
+  if (scene === 'title') renderTitle();
+  else if (scene === 'name') renderName();
+  else renderPlay();
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   UPDATE + MAIN LOOP
+   ═══════════════════════════════════════════════════════════════════════ */
+function updatePlay(dt) {
+  if (banners.length) {
+    banners[0].t += dt * (banners.length > 1 ? 2.4 : 1);   // queued banners drain fast
+    if (banners[0].t > banners[0].dur) banners.shift();
+  }
+  if (paused || modal) return;
+  playtime += dt;
+  simAcc += dt;
+  while (simAcc >= 1) { simAcc -= 1; economyTick(); }
+  if (!rocketSeq) for (const p of players) updatePlayer(p, dt);
+  for (const r of robots) updateRobot(r, dt);
+  if (drake) updateDrake(drake, dt);
+  if (egg) {
+    egg.t += dt;
+    if (Math.random() < dt * 2) spawnP(egg.x, egg.y - 16, SPR.spark[1], { vy: -20, g: 0, life: 0.6 });
+    if (egg.t > 20) {
+      drake = { x: egg.x, y: egg.y, frame: 0 };
+      egg = null;
+      banners.push({ title: 'IT HATCHED!', sub: 'A pet drake joins your family!', t: 0, dur: 3, legendary: true });
+      SFX.hatch();
+    }
+  }
+  if (crate) {
+    crate.t += dt;
+    if (crate.opening) {
+      crate.opening += dt;
+      if (crate.opening > 0.8) revealCrate();
+    } else if (Math.random() < dt * 2.4) {
+      spawnP(tX(crate.gx) + 16, tY(crate.gy) - 4, SPR.spark[0], { vy: -34, vx: (Math.random() - 0.5) * 20, g: 0, life: 0.8 });
+    }
+  }
+  for (const f of flora) {
+    if (f.gone) {
+      f.regrowT -= dt;
+      if (f.regrowT <= 0) {
+        f.gone = false; f.hits = 0; bgDirty = true;
+        spawnP(tX(f.gx) + 16, tY(f.gy) + 16, SPR.spark[0], { vy: -20, g: 0, life: 0.7 });
+      }
+    } else if (f.shakeT > 0) {
+      f.shakeT -= dt;
+      if (f.shakeT <= 0) bgDirty = true;
+    }
+  }
+  /* ambient emitters (smoke / bubbles / auras) */
+  for (const a of anims) {
+    if (a.t === 'smoke') {
+      a.cool -= dt;
+      if (a.cool <= 0) {
+        a.cool = a.soft ? 1.6 : 0.85 + Math.random() * 0.4;
+        spawnP(a.x, a.y, (a.soft ? SPR.puff : SPR.puffDark)[(Math.random() * 2) | 0],
+               { vx: 6 + Math.random() * 8, vy: -20 - Math.random() * 8, g: -8, life: 1.5 });
+      }
+    } else if (a.t === 'bubbles') {
+      if (!a.b.idle) {
+        a.cool -= dt;
+        if (a.cool <= 0) { a.cool = 0.5 + Math.random() * 0.4; spawnP(a.x, a.y, SPR.sparkB[1], { vx: 0, vy: -26, g: 0, life: 0.7 }); }
+      }
+    } else if (a.t === 'aura') {
+      a.cool -= dt;
+      if (a.cool <= 0) {
+        a.cool = 0.7 + Math.random() * 0.6;
+        spawnP(a.x + (Math.random() - 0.5) * 26, a.y + Math.random() * 16,
+               a.gold ? SPR.spark[0] : SPR.sparkB[0], { vx: 0, vy: -18, g: 0, life: 0.9 });
+      }
+    }
+  }
+  if (rocketSeq) updateRocket(dt);
+  else if (shakeAmt > 0) shakeAmt = Math.max(0, shakeAmt - dt * 8);
+  updateDots(dt);
+  /* pools */
+  for (let i = 0; i < P_MAX; i++) {
+    const p = parts[i];
+    if (!p.on) continue;
+    p.t += dt;
+    if (p.t >= p.life) { p.on = false; continue; }
+    p.vy += p.g * dt;
+    p.x += p.vx * dt; p.y += p.vy * dt;
+  }
+  for (let i = 0; i < F_MAX; i++) {
+    const f = floats[i];
+    if (!f.on) continue;
+    f.t += dt;
+    if (f.t > 1.3) f.on = false;
+  }
+  autosaveT += dt;
+  if (autosaveT > 10) { autosaveT = 0; saveGame(); }
+}
+
+let lastT = 0;
+function loop(t) {
+  requestAnimationFrame(loop);
+  const dt = Math.min(((t - lastT) || 16.7) / 1000, 0.1);
+  lastT = t;
+  T += dt;
+  musicTick();
+  if (scene === 'play') updatePlay(dt);
+  render();
+}
+
+/* ───── test hooks (used by the CI harness; harmless to ship) ───── */
+window.__test = {
+  grant(o) { for (const k in o) res[k] = (res[k] || 0) + o[k]; },
+  setAge(n) { while (age < n) ageUp(); },
+  setPop(n) { popF = n; pop = n; },
+  crate() { if (!crate) spawnCrate(); return crate ? { gx: crate.gx, gy: crate.gy } : null; },
+  gotoCrate() { if (crate && players[0]) { players[0].x = tX(crate.gx) + 16; players[0].y = tY(crate.gy) + 20; } },
+  walkTo(x, y) { if (players[0]) players[0].target = { x, y }; },
+  walkToTile(gx, gy) { if (players[0]) players[0].target = { x: tX(gx) + 16, y: tY(gy) + 16 }; },
+  arrived() { return !players[0] || !players[0].target; },
+  flora() { return flora.filter(f => !f.gone).map(f => ({ type: f.type, x: tX(f.gx) + 16, y: tY(f.gy) + 20 })); },
+  findSpot(k) {
+    for (let r = 1; r < 16; r++) for (let gy = CYG - r; gy <= CYG + r; gy++) for (let gx = CX - r; gx <= CX + r; gx++)
+      if (validAt(k, gx, gy)) return { gx, gy };
+    return null;
+  },
+  place(k, gx, gy) { return placeBuilding(k, gx, gy); },
+  tick(n) { for (let i = 0; i < (n || 1); i++) economyTick(); },
+  fastRocket() { if (rocketSeq) { rocketSeq.phase = 'lift'; rocketSeq.t = 3.3; rocketSeq.n = 0; } },
+  fastBanner() { if (banners.length) banners[0].t = banners[0].dur; },
+  save() { saveGame(); },
+  info() {
+    return {
+      scene, age, pop, hungry, paused, statsOpen, legends, rocketDone,
+      res: Object.assign({}, res), rates: Object.assign({}, rates),
+      powerInc, powerDem, islandPowered,
+      buildings: buildings.map(b => b.k), pipes: pipes.length,
+      players: players.length,
+      mode: players[0] ? players[0].mode : null,
+      p2mode: players[1] ? players[1].mode : null,
+      modal: !!modal, banner: banners.length ? banners[0].title : null,
+      crate: !!crate, robots: robots.length, drake: !!drake, egg: !!egg,
+      rocket: rocketSeq ? rocketSeq.phase : null,
+      slotSel, nameBuf: nameSt ? nameSt.name : null,
+      p1: players[0] ? { x: players[0].x, y: players[0].y } : null,
+    };
+  },
+};
+
+/* ───── boot ───── */
+initSprites();
+extraSprites();
+loadSlotSummaries();
+document.addEventListener('visibilitychange', () => { if (document.hidden) saveGame(); });
+addEventListener('pagehide', () => saveGame());
+requestAnimationFrame(loop);
+</script>
+<!-- injected by scripts/bundle-games.sh — back-to-arcade overlay -->
+<a id="__arcade_back" href="/" style="position:fixed;top:max(10px,env(safe-area-inset-top));left:max(10px,env(safe-area-inset-left));z-index:2147483647;font:bold 10px/1 -apple-system,BlinkMacSystemFont,'Segoe UI',monospace;letter-spacing:2px;color:#ffd23f;background:rgba(10,14,39,0.82);border:2px solid #ffd23f;padding:8px 10px 7px;text-decoration:none;border-radius:3px;box-shadow:2px 2px 0 rgba(255,69,113,0.65);-webkit-tap-highlight-color:transparent;-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);">&#9664; ARCADE</a>
+
+<!-- injected by scripts/bundle-games.sh — hold PS (or SELECT+START) on any gamepad to return to the arcade menu -->
+<script id="__arcade_pad_exit">
+(function () {
+  var HOLD_MS = 1000;
+  var heldSince = 0;
+  var leaving = false;
+  function comboDown(gp) {
+    var b = gp.buttons;
+    var ps = b[16] && b[16].pressed;
+    var selectStart = b[8] && b[8].pressed && b[9] && b[9].pressed;
+    return !!(ps || selectStart);
+  }
+  function tick(now) {
+    if (leaving) return;
+    var pads = navigator.getGamepads ? navigator.getGamepads() : [];
+    var down = false;
+    for (var i = 0; i < pads.length; i++) {
+      if (pads[i] && pads[i].connected && comboDown(pads[i])) { down = true; break; }
+    }
+    var btn = document.getElementById('__arcade_back');
+    if (!down) {
+      heldSince = 0;
+      if (btn) { btn.style.transform = ''; btn.style.boxShadow = ''; }
+    } else {
+      if (!heldSince) heldSince = now;
+      var progress = (now - heldSince) / HOLD_MS;
+      if (btn) {
+        btn.style.transform = 'scale(' + (1 + 0.35 * Math.min(progress, 1)) + ')';
+        btn.style.transformOrigin = 'top left';
+        btn.style.boxShadow = '0 0 ' + Math.round(18 * Math.min(progress, 1)) + 'px #ffd23f';
+      }
+      if (progress >= 1) { leaving = true; location.href = '/'; return; }
+    }
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+})();
+</script>
+
+<!-- injected by scripts/bundle-games.sh — low-effects mode for the Pi console.
+     Canvas shadowBlur (neon glow) costs a GPU blur pass per glowing sprite;
+     the Pi 5 drops from ~50fps to ~13fps with it on. The console kiosk loads
+     the arcade with ?fx=low, the launcher persists the flag in localStorage,
+     and this overlay no-ops shadowBlur in every bundled game. Visit with
+     ?fx=full to turn glows back on. -->
+<script id="__arcade_lowfx">
+(function () {
+  var on = false;
+  try {
+    if (/[?&]fx=low\b/.test(location.search)) { on = true; localStorage.setItem('arcade_lowfx', '1'); }
+    else if (/[?&]fx=full\b/.test(location.search)) { localStorage.setItem('arcade_lowfx', '0'); }
+    else { on = localStorage.getItem('arcade_lowfx') === '1'; }
+  } catch (e) {}
+  if (!on) return;
+  try {
+    Object.defineProperty(CanvasRenderingContext2D.prototype, 'shadowBlur', {
+      set: function () {}, get: function () { return 0; }
+    });
+  } catch (e) {}
+  // Console mode: no mouse exists, so never show a cursor. And CSS
+  // backdrop-filter re-blurs the animating canvas under every frosted panel
+  // on every frame — measured 17fps -> 60fps in Ninth Inning on the Pi by
+  // disabling it. Panels keep their translucent rgba backgrounds.
+  try {
+    document.head.insertAdjacentHTML('beforeend',
+      '<style>* { cursor: none !important; backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }</style>');
+  } catch (e) {}
+})();
+</script>
+
+</body>
+</html>
