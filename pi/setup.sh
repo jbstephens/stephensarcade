@@ -85,6 +85,26 @@ if [ -f "$WAYFIRE_INI" ] && ! grep -q "ses-kiosk" "$WAYFIRE_INI"; then
   fi
 fi
 
+# Idle-pad watchdog — powers off DualShocks idle for 15 min by dropping
+# their Bluetooth link (press PS to wake). Watches only the gamepad event
+# node, never the motion-sensor/touchpad sub-devices.
+sudo install -m 0755 "$(dirname "$0")/idle-pads.py" /usr/local/bin/ses-idle-pads
+sudo tee /etc/systemd/system/ses-idle-pads.service >/dev/null <<'UNIT'
+[Unit]
+Description=Stephens Arcade — power off idle controllers
+After=bluetooth.target
+
+[Service]
+ExecStart=/usr/local/bin/ses-idle-pads
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+sudo systemctl daemon-reload
+sudo systemctl enable --now ses-idle-pads.service
+
 # LXDE/X11 — fallback if Wayland is ever switched off.
 if [ -d /etc/xdg/lxsession/LXDE-pi ]; then
   LXDE_AUTOSTART="$HOME/.config/lxsession/LXDE-pi/autostart"
