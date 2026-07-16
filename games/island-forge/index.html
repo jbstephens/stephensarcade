@@ -304,6 +304,7 @@ const GOALS = [
   { t: 'REPAIR 3 RUBBLES',        ok: () => rubbleFixed >= 3 },
   { t: 'REACH 120 POP',           ok: () => pop >= 120 },
   { t: 'SETTLE 3 ISLANDS',        ok: () => settled.length >= 3 },
+  { t: 'COMPLETE A COLONY',       ok: () => settled.some(il => il.lvl >= 4) },
   { t: 'REACH THE MOON',          ok: () => age >= 7 },
   { t: 'BUILD 3 MOON BUILDINGS',  ok: () => cnt('moondome') >= 1 && cnt('regomine') >= 1 && cnt('helium3') >= 1 },
   { t: 'OPEN THE STAR GATE',      ok: () => legends },
@@ -362,6 +363,9 @@ const SETTLE_MAX = 3, ISLE_STEP_MAX = 4;
 let camX = 0, camY = 0, camPan = null;        // camera top-left (world px) + cinematic pan
 let isleId = [];                              // flood-fill island component id per tile
 const edgeArrows = [{ on: false }, { on: false }, { on: false }];   // pooled edge pointers
+/* ── v4a: colony levels for settled islands ── */
+let ferries = [];                             // cosmetic cargo dinghies (pooled, ≤1 per island)
+let colonyFw = null;                          // { x, y, t, cool } — colony-complete fireworks show
 
 /* ═══════════════════════════════════════════════════════════════════════
    SPRITE ATLAS — everything baked once at load. P() draws chunky 2x
@@ -1213,6 +1217,58 @@ function initSprites() {
     SPR.bLit[k].getContext('2d').drawImage(powBadge, SPR.bLit[k].width - 15, 1);
   }
 
+  /* ── v4a: colony art — camp marker, level pips, checklist panel, gold trim ── */
+  SPR.camp = S(16, 16, (g, P) => {
+    shad(g, 16, 29, 11, 3);
+    /* little firepit with a warm ember */
+    P(2, 11.6, 1.7, 1.5, '#8f979f'); P(4.2, 12.4, 1.7, 1.5, '#9aa2ab'); P(2.6, 13.4, 1.7, 1.5, '#848b93');
+    P(3.4, 12.4, 1.4, 1.2, '#ff8a2a'); P(3.7, 12.7, 0.7, 0.6, '#ffd75e');
+    /* supply crate */
+    P(9.4, 10.2, 4.8, 4.2, '#9c6b3d'); P(9.4, 10.2, 4.8, 1, '#b07c48');
+    P(11.4, 10.2, 0.9, 4.2, '#5f3a22'); P(9.4, 12, 4.8, 0.8, '#5f3a22');
+    /* flag pole + snapping pennant */
+    P(6.6, 2.6, 1, 11.8, '#8a5c33'); P(6.6, 2.6, 0.45, 11.8, '#9c6b3d');
+    P(7.6, 2.8, 4.8, 2.7, '#e05a3a'); P(7.6, 3.1, 3.4, 1.7, '#f0705e');
+    P(6.3, 1.9, 1.6, 1, '#ffd24a');
+  });
+  SPR.pipOn = (() => {
+    const [c, g] = C(12, 12);
+    g.fillStyle = '#8a6a12'; g.beginPath(); g.arc(6, 6.6, 5.2, 0, 6.3); g.fill();
+    g.fillStyle = '#ffd24a'; g.beginPath(); g.arc(6, 5.8, 5, 0, 6.3); g.fill();
+    g.fillStyle = '#fff3b0'; g.beginPath(); g.arc(4.6, 4.4, 1.8, 0, 6.3); g.fill();
+    return c;
+  })();
+  SPR.pipOff = (() => {
+    const [c, g] = C(12, 12);
+    g.fillStyle = 'rgba(6,18,30,0.8)'; g.beginPath(); g.arc(6, 6, 5, 0, 6.3); g.fill();
+    g.strokeStyle = 'rgba(160,200,230,0.5)'; g.lineWidth = 1.6;
+    g.beginPath(); g.arc(6, 6, 4.4, 0, 6.3); g.stroke();
+    return c;
+  })();
+  SPR.colonyP = (() => {          // checklist strip backing (goal-strip slot, taller)
+    const [c, g] = C(432, 50);
+    g.fillStyle = 'rgba(9,26,40,0.78)'; rr(g, 0, 0, 430, 48, 15); g.fill();
+    g.strokeStyle = 'rgba(125,255,154,0.55)'; g.lineWidth = 2; rr(g, 1, 1, 428, 46, 14); g.stroke();
+    return c;
+  })();
+  /* golden-trim variants for TOWN specialty producers (baked, zero per-frame cost) */
+  const goldify = src => {
+    const [c, g] = C(src.width, src.height);
+    g.drawImage(src, 0, 0);
+    g.fillStyle = '#ffd24a'; g.fillRect(1, src.height - 6, src.width - 2, 3);   // golden plinth
+    g.fillStyle = '#fff3b0'; g.fillRect(1, src.height - 6, src.width - 2, 1);
+    g.fillStyle = '#b8860b'; g.fillRect(1, src.height - 3, src.width - 2, 1);
+    g.fillStyle = '#ffe27a';                                                    // glinting studs
+    g.fillRect(3, src.height - 13, 2, 2); g.fillRect(src.width - 6, src.height - 16, 2, 2);
+    g.drawImage(SPR.star, 1, 0);            // star badge top-LEFT (⚡ badge owns top-right)
+    return c;
+  };
+  SPR.bGold = {}; SPR.bLitGold = {};
+  for (const k of ['lumberhut', 'quarry', 'farm', 'smelter', 'lab']) {
+    SPR.bGold[k] = goldify(SPR.b[k]);
+    SPR.bLitGold[k] = goldify(SPR.bLit[k]);
+  }
+
   /* logo */
   SPR.logo = (() => {
     const [c, g] = C(820, 170);
@@ -1523,6 +1579,7 @@ function growIsland() {
   for (const t of picked) { px2 += tX(t.gx) + 16; py2 += tY(t.gy) + 16; }
   camPanTo(px2 / picked.length, py2 / picked.length, 2.4);   // show kids the new land
   recomputeIsleIds();
+  refreshColonyChecks(); refreshFerries();
   terrainDirty = true;
   saveGame();
   return true;
@@ -1749,9 +1806,13 @@ function rebuildBG() {
   const items = [];
   for (const f of flora) if (!f.gone && f.shakeT <= 0) items.push({ y: tY(f.gy) + 32, f });
   for (const b of buildings) items.push({ y: tY(b.gy) + (B[b.k].size || 1) * 32, b });
+  /* v4a: founding camp marker (flag + crate + firepit) — pure decoration,
+     hidden if someone builds right on the island centre */
+  for (const il of settled) if (!occ[il.gy][il.gx]) items.push({ y: tY(il.gy) + 32, camp: il });
   items.sort((a, b2) => a.y - b2.y);
   for (const it of items) {
     if (it.f) drawFlora(bgg, it.f);
+    else if (it.camp) bgg.drawImage(SPR.camp, tX(it.camp.gx), tY(it.camp.gy) + 32 - SPR.camp.height);
     else drawBuilding(bgg, it.b);
   }
 }
@@ -1772,7 +1833,8 @@ function drawBuilding(g, b) {
     return;
   }
   const lit = (islandPowered && b.k !== 'campfire') || (b.k === 'stargate' && legends);
-  const s = (lit ? SPR.bLit : SPR.b)[b.k];
+  const s = b.gold ? (lit ? SPR.bLitGold : SPR.bGold)[b.k]
+                   : (lit ? SPR.bLit : SPR.b)[b.k];
   g.drawImage(s, tX(b.gx), tY(b.gy) + sz * 32 - s.height);
 }
 
@@ -1889,6 +1951,14 @@ function refund(cost) { for (const r in cost) res[r] += cost[r]; }
 function economyTick() {
   const wellBonus = cnt('well') > 0 ? 1.5 : 1;
   const mult = 1 + 0.1 * stars;                 // prestige bonus on ALL production
+  /* v4a: TOWN islands boost their specialty producers 1.5x locally;
+     each finished COLONY adds +10% to its specialty resource GLOBALLY
+     (multiplicative with prestige) */
+  const townSpec = {}, colonyMult = {};
+  for (const il of settled) {
+    if (il.lvl >= 3) townSpec[isleIdAt(il.gx, il.gy)] = il.spec;
+    if (il.lvl >= 4) colonyMult[il.spec] = (colonyMult[il.spec] || 1) * 1.1;
+  }
   powerInc = 0; powerDem = 0;
   const inc = {};
   for (const b of buildings) {
@@ -1921,6 +1991,9 @@ function economyTick() {
       if (r === 'power') continue;
       let amt = d.prod[r] * mult;
       if (b.k === 'farm') amt *= wellBonus;
+      const ts = townSpec[isleIdAt(b.gx, b.gy)];
+      if (ts && SPEC_B[ts] === b.k) amt *= 1.5;  // golden TOWN producer
+      if (colonyMult[r]) amt *= colonyMult[r];   // global COLONY bonus
       res[r] += amt; inc[r] = (inc[r] || 0) + amt;
       if (r === 'metal') life.metal += amt;
       if (r === 'parts') life.parts += amt;
@@ -1967,6 +2040,12 @@ function economyTick() {
     if (!crate) spawnCrate();
     else crateT = Math.min(crateT, 5);
   }
+  /* v4a: colony ladders — one level-up per tick (staged celebrations) */
+  if (!loading) {
+    for (const il of settled)
+      if (colonyReady(il)) { colonyLevelUp(il); break; }
+    refreshColonyChecks();                       // keep HUD checklists live
+  }
   /* age advancement (5 → 6 happens via the rocket instead) */
   const rq = REQ_NEXT[age];
   if (rq && rq.ok()) ageUp();
@@ -2004,6 +2083,7 @@ function ageUp() {
     p.boat = false;
     if (p.mode === 'boatmenu' || p.mode === 'settle') p.mode = 'walk';
   }
+  refreshColonyChecks(); refreshFerries();      // new rings can reshape lanes/components
   recomputePipes(); recomputeAnims();
   terrainDirty = true;
   saveGame();
@@ -2040,6 +2120,7 @@ function addBuilding(k, gx, gy) {
   buildings.push(b);
   const s = B[k].size || 1;
   for (let dy = 0; dy < s; dy++) for (let dx = 0; dx < s; dx++) occ[gy + dy][gx + dx] = b;
+  refreshColonyChecks();
   recomputePipes(); recomputeAnims();
   bgDirty = true;
   return b;
@@ -2080,6 +2161,7 @@ function removeBuilding(b) {
   SFX.remove();
   for (let i = 0; i < 6; i++)
     spawnP(tX(b.gx) + s * 16, tY(b.gy) + s * 16, SPR.puff[0], { life: 0.5 });
+  refreshColonyChecks();
   recomputePipes(); recomputeAnims();
   bgDirty = true;
   return true;
@@ -2445,6 +2527,7 @@ function startDisaster(forceType) {
 }
 function smashBuilding(b) {
   b.rubble = true; b.repair = 0; b.idle = null;
+  refreshColonyChecks();                        // rubble stops counting (levels never revert)
   bgDirty = true;
   shakeAmt = Math.max(shakeAmt, 6);
   SFX.boom();
@@ -2504,6 +2587,7 @@ function repairWhack(b) {
   if (b.repair >= 3) {
     b.rubble = false; b.repair = 0;
     rubbleFixed++;
+    refreshColonyChecks();                       // repaired buildings count again
     SFX.fixed();
     addFloat(cx2, tY(b.gy) - 6, 'FIXED!', '#7dff9a');
     for (let i = 0; i < 12; i++) spawnP(cx2 + (Math.random() - 0.5) * s * 28, cy2 - 8, SPR.spark[i % 2], { life: 0.9 });
@@ -2598,7 +2682,9 @@ function trySettle(p) {
   const si = settleInfo(p);
   if (!si.geomOk || !canAfford(si.cost)) { SFX.cancel(); return false; }
   payCost(si.cost);
-  const isl = { gx: si.c.gx, gy: si.c.gy, steps: 0, o: settled.length };
+  const spec = specFor(settled.length);
+  const isl = { gx: si.c.gx, gy: si.c.gy, steps: 0, o: settled.length,
+                lvl: 1, spec, name: isleNameFor(spec, settled.length) };   // v4a: OUTPOST
   settled.push(isl);
   for (const q of si.tiles) if (landAge[q.gy][q.gx] === 0) landAge[q.gy][q.gx] = 1;
   recomputeIsleIds();
@@ -2617,7 +2703,7 @@ function trySettle(p) {
   }
   for (let i = 0; i < 10; i++)
     spawnP(p.x + (Math.random() - 0.5) * 120, p.y + (Math.random() - 0.5) * 80, SPR.wake, { vy: -24, g: -8, life: 0.8 });
-  banners.push({ title: 'A NEW ISLAND!', sub: islandName + "'s archipelago grows!", t: 0, dur: 3.4, legendary: true });
+  banners.push({ title: 'OUTPOST FOUNDED!', sub: isl.name + ' — a fine place for ' + spec.toUpperCase() + '!', t: 0, dur: 3.4, legendary: true });
   SFX.legendary(); SFX.splash();
   /* the boat is beached on the brand-new shore — step off proudly, and the
      dinghy stays moored just off the coast so you can always sail home */
@@ -2628,9 +2714,155 @@ function trySettle(p) {
     if (isWater(isl.gx + dx, isl.gy + dy)) { p.moor = { x: tX(isl.gx + dx) + 16, y: tY(isl.gy + dy) + 16 }; break out; }
   }
   terrainDirty = true;
+  refreshColonyChecks(); refreshFerries();
   recomputePipes(); recomputeAnims();
   saveGame();
   return true;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   V4a — COLONY LEVELS: every settled island climbs a 4-step local ladder
+   OUTPOST → VILLAGE → TOWN → COLONY. Resources stay 100% global; levels
+   only unlock rings, golden producers (1.5x local) and a +10% global
+   bonus on the island's specialty resource. Levels never revert.
+   ═══════════════════════════════════════════════════════════════════════ */
+const SPECS = ['wood', 'stone', 'food', 'metal', 'science'];
+const SPEC_B = { wood: 'lumberhut', stone: 'quarry', food: 'farm', metal: 'smelter', science: 'lab' };
+const COLONY_LVLS = [null, 'OUTPOST', 'VILLAGE', 'TOWN', 'COLONY'];
+const COLONY_STEP_MAX = 7;                     // rings from age-ups + colony levels combined
+const ISLE_NAMES = {
+  wood:   ['OAK ISLE', 'PINE KEY', 'CEDAR CAY'],
+  stone:  ['STONE CAY', 'BOULDER ISLE', 'FLINT KEY'],
+  food:   ['BERRY KEY', 'HONEY ISLE', 'MANGO CAY'],
+  metal:  ['IRON ISLE', 'COPPER KEY', 'FORGE CAY'],
+  science:['SPARK ISLE', 'COMET KEY', 'NOVA CAY'],
+};
+/* specialty + name are pure functions of (seed, settle order) — cycling so
+   the 3 islands always differ; saves never need to store them */
+const specFor = o => SPECS[(seed + o) % 5];
+const isleNameFor = (spec, o) => ISLE_NAMES[spec][(Math.floor(seed / 5) + o) % ISLE_NAMES[spec].length];
+/* checklist for the island's NEXT level — a building belongs to the island
+   whose land component it sits on (rubble never counts; levels never revert) */
+function colonyChecklist(il) {
+  const id = isleIdAt(il.gx, il.gy);
+  let cabins = 0, food = 0, spec = 0, pow = 0, port = 0;
+  for (const b of buildings) {
+    if (b.rubble || isleIdAt(b.gx, b.gy) !== id) continue;
+    if (b.k === 'cabin') cabins++;
+    if (b.k === 'farm' || b.k === 'bakery') food++;
+    if (b.k === SPEC_B[il.spec]) spec++;
+    if (b.k === 'windmill' || b.k === 'solar' || b.k === 'fusioncore') pow++;
+    if (b.k === 'seaport') port++;
+  }
+  if (il.lvl <= 1) return [{ k: 'cabin', n: cabins, need: 2 }, { k: 'farm', n: food, need: 1 }];
+  if (il.lvl === 2) return [{ k: SPEC_B[il.spec], n: spec, need: 2 }];
+  if (il.lvl === 3) return [{ k: 'windmill', n: pow, need: 1 }, { k: 'seaport', n: port, need: 1 }];
+  return [];
+}
+const colonyReady = il => il.lvl >= 1 && il.lvl < 4 && colonyChecklist(il).every(c => c.n >= c.need);
+/* golden flags on TOWN specialty producers + cached checklists for the HUD */
+function refreshColonyChecks() {
+  const gm = {};
+  for (const il of settled) {
+    il.check = colonyChecklist(il);
+    if (il.lvl >= 3) gm[isleIdAt(il.gx, il.gy)] = il.spec;
+  }
+  let dirty = false;
+  for (const b of buildings) {
+    const want = SPEC_B[gm[isleIdAt(b.gx, b.gy)]] === b.k;
+    if (!!b.gold !== want) { b.gold = want; dirty = true; }
+  }
+  if (dirty) bgDirty = true;
+}
+/* one colony ring — reuses the per-island ring machinery, with sparkles */
+function colonyGrowRing(il, silent) {
+  if (il.steps >= COLONY_STEP_MAX) return;
+  il.steps++;
+  const tiles = carveIsle(il, il.steps, 1);
+  recomputeIsleIds();
+  if (!silent) for (const t of tiles)
+    if (hash2(t.gx, t.gy + 5) < 0.6)
+      spawnP(tX(t.gx) + 16, tY(t.gy) + 16, SPR.spark[(t.gx + t.gy) % 2], { vy: -30, g: 0, life: 1.2 });
+  terrainDirty = true;
+}
+function colonyLevelUp(il) {
+  il.lvl++;
+  colonyGrowRing(il);
+  const spc = il.spec.toUpperCase();
+  if (il.lvl === 2) {
+    banners.push({ title: 'LEVEL 2 — VILLAGE!', sub: il.name + ' grows a whole new ring of land!', t: 0, dur: 3.2, legendary: true });
+    SFX.fanfare();
+  } else if (il.lvl === 3) {
+    banners.push({ title: 'LEVEL 3 — TOWN!', sub: il.name + "'s " + spc + ' makers turn GOLDEN — 1.5x!', t: 0, dur: 3.4, legendary: true });
+    SFX.legendary();
+    const id = isleIdAt(il.gx, il.gy);
+    for (const b of buildings)
+      if (b.k === SPEC_B[il.spec] && isleIdAt(b.gx, b.gy) === id)
+        for (let i = 0; i < 6; i++)
+          spawnP(tX(b.gx) + 16, tY(b.gy) + 8, SPR.spark[i % 2], { life: 0.9 });
+  } else if (il.lvl === 4) {
+    banners.push({ title: 'COLONY COMPLETE!', sub: il.name + ' ★ — all ' + spc + ' +10% forever!', t: 0, dur: 4, legendary: true });
+    SFX.legendary();
+    colonyFw = { x: tX(il.gx) + 16, y: tY(il.gy) + 16, t: 3.4, cool: 0 };   // short fireworks show
+  }
+  /* a new ring can rise under a sailing boat — beach it gently */
+  for (const p of players) if (p.boat && !isWaterPx(p.x, p.y)) {
+    p.boat = false;
+    if (p.mode === 'boatmenu' || p.mode === 'settle') p.mode = 'walk';
+  }
+  camPanTo(tX(il.gx) + 16, tY(il.gy) + 16, 2.2);
+  refreshColonyChecks();
+  refreshFerries();
+  recomputePipes(); recomputeAnims();
+  bgDirty = true;
+  saveGame();
+}
+/* the goal-strip swaps to an island checklist while a player stands on (or
+   is boated beside) a settled island below COLONY. P1 wins ties. */
+function playerColony(p) {
+  const t = tileUnder(p);
+  let id = isleIdAt(t.gx, t.gy);
+  if (!id && p.boat)
+    id = isleIdAt(t.gx + 1, t.gy) || isleIdAt(t.gx - 1, t.gy) ||
+         isleIdAt(t.gx, t.gy + 1) || isleIdAt(t.gx, t.gy - 1);
+  if (!id) return null;
+  for (const il of settled)
+    if (il.lvl < 4 && isleIdAt(il.gx, il.gy) === id) return il;
+  return null;
+}
+/* ── cosmetic cargo ferries: village+ islands get a dinghy that shuttles
+   the longest clear-water leg of the straight line to the home island.
+   Pure decoration — the economy is one shared pool. ── */
+function refreshFerries() {
+  ferries = [];
+  const hx = tX(CX) + 16, hy = tY(CYG) + 16;
+  for (const il of settled) {
+    if (il.lvl < 2) continue;
+    const ix = tX(il.gx) + 16, iy = tY(il.gy) + 16;
+    const n = Math.max(2, Math.ceil(Math.hypot(hx - ix, hy - iy) / 16));
+    let runS = -1, bS = 0, bE = -1;
+    for (let s = 0; s <= n; s++) {
+      const wet = isWaterPx(ix + (hx - ix) * s / n, iy + (hy - iy) * s / n);
+      if (wet) { if (runS < 0) runS = s; if (s - runS > bE - bS) { bS = runS; bE = s; } }
+      else runS = -1;
+    }
+    if (bE - bS < 6) continue;                  // no clear lane — skip, decoration only
+    const f0 = (bS + 1) / n, f1 = (bE - 1) / n;
+    const x0 = ix + (hx - ix) * f0, y0 = iy + (hy - iy) * f0;
+    ferries.push({ x0, y0, x1: ix + (hx - ix) * f1, y1: iy + (hy - iy) * f1,
+                   t: 0.2 + Math.random() * 0.6, dir: 1, pause: 0, x: x0, y: y0 });
+  }
+}
+function updateFerries(dt) {
+  for (const f of ferries) {
+    if (f.pause > 0) { f.pause -= dt; continue; }
+    const len = Math.max(1, Math.hypot(f.x1 - f.x0, f.y1 - f.y0));
+    f.t += f.dir * dt * 34 / len;
+    if (f.t >= 1) { f.t = 1; f.dir = -1; f.pause = 2.5; }
+    else if (f.t <= 0) { f.t = 0; f.dir = 1; f.pause = 2.5; }
+    f.x = f.x0 + (f.x1 - f.x0) * f.t;
+    f.y = f.y0 + (f.y1 - f.y0) * f.t;
+  }
 }
 
 /* ═══════════════════════════════════════════════════════════════════════
@@ -2649,7 +2881,7 @@ function saveGame() {
     v: 4, name: islandName, seed, age, legends, rocketDone, firstPowerDone,
     stars, goalI, cratesOpened, rubbleFixed,
     rocketsLaunched, lastGift, battCharge,
-    islands: settled.map(il => [il.gx, il.gy, il.steps]),
+    islands: settled.map(il => [il.gx, il.gy, il.steps, il.lvl]),   // v4a: colony level (spec/name re-derive from seed)
     grown: grownTiles, growNextPop, islandFull,
     campfireGone: cnt('campfire') === 0,
     res, life, popF, playtime, crateT, rates, savedAt: Date.now(),
@@ -2689,7 +2921,7 @@ function resetWorldState() {
   rocketsLaunched = 0; lastGift = null; forcedGift = null; fwShow = 0; fwT = 0;
   battCharge = 0; battCap = 0;
   grownTiles = []; growNextPop = 0; islandFull = false;
-  settled = []; camPan = null;
+  settled = []; camPan = null; ferries = []; colonyFw = null;
   for (const a of edgeArrows) a.on = false;
   gateSeq = null; confirmPrestige = null;
   disaster = null; disasterT = DIS_FIRST; sessionT = 0;
@@ -2762,7 +2994,11 @@ function loadGame(slot) {
     if (moonB && oldMoon && moonRect) return [gx - oldMoon.gx + moonRect.gx, gy - oldMoon.gy + moonRect.gy];
     return [gx + odx, gy + ody];
   };
-  settled = (s.islands || []).map((a, i) => ({ gx: a[0], gy: a[1], steps: a[2] || 0, o: i }));
+  settled = (s.islands || []).map((a, i) => {
+    const spec = specFor(i);                     // deterministic from seed + order
+    return { gx: a[0], gy: a[1], steps: a[2] || 0, o: i,
+             lvl: a[3] || 0, spec, name: isleNameFor(spec, i) };   // lvl 0 = pre-colony save → migrate below
+  });
   for (const il of settled) for (let st = 0; st <= il.steps; st++) carveIsle(il, st, 1);
   grownTiles = (s.grown || []).map(t => [t[0] + odx, t[1] + ody]);   // re-apply max-age growth
   for (const t of grownTiles) if (landAge[t[1]]) landAge[t[1]][t[0]] = 7;
@@ -2789,6 +3025,18 @@ function loadGame(slot) {
   for (let i = 0; i < (s.goldRobots || 0); i++) spawnRobot(tX(CX) + 16 + i * 10, tY(CYG) + 60, true);
   if (Array.isArray(s.drakes)) for (const bl of s.drakes) drakes.push({ x: tX(CX) + drakes.length * 20, y: tY(CYG), frame: 0, blue: !!bl });
   else if (s.drake) drakes.push({ x: tX(CX), y: tY(CYG), frame: 0, blue: false });   // v1/v2 migration
+  /* ── v4a migration: pre-colony saves get colonies evaluated ON LOAD —
+     level = whatever the existing buildings already satisfy, rings granted
+     silently, no banners/fireworks. Recorded levels never re-reward. ── */
+  for (const il of settled) {
+    if (il.lvl) continue;
+    il.lvl = 1;
+    while (il.lvl < 4 && colonyChecklist(il).every(c => c.n >= c.need)) {
+      il.lvl++;
+      colonyGrowRing(il, true);                  // silent — no sparkles on load
+    }
+  }
+  refreshColonyChecks(); refreshFerries();
   recomputePipes(); recomputeAnims();
   startPlay();
   islandPowered = false;   // recomputed on first tick
@@ -3373,8 +3621,13 @@ function drawHUD() {
         : age >= 7 ? 'BUILD THE STAR GATE ON THE MOON!'
         : 'BUILD A LAUNCH PAD, THEN THE ROCKET!', 108, 37, 9, '#ffd24a');
   }
-  /* goals strip — the one active goal, right under the age progress */
-  if (goalI < GOALS.length) {
+  /* goals strip — the one active goal, right under the age progress.
+     v4a: standing on (or boated beside) a settled island below COLONY
+     swaps in that island's big-icon checklist instead (P1 wins ties). */
+  let focusIl = null;
+  for (const p of players) { focusIl = playerColony(p); if (focusIl) break; }
+  if (focusIl) drawColonyStrip(focusIl);
+  else if (goalI < GOALS.length) {
     ctx.drawImage(SPR.goalP, 8, 50);
     ctx.drawImage(SPR.star, 20, 55);
     txt('GOAL: ' + GOALS[goalI].t, 44, 69, 12, '#ffe9a8');
@@ -3400,6 +3653,26 @@ function drawHUD() {
   ctx.drawImage(SPR.icon.pop, W - 128, 8);
   txt(pop + '/' + cap, W - 102, 25, 13, hungry ? '#ff9a8a' : RES_COL.pop);
   if (hungry) txt('NEED FOOD!', W - 128, 38, 9, '#ff9a8a');
+}
+
+/* v4a: the island checklist strip — name + specialty, 4 level pips,
+   big building icons with counts. Uses the cached il.check (refreshed on
+   every build/remove/repair and each economy tick — no per-frame work). */
+function drawColonyStrip(il) {
+  ctx.drawImage(SPR.colonyP, 8, 48);
+  ctx.drawImage(SPR.icon[il.spec], 18, 60);
+  txt(il.name, 44, 68, 12, '#ffe9a8');
+  txt(COLONY_LVLS[il.lvl] + ' → ' + COLONY_LVLS[il.lvl + 1], 44, 84, 9, '#8fc4e0');
+  for (let i = 0; i < 4; i++)
+    ctx.drawImage(i < il.lvl ? SPR.pipOn : SPR.pipOff, 168 + i * 15, 58);
+  let x = 240;
+  for (const c of (il.check || [])) {
+    const done = c.n >= c.need;
+    drawFit(SPR.b[c.k], x + 14, 71, 26, 34);
+    txt(c.n + '/' + c.need, x + 32, 77, 14, done ? '#7dff9a' : '#fff');
+    if (done) txt('✓', x + 66, 77, 13, '#7dff9a');
+    x += 92;
+  }
 }
 
 function drawMenu(p, yBase) {
@@ -3627,6 +3900,17 @@ function drawStats() {
   for (const p of players) {
     ctx.fillStyle = p.pi ? '#ff9a8a' : '#8fd4ff';
     ctx.fillRect(mx0 + 4 + p.x * msc, my0 + 4 + p.y * msc, 5, 5);
+  }
+  /* v4a: colony ledger — every settled island with specialty + level pips */
+  let cy2 = my0 + 186;
+  for (const il of settled) {
+    ctx.drawImage(SPR.icon[il.spec], mx0 + 4, cy2 - 15);
+    txt(il.name, mx0 + 30, cy2, 12, il.lvl >= 4 ? '#ffd24a' : '#cfe8f4');
+    for (let i = 0; i < 4; i++)
+      ctx.drawImage(i < il.lvl ? SPR.pipOn : SPR.pipOff, mx0 + 152 + i * 14, cy2 - 10);
+    txt(il.lvl >= 4 ? '★ ' + il.spec.toUpperCase() + ' +10%' : COLONY_LVLS[il.lvl],
+        mx0 + 214, cy2, 10, il.lvl >= 4 ? '#ffd24a' : '#8fc4e0');
+    cy2 += 26;
   }
   txt('△ / V — CLOSE', W / 2, y + 532, 13, '#8fc4e0', 'center');
 }
@@ -3879,6 +4163,22 @@ function renderPlay() {
   /* ghosts under everything mobile (hidden during cinematics) */
   if (!rocketSeq && !gateSeq) for (const p of players) drawGhost(p);
 
+  /* cosmetic cargo ferries — hull + tiny crate, ≤3 in the world, culled */
+  for (let i = 0; i < ferries.length; i++) {
+    const f = ferries[i];
+    if (!onCam(f.x, f.y, 48)) continue;
+    const fb = Math.sin(T * 3 + i * 2.1) * 1.6;
+    if (f.dir * (f.x1 - f.x0) < 0) {
+      ctx.translate(f.x, 0); ctx.scale(-1, 1);
+      ctx.drawImage(SPR.boat, -19, f.y - 12 + fb);
+      ctx.drawImage(SPR.crate, -7, f.y - 17 + fb, 14, 12);
+      reTx();
+    } else {
+      ctx.drawImage(SPR.boat, f.x - 19, f.y - 12 + fb);
+      ctx.drawImage(SPR.crate, f.x - 7, f.y - 17 + fb, 14, 12);
+    }
+  }
+
   /* robots, drakes, players (+ boats) */
   for (const r of robots) {
     if (!onCam(r.x, r.y, 48)) continue;
@@ -4096,6 +4396,22 @@ function updatePlay(dt) {
       if (age >= 2) res.food += age;
     }
   }
+  /* v4a: colony-complete fireworks show over the island (pooled particles) */
+  if (colonyFw) {
+    colonyFw.t -= dt; colonyFw.cool -= dt;
+    if (colonyFw.cool <= 0) {
+      colonyFw.cool = 0.45;
+      SFX.firework();
+      const fx = colonyFw.x + (Math.random() - 0.5) * 260;
+      const fy = colonyFw.y - 60 - Math.random() * 140;
+      const spr = SPR.fw[(Math.random() * SPR.fw.length) | 0];
+      for (let i = 0; i < 9; i++) {
+        const a = i / 9 * 6.28, sp = 60 + Math.random() * 60;
+        spawnP(fx, fy, spr, { vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, g: 30, life: 1.1 });
+      }
+    }
+    if (colonyFw.t <= 0) colonyFw = null;
+  }
   if (crate) {
     crate.t += dt;
     if (crate.opening) {
@@ -4146,6 +4462,7 @@ function updatePlay(dt) {
   else if (shakeAmt > 0) shakeAmt = Math.max(0, shakeAmt - dt * 8);
   updateCamera(dt);
   updateDots(dt);
+  updateFerries(dt);
   /* pools */
   for (let i = 0; i < P_MAX; i++) {
     const p = parts[i];
@@ -4278,6 +4595,16 @@ window.__test = {
   oldMoonRect(sd) { return oldMoonRectFor(sd); },
   isWater(gx, gy) { return isWater(gx, gy); },
   landAt(gx, gy) { return landAge[gy] ? landAge[gy][gx] : -1; },
+  /* ── v4a hooks ── */
+  colonies() {
+    return settled.map(il => ({ gx: il.gx, gy: il.gy, steps: il.steps, lvl: il.lvl,
+                                spec: il.spec, name: il.name,
+                                camp: !occ[il.gy][il.gx],
+                                check: colonyChecklist(il) }));
+  },
+  isleAt(gx, gy) { return isleIdAt(gx, gy); },
+  canPlace(k, gx, gy) { return validAt(k, gx, gy) && canAfford(B[k].cost); },
+  calm(n) { disasterT = n; },
   info() {
     const items = players[0] && players[0].mode === 'menu' ? menuItems() : null;
     const sel = items ? items[clamp(players[0].menuI, 0, items.length - 1)] : null;
@@ -4302,6 +4629,15 @@ window.__test = {
       islands: settled.length,
       islandList: settled.map(il => ({ gx: il.gx, gy: il.gy, steps: il.steps })),
       seaports: cnt('seaport'),
+      /* v4a */
+      colonies: settled.map(il => ({ name: il.name, spec: il.spec, lvl: il.lvl, steps: il.steps })),
+      focusColony: (() => {
+        for (const p of players) { const il = playerColony(p); if (il) return il.name; }
+        return null;
+      })(),
+      ferries: ferries.length,
+      ferryXY: ferries.map(f => ({ x: Math.round(f.x), y: Math.round(f.y) })),
+      goldCount: buildings.filter(b => b.gold).length,
       arrows: edgeArrows.filter(a => a.on).map(a => ({ type: a.type, x: a.x, y: a.y })),
       minimap: statsOpen ? { x: W / 2 - 480 + 636, y: 80 + 150, w: 276, h: 158 } : null,
       buildingsXY: buildings.map(b => [b.k, b.gx, b.gy]),
@@ -4318,6 +4654,12 @@ window.__test = {
       pauseOpts: paused ? pauseOptions() : null,
       confirmPrestige: confirmPrestige ? { yes: confirmPrestige.yes } : null,
       menuKey: sel ? (sel.k || (sel.rocket && 'rocket') || (sel.remove && 'remove') || null) : null,
+      p2menuKey: (() => {
+        const p = players[1];
+        if (!p || p.mode !== 'menu') return null;
+        const it = menuItems(), s2 = it[clamp(p.menuI, 0, it.length - 1)];
+        return s2 ? (s2.k || (s2.rocket && 'rocket') || (s2.remove && 'remove') || null) : null;
+      })(),
     };
   },
 };
