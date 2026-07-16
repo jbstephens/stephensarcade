@@ -75,8 +75,9 @@
    background canvas rebuilt only when the island changes.
    ═══════════════════════════════════════════════════════════════════════ */
 
-const W = 1280, H = 720, TILE = 32, GW = 40, GH = 22, GY0 = 8;
-const CX = 20, CYG = 11;                       // island centre in grid coords
+const W = 1280, H = 720, TILE = 32, GW = 80, GH = 44, GY0 = 8;
+const WORLD_W = GW * TILE, WORLD_H = GY0 + GH * TILE;   // 2560 x 1416 world px
+const CX = 24, CYG = 13;                       // home island centre in grid coords
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
 ctx.imageSmoothingEnabled = false;
@@ -183,6 +184,7 @@ const SFX = {
   boom:     () => { noiseBurst(0.5, 0.28, 900, 60); blip(90, 0.4, 'sawtooth', 0.1, 35); },
   fixed:    () => { [523, 784, 1047].forEach((f, i) => setTimeout(() => blip(f, 0.12, 'triangle', 0.08), i * 70)); },
   gate:     () => { [330, 440, 587, 784].forEach((f, i) => setTimeout(() => blip(f, 0.3, 'sawtooth', 0.05, f * 1.5), i * 160)); },
+  splash:   () => { noiseBurst(0.28, 0.14, 1400, 220); blip(320, 0.14, 'sine', 0.05, 130); },
 };
 /* cozy ambient loop — soft pad chords + pentatonic plucks, scheduled ahead */
 const CHORDS = [[130.8, 196, 329.6], [110, 164.8, 261.6], [87.3, 130.8, 220], [98, 146.8, 246.9]];
@@ -240,6 +242,7 @@ const B = {
   windmill:  { name: 'WINDMILL',   age: 4, size: 1, cost: { wood: 40, metal: 10 }, prod: { power: 4 },  wire: true },
   solar:     { name: 'SOLAR PANEL',age: 4, size: 1, cost: { metal: 20, parts: 8 }, prod: { power: 6 },  wire: true },
   battery:   { name: 'BATTERY',    age: 4, size: 1, cost: { metal: 20, parts: 10 },store: 25,           wire: true },
+  seaport:   { name: 'SEAPORT',    age: 4, size: 1, cost: { wood: 30, metal: 20 }, coastal: true },
   lab:       { name: 'LAB',        age: 5, size: 1, cost: { metal: 30, parts: 15 },prod: { science: 0.6 }, needPower: 3, wire: true },
   roboshed:  { name: 'ROBO HELPER',age: 5, size: 1, cost: { metal: 20, parts: 12 },robot: true,         needPower: 1, wire: true },
   launchpad: { name: 'LAUNCH PAD', age: 5, size: 2, cost: { stone: 40, metal: 60, parts: 30 }, needPower: 4, wire: true },
@@ -289,7 +292,9 @@ const GOALS = [
   { t: 'BUILD A MINE + SMELTER',  ok: () => cnt('mine') >= 1 && cnt('smelter') >= 1 },
   { t: 'MAKE 80 METAL + PARTS',   ok: () => life.metal + life.parts >= 80 },
   { t: 'MAKE 8 POWER',            ok: () => powerInc >= 8 },
+  { t: 'BUILD A SEAPORT',         ok: () => cnt('seaport') >= 1 },
   { t: 'REACH 60 POP',            ok: () => pop >= 60 },
+  { t: 'SETTLE A NEW ISLAND',     ok: () => settled.length >= 1 },
   { t: 'BUILD A LAB',             ok: () => cnt('lab') >= 1 },
   { t: 'OPEN 3 CRATES',           ok: () => cratesOpened >= 3 },
   { t: 'BUILD THE LAUNCH PAD',    ok: () => cnt('launchpad') >= 1 },
@@ -298,6 +303,7 @@ const GOALS = [
   { t: 'BUILD A FUSION CORE',     ok: () => cnt('fusioncore') >= 1 },
   { t: 'REPAIR 3 RUBBLES',        ok: () => rubbleFixed >= 3 },
   { t: 'REACH 120 POP',           ok: () => pop >= 120 },
+  { t: 'SETTLE 3 ISLANDS',        ok: () => settled.length >= 3 },
   { t: 'REACH THE MOON',          ok: () => age >= 7 },
   { t: 'BUILD 3 MOON BUILDINGS',  ok: () => cnt('moondome') >= 1 && cnt('regomine') >= 1 && cnt('helium3') >= 1 },
   { t: 'OPEN THE STAR GATE',      ok: () => legends },
@@ -348,8 +354,14 @@ let players = [];
 let playtime = 0, autosaveT = 0, simAcc = 0, loading = false;
 let landAge = [], coast = [];
 let bgDirty = false, terrainDirty = false;
-let shakeAmt = 0;
+let shakeAmt = 0, shakeX = 0, shakeY = 0;
 let landSalt = [0, 0, 0];
+/* ── v3: archipelago ── */
+let settled = [];                             // settled islands [{gx,gy,steps,o}]
+const SETTLE_MAX = 3, ISLE_STEP_MAX = 4;
+let camX = 0, camY = 0, camPan = null;        // camera top-left (world px) + cinematic pan
+let isleId = [];                              // flood-fill island component id per tile
+const edgeArrows = [{ on: false }, { on: false }, { on: false }];   // pooled edge pointers
 
 /* ═══════════════════════════════════════════════════════════════════════
    SPRITE ATLAS — everything baked once at load. P() draws chunky 2x
@@ -602,6 +614,33 @@ function initSprites() {
     P(6, 2, 4, 2.4, '#9aa2ab');
     for (let i = 0; i < 3; i++) P(6, 15 - i * 3.4, 4, 2, lit ? '#4de08a' : '#2e5a44');
     P(7, 6, 2, 3, '#ffd24a'); P(7.6, 6.6, 0.8, 1.8, '#c9a01a');
+  });
+  mk('seaport', 16, 20, (g, P, lit) => {
+    shad(g, 16, 37, 13, 4);
+    /* wooden dock deck on posts */
+    for (let i = 0; i < 5; i++) P(1, 12 + i * 0.1, 14, 1.1, i % 2 ? '#9c6b3d' : '#8a5c33');
+    P(1, 12, 14, 3.4, '#9c6b3d'); P(1, 12, 14, 0.8, '#b07c48');
+    for (let i = 0; i < 4; i++) P(2 + i * 3.8, 12.6, 0.8, 1, '#6e4526');
+    P(2, 15.4, 1.4, 3.6, '#7a4a2b'); P(12.6, 15.4, 1.4, 3.6, '#7a4a2b'); P(7.2, 15.4, 1.4, 3.6, '#7a4a2b');
+    /* little harbour hut with lantern */
+    P(1.6, 6.4, 6, 5.6, '#c98850'); P(1.6, 6.4, 6, 0.8, '#b57741');
+    P(0.8, 4.4, 7.6, 2.4, '#a8402f'); P(1.6, 3.6, 6, 1.4, '#c1523c');
+    P(3.4, 8.4, 2, 3.6, '#5f3a22');
+    P(6.4, 7.4, 1.2, 1.2, lit ? '#ffd75e' : '#39301f');
+    /* crane mast + arm + hanging crate */
+    P(11, 1, 1.2, 11, '#8a5c33'); P(11, 1, 0.5, 11, '#9c6b3d');
+    P(8.4, 1.6, 6.4, 1, '#8a5c33'); P(8.4, 2.4, 0.5, 2.6, '#5f3a22');
+    P(7.6, 5, 2.2, 2, '#b07c48'); P(7.6, 5, 2.2, 0.6, '#c98a58'); P(8.5, 5, 0.4, 2, '#7a4a2b');
+    /* moored dinghy bobbing by the deck */
+    P(4.4, 16.6, 6.2, 1.8, '#8a5c33'); P(5, 16.2, 5, 0.8, '#b07c48');
+    P(5.4, 17, 4.2, 0.9, '#6e4526'); P(6.8, 15.6, 0.7, 1, '#9c6b3d');
+    /* mooring rope + life ring */
+    P(9.6, 10.4, 3, 0.6, '#e8d8a8');
+    g.strokeStyle = '#f0f0e0'; g.lineWidth = 2.4;
+    g.beginPath(); g.arc(29, 27, 3, 0, 6.3); g.stroke();
+    g.strokeStyle = '#e05a3a'; g.lineWidth = 1.2;
+    g.beginPath(); g.arc(29, 27, 3, 0.6, 1.8); g.stroke();
+    g.beginPath(); g.arc(29, 27, 3, 3.6, 4.8); g.stroke();
   });
   mk('lab', 16, 26, (g, P, lit) => {
     shad(g, 16, 49, 13, 4);
@@ -938,6 +977,37 @@ function initSprites() {
   SPR.bubHungry = mkBub((g, P) => { P(4.4, 1.6, 1.4, 4, '#e05a3a'); P(4.4, 6.2, 1.4, 1.4, '#e05a3a'); });
   SPR.bubPower  = mkBub((g, P) => { P(4.6, 1.4, 2, 2.6, '#2a9fd0'); P(3.6, 3.6, 2, 1.4, '#2a9fd0'); P(4.4, 4.6, 2, 2.8, '#2a9fd0'); });
 
+  /* player boat — cozy wooden dinghy, drawn over the avatar's legs */
+  SPR.boat = S(19, 12, (g, P) => {
+    g.fillStyle = 'rgba(20,60,90,0.35)';
+    g.beginPath(); g.ellipse(19, 20, 17, 3.4, 0, 0, 6.3); g.fill();
+    P(2, 3.6, 15, 4.6, '#9c6b3d');                           // hull body
+    P(1, 2.8, 2.6, 4, '#b07c48'); P(15.4, 2.8, 2.6, 4, '#b07c48');   // raised bow/stern
+    P(1.4, 2.4, 1.4, 1, '#c98a58'); P(16.2, 2.4, 1.4, 1, '#c98a58'); // sunlit tips
+    P(3, 3, 13, 1.2, '#b07c48');                             // gunwale
+    P(3.8, 4, 11.4, 2, '#4a2c18');                           // cosy interior
+    P(6.2, 3.8, 2.6, 1, '#c98a58');                          // seat plank
+    P(2.6, 7, 13.8, 1.4, '#6e4526');                         // waterline shade
+    P(3.6, 8.4, 11.8, 0.7, '#5a3a20');                       // keel line
+    P(15.9, 0.4, 0.7, 2.6, '#5f3a22');                       // stern flag pole
+    P(16.6, 0.4, 2.2, 1.3, '#e05a3a'); P(16.6, 0.6, 1.4, 0.9, '#f0705e');  // little flag
+  });
+  SPR.wake = glowDot(8, '#eefaff');
+  /* edge-of-screen event arrows (crate / danger / egg) — baked, drawn rotated */
+  const mkArrow = col => {
+    const [c, g] = C(40, 40);
+    const gl = g.createRadialGradient(20, 20, 2, 20, 20, 19);
+    gl.addColorStop(0, col + '55'); gl.addColorStop(1, col + '00');
+    g.fillStyle = gl; g.fillRect(0, 0, 40, 40);
+    g.beginPath(); g.moveTo(34, 20); g.lineTo(12, 8); g.lineTo(18, 20); g.lineTo(12, 32); g.closePath();
+    g.fillStyle = col; g.fill();
+    g.lineWidth = 2.4; g.strokeStyle = '#ffffff'; g.lineJoin = 'round'; g.stroke();
+    return c;
+  };
+  SPR.arrowC = mkArrow('#ffd24a');   // crate
+  SPR.arrowD = mkArrow('#ff6b6b');   // disaster
+  SPR.arrowE = mkArrow('#c9a6e8');   // egg
+
   /* crate / egg / drake / robot */
   SPR.crate = S(14, 12, (g, P) => {
     shad(g, 14, 22, 10, 3);
@@ -1057,7 +1127,13 @@ function initSprites() {
     return c;
   };
   SPR.menuP   = panel(1240, 106);
-  SPR.statsP  = panel(660, 480);
+  SPR.statsP  = panel(960, 560);
+  SPR.miniP   = (() => {          // minimap backing (world aspect 2560:1416)
+    const [c, g] = C(276, 158);
+    g.fillStyle = 'rgba(0,0,0,0.55)'; rr(g, 0, 0, 276, 158, 8); g.fill();
+    g.strokeStyle = 'rgba(120,200,255,0.55)'; g.lineWidth = 2; rr(g, 1, 1, 274, 156, 7); g.stroke();
+    return c;
+  })();
   SPR.pauseP  = panel(420, 330);
   SPR.bannerP = panel(780, 132, '#ffd24a');
   SPR.modalP  = panel(620, 380, '#ffd24a');
@@ -1187,8 +1263,8 @@ function initSprites() {
    WORLD — organic island mask per age, terrain layer, static bg layer,
    decorative auto-pipes. Terrain/bg are rebuilt ONLY on island changes.
    ═══════════════════════════════════════════════════════════════════════ */
-const [terrainC, tg] = C(W, H);
-const [bgC, bgg] = C(W, H);
+const [terrainC, tg] = C(WORLD_W, WORLD_H);
+const [bgC, bgg] = C(WORLD_W, WORLD_H);
 const RX = [0, 6.4, 8.6, 10.8, 13.2, 15.4, 16.4];
 const RY = [0, 4.8, 6.2, 7.6, 8.8, 10.0, 10.6];
 
@@ -1235,6 +1311,90 @@ function genIsland(sd) {
   }
   occ = [];
   for (let gy = 0; gy < GH; gy++) { occ[gy] = []; for (let gx = 0; gx < GW; gx++) occ[gy][gx] = null; }
+  recomputeIsleIds();
+}
+
+/* ── v3: settled-island blobs — deterministic per seed + settle order ── */
+function isleTiles(cx2, cy2, order, step) {
+  const rng = mulberry(((seed % 65536) * 131 + order * 29 + 7) >>> 0);
+  const s0 = rng() * 6.28, s1 = rng() * 6.28, s2 = rng() * 6.28;
+  const rx = 5.0 + step * 1.2, ry = 3.8 + step * 1.0;
+  const out = [];
+  for (let gy = Math.floor(cy2 - ry - 2); gy <= Math.ceil(cy2 + ry + 2); gy++)
+    for (let gx = Math.floor(cx2 - rx - 2); gx <= Math.ceil(cx2 + rx + 2); gx++) {
+      const dx = (gx - cx2) / rx, dy = (gy - cy2) / ry;
+      const r = Math.hypot(dx, dy), ang = Math.atan2(dy, dx);
+      const wob = 1 + 0.14 * Math.sin(ang * 3 + s0) + 0.1 * Math.sin(ang * 5 + s1) + 0.05 * Math.sin(ang * 7 + s2);
+      if (r < wob * 0.8 || Math.hypot(gx - cx2, gy - cy2) < 1.7) out.push({ gx, gy });
+    }
+  return out;
+}
+function carveIsle(isl, step, ageVal) {        // raise any still-water tiles of this ring
+  const out = [];
+  for (const t of isleTiles(isl.gx, isl.gy, isl.o, step)) {
+    if (t.gx < 2 || t.gy < 2 || t.gx >= GW - 2 || t.gy >= GH - 2) continue;
+    if (nearMoonR(t.gx, t.gy, 1)) continue;    // the moon keeps its moat
+    if (landAge[t.gy][t.gx] !== 0) continue;
+    landAge[t.gy][t.gx] = ageVal;
+    out.push(t);
+  }
+  return out;
+}
+/* island component ids (flood fill over RAW land incl. future rings + moon);
+   pipes / robots / crates use these — nothing ever links across water */
+function recomputeIsleIds() {
+  isleId = [];
+  for (let gy = 0; gy < GH; gy++) { isleId[gy] = []; for (let gx = 0; gx < GW; gx++) isleId[gy][gx] = 0; }
+  let n = 0;
+  const stack = [];
+  for (let gy = 0; gy < GH; gy++) for (let gx = 0; gx < GW; gx++) {
+    if (landAge[gy][gx] === 0 || isleId[gy][gx]) continue;
+    n++;
+    stack.length = 0; stack.push(gx, gy);
+    while (stack.length) {
+      const y2 = stack.pop(), x2 = stack.pop();
+      if (x2 < 0 || y2 < 0 || x2 >= GW || y2 >= GH) continue;
+      if (landAge[y2][x2] === 0 || isleId[y2][x2]) continue;
+      isleId[y2][x2] = n;
+      stack.push(x2 + 1, y2, x2 - 1, y2, x2, y2 + 1, x2, y2 - 1);
+    }
+  }
+}
+const isleIdAt = (gx, gy) => gx >= 0 && gy >= 0 && gx < GW && gy < GH ? isleId[gy][gx] : 0;
+/* v1/v2 saves lived in a 40x22 world — replicate the OLD moon-corner pick so
+   moon buildings can be remapped exactly (same rng, same emptiest-corner rule) */
+function oldMoonRectFor(sd) {
+  const GW0 = 40, GH0 = 22, CX0 = 20, CYG0 = 11;
+  const rng = mulberry(sd);
+  const s = [rng() * 6.28, rng() * 6.28, rng() * 6.28];
+  const la = [];
+  for (let gy = 0; gy < GH0; gy++) {
+    la[gy] = [];
+    for (let gx = 0; gx < GW0; gx++) {
+      let a = 0;
+      if (gx >= 1 && gx < GW0 - 1 && gy >= 1 && gy < GH0 - 1) {
+        for (let k = 1; k <= 6; k++) {
+          const dx = (gx - CX0) / RX[k], dy = (gy - CYG0) / RY[k];
+          const r = Math.hypot(dx, dy), ang = Math.atan2(dy, dx);
+          const wob = 1 + 0.13 * Math.sin(ang * 3 + s[0]) + 0.09 * Math.sin(ang * 5 + s[1]) + 0.05 * Math.sin(ang * 7 + s[2]);
+          if (r < wob * 0.82 || (k === 1 && Math.hypot(gx - CX0, gy - CYG0) < 2.2)) { a = k; break; }
+        }
+      }
+      la[gy][gx] = a;
+    }
+  }
+  const corners = [
+    { gx: 2, gy: 1 }, { gx: GW0 - 2 - MOON_W, gy: 1 },
+    { gx: 2, gy: GH0 - 1 - MOON_H }, { gx: GW0 - 2 - MOON_W, gy: GH0 - 1 - MOON_H },
+  ];
+  let bestC = corners[0], bestN = 1e9;
+  for (const c of corners) {
+    let n = 0;
+    for (let dy = -1; dy <= MOON_H; dy++) for (let dx = -1; dx <= MOON_W; dx++)
+      if (la[c.gy + dy] && la[c.gy + dy][c.gx + dx]) n++;
+    if (n < bestN) { bestN = n; bestC = c; }
+  }
+  return bestC;
 }
 const isLand = (gx, gy) => gx >= 0 && gy >= 0 && gx < GW && gy < GH && landAge[gy][gx] > 0 && landAge[gy][gx] <= age;
 /* moon = age-7 tiles INSIDE the reserved moon rect (grown max-age land is
@@ -1242,6 +1402,16 @@ const isLand = (gx, gy) => gx >= 0 && gy >= 0 && gx < GW && gy < GH && landAge[g
 const isMoon = (gx, gy) => gx >= 0 && gy >= 0 && gx < GW && gy < GH && landAge[gy][gx] === 7 &&
   !!moonRect && gx >= moonRect.gx && gx < moonRect.gx + MOON_W && gy >= moonRect.gy && gy < moonRect.gy + MOON_H;
 const isLandPx = (x, y) => isLand(Math.floor(x / TILE), Math.floor((y - GY0) / TILE));
+/* sailable water = visible ocean, minus the moon's reserved waters (so the
+   age-7 reveal can never strand a boat on regolith) */
+function isWater(gx, gy) {
+  if (gx < 0 || gy < 0 || gx >= GW || gy >= GH) return false;
+  if (isLand(gx, gy)) return false;
+  if (moonRect && gx >= moonRect.gx - 1 && gx < moonRect.gx + MOON_W + 1 &&
+      gy >= moonRect.gy - 1 && gy < moonRect.gy + MOON_H + 1) return false;
+  return true;
+}
+const isWaterPx = (x, y) => isWater(Math.floor(x / TILE), Math.floor((y - GY0) / TILE));
 function sandAt(gx, gy) {
   return isLand(gx, gy) && (!isLand(gx - 1, gy) || !isLand(gx + 1, gy) || !isLand(gx, gy - 1) || !isLand(gx, gy + 1));
 }
@@ -1261,6 +1431,7 @@ function scatterFlora(forAge) {
     if (landAge[gy][gx] !== forAge) continue;
     if (sandAt(gx, gy)) continue;
     if (Math.hypot(gx - CX, gy - CYG) < 2.5) continue;
+    if (settled.some(il => Math.hypot(gx - il.gx, gy - il.gy) < 2)) continue;
     if (occ[gy][gx] || floraAt(gx, gy)) continue;
     const r = rng();
     if (r < 0.12) { flora.push({ type: 'tree', gx, gy, hits: 0, gone: false, regrowT: 0, shakeT: 0, golden: false }); trees++; }
@@ -1306,9 +1477,10 @@ function growCandidates() {
 function growIsland() {
   const cands = growCandidates();
   if (!cands.length) {
-    if (!islandFull) {
+    /* per-archipelago: only "full" when no island can grow AND all are settled */
+    if (!islandFull && settled.length >= SETTLE_MAX) {
       islandFull = true;
-      banners.push({ title: 'YOUR ISLAND IS FULL!', sub: 'Every last tile tamed!', t: 0, dur: 3.6, legendary: true });
+      banners.push({ title: 'YOUR ARCHIPELAGO IS FULL!', sub: 'Every last tile tamed!', t: 0, dur: 3.6, legendary: true });
       SFX.fanfare();
       saveGame();
     }
@@ -1347,9 +1519,39 @@ function growIsland() {
   }
   banners.push({ title: 'THE ISLAND GROWS!', sub: '+' + picked.length + ' new land — room to build!', t: 0, dur: 3 });
   SFX.fanfare();
+  let px2 = 0, py2 = 0;
+  for (const t of picked) { px2 += tX(t.gx) + 16; py2 += tY(t.gy) + 16; }
+  camPanTo(px2 / picked.length, py2 / picked.length, 2.4);   // show kids the new land
+  recomputeIsleIds();
   terrainDirty = true;
   saveGame();
   return true;
+}
+
+/* ── v3: camera — one smooth window into the big world ── */
+function camPanTo(x, y, dur) { camPan = { x, y, t: dur }; }
+function camTarget() {
+  if (gateSeq) return { x: tX(gateSeq.b.gx) + 32, y: tY(gateSeq.b.gy) + 30 };
+  if (rocketSeq && rocketSeq.phase !== 'stars')
+    return { x: tX(rocketSeq.pad.gx) + 32, y: tY(rocketSeq.pad.gy) + 20 - Math.min(rocketSeq.ry * 0.5, 260) };
+  if (disaster) {
+    const t = disaster.targets.find(t2 => !t2.done) || disaster.targets[disaster.targets.length - 1];
+    if (t) return { x: t.x, y: t.y };
+  }
+  if (camPan) return camPan;
+  let sx = 0, sy = 0, n = 0;
+  for (const p of players) { sx += p.x; sy += p.y; n++; }
+  return n ? { x: sx / n, y: sy / n } : { x: tX(CX) + 16, y: tY(CYG) + 16 };
+}
+const camFollowing = () => !gateSeq && !rocketSeq && !disaster && !camPan;   // leash only in follow mode
+function updateCamera(dt, snap) {
+  if (camPan) { camPan.t -= dt; if (camPan.t <= 0) camPan = null; }
+  const t = camTarget();
+  const wx = clamp(t.x - W / 2, 0, WORLD_W - W), wy = clamp(t.y - H / 2, 0, WORLD_H - H);
+  if (snap) { camX = wx; camY = wy; return; }
+  const f = Math.min(1, dt * 3.2);
+  camX += (wx - camX) * f;
+  camY += (wy - camY) * f;
 }
 
 /* ── pipes (purely decorative) ── */
@@ -1359,9 +1561,11 @@ function pipeAnchor(b) {
 }
 function nearestOf(kinds, b, before) {
   let bst = null, bd = 1e9;
+  const home = isleIdAt(b.gx, b.gy);
   for (const o of buildings) {
     if (o === b) continue;
     if (before && o.seq >= b.seq) continue;
+    if (isleIdAt(o.gx, o.gy) !== home) continue;   // pipes never cross water
     let match = false;
     for (const k of kinds) if (o.k === k || (k === '@power' && B[o.k].wire && (B[o.k].prod || {}).power)) match = true;
     if (!match) continue;
@@ -1443,21 +1647,25 @@ function pipePos(p, d) {
 
 function rebuildTerrain() {
   terrainDirty = false;
-  const gr = tg.createLinearGradient(0, 0, 0, H);
+  const gr = tg.createLinearGradient(0, 0, 0, WORLD_H);
   gr.addColorStop(0, '#2b7db8'); gr.addColorStop(1, '#175a92');
-  tg.fillStyle = gr; tg.fillRect(0, 0, W, H);
-  /* soft turquoise halo under the island so it sits IN the water */
-  const halo = tg.createRadialGradient(CX * TILE + 16, tY(CYG) + 16, 60, CX * TILE + 16, tY(CYG) + 16, 460);
-  halo.addColorStop(0, 'rgba(120,215,255,0.13)'); halo.addColorStop(1, 'rgba(120,215,255,0)');
-  tg.fillStyle = halo; tg.fillRect(0, 0, W, H);
+  tg.fillStyle = gr; tg.fillRect(0, 0, WORLD_W, WORLD_H);
+  /* soft turquoise halo under every island so they sit IN the water */
+  const isleHalo = (hx, hy, r) => {
+    const halo = tg.createRadialGradient(hx, hy, 60, hx, hy, r);
+    halo.addColorStop(0, 'rgba(120,215,255,0.13)'); halo.addColorStop(1, 'rgba(120,215,255,0)');
+    tg.fillStyle = halo; tg.fillRect(hx - r, hy - r, r * 2, r * 2);
+  };
+  isleHalo(CX * TILE + 16, tY(CYG) + 16, 460);
+  for (const il of settled) isleHalo(tX(il.gx) + 16, tY(il.gy) + 16, 220 + il.steps * 40);
   tg.fillStyle = 'rgba(10,50,90,0.25)';
-  for (let i = 0; i < 90; i++) {
-    const x = (i * 211 + 40) % W, y = (i * 127 + 60) % H;
+  for (let i = 0; i < 340; i++) {
+    const x = (i * 211 + 40) % WORLD_W, y = (i * 127 + 60) % WORLD_H;
     if (!isLandPx(x, y)) tg.fillRect(x, y, 26, 3);
   }
   tg.fillStyle = 'rgba(200,235,255,0.14)';
-  for (let i = 0; i < 60; i++) {
-    const x = (i * 173 + 90) % W, y = (i * 149 + 20) % H;
+  for (let i = 0; i < 230; i++) {
+    const x = (i * 173 + 90) % WORLD_W, y = (i * 149 + 20) % WORLD_H;
     if (!isLandPx(x, y)) tg.fillRect(x, y, 14, 2);
   }
   const nearLandR = (gx, gy, r) => {
@@ -1770,17 +1978,31 @@ function ageUp() {
   age++;
   banners.push({ title: 'AGE ' + age + ' — ' + AGE_NAMES[age] + '!', sub: AGE_SUBS[age], t: 0, dur: 3.4 });
   SFX.fanfare();
+  /* every settled island grows its own ring, from its own centre */
+  for (const il of settled) {
+    if (il.steps >= ISLE_STEP_MAX) continue;
+    il.steps++;
+    carveIsle(il, il.steps, age);
+  }
+  recomputeIsleIds();
   scatterFlora(age);
   for (let gy = 0; gy < GH; gy++) for (let gx = 0; gx < GW; gx++) {
     if (landAge[gy][gx] === age && hash2(gx + age, gy) < 0.4)
       spawnP(tX(gx) + 16, tY(gy) + 16, SPR.spark[0], { vy: -30, g: 0, life: 1.2 });
   }
+  camPanTo(tX(CX) + 16, tY(CYG) + 16, 2.2);     // watch the home island bloom
   if (age === 7) {                              // the moon appears!
     banners.push({ title: 'THE MOON ISLAND!', sub: 'The space elevator hums to life...', t: 0, dur: 3.4, legendary: true });
     if (moonRect) for (let gy = moonRect.gy; gy < moonRect.gy + MOON_H; gy++)
       for (let gx = moonRect.gx; gx < moonRect.gx + MOON_W; gx++)
         if (isMoon(gx, gy) && hash2(gx, gy + 7) < 0.6)
           spawnP(tX(gx) + 16, tY(gy) + 16, SPR.sparkB[0], { vy: -26, g: 0, life: 1.3 });
+    camPanTo(tX(moonRect.gx) + MOON_W * 16, tY(moonRect.gy) + MOON_H * 16, 3.2);
+  }
+  /* new land can rise under a sailing boat — beach it gently, never strand */
+  for (const p of players) if (p.boat && !isWaterPx(p.x, p.y)) {
+    p.boat = false;
+    if (p.mode === 'boatmenu' || p.mode === 'settle') p.mode = 'walk';
   }
   recomputePipes(); recomputeAnims();
   terrainDirty = true;
@@ -1789,10 +2011,12 @@ function ageUp() {
 
 /* ── building placement ── */
 function validAt(k, gx, gy) {
-  const s = B[k].size || 1, moonB = !!B[k].moon;
+  const s = B[k].size || 1, moonB = !!B[k].moon, coastal = !!B[k].coastal;
   if (gx < 0 || gy < 0 || gx + s > GW || gy + s > GH) return false;
   for (let dy = 0; dy < s; dy++) for (let dx = 0; dx < s; dx++) {
-    if (!tileBuildable(gx + dx, gy + dy) || sandAt(gx + dx, gy + dy)) return false;
+    if (!tileBuildable(gx + dx, gy + dy)) return false;
+    /* coastal buildings (seaport) NEED a beach tile; everything else avoids sand */
+    if (sandAt(gx + dx, gy + dy) !== coastal) return false;
     if (isMoon(gx + dx, gy + dy) !== moonB) return false;   // moon buildings on moon only
   }
   return true;
@@ -1863,9 +2087,13 @@ function removeBuilding(b) {
 
 /* ── mystery crates ── */
 function spawnCrate() {
-  const beach = [];
+  /* crates wash up on a random island that HAS buildings (never a bare one) */
+  const lived = new Set();
+  for (const b of buildings) { const id = isleIdAt(b.gx, b.gy); if (id) lived.add(id); }
+  let beach = [];
   for (let gy = 0; gy < GH; gy++) for (let gx = 0; gx < GW; gx++)
-    if (sandAt(gx, gy) && !isMoon(gx, gy) && !occ[gy][gx] && !floraAt(gx, gy)) beach.push({ gx, gy });
+    if (sandAt(gx, gy) && !isMoon(gx, gy) && !occ[gy][gx] && !floraAt(gx, gy) &&
+        (!lived.size || lived.has(isleId[gy][gx]))) beach.push({ gx, gy });
   if (!beach.length) { crateT = 60; return; }
   const t = beach[(Math.random() * beach.length) | 0];
   crate = { gx: t.gx, gy: t.gy, t: 0, opening: 0 };
@@ -1963,15 +2191,19 @@ function updateRobot(r, dt) {
   /* drop finished / invalid targets (flora harvested, rubble repaired) */
   if (r.targ && (r.targ.k ? !r.targ.rubble : r.targ.gone)) r.targ = null;
   if (!r.targ) {
+    /* robots stay on their own island — never chase targets across water */
+    const home = isleIdAt(Math.floor(r.x / TILE), Math.floor((r.y - GY0) / TILE));
     let bd = 1e9;
     for (const b of buildings) {                // rubble first — robots love fixing
       if (!b.rubble) continue;
+      if (home && isleIdAt(b.gx, b.gy) !== home) continue;
       const s = B[b.k].size || 1;
       const d = Math.hypot(tX(b.gx) + s * 16 - r.x, tY(b.gy) + s * 16 - r.y);
       if (d < bd) { bd = d; r.targ = b; }
     }
     if (!r.targ) for (const f of flora) {
       if (f.gone) continue;
+      if (home && isleIdAt(f.gx, f.gy) !== home) continue;
       const d = Math.hypot(tX(f.gx) + 16 - r.x, tY(f.gy) + 24 - r.y);
       if (d < bd) { bd = d; r.targ = f; }
     }
@@ -2000,7 +2232,9 @@ function updateRobot(r, dt) {
 function updateDrake(dr, i, dt) {
   const owner = players[i % (players.length || 1)];  // both drakes follow players
   if (!owner) return;
-  const tx2 = owner.x + (i ? 26 : -26), ty2 = owner.y - 6;
+  /* if their human sails away, drakes hover to the shore and wait (cute) */
+  const ax = owner.boat ? owner.shoreX : owner.x, ay = owner.boat ? owner.shoreY : owner.y;
+  const tx2 = ax + (i ? 26 : -26), ty2 = ay - 6;
   dr.x += (tx2 - dr.x) * Math.min(1, dt * 3);
   dr.y += (ty2 - dr.y) * Math.min(1, dt * 3);
   dr.frame += dt * 5;
@@ -2044,6 +2278,11 @@ function harvestFlora(f, px2, py2) {
     f.hits++;
     if (f.hits >= 3) { f.gone = true; f.hits = 0; f.regrowT = 35 + Math.random() * 15; }
   }
+}
+
+/* fireworks burst somewhere in the CURRENT camera view (world coords) */
+function fwSpot() {
+  return { x: camX + 200 + Math.random() * (W - 400), y: camY + 100 + Math.random() * 260 };
 }
 
 /* ── rocket sequence (repeatable — re-launches deliver space cargo) ── */
@@ -2092,7 +2331,7 @@ function updateRocket(dt) {
     if (q.fw <= 0) {
       q.fw = 0.35;
       SFX.firework();
-      const fx = 200 + Math.random() * (W - 400), fy = 100 + Math.random() * 260;
+      const { x: fx, y: fy } = fwSpot();
       const spr = SPR.fw[(Math.random() * SPR.fw.length) | 0];
       for (let i = 0; i < 9; i++) {
         const a = i / 9 * 6.28, sp = 60 + Math.random() * 60;
@@ -2144,7 +2383,7 @@ function updateGate(dt) {
     if (q.fw <= 0) {
       q.fw = 0.35;
       SFX.firework();
-      const fx = 200 + Math.random() * (W - 400), fy = 100 + Math.random() * 260;
+      const { x: fx, y: fy } = fwSpot();
       const spr = SPR.fw[(Math.random() * SPR.fw.length) | 0];
       for (let i = 0; i < 9; i++) {
         const a = i / 9 * 6.28, sp = 60 + Math.random() * 60;
@@ -2188,9 +2427,16 @@ function startDisaster(forceType) {
   }
   disaster = { type, phase: 'warn', t: 0, targets };
   if (type === 'pirates') {
-    const left = targets[0].x < W / 2;
-    disaster.ship = { x: left ? -70 : W + 70, y: clamp(targets[0].y, 120, H - 60),
-                      tx: left ? 70 : W - 70, dir: left ? 1 : -1 };
+    /* sail in from the nearer sea and anchor just offshore (world coords) */
+    const left = targets[0].x < WORLD_W / 2;
+    const step = left ? -1 : 1;
+    const tgy = clamp(Math.floor((targets[0].y - GY0) / TILE), 1, GH - 2);
+    let sgx = clamp(Math.floor(targets[0].x / TILE), 2, GW - 3);
+    while (sgx > 2 && sgx < GW - 3 && !isWater(sgx, tgy)) sgx += step;
+    sgx = clamp(sgx + step * 2, 2, GW - 3);
+    const anchorX = tX(sgx) + 16;
+    disaster.ship = { x: anchorX + step * 420, y: clamp(targets[0].y, 60, WORLD_H - 60),
+                      tx: anchorX, dir: left ? 1 : -1 };
     for (let i = 0; i < targets.length; i++) targets[i].delay = 0.5 + i * 1.1;
   }
   banners.push({ title: DIS_DEFS[type].title, sub: 'Quick — it will smash some buildings!', t: 0, dur: 2.6 });
@@ -2268,21 +2514,142 @@ function repairWhack(b) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════
+   V3 — SEAPORT, BOATS & SETTLING NEW ISLANDS
+   ═══════════════════════════════════════════════════════════════════════ */
+function nearSeaport(p) {
+  for (const b of buildings)
+    if (b.k === 'seaport' && !b.rubble &&
+        Math.hypot(tX(b.gx) + 16 - p.x, tY(b.gy) + 16 - p.y) < 58) return b;
+  return null;
+}
+function boardBoat(p, sp) {
+  let bst = null, bd = 1e9;
+  for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
+    const gx = sp.gx + dx, gy = sp.gy + dy;
+    if (!isWater(gx, gy)) continue;
+    const d = Math.hypot(gx - sp.gx, gy - sp.gy);
+    if (d < bd) { bd = d; bst = { gx, gy }; }
+  }
+  if (!bst) return false;
+  p.shoreX = p.x; p.shoreY = p.y;               // drakes wait here, cutely
+  p.x = tX(bst.gx) + 16; p.y = tY(bst.gy) + 16;
+  p.boat = true; p.moor = null; p.target = null; p.wakeT = 0;
+  SFX.splash();
+  for (let i = 0; i < 6; i++) spawnP(p.x, p.y + 4, SPR.wake, { vy: -14, g: -6, life: 0.6 });
+  addFloat(p.x, p.y - 36, 'ANCHORS AWAY!', '#8fd4ff');
+  return true;
+}
+/* the boat you left stays moored where you hopped off — press ✕ to re-board
+   (kid-proof: you can never be stranded on a seaport-less island) */
+function tryBoardMoor(p) {
+  if (p.boat || !p.moor) return false;
+  if (Math.hypot(p.moor.x - p.x, p.moor.y - p.y) > 64) return false;
+  p.shoreX = p.x; p.shoreY = p.y;
+  p.x = p.moor.x; p.y = p.moor.y;
+  p.boat = true; p.moor = null; p.target = null; p.wakeT = 0;
+  SFX.splash();
+  for (let i = 0; i < 5; i++) spawnP(p.x, p.y + 4, SPR.wake, { vy: -14, g: -6, life: 0.6 });
+  return true;
+}
+function tryDisembark(p) {
+  let bst = null, bd = 1e9;
+  const gx0 = Math.floor(p.x / TILE), gy0 = Math.floor((p.y - GY0) / TILE);
+  for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
+    const gx = gx0 + dx, gy = gy0 + dy;
+    if (!isLand(gx, gy) || isMoon(gx, gy)) continue;     // the moon has no beach
+    const d = Math.hypot(tX(gx) + 16 - p.x, tY(gy) + 16 - p.y);
+    if (d < bd) { bd = d; bst = { gx, gy }; }
+  }
+  if (!bst || bd > 62) return false;            // open water: nothing (no stranding)
+  p.moor = { x: p.x, y: p.y };                  // the dinghy waits right here
+  p.x = tX(bst.gx) + 16; p.y = tY(bst.gy) + 16;
+  p.boat = false; p.target = null;
+  SFX.splash();
+  for (let i = 0; i < 5; i++) spawnP(p.x, p.y + 6, SPR.wake, { vy: -12, g: -6, life: 0.5 });
+  return true;
+}
+function settleCost() {
+  const m = Math.pow(1.5, settled.length);      // +50% per island already settled
+  return { wood: Math.round(200 * m), stone: Math.round(100 * m), metal: Math.round(50 * m) };
+}
+function settleInfo(p) {
+  /* cached per boat-tile — cheap enough to hold in the render loop */
+  const c = tileUnder(p);
+  if (p._si && p._si.c.gx === c.gx && p._si.c.gy === c.gy && p._si.n === settled.length) return p._si;
+  const tiles = isleTiles(c.gx, c.gy, settled.length, 0);
+  const cost = settleCost();
+  let geomOk = true, reason = '';
+  if (settled.length >= SETTLE_MAX) { geomOk = false; reason = 'MAX ISLANDS!'; }
+  if (geomOk) for (const q of tiles) {
+    if (q.gx < 2 || q.gy < 2 || q.gx >= GW - 2 || q.gy >= GH - 2) { geomOk = false; reason = 'TOO FAR OUT TO SEA!'; break; }
+    if (landAge[q.gy][q.gx] !== 0) { geomOk = false; reason = 'TOO CLOSE TO LAND!'; break; }
+  }
+  if (geomOk) outer: for (const q of tiles)     // ≥3 tiles clear of ANY land (even future rings)
+    for (let dy = -3; dy <= 3; dy++) for (let dx = -3; dx <= 3; dx++) {
+      const gx = q.gx + dx, gy = q.gy + dy;
+      if (gx >= 0 && gy >= 0 && gx < GW && gy < GH && landAge[gy][gx] > 0) {
+        geomOk = false; reason = 'TOO CLOSE TO LAND!'; break outer;
+      }
+    }
+  p._si = { c: { gx: c.gx, gy: c.gy }, n: settled.length, tiles, geomOk, reason, cost };
+  return p._si;
+}
+function trySettle(p) {
+  const si = settleInfo(p);
+  if (!si.geomOk || !canAfford(si.cost)) { SFX.cancel(); return false; }
+  payCost(si.cost);
+  const isl = { gx: si.c.gx, gy: si.c.gy, steps: 0, o: settled.length };
+  settled.push(isl);
+  for (const q of si.tiles) if (landAge[q.gy][q.gx] === 0) landAge[q.gy][q.gx] = 1;
+  recomputeIsleIds();
+  /* a few trees & rocks take root (deterministic per seed + settle order) */
+  const rng = mulberry(((seed % 65536) * 997 + isl.o * 57 + 3) >>> 0);
+  for (const q of si.tiles) {
+    if (sandAt(q.gx, q.gy) || Math.hypot(q.gx - isl.gx, q.gy - isl.gy) < 1.5) continue;
+    const r = rng();
+    if (r < 0.18) flora.push({ type: 'tree', gx: q.gx, gy: q.gy, hits: 0, gone: false, regrowT: 0, shakeT: 0, golden: false });
+    else if (r < 0.28) flora.push({ type: 'rock', gx: q.gx, gy: q.gy, hits: 0, gone: false, regrowT: 0, shakeT: 0, golden: false });
+  }
+  /* land rises! splash + sparkle celebration */
+  for (const q of si.tiles) {
+    if (hash2(q.gx, q.gy + 3) < 0.5)
+      spawnP(tX(q.gx) + 16, tY(q.gy) + 16, SPR.spark[(q.gx + q.gy) % 2], { vy: -30, g: 0, life: 1.1 });
+  }
+  for (let i = 0; i < 10; i++)
+    spawnP(p.x + (Math.random() - 0.5) * 120, p.y + (Math.random() - 0.5) * 80, SPR.wake, { vy: -24, g: -8, life: 0.8 });
+  banners.push({ title: 'A NEW ISLAND!', sub: islandName + "'s archipelago grows!", t: 0, dur: 3.4, legendary: true });
+  SFX.legendary(); SFX.splash();
+  /* the boat is beached on the brand-new shore — step off proudly, and the
+     dinghy stays moored just off the coast so you can always sail home */
+  p.boat = false; p.mode = 'walk';
+  p.x = tX(isl.gx) + 16; p.y = tY(isl.gy) + 16;
+  p.moor = null;
+  out: for (let r = 1; r < 12; r++) for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) {
+    if (isWater(isl.gx + dx, isl.gy + dy)) { p.moor = { x: tX(isl.gx + dx) + 16, y: tY(isl.gy + dy) + 16 }; break out; }
+  }
+  terrainDirty = true;
+  recomputePipes(); recomputeAnims();
+  saveGame();
+  return true;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
    SAVE / LOAD — 3 slots + autosave + offline progress (½ rate, 8h cap)
    ═══════════════════════════════════════════════════════════════════════ */
 function thumbURL() {
   try {
     const [c, g] = C(96, 54);
-    g.drawImage(bgC, 0, 0, W, H, 0, 0, 96, 54);
+    g.drawImage(bgC, 0, 0, WORLD_W, WORLD_H, 0, 0, 96, 54);
     return c.toDataURL('image/png');
   } catch (e) { return null; }
 }
 function saveGame() {
   if (scene !== 'play') return;
   const s = {
-    v: 3, name: islandName, seed, age, legends, rocketDone, firstPowerDone,
+    v: 4, name: islandName, seed, age, legends, rocketDone, firstPowerDone,
     stars, goalI, cratesOpened, rubbleFixed,
     rocketsLaunched, lastGift, battCharge,
+    islands: settled.map(il => [il.gx, il.gy, il.steps]),
     grown: grownTiles, growNextPop, islandFull,
     campfireGone: cnt('campfire') === 0,
     res, life, popF, playtime, crateT, rates, savedAt: Date.now(),
@@ -2322,6 +2689,8 @@ function resetWorldState() {
   rocketsLaunched = 0; lastGift = null; forcedGift = null; fwShow = 0; fwT = 0;
   battCharge = 0; battCap = 0;
   grownTiles = []; growNextPop = 0; islandFull = false;
+  settled = []; camPan = null;
+  for (const a of edgeArrows) a.on = false;
   gateSeq = null; confirmPrestige = null;
   disaster = null; disasterT = DIS_FIRST; sessionT = 0;
   goalI = 0; cratesOpened = 0; rubbleFixed = 0;
@@ -2335,6 +2704,7 @@ function startPlay() {
   scene = 'play';
   document.body.classList.add('in-play');
   players = [mkPlayer(0)];
+  updateCamera(0, true);                        // snap camera onto the campfire
   terrainDirty = true; bgDirty = true;
 }
 function newGame(slot, nm, keepStars) {
@@ -2380,10 +2750,25 @@ function loadGame(slot) {
   genIsland(s.seed || 1);
   age = s.age || 1;
   if (rocketDone && age === 5) age = 6;          // v1 finishers: rocket now means Age 6
-  grownTiles = (s.grown || []).map(t => [t[0], t[1]]);   // re-apply max-age growth
+  /* ── v3 migration: pre-v4 saves lived in a 40x22 world. Translate every
+     coordinate so the old island lands EXACTLY at the new home position
+     (home centre moved (20,11) → (24,13) ⇒ offset +4,+2); moon buildings
+     remap relative to the reconstructed old moon rect. ── */
+  const old = (s.v || 1) < 4;
+  const odx = old ? CX - 20 : 0, ody = old ? CYG - 11 : 0;
+  const oldMoon = old ? oldMoonRectFor(s.seed || 1) : null;
+  const migXY = (gx, gy, moonB) => {
+    if (!old) return [gx, gy];
+    if (moonB && oldMoon && moonRect) return [gx - oldMoon.gx + moonRect.gx, gy - oldMoon.gy + moonRect.gy];
+    return [gx + odx, gy + ody];
+  };
+  settled = (s.islands || []).map((a, i) => ({ gx: a[0], gy: a[1], steps: a[2] || 0, o: i }));
+  for (const il of settled) for (let st = 0; st <= il.steps; st++) carveIsle(il, st, 1);
+  grownTiles = (s.grown || []).map(t => [t[0] + odx, t[1] + ody]);   // re-apply max-age growth
   for (const t of grownTiles) if (landAge[t[1]]) landAge[t[1]][t[0]] = 7;
+  recomputeIsleIds();
   growNextPop = s.growNextPop || 0;
-  islandFull = !!s.islandFull;
+  islandFull = old ? false : !!s.islandFull;     // the v3 sea has room again!
   res = Object.assign({ wood: 0, stone: 0, food: 0, ore: 0, metal: 0, parts: 0, science: 0 }, s.res);
   life = Object.assign({ metal: 0, parts: 0, science: 0 }, s.life);
   popF = s.popF || 2; pop = Math.floor(popF);
@@ -2391,12 +2776,13 @@ function loadGame(slot) {
   if (!s.campfireGone) addBuilding('campfire', CX, CYG);  // retired campfires stay gone
   for (const bb of (s.buildings || [])) {
     if (!B[bb[0]]) continue;
-    const b = addBuilding(bb[0], bb[1], bb[2]);  // trust save even if flora landed there
+    const [mgx, mgy] = migXY(bb[1], bb[2], !!B[bb[0]].moon);
+    const b = addBuilding(bb[0], mgx, mgy);      // trust save even if flora landed there
     if (bb[3]) { b.rubble = true; b.repair = clamp(bb[3] - 1, 0, 2); }
   }
   flora = [];
   for (const ff of (s.flora || [])) {
-    flora.push({ type: ff[0], gx: ff[1], gy: ff[2], golden: ff[3] === 1, rainbow: ff[3] === 2,
+    flora.push({ type: ff[0], gx: ff[1] + odx, gy: ff[2] + ody, golden: ff[3] === 1, rainbow: ff[3] === 2,
                  hits: ff[4] || 0, gone: ff[5] > 0, regrowT: ff[5] || 0, shakeT: 0 });
   }
   for (let i = 0; i < (s.robots || 0); i++) spawnRobot(tX(CX) + 16 + i * 10, tY(CYG) + 50);
@@ -2449,14 +2835,19 @@ function eraseSlot(i) { lsDel(SLOT_KEY(i)); loadSlotSummaries(); }
 function mkPlayer(pi) {
   return { pi, x: tX(CX) + 16 + (pi ? 34 : -18), y: tY(CYG) + 74,
            dir: 0, flip: false, frame: 0, moving: false,
+           boat: false, wakeT: 0, shoreX: 0, shoreY: 0, moor: null,
            mode: 'walk', menuI: 0, placeK: null, target: null, ghost: null };
 }
 function joinP2() {
   if (players.length !== 1) return;
   players.push(mkPlayer(1));
-  players[1].x = players[0].x + 30; players[1].y = players[0].y;
-  if (!isLandPx(players[1].x, players[1].y)) { players[1].x = players[0].x; players[1].y = players[0].y; }
-  addFloat(players[1].x, players[1].y - 40, 'P2 JOINS!', '#ff9a8a');
+  const p1 = players[0], p2 = players[1];
+  p2.x = p1.x + 30; p2.y = p1.y;
+  if (p1.boat) {                                // P1 is at sea → P2 joins in a boat beside them!
+    p2.boat = true; p2.shoreX = p1.shoreX; p2.shoreY = p1.shoreY;
+    if (!isWaterPx(p2.x, p2.y)) { p2.x = p1.x; p2.y = p1.y; }
+  } else if (!isLandPx(p2.x, p2.y)) { p2.x = p1.x; p2.y = p1.y; }
+  addFloat(p2.x, p2.y - 40, 'P2 JOINS!', '#ff9a8a');
   SFX.legendary();
 }
 function ghostTile(p) {
@@ -2483,9 +2874,13 @@ function nearFlora(p) {
   return bst;
 }
 function doAction(p) {
+  if (p.boat) { tryDisembark(p); return; }      // ✕ at sea = hop ashore (if land is near)
   if (crate && Math.hypot(tX(crate.gx) + 16 - p.x, tY(crate.gy) + 12 - p.y) < 52) { openCrate(); return; }
   const rb = nearRubble(p);
   if (rb) { repairWhack(rb); return; }
+  const sp = nearSeaport(p);
+  if (sp && boardBoat(p, sp)) return;           // ✕ by the dock = set sail!
+  if (tryBoardMoor(p)) return;                  // ✕ by your moored dinghy = sail on!
   const f = nearFlora(p);
   if (f) harvestFlora(f, p.x, p.y);
 }
@@ -2504,7 +2899,7 @@ function menuItems() {
 }
 function updatePlayer(p, dt) {
   const v = moveVec(p.pi);
-  const inMenu = p.mode === 'menu';
+  const inMenu = p.mode === 'menu' || p.mode === 'boatmenu';
   let mx = 0, my = 0;
   if (!inMenu) { mx = v.dx; my = v.dy; }
   if ((mx || my)) { p.target = null; p.ghost = null; }
@@ -2515,15 +2910,29 @@ function updatePlayer(p, dt) {
   }
   p.moving = !!(mx || my);
   if (p.moving) {
-    const sp = 150 * dt;
-    let nx = clamp(p.x + mx * sp, 8, W - 8), ny = clamp(p.y + my * sp, GY0 + 8, H - 8);
-    if (isLandPx(nx, ny)) { p.x = nx; p.y = ny; }
-    else if (isLandPx(nx, p.y)) { p.x = nx; p.target = null; }
-    else if (isLandPx(p.x, ny)) { p.y = ny; p.target = null; }
+    const sp = (p.boat ? 180 : 150) * dt;       // boats feel like walking +20%
+    let nx = clamp(p.x + mx * sp, 8, WORLD_W - 8), ny = clamp(p.y + my * sp, GY0 + 8, WORLD_H - 8);
+    /* Overcooked-style leash: nobody may leave the shared screen */
+    if (camFollowing()) {
+      nx = clamp(nx, camX + 14, camX + W - 14);
+      ny = clamp(ny, camY + 14, camY + H - 14);
+    }
+    const pass = p.boat ? isWaterPx : isLandPx;
+    if (pass(nx, ny)) { p.x = nx; p.y = ny; }
+    else if (pass(nx, p.y)) { p.x = nx; p.target = null; }
+    else if (pass(p.x, ny)) { p.y = ny; p.target = null; }
     else p.target = null;
     p.frame += dt * 7;
     if (Math.abs(mx) > Math.abs(my)) { p.dir = 2; p.flip = mx < 0; }
     else p.dir = my < 0 ? 1 : 0;
+    if (p.boat) {                               // foamy wake trail
+      p.wakeT -= dt;
+      if (p.wakeT <= 0) {
+        p.wakeT = 0.09;
+        spawnP(p.x - mx * 14 + (Math.random() - 0.5) * 8, p.y - my * 14 + 8,
+               SPR.wake, { vx: -mx * 26, vy: -my * 26 - 3, g: 0, life: 0.75 });
+      }
+    }
   } else p.frame = 0;
 }
 function moveVec(pi) {
@@ -2587,7 +2996,21 @@ function onBtn(pi, b) {
   if (b === 'north') { statsOpen = true; SFX.ui(); return; }
   if (p.mode === 'walk') {
     if (b === 'south') doAction(p);
-    else if (b === 'west') { p.mode = 'menu'; p.menuI = 0; SFX.ui(); }
+    else if (b === 'east' && p.boat) tryDisembark(p);          // ○ also steps ashore
+    else if (b === 'west') {
+      if (p.boat) { p.mode = 'boatmenu'; SFX.ui(); }
+      else { p.mode = 'menu'; p.menuI = 0; SFX.ui(); }
+    }
+  } else if (p.mode === 'boatmenu') {                          // one item: SETTLE ISLAND
+    if (b === 'south') {
+      if (settled.length < SETTLE_MAX) { p.mode = 'settle'; SFX.confirm(); }
+      else SFX.cancel();
+    }
+    else if (b === 'east' || b === 'west') { p.mode = 'walk'; SFX.cancel(); }
+  } else if (p.mode === 'settle') {                            // ghost island follows the boat
+    if (b === 'south') trySettle(p);
+    else if (b === 'east') { p.mode = 'boatmenu'; SFX.cancel(); }
+    else if (b === 'west') { p.mode = 'walk'; SFX.cancel(); }
   } else if (p.mode === 'menu') {
     const items = menuItems();
     if (b === 'left') { p.menuI = (p.menuI + items.length - 1) % items.length; SFX.ui(); }
@@ -2795,6 +3218,17 @@ function tapAt(x, y) {
   if (statsOpen) { statsOpen = false; SFX.ui(); return; }
   const p = players[0];
   if (!p) return;
+  const wx = x + camX, wy = y + camY;           // tap → world coords through the camera
+  if (p.mode === 'boatmenu') {
+    const y0 = H - 114;
+    if (y > y0 && y < y0 + 106) { onBtn(0, 'south'); return; }
+    p.mode = 'walk'; SFX.cancel();
+    return;
+  }
+  if (p.mode === 'settle') {
+    if (y > 44) p.target = { x: clamp(wx, 8, WORLD_W - 8), y: clamp(wy, GY0 + 8, WORLD_H - 8) };
+    return;
+  }
   if (p.mode === 'menu') {
     const items = menuItems();
     const pw = Math.min(1240, items.length * 100 + 24);
@@ -2813,12 +3247,12 @@ function tapAt(x, y) {
   if (p.mode === 'place' || p.mode === 'remove') {
     if (y > 44) {
       const s = p.placeK && p.mode === 'place' ? (B[p.placeK].size || 1) : 1;
-      p.ghost = { gx: clamp(Math.floor(x / TILE), 0, GW - s), gy: clamp(Math.floor((y - GY0) / TILE), 0, GH - s) };
+      p.ghost = { gx: clamp(Math.floor(wx / TILE), 0, GW - s), gy: clamp(Math.floor((wy - GY0) / TILE), 0, GH - s) };
       SFX.ui();
     }
     return;
   }
-  if (y > 44) { p.target = { x: clamp(x, 8, W - 8), y: clamp(y, GY0 + 8, H - 8) }; }
+  if (y > 44) { p.target = { x: clamp(wx, 8, WORLD_W - 8), y: clamp(wy, GY0 + 8, WORLD_H - 8) }; }
 }
 canvas.addEventListener('touchstart', ev => { ev.preventDefault(); ensureAudio(); const q = canvasPoint(ev); tapAt(q.x, q.y); }, { passive: false });
 canvas.addEventListener('mousedown', ev => { ensureAudio(); const q = canvasPoint(ev); tapAt(q.x, q.y); });
@@ -3011,6 +3445,7 @@ function drawMenu(p, yBase) {
     if (it.k === 'stargate') desc = 'opens the gate to the stars!';
     else if (d.pop) desc = '+' + d.pop + ' population' + (d.moon ? ' (on the moon!)' : '');
     else if (d.aura) desc = 'farms +50%!';
+    else if (d.coastal) desc = 'build on a beach — set sail!';
     else if (d.robot) desc = 'a robot friend!';
     else if (it.k === 'launchpad') desc = 'unlocks the rocket';
     else if (d.store) desc = 'stores ' + d.store + ' power!';
@@ -3030,8 +3465,76 @@ function drawMenu(p, yBase) {
   }
 }
 
+/* one-item build menu while boating: SETTLE ISLAND */
+function drawBoatMenu(p, yBase) {
+  const max = settled.length >= SETTLE_MAX;
+  const x0 = W / 2 - 170;
+  ctx.drawImage(SPR.menuP, x0, yBase, 340, 106);
+  ctx.drawImage(SPR.cellSel, x0 + 122, yBase + 14, 96, 82);
+  ctx.globalAlpha = max ? 0.42 : 1;
+  drawFit(SPR.tree[0], x0 + 158, yBase + 44, 40, 46);
+  ctx.globalAlpha = 1;
+  txt(max ? 'MAX!' : 'SETTLE', x0 + 170, yBase + 86, 9, max ? '#7a8b98' : '#cfe8f4', 'center');
+  otxt(max ? 'MAX ISLANDS!' : 'SETTLE ISLAND', W / 2, yBase - 38, 20, max ? '#7a8b98' : '#fff');
+  if (max) txt('your archipelago is complete!', W / 2, yBase - 16, 12, '#9fd4f0', 'center');
+  else {
+    txt('raise a brand new island from the sea!', W / 2, yBase - 16, 12, '#7dff9a', 'center');
+    const cost = settleCost(), entries = Object.keys(cost);
+    let cx1 = W / 2 - entries.length * 43 + 240;
+    for (const r of entries) {
+      ctx.drawImage(SPR.icon[r], cx1, yBase - 54);
+      txt(fmt(cost[r]), cx1 + 24, yBase - 37, 14, (res[r] || 0) >= cost[r] ? RES_COL[r] : '#ff6b6b');
+      cx1 += 86;
+    }
+  }
+}
+
+/* ── edge arrows: pulsing pointers to off-screen events (pooled, 1/type) ── */
+function updateArrows() {
+  let n = 0;
+  const put = (x, y, spr, type) => {
+    if (n >= edgeArrows.length || onCam(x, y, -8)) return;
+    const dx = x - (camRX + W / 2), dy = y - (camRY + H / 2);
+    const s = Math.min((W / 2 - 34) / Math.abs(dx || 0.001), (H / 2 - 34) / Math.abs(dy || 0.001));
+    const a = edgeArrows[n++];
+    a.on = true; a.type = type; a.spr = spr;
+    a.x = W / 2 + dx * s;
+    a.y = clamp(H / 2 + dy * s, 72, H - 34);     // keep clear of the HUD bar
+    a.ang = Math.atan2(dy, dx);
+  };
+  if (scene === 'play') {
+    if (disaster) {
+      const t = disaster.targets.find(t2 => !t2.done) || disaster.targets[0];
+      if (t && !(t.done && disaster.phase !== 'warn')) put(t.x, t.y, SPR.arrowD, 'disaster');
+    }
+    if (crate && !crate.opening) put(tX(crate.gx) + 16, tY(crate.gy) + 12, SPR.arrowC, 'crate');
+    if (egg) put(egg.x, egg.y, SPR.arrowE, 'egg');
+  }
+  for (let i = n; i < edgeArrows.length; i++) edgeArrows[i].on = false;
+}
+function drawArrows() {
+  updateArrows();
+  const pulse = 1 + 0.14 * Math.sin(T * 6);
+  for (const a of edgeArrows) {
+    if (!a.on) continue;
+    ctx.translate(a.x, a.y);
+    ctx.rotate(a.ang);
+    ctx.scale(pulse, pulse);
+    ctx.drawImage(a.spr, -20, -20);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+  }
+}
+
 function drawGhost(p) {
-  if (p.mode === 'place') {
+  if (p.mode === 'settle') {
+    /* ghost island silhouette follows the boat */
+    const si = settleInfo(p);
+    const ok = si.geomOk && canAfford(si.cost);
+    for (const q of si.tiles)
+      ctx.drawImage(ok ? SPR.tileOK : SPR.tileNO, tX(q.gx), tY(q.gy));
+    otxt(ok ? '✕ RAISE THE ISLAND!' : (si.geomOk ? 'NEED MORE RESOURCES!' : si.reason),
+         tX(si.c.gx) + 16, tY(si.c.gy) - 128, 15, ok ? '#7dff9a' : '#ff9a8a');
+  } else if (p.mode === 'place') {
     const k = p.placeK, s = B[k].size || 1, g = ghostTile(p);
     const ok = validAt(k, g.gx, g.gy) && canAfford(B[k].cost);
     for (let dy = 0; dy < s; dy++) for (let dx = 0; dx < s; dx++)
@@ -3040,7 +3543,8 @@ function drawGhost(p) {
     const spr2 = SPR.b[k];
     ctx.drawImage(spr2, tX(g.gx), tY(g.gy) + s * 32 - spr2.height);
     ctx.globalAlpha = 1;
-    otxt(ok ? '✕ PLACE' : 'CAN\'T BUILD HERE', tX(g.gx) + s * 16, tY(g.gy) - 8, 13, ok ? '#7dff9a' : '#ff9a8a');
+    otxt(ok ? '✕ PLACE' : (B[k].coastal ? 'NEEDS A BEACH BY THE SEA!' : 'CAN\'T BUILD HERE'),
+         tX(g.gx) + s * 16, tY(g.gy) - 8, 13, ok ? '#7dff9a' : '#ff9a8a');
   } else if (p.mode === 'remove') {
     const g = p.ghost || tileUnder(p);
     const bb = occ[g.gy] && occ[g.gy][g.gx];
@@ -3058,8 +3562,8 @@ function drawGhost(p) {
 
 function drawStats() {
   ctx.drawImage(SPR.dim, 0, 0);
-  const x = W / 2 - 330, y = 96;
-  ctx.drawImage(SPR.statsP, x, y, 660, 480);
+  const x = W / 2 - 480, y = 80;
+  ctx.drawImage(SPR.statsP, x, y, 960, 560);
   otxt(islandName + "'S ISLAND", W / 2, y + 46, 24, '#ffd24a');
   txt('AGE ' + age + ' — ' + AGE_NAMES[age] + (legends ? ' ★ LEGENDS' : ''), W / 2, y + 72, 14, '#9fd4f0', 'center');
   const rq = REQ_NEXT[age];
@@ -3071,7 +3575,7 @@ function drawStats() {
   } else txt(legends ? 'AGE OF LEGENDS — keep building!'
              : age >= 7 ? 'Build the STAR GATE on the moon!'
              : 'Build a LAUNCH PAD, then the ROCKET!', x + 40, y + 110, 12, '#ffd24a');
-  let ry = y + 160;
+  let ry = y + 170;
   for (const r of RES_LIST) {
     if (RES_AGE[r] > age) continue;
     ctx.drawImage(SPR.icon[r], x + 40, ry - 15);
@@ -3084,10 +3588,10 @@ function drawStats() {
       const rt = rates[r] || 0;
       txt((rt >= 0 ? '+' : '') + rt.toFixed(1) + '/s', x + 250, ry, 13, rt >= 0 ? '#7dff9a' : '#ff9a8a');
     }
-    ry += 32;
+    ry += 34;
   }
   const cap = capPop();
-  let iy = y + 160;
+  let iy = y + 170;
   ctx.drawImage(SPR.icon.pop, x + 380, iy - 15);
   txt('POPULATION', x + 410, iy, 13, '#cfe8f4');
   txt(pop + ' / ' + cap + (hungry ? '  (hungry!)' : ''), x + 410, iy + 20, 13, hungry ? '#ff9a8a' : RES_COL.pop);
@@ -3095,6 +3599,8 @@ function drawStats() {
   txt('BUILDINGS', x + 380, iy, 13, '#cfe8f4');
   txt('' + (buildings.length - cnt('campfire')), x + 380, iy + 20, 13, '#ffd24a');
   iy += 54;
+  txt('ISLANDS: ' + (1 + settled.length) + (age >= 7 ? ' + MOON' : ''), x + 380, iy, 13, '#7dffd4');
+  iy += 30;
   txt('GOALS: ' + Math.min(goalI, GOALS.length) + '/' + GOALS.length, x + 380, iy, 13, '#ffe9a8');
   iy += 30;
   if (stars > 0) { txt('★ BONUS +' + (stars * 10) + '%', x + 380, iy, 13, '#ffd24a'); iy += 30; }
@@ -3105,7 +3611,24 @@ function drawStats() {
   txt('PLAY TIME: ' + mins + 'm', x + 380, iy, 12, '#9fd4f0');
   iy += 30;
   txt('BEST POP EVER: ' + best, x + 380, iy, 12, '#ffd24a');
-  txt('△ / V — CLOSE', W / 2, y + 452, 13, '#8fc4e0', 'center');
+  /* minimap god-view — one scaled blit of the world bake + dots */
+  const mx0 = x + 636, my0 = y + 150;
+  txt('WORLD MAP', mx0 + 138, my0 - 10, 12, '#8fc4e0', 'center');
+  ctx.drawImage(SPR.miniP, mx0, my0);
+  const msc = 264 / WORLD_W;
+  ctx.drawImage(bgC, 0, 0, WORLD_W, WORLD_H, mx0 + 6, my0 + 6, 264, Math.round(WORLD_H * msc));
+  /* camera window */
+  ctx.strokeStyle = 'rgba(255,255,255,0.75)'; ctx.lineWidth = 1;
+  ctx.strokeRect(mx0 + 6 + camX * msc, my0 + 6 + camY * msc, W * msc, H * msc);
+  if (crate) {
+    ctx.fillStyle = '#ffd24a';
+    ctx.fillRect(mx0 + 4 + (tX(crate.gx) + 16) * msc, my0 + 4 + (tY(crate.gy) + 16) * msc, 5, 5);
+  }
+  for (const p of players) {
+    ctx.fillStyle = p.pi ? '#ff9a8a' : '#8fd4ff';
+    ctx.fillRect(mx0 + 4 + p.x * msc, my0 + 4 + p.y * msc, 5, 5);
+  }
+  txt('△ / V — CLOSE', W / 2, y + 532, 13, '#8fc4e0', 'center');
 }
 
 function drawPause() {
@@ -3167,17 +3690,29 @@ function drawBanner(b) {
   ctx.restore();
 }
 
+let camRX = 0, camRY = 0;                        // rounded camera used this frame
+const onCam = (x, y, m) => x > camRX - m && x < camRX + W + m && y > camRY - m && y < camRY + H + m;
+function reTx() {                                // restore shake+camera after setTransform
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.translate(shakeX - camRX, shakeY - camRY);
+}
 function renderPlay() {
   if (terrainDirty) rebuildTerrain();
   if (bgDirty) rebuildBG();
+  camRX = Math.round(camX); camRY = Math.round(camY);
+  shakeX = shakeAmt > 0.2 ? (Math.random() - 0.5) * shakeAmt * 2 : 0;
+  shakeY = shakeAmt > 0.2 ? (Math.random() - 0.5) * shakeAmt * 2 : 0;
   ctx.save();
-  if (shakeAmt > 0.2) ctx.translate((Math.random() - 0.5) * shakeAmt * 2, (Math.random() - 0.5) * shakeAmt * 2);
-  ctx.drawImage(bgC, 0, 0);
+  ctx.translate(shakeX - camRX, shakeY - camRY);
+  /* ONE source-rect blit of the visible world window */
+  ctx.drawImage(bgC, camRX, camRY, W, H, camRX, camRY, W, H);
 
-  /* ocean sparkles along the coast */
-  const nspark = Math.min(9, coast.length);
-  for (let i = 0; i < nspark; i++) {
+  /* ocean sparkles along the coast (culled to the window) */
+  const nspark = Math.min(26, coast.length);
+  for (let i = 0, drawn = 0; i < nspark && drawn < 10; i++) {
     const c = coast[(i * 43) % coast.length];
+    if (!onCam(c.x, c.y, 0)) continue;
+    drawn++;
     ctx.globalAlpha = 0.25 + 0.3 * Math.sin(T * 2.4 + i * 2.1);
     ctx.drawImage(SPR.sparkB[i % 2], c.x - 5 + ((i * 13) % 11), c.y - 5 + ((i * 7) % 9));
   }
@@ -3188,6 +3723,7 @@ function renderPlay() {
     const d = dots[i];
     if (!d.on) continue;
     const q = pipePos(d.pipe, pipeRev(d.pipe) ? d.pipe.len - d.d : d.d);
+    if (!onCam(q.x, q.y, 32)) continue;
     if (d.pipe.power) ctx.drawImage(SPR.arc[((T * 12) | 0 + i) % 2], q.x - 7, q.y - 7);
     else ctx.drawImage(SPR.dot, q.x - 5, q.y - 5);
   }
@@ -3200,8 +3736,10 @@ function renderPlay() {
     const ph = (T * 0.5) % 1;
     for (let i = 0; i < 7; i++) {
       const f = ((i + ph) / 7) % 1;
+      const ex = ax + (mx - ax) * f, ey = ay + (my - ay) * f;
+      if (!onCam(ex, ey, 32)) continue;
       ctx.globalAlpha = 0.55 + 0.3 * Math.sin(T * 3 + i * 1.3);
-      ctx.drawImage(SPR.elevDot, ax + (mx - ax) * f - 10, ay + (my - ay) * f - 10);
+      ctx.drawImage(SPR.elevDot, ex - 10, ey - 10);
     }
     ctx.globalAlpha = 1;
   }
@@ -3209,6 +3747,7 @@ function renderPlay() {
   /* animated building overlays */
   for (const a of anims) {
     if (a.b && a.b.rubble) continue;
+    if (!onCam(a.x, a.y, 64)) continue;
     switch (a.t) {
       case 'flame': {
         const f = SPR.flame[((T * 9) | 0) % 3];
@@ -3226,16 +3765,14 @@ function renderPlay() {
         ctx.translate(a.x, a.y);
         ctx.rotate(T * a.sp);
         ctx.drawImage(s, -hw, -hw);
-        ctx.setTransform(1, 0, 0, 1, 0, 0);
-        if (shakeAmt > 0.2) ctx.translate((Math.random() - 0.5) * shakeAmt * 2, (Math.random() - 0.5) * shakeAmt * 2);
+        reTx();
         break;
       }
       case 'gear':
         ctx.translate(a.x, a.y);
         ctx.rotate(T * 1.3);
         ctx.drawImage(SPR.gear, -8, -8);
-        ctx.setTransform(1, 0, 0, 1, 0, 0);
-        if (shakeAmt > 0.2) ctx.translate((Math.random() - 0.5) * shakeAmt * 2, (Math.random() - 0.5) * shakeAmt * 2);
+        reTx();
         break;
       case 'bglow':
         if (islandPowered) {
@@ -3269,8 +3806,7 @@ function renderPlay() {
         ctx.translate(a.x, a.y);
         ctx.rotate(Math.sin(T * 2.2 + a.x) * 0.7 - 0.6);
         ctx.drawImage(SPR.roboArm, -4, -4);
-        ctx.setTransform(1, 0, 0, 1, 0, 0);
-        if (shakeAmt > 0.2) ctx.translate((Math.random() - 0.5) * shakeAmt * 2, (Math.random() - 0.5) * shakeAmt * 2);
+        reTx();
         break;
       case 'fusion': {
         const pu = 0.5 + 0.5 * Math.sin(T * 3.2 + a.x);
@@ -3298,6 +3834,7 @@ function renderPlay() {
   /* idle / hungry / rubble bubbles — gentle blink (also cheaper on the Pi) */
   const bob = Math.sin(T * 4) * 2;
   if (((T * 1.4) | 0) % 3 !== 2) for (const b of buildings) {
+    if (!onCam(tX(b.gx), tY(b.gy), 64)) continue;
     if (b.rubble) ctx.drawImage(SPR.bubHungry, tX(b.gx) + 6, tY(b.gy) - 26 + bob);   // sad "!"
     else if (b.idle === 'power') ctx.drawImage(SPR.bubPower, tX(b.gx) + 6, tY(b.gy) - 26 + bob);
     else if (b.idle === 'input') ctx.drawImage(SPR.bubHungry, tX(b.gx) + 6, tY(b.gy) - 26 + bob);
@@ -3305,28 +3842,33 @@ function renderPlay() {
   }
 
   /* crate + egg */
-  if (crate) {
+  if (crate && onCam(tX(crate.gx), tY(crate.gy), 64)) {
     const cbob = Math.sin(T * 3) * 2;
     const s = crate.opening ? SPR.crateOpen : SPR.crate;
     ctx.drawImage(s, tX(crate.gx) + 2, tY(crate.gy) + 26 - s.height + (crate.opening ? -Math.sin(crate.opening * 8) * 4 : cbob));
     ctx.drawImage(SPR.spark[((T * 5) | 0) % 2], tX(crate.gx) + 11, tY(crate.gy) - 14 + cbob);
   }
-  if (egg) {
+  if (egg && onCam(egg.x, egg.y, 48)) {
     ctx.drawImage(SPR.egg, egg.x - 8, egg.y - 18 + Math.sin(T * 6) * 1.5);
   }
 
   /* shaking flora (temporarily lifted out of the static bg) */
-  for (const f of flora) if (!f.gone && f.shakeT > 0) drawFlora(ctx, f, true);
+  for (const f of flora) if (!f.gone && f.shakeT > 0 && onCam(tX(f.gx), tY(f.gy), 64)) drawFlora(ctx, f, true);
 
-  /* harvest / repair target markers */
+  /* harvest / repair / sail target markers */
   for (const p of players) {
     if (p.mode !== 'walk') continue;
+    if (p.boat) continue;
     const rb = nearRubble(p);
     if (rb) {
       const s2 = B[rb.k].size || 1;
       drawFit(SPR.mark, tX(rb.gx) + s2 * 16, tY(rb.gy) - 12 + bob, 16, 14);
       otxt('✕ FIX!', tX(rb.gx) + s2 * 16, tY(rb.gy) - 24, 13, '#7dff9a');
     } else {
+      const sp = nearSeaport(p);
+      if (sp) otxt('✕ SET SAIL!', tX(sp.gx) + 16, tY(sp.gy) - 26, 13, '#8fd4ff');
+      else if (p.moor && Math.hypot(p.moor.x - p.x, p.moor.y - p.y) < 64)
+        otxt('✕ SAIL!', p.moor.x, p.moor.y - 26, 13, '#8fd4ff');
       const f = nearFlora(p);
       if (f) drawFit(SPR.mark, tX(f.gx) + 16, tY(f.gy) - 12 + bob, 16, 14);
     }
@@ -3337,19 +3879,34 @@ function renderPlay() {
   /* ghosts under everything mobile (hidden during cinematics) */
   if (!rocketSeq && !gateSeq) for (const p of players) drawGhost(p);
 
-  /* robots, drakes, players */
-  for (const r of robots) ctx.drawImage((r.gold ? SPR.robotG : SPR.robot)[(r.frame | 0) % 2], r.x - 12, r.y - 26);
-  for (const dr of drakes)
+  /* robots, drakes, players (+ boats) */
+  for (const r of robots) {
+    if (!onCam(r.x, r.y, 48)) continue;
+    ctx.drawImage((r.gold ? SPR.robotG : SPR.robot)[(r.frame | 0) % 2], r.x - 12, r.y - 26);
+  }
+  for (const dr of drakes) {
+    if (!onCam(dr.x, dr.y, 48)) continue;
     ctx.drawImage((dr.blue ? SPR.drakeB : SPR.drake)[(dr.frame | 0) % 2], dr.x - 11, dr.y - 14 + Math.sin(T * 5 + (dr.blue ? 2 : 0)) * 2);
+  }
   for (const p of players) {
-    const frames = SPR.av[p.pi][p.dir];
-    const spr2 = p.moving ? frames[1 + ((p.frame | 0) % 2)] : frames[0];
-    if (p.flip) {
+    if (p.moor && !p.boat && onCam(p.moor.x, p.moor.y, 48))     // the waiting dinghy
+      ctx.drawImage(SPR.boat, p.moor.x - 19, p.moor.y - 12 + Math.sin(T * 3.2 + p.pi * 2) * 1.6);
+    const bob2 = p.boat ? Math.sin(T * 3.2 + p.pi * 2) * 1.6 : 0;
+    const frames = SPR.av[p.pi][p.boat ? 0 : p.dir];
+    const spr2 = p.moving && !p.boat ? frames[1 + ((p.frame | 0) % 2)] : frames[0];
+    if (p.flip && !p.boat) {
       ctx.translate(p.x, 0); ctx.scale(-1, 1);
       ctx.drawImage(spr2, -12, p.y - 30);
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
-    } else ctx.drawImage(spr2, p.x - 12, p.y - 30);
-    if (players.length > 1) otxt('P' + (p.pi + 1), p.x, p.y - 36, 10, p.pi ? '#ff9a8a' : '#8fd4ff');
+      reTx();
+    } else ctx.drawImage(spr2, p.x - 12, p.y - (p.boat ? 34 : 30) + bob2);
+    if (p.boat) {                                // hull drawn over the legs = sitting sailor
+      if (p.flip) {
+        ctx.translate(p.x, 0); ctx.scale(-1, 1);
+        ctx.drawImage(SPR.boat, -19, p.y - 12 + bob2);
+        reTx();
+      } else ctx.drawImage(SPR.boat, p.x - 19, p.y - 12 + bob2);
+    }
+    if (players.length > 1) otxt('P' + (p.pi + 1), p.x, p.y - (p.boat ? 42 : 36), 10, p.pi ? '#ff9a8a' : '#8fd4ff');
   }
 
   /* rocket sequence */
@@ -3358,8 +3915,8 @@ function renderPlay() {
     const rx = tX(q.pad.gx) + 32 - 20, ry0 = tY(q.pad.gy) + 46 - 92;
     ctx.drawImage(SPR.rocket, rx, ry0 - q.ry);
     if (q.phase === 'lift') ctx.drawImage(SPR.rflame[((T * 14) | 0) % 2], rx + 8, ry0 - q.ry + 88);
-    if (q.phase === 'count' && q.n > 0) otxt('' + q.n, W / 2, 300, 130, '#ffd24a');
-    if (q.phase === 'lift' && q.t < 1) otxt('LIFTOFF!', W / 2, 300, 70, '#ff9a4a');
+    if (q.phase === 'count' && q.n > 0) otxt('' + q.n, camRX + W / 2, camRY + 300, 130, '#ffd24a');
+    if (q.phase === 'lift' && q.t < 1) otxt('LIFTOFF!', camRX + W / 2, camRY + 300, 70, '#ff9a4a');
   } else if (rocketDone) {
     const pad = buildings.find(b2 => b2.k === 'launchpad');
     if (pad) ctx.drawImage(SPR.star, tX(pad.gx) + 24, tY(pad.gy) + 18);
@@ -3380,14 +3937,14 @@ function renderPlay() {
       const ramp = q.phase === 'warn' ? clamp(q.t - 3.5, 0, 1) * 0.55
                                       : clamp(2.6 - q.t * 0.45, 0.15, 0.55);
       ctx.globalAlpha = ramp;
-      ctx.drawImage(SPR.dim, 0, 0);
+      ctx.drawImage(SPR.dim, camRX, camRY);            // screen-sized, pinned to the window
       ctx.globalAlpha = 1;
       if (q.phase === 'strike') for (const tg2 of q.targets) {
         const bt = q.t - tg2.delay;
         if (bt > -0.1 && bt < 0.18) {                  // bolt + white flash
           ctx.drawImage(SPR.bolt, tg2.x - 8, tg2.y - 160, 16, 160);
           ctx.globalAlpha = 0.5 * (1 - bt * 5);
-          ctx.drawImage(SPR.flashW, 0, 0);
+          ctx.drawImage(SPR.flashW, camRX, camRY);
           ctx.globalAlpha = 1;
         }
       }
@@ -3430,23 +3987,23 @@ function renderPlay() {
       ctx.globalAlpha = 1;
       if (q.phase === 'portal' && q.t < 0.5) {         // screen glow at ignition
         ctx.globalAlpha = 0.55 * (1 - q.t * 2);
-        ctx.drawImage(SPR.flashW, 0, 0);
+        ctx.drawImage(SPR.flashW, camRX, camRY);
         ctx.globalAlpha = 1;
       }
     }
   }
 
-  /* particles + floaty texts */
+  /* particles + floaty texts (culled) */
   for (let i = 0; i < P_MAX; i++) {
     const p = parts[i];
-    if (!p.on) continue;
+    if (!p.on || !onCam(p.x, p.y, 32)) continue;
     if (p.fade) ctx.globalAlpha = clamp(1 - p.t / p.life, 0, 1);
     ctx.drawImage(p.spr, p.x - p.spr.width / 2, p.y - p.spr.height / 2);
   }
   ctx.globalAlpha = 1;
   for (let i = 0; i < F_MAX; i++) {
     const f = floats[i];
-    if (!f.on) continue;
+    if (!f.on || !onCam(f.x, f.y, 64)) continue;
     ctx.globalAlpha = clamp(1.4 - f.t, 0, 1);
     let fx = f.x;
     if (f.icon && SPR.icon[f.icon]) { ctx.drawImage(SPR.icon[f.icon], f.x - 22, f.y - f.t * 34 - 14); fx = f.x + 2; }
@@ -3455,16 +4012,25 @@ function renderPlay() {
   ctx.globalAlpha = 1;
   ctx.restore();
 
+  drawArrows();                                  // edge pointers so kids never lose an event
   drawHUD();
-  for (const p of players) if (p.mode === 'menu') drawMenu(p, H - 114 - (p.pi ? 170 : 0));
+  for (const p of players) {
+    if (p.mode === 'menu') drawMenu(p, H - 114 - (p.pi ? 170 : 0));
+    else if (p.mode === 'boatmenu') drawBoatMenu(p, H - 114 - (p.pi ? 170 : 0));
+  }
   /* contextual hint line (touch users have DOM buttons in this corner) */
   if (!paused && !modal && !rocketSeq && !gateSeq && !confirmPrestige && players[0] &&
       !(AC && AC.currentInputSource() === 'touch')) {
-    const m = players[0].mode;
+    const p0 = players[0];
+    const m = p0.mode;
     let hint = '';
-    if (m === 'walk') hint = '✕/Z CHOP · □/C BUILD · △/V STATS';
+    if (m === 'walk') hint = p0.boat ? '✕/Z LAND NEARBY · □/C SETTLE MENU · △/V STATS'
+                                     : '✕/Z CHOP · □/C BUILD · △/V STATS';
     else if (m === 'menu') hint = '◀ ▶ CHOOSE · ✕ OK · ○ BACK';
-    else if (m === 'place') hint = 'WALK TO A SPOT · ✕ PLACE · ○ BACK';
+    else if (m === 'boatmenu') hint = '✕ SETTLE ISLAND · ○ BACK';
+    else if (m === 'settle') hint = 'SAIL TO OPEN WATER · ✕ RAISE THE ISLAND · ○ BACK';
+    else if (m === 'place') hint = B[p0.placeK] && B[p0.placeK].coastal
+        ? 'WALK TO A BEACH · ✕ PLACE · ○ BACK' : 'WALK TO A SPOT · ✕ PLACE · ○ BACK';
     else if (m === 'remove') hint = 'STAND ON A BUILDING · ✕ REMOVE · ○ BACK';
     txt(hint, 12, H - 12, 11, 'rgba(220,240,255,0.75)');
   }
@@ -3520,7 +4086,7 @@ function updatePlay(dt) {
     if (fwT <= 0) {
       fwT = 0.4;
       SFX.firework();
-      const fx = 200 + Math.random() * (W - 400), fy = 100 + Math.random() * 260;
+      const { x: fx, y: fy } = fwSpot();
       const spr = SPR.fw[(Math.random() * SPR.fw.length) | 0];
       for (let i = 0; i < 9; i++) {
         const a = i / 9 * 6.28, sp = 60 + Math.random() * 60;
@@ -3578,6 +4144,7 @@ function updatePlay(dt) {
   if (rocketSeq) updateRocket(dt);
   else if (gateSeq) updateGate(dt);
   else if (shakeAmt > 0) shakeAmt = Math.max(0, shakeAmt - dt * 8);
+  updateCamera(dt);
   updateDots(dt);
   /* pools */
   for (let i = 0; i < P_MAX; i++) {
@@ -3622,7 +4189,7 @@ window.__test = {
   arrived() { return !players[0] || !players[0].target; },
   flora() { return flora.filter(f => !f.gone).map(f => ({ type: f.type, x: tX(f.gx) + 16, y: tY(f.gy) + 20 })); },
   findSpot(k) {
-    for (let r = 1; r < 16; r++) for (let gy = CYG - r; gy <= CYG + r; gy++) for (let gx = CX - r; gx <= CX + r; gx++)
+    for (let r = 1; r < 24; r++) for (let gy = CYG - r; gy <= CYG + r; gy++) for (let gx = CX - r; gx <= CX + r; gx++)
       if (validAt(k, gx, gy)) return { gx, gy };
     return null;
   },
@@ -3650,7 +4217,7 @@ window.__test = {
   },
   fireworks() {
     for (let n = 0; n < 3; n++) {
-      const fx = 200 + Math.random() * (W - 400), fy = 100 + Math.random() * 260;
+      const { x: fx, y: fy } = fwSpot();
       const spr = SPR.fw[(Math.random() * SPR.fw.length) | 0];
       for (let i = 0; i < 9; i++) {
         const a = i / 9 * 6.28, sp = 60 + Math.random() * 60;
@@ -3658,6 +4225,59 @@ window.__test = {
       }
     }
   },
+  /* ── v3 hooks ── */
+  teleport(pi, x, y) {
+    const p = players[pi || 0];
+    if (p) { p.x = x; p.y = y; p.target = null; }
+  },
+  setBoat(pi, v) { const p = players[pi || 0]; if (p) p.boat = !!v; },
+  snapCam() { updateCamera(0, true); },
+  gotoSeaport() {
+    const sp = buildings.find(b => b.k === 'seaport' && !b.rubble);
+    if (sp && players[0]) { players[0].x = tX(sp.gx) + 16; players[0].y = tY(sp.gy) + 44; players[0].target = null; }
+    return !!sp;
+  },
+  findSettleSpot() {
+    for (let gy = 7; gy < GH - 7; gy++) for (let gx = 7; gx < GW - 7; gx++) {
+      if (!isWater(gx, gy)) continue;
+      let clear = true;
+      chk: for (let dy = -9; dy <= 9; dy++) for (let dx = -9; dx <= 9; dx++) {
+        const x2 = gx + dx, y2 = gy + dy;
+        if (x2 >= 0 && y2 >= 0 && x2 < GW && y2 < GH && landAge[y2][x2] > 0) { clear = false; break chk; }
+      }
+      if (clear) return { gx, gy, x: tX(gx) + 16, y: tY(gy) + 16 };
+    }
+    return null;
+  },
+  settleAt(gx, gy) {
+    const p = players[0];
+    if (!p) return false;
+    p.boat = true; p.x = tX(gx) + 16; p.y = tY(gy) + 16; p.mode = 'settle'; p.target = null;
+    const ok = trySettle(p);
+    if (!ok) { p.mode = 'walk'; }
+    return ok;
+  },
+  settleCost() { return settleCost(); },
+  islandsInfo() {
+    return settled.map(il => {
+      const id = isleIdAt(il.gx, il.gy);
+      let tiles = 0;
+      for (let gy = 0; gy < GH; gy++) for (let gx = 0; gx < GW; gx++)
+        if (landAge[gy][gx] > 0 && isleId[gy][gx] === id) tiles++;
+      return { gx: il.gx, gy: il.gy, steps: il.steps, tiles };
+    });
+  },
+  pipeIslands() {
+    return pipes.map(p => {
+      const a = p.pts[0], c = p.pts[p.pts.length - 1];
+      return [isleIdAt(Math.floor(a.x / TILE), Math.floor((a.y - GY0) / TILE)),
+              isleIdAt(Math.floor(c.x / TILE), Math.floor((c.y - GY0) / TILE))];
+    });
+  },
+  crateAt(gx, gy) { crate = { gx, gy, t: 0, opening: 0 }; return true; },
+  oldMoonRect(sd) { return oldMoonRectFor(sd); },
+  isWater(gx, gy) { return isWater(gx, gy); },
+  landAt(gx, gy) { return landAge[gy] ? landAge[gy][gx] : -1; },
   info() {
     const items = players[0] && players[0].mode === 'menu' ? menuItems() : null;
     const sel = items ? items[clamp(players[0].menuI, 0, items.length - 1)] : null;
@@ -3673,7 +4293,18 @@ window.__test = {
       crate: !!crate, robots: robots.length, drake: drakes.length > 0, drakes: drakes.length, egg: !!egg,
       rocket: rocketSeq ? rocketSeq.phase : null,
       slotSel, nameBuf: nameSt ? nameSt.name : null,
-      p1: players[0] ? { x: players[0].x, y: players[0].y } : null,
+      p1: players[0] ? { x: players[0].x, y: players[0].y, boat: !!players[0].boat, moor: !!players[0].moor,
+                         moorX: players[0].moor ? players[0].moor.x : 0, moorY: players[0].moor ? players[0].moor.y : 0 } : null,
+      p2: players[1] ? { x: players[1].x, y: players[1].y, boat: !!players[1].boat, moor: !!players[1].moor } : null,
+      /* v3 */
+      cam: { x: camX, y: camY },
+      world: { w: WORLD_W, h: WORLD_H },
+      islands: settled.length,
+      islandList: settled.map(il => ({ gx: il.gx, gy: il.gy, steps: il.steps })),
+      seaports: cnt('seaport'),
+      arrows: edgeArrows.filter(a => a.on).map(a => ({ type: a.type, x: a.x, y: a.y })),
+      minimap: statsOpen ? { x: W / 2 - 480 + 636, y: 80 + 150, w: 276, h: 158 } : null,
+      buildingsXY: buildings.map(b => [b.k, b.gx, b.gy]),
       /* v2 */
       battCharge, battCap,
       stars, goalI, goalText: goalI < GOALS.length ? GOALS[goalI].t : null,
