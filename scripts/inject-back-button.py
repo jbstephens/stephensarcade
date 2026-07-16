@@ -38,6 +38,11 @@ INJECTIONS = [
         "marker":  'id="__arcade_lowfx"',
         "anchor":  "</body>",
     },
+    {
+        "snippet": (HERE / "idle-return.html").read_text(),
+        "marker":  'id="__arcade_idle"',
+        "anchor":  "</body>",
+    },
 ]
 
 for path in sys.argv[1:]:
