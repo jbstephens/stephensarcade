@@ -42,6 +42,11 @@
       font-family:inherit; touch-action:manipulation; }
   body.input-touch.in-play #tbPause { display:flex; }
   body.input-pad #tbPause { display:none !important; }
+  /* v4c: cannon-manning touch cluster (◀ ▶ PWR + FIRE) */
+  .tc-cannon { left:50%; transform:translateX(-50%); flex-direction:row; }
+  body.input-touch.in-play.manning .tc-cannon { display:flex; }
+  body.manning .tc-left { display:none !important; }
+  #tbCF { background:rgba(255,180,60,0.35); border-color:rgba(255,220,140,0.7); }
 </style>
 <!-- Google Analytics — injected by scripts/inject-back-button.py at bundle time -->
 <script id="__arcade_ga" async src="https://www.googletagmanager.com/gtag/js?id=G-T7N4WEJJEL"></script>
@@ -62,6 +67,12 @@
 <div class="tc tc-right">
   <button class="tbtn small" id="tbB">✕</button>
   <button class="tbtn big" id="tbA">✓</button>
+</div>
+<div class="tc tc-cannon">
+  <button class="tbtn" id="tbCL">◀</button>
+  <button class="tbtn" id="tbCR">▶</button>
+  <button class="tbtn" id="tbCP">PWR</button>
+  <button class="tbtn" id="tbCF">FIRE</button>
 </div>
 <button id="tbPause">❚❚</button>
 <script>
@@ -191,6 +202,11 @@ const SFX = {
   fixed:    () => { [523, 784, 1047].forEach((f, i) => setTimeout(() => blip(f, 0.12, 'triangle', 0.08), i * 70)); },
   gate:     () => { [330, 440, 587, 784].forEach((f, i) => setTimeout(() => blip(f, 0.3, 'sawtooth', 0.05, f * 1.5), i * 160)); },
   splash:   () => { noiseBurst(0.28, 0.14, 1400, 220); blip(320, 0.14, 'sine', 0.05, 130); },
+  /* v4c: pop cannon */
+  shoot:    () => { noiseBurst(0.12, 0.14, 900, 220); blip(150, 0.16, 'square', 0.07, 430); },
+  bounce:   () => blip(300, 0.07, 'sine', 0.06, 620),
+  boing:    () => { blip(150, 0.08, 'sine', 0.09, 80); setTimeout(() => blip(190, 0.24, 'sine', 0.08, 540), 50); },
+  burst:    () => { noiseBurst(0.2, 0.14, 2200, 300); blip(900, 0.18, 'triangle', 0.06, 260); },
 };
 /* cozy ambient loop — soft pad chords + pentatonic plucks, scheduled ahead */
 const CHORDS = [[130.8, 196, 329.6], [110, 164.8, 261.6], [87.3, 130.8, 220], [98, 146.8, 246.9]];
@@ -249,6 +265,8 @@ const B = {
   mine:      { name: 'MINE',       age: 3, size: 1, cost: { wood: 30, stone: 25 }, prod: { ore: 1 },    pipe: ['quarry', 'campfire'] },
   smelter:   { name: 'SMELTER',    age: 3, size: 1, cost: { wood: 15, stone: 40 }, cons: { ore: 0.8 },  prod: { metal: 0.5 }, pipe: ['mine'] },
   factory:   { name: 'FACTORY',    age: 3, size: 2, cost: { stone: 30, metal: 15 },cons: { metal: 0.3 },prod: { parts: 0.25 }, pipe: ['smelter', 'mine'] },
+  /* v4c: playful physics launcher — buildable on Earth AND the moon */
+  popcannon: { name: 'POP CANNON', age: 3, size: 1, cost: { stone: 20, metal: 10 }, both: true },
   windmill:  { name: 'WINDMILL',   age: 4, size: 1, cost: { wood: 40, metal: 10 }, prod: { power: 4 },  wire: true },
   solar:     { name: 'SOLAR PANEL',age: 4, size: 1, cost: { metal: 20, parts: 8 }, prod: { power: 6 },  wire: true },
   battery:   { name: 'BATTERY',    age: 4, size: 1, cost: { metal: 20, parts: 10 },store: 25,           wire: true },
@@ -305,6 +323,7 @@ const GOALS = [
   { t: 'REACH 30 POP',            ok: () => pop >= 30 },
   { t: 'BUILD A MINE + SMELTER',  ok: () => cnt('mine') >= 1 && cnt('smelter') >= 1 },
   { t: 'MAKE 80 METAL + PARTS',   ok: () => life.metal + life.parts >= 80 },
+  { t: 'BUILD A POP CANNON',      ok: () => cnt('popcannon') >= 1 },
   { t: 'MAKE 8 POWER',            ok: () => powerInc >= 8 },
   { t: 'BUILD A SEAPORT',         ok: () => cnt('seaport') >= 1 },
   { t: 'REACH 60 POP',            ok: () => pop >= 60 },
@@ -316,6 +335,7 @@ const GOALS = [
   { t: 'BUILD A HOLO-TREE',       ok: () => cnt('holotree') >= 1 },
   { t: 'BUILD A FUSION CORE',     ok: () => cnt('fusioncore') >= 1 },
   { t: 'REPAIR 3 RUBBLES',        ok: () => rubbleFixed >= 3 },
+  { t: 'DEFEND YOUR ISLAND',      ok: () => meteorsBlocked >= 1 },
   { t: 'REACH 120 POP',           ok: () => pop >= 120 },
   { t: 'SETTLE 3 ISLANDS',        ok: () => settled.length >= 3 },
   { t: 'COMPLETE A COLONY',       ok: () => settled.some(il => il.lvl >= 4) },
@@ -350,6 +370,13 @@ let age = 1, seed = 1, islandName = 'ISLE', legends = false, rocketDone = false;
 let rocketsLaunched = 0;                      // repeat launches → space cargo crates
 let stars = 0;                                // prestige stars (production +10% each)
 let goalI = 0, cratesOpened = 0, rubbleFixed = 0;
+/* ── v4c: pop cannons ── */
+let meteorsBlocked = 0;                       // stats + goal counter (persisted)
+let lastImpact = null;                        // { type, x, y } — test/debug hook
+let wobbleN = 0, bodyManning = false;         // fizzle wobbles live + touch UI class
+const CAN_GS = [110, 160, 220];               // ground speed px/s per power (LOW/MED/HIGH)
+const CAN_HV = [120, 150, 180];               // launch vertical speed
+const CAN_G  = 280;                           // ball gravity
 let grownTiles = [], growNextPop = 0, islandFull = false;   // max-age land growth
 let lastGift = null, forcedGift = null;       // crate duplicate-avoidance (+ test hook)
 let fwShow = 0, fwT = 0;                      // party fireworks show timer
@@ -498,6 +525,18 @@ function initSprites() {
     P(6.4, 1, 3.2, 1.2, '#ffb2d0');
     P(4, 8, 1, 1, '#ffffff'); P(10.4, 5.6, 1, 1, '#ffffff'); P(7, 11.6, 1, 1, '#ffffff');
   }));
+  /* v4d: sleeping (dimmed) variants of the treasure trees — baked once,
+     swapped in while the tree naps so the glow visibly rests */
+  const dimify = src => {
+    const [c, g] = C(src.width, src.height);
+    g.drawImage(src, 0, 0);
+    g.globalCompositeOperation = 'source-atop';
+    g.fillStyle = 'rgba(18,32,58,0.48)';
+    g.fillRect(0, 0, src.width, src.height);
+    return c;
+  };
+  SPR.goldDim = SPR.gold.map(dimify);
+  SPR.rainbowDim = SPR.rainbow.map(dimify);
   SPR.rock = [0, 1, 2].map(st => S(16, 12, (g, P) => {
     shad(g, 16, 20, 10 - st * 2, 3);
     const sz = [1, 0.75, 0.5][st], w = 12 * sz, h = 8 * sz, x0 = 8 - w / 2, y0 = 10 - h;
@@ -1147,6 +1186,12 @@ function initSprites() {
   });
   SPR.bubHungry = mkBub((g, P) => { P(4.4, 1.6, 1.4, 4, '#e05a3a'); P(4.4, 6.2, 1.4, 1.4, '#e05a3a'); });
   SPR.bubPower  = mkBub((g, P) => { P(4.6, 1.4, 2, 2.6, '#2a9fd0'); P(3.6, 3.6, 2, 1.4, '#2a9fd0'); P(4.4, 4.6, 2, 2.8, '#2a9fd0'); });
+  /* v4d: 💤 bubble for napping treasure trees (big Z + little z) */
+  SPR.bubZzz = mkBub((g, P) => {
+    P(2.4, 1.8, 3.6, 1, '#3a6ea8'); P(4.4, 2.8, 1.2, 1, '#3a6ea8');
+    P(3.2, 3.8, 1.2, 1, '#3a6ea8'); P(2.4, 4.8, 3.6, 1, '#3a6ea8');
+    P(6.6, 4.2, 2.2, 0.8, '#6a9ed0'); P(7.6, 5, 0.9, 0.8, '#6a9ed0'); P(6.6, 5.8, 2.2, 0.8, '#6a9ed0');
+  });
 
   /* player boat — cozy wooden dinghy, drawn over the avatar's legs */
   SPR.boat = S(19, 12, (g, P) => {
@@ -1178,6 +1223,7 @@ function initSprites() {
   SPR.arrowC = mkArrow('#ffd24a');   // crate
   SPR.arrowD = mkArrow('#ff6b6b');   // disaster
   SPR.arrowE = mkArrow('#c9a6e8');   // egg
+  SPR.arrowB = mkArrow('#7dffe0');   // v4c: off-screen cannon ball
 
   /* crate / egg / drake / robot */
   SPR.crate = S(14, 12, (g, P) => {
@@ -1344,6 +1390,15 @@ function initSprites() {
     g.strokeStyle = '#ffd24a'; g.lineWidth = 3; rr(g, 2, 2, 92, 78, 8); g.stroke();
     return c;
   })();
+  SPR.pillP = (() => {  // v4d: slim dark pill behind the build-menu detail block
+    const [c, g] = C(760, 54);
+    g.fillStyle = 'rgba(0,0,0,0.28)'; rr(g, 4, 5, 754, 48, 24); g.fill();
+    const gr = g.createLinearGradient(0, 0, 0, 54);
+    gr.addColorStop(0, 'rgba(23,58,82,0.92)'); gr.addColorStop(1, 'rgba(13,37,55,0.9)');
+    g.fillStyle = gr; rr(g, 0, 0, 754, 50, 24); g.fill();
+    g.strokeStyle = 'rgba(95,184,232,0.55)'; g.lineWidth = 2; rr(g, 1, 1, 752, 48, 23); g.stroke();
+    return c;
+  })();
 
   /* rocket */
   SPR.rocket = S(20, 46, (g, P) => {
@@ -1438,6 +1493,84 @@ function initSprites() {
     SPR.bGold[k] = goldify(SPR.b[k]);
     SPR.bLitGold[k] = goldify(SPR.bLit[k]);
   }
+
+  /* ── v4c: POP CANNON — chunky toy mortar. The BASE is baked into the bg;
+     the BARREL is a per-frame overlay rotated to the aim angle. ── */
+  SPR.cannonBase = S(16, 14, (g, P) => {
+    shad(g, 16, 25, 12, 3.5);
+    /* round wooden platform (two plank layers) + feet */
+    P(2.4, 11.6, 2.2, 1.4, '#6e4526'); P(11.4, 11.6, 2.2, 1.4, '#6e4526');
+    P(1.6, 9.6, 12.8, 2.6, '#8a5c33'); P(2.2, 9, 11.6, 2, '#9c6b3d');
+    P(2.8, 8.8, 10.4, 0.8, '#b07c48');
+    for (let i = 0; i < 4; i++) P(3.4 + i * 3, 10, 0.6, 1.4, '#6e4526');   // plank seams
+    /* big playful spring at the back */
+    for (let i = 0; i < 4; i++) P(11.6, 3.8 + i * 1.3, 3, 0.8, i % 2 ? '#c9d2da' : '#8f979f');
+    P(11.4, 3.2, 3.4, 0.7, '#e8eef4'); P(11.4, 9, 3.4, 0.7, '#6d747c');
+    /* brass swivel dome */
+    P(5.8, 6.6, 4.4, 2.6, '#e8c25a'); P(6.4, 6, 3.2, 1.2, '#f0d27a');
+    P(6.6, 6.4, 1.2, 1, '#fff3b0');
+    P(5.2, 8.6, 5.6, 1, '#b8860b');
+    /* cushy red operator seat + a friendly star decal */
+    P(2.2, 6.8, 3, 1.8, '#e05a3a'); P(2.2, 6.6, 3, 0.7, '#f0705e');
+    P(2.6, 8.6, 2.2, 0.8, '#8a5c33');
+    P(8.2, 9.6, 1.6, 1.6, '#ffd24a'); P(8.6, 10, 0.8, 0.8, '#fff3b0');
+  });
+  /* barrel — points RIGHT at rotation 0; pivot at (7,8) in px */
+  SPR.cannonBarrel = (() => {
+    const [c, g] = C(34, 16);
+    const P = (x, y, w, h, col) => { g.fillStyle = col; g.fillRect(x, y, w, h); };
+    P(4, 4, 24, 8, '#9c6b3d');                   // wooden tube
+    P(4, 4, 24, 2, '#b07c48');                   // top light
+    P(4, 10, 24, 2, '#6e4526');                  // bottom shade
+    P(1, 3, 5, 10, '#e8c25a'); P(1, 3, 5, 2, '#f0d27a'); P(1, 11, 5, 2, '#b8860b');  // brass butt
+    P(12, 3, 3, 10, '#e8c25a'); P(12, 3, 3, 1.6, '#f0d27a'); P(12, 11.4, 3, 1.6, '#b8860b'); // band
+    P(19, 4.6, 4, 6.8, '#e05a3a'); P(19, 4.6, 4, 1.4, '#f0705e');   // fun red stripe
+    P(26, 2, 5, 12, '#e8c25a'); P(26, 2, 5, 2, '#f0d27a'); P(26, 12, 5, 2, '#b8860b'); // muzzle ring
+    P(29, 4, 3, 8, '#3a2c18'); P(30, 5.4, 2, 5.2, '#201608');       // bore
+    P(8, 6.4, 2.6, 2.6, '#fff3b0'); P(8.8, 5.6, 1, 1, '#fff3b0'); P(8.8, 9, 1, 1, '#fff3b0'); // star-ish glint
+    return c;
+  })();
+  /* menu/ghost composite: base + barrel cocked at a jaunty 50° */
+  SPR.b.popcannon = SPR.bLit.popcannon = (() => {
+    const [c, g] = C(32, 40);
+    g.drawImage(SPR.cannonBase, 0, 12);
+    g.translate(16, 27); g.rotate(-Math.PI * 0.28);
+    g.drawImage(SPR.cannonBarrel, -7, -8);
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    return c;
+  })();
+  /* bouncing energy ball (baked glow + hot core) + ground shadow */
+  SPR.eball = (() => {
+    const [c, g] = C(20, 20);
+    const gr = g.createRadialGradient(10, 10, 1, 10, 10, 10);
+    gr.addColorStop(0, '#ffffff'); gr.addColorStop(0.3, '#ffe27a');
+    gr.addColorStop(0.65, 'rgba(255,180,60,0.55)'); gr.addColorStop(1, 'rgba(255,160,40,0)');
+    g.fillStyle = gr; g.fillRect(0, 0, 20, 20);
+    g.fillStyle = '#fff8d8'; g.beginPath(); g.arc(10, 10, 4, 0, 6.3); g.fill();
+    g.fillStyle = '#ffffff'; g.beginPath(); g.arc(8.6, 8.6, 1.8, 0, 6.3); g.fill();
+    return c;
+  })();
+  SPR.ballShad = (() => {
+    const [c, g] = C(14, 8);
+    g.fillStyle = 'rgba(10,25,35,0.35)';
+    g.beginPath(); g.ellipse(7, 4, 6, 3, 0, 0, 6.3); g.fill();
+    return c;
+  })();
+  SPR.aimDot = glowDot(4, '#fff3b0');
+  /* power pips baked as ONE strip per level (LOW/MED/HIGH) — 1 draw, not 3 */
+  SPR.powPips = [0, 1, 2].map(lv => {
+    const [c, g] = C(52, 14);
+    for (let i = 0; i < 3; i++) g.drawImage(i <= lv ? SPR.pipOn : SPR.pipOff, 1 + i * 17, 1);
+    return c;
+  });
+  SPR.aimRing = (() => {
+    const [c, g] = C(28, 28);
+    g.strokeStyle = '#ffd24a'; g.lineWidth = 3;
+    g.beginPath(); g.arc(14, 14, 10, 0, 6.3); g.stroke();
+    g.strokeStyle = 'rgba(255,255,255,0.85)'; g.lineWidth = 1.2;
+    g.beginPath(); g.arc(14, 14, 10, 0, 6.3); g.stroke();
+    return c;
+  })();
 
   /* logo */
   SPR.logo = (() => {
@@ -1785,6 +1918,7 @@ function growIsland() {
   for (const t of picked) { px2 += tX(t.gx) + 16; py2 += tY(t.gy) + 16; }
   camPanTo(px2 / picked.length, py2 / picked.length, 2.4);   // show kids the new land
   recomputeIsleIds();
+  landGrowthSanity(false);                      // v4d: boats push off, landlocked ports pack up
   refreshColonyChecks(); refreshFerries();
   terrainDirty = true;
   saveGame();
@@ -2052,7 +2186,8 @@ function rebuildBG() {
   bgg.drawImage(terrainC, 0, 0);
   const items = [];
   for (const f of flora) if (!f.gone && f.shakeT <= 0) items.push({ y: tY(f.gy) + 32, f });
-  for (const b of buildings) items.push({ y: tY(b.gy) + (B[b.k].size || 1) * 32, b });
+  /* v4c: fizzle-wobbling buildings are lifted out (drawn live, like shaking flora) */
+  for (const b of buildings) if (!(b.wobT > 0)) items.push({ y: tY(b.gy) + (B[b.k].size || 1) * 32, b });
   /* v4a: founding camp marker (flag + crate + firepit) — pure decoration,
      hidden if someone builds right on the island centre */
   if (world === 'earth')
@@ -2065,7 +2200,11 @@ function rebuildBG() {
   }
 }
 function floraSprite(f) {
-  if (f.type === 'tree') return (f.rainbow ? SPR.rainbow : f.golden ? SPR.gold : SPR.tree)[Math.min(f.hits, 2)];
+  if (f.type === 'tree') {
+    const asleep = f.sleepT > 0;                 // v4d: napping treasure trees dim
+    return (f.rainbow ? (asleep ? SPR.rainbowDim : SPR.rainbow)
+          : f.golden ? (asleep ? SPR.goldDim : SPR.gold) : SPR.tree)[Math.min(f.hits, 2)];
+  }
   if (f.type === 'mrock') return SPR.mrock[Math.min(f.hits, 2)];
   if (f.type === 'ice') return SPR.ice[Math.min(f.hits, 2)];
   return SPR.rock[Math.min(f.hits, 2)];
@@ -2080,6 +2219,10 @@ function drawBuilding(g, b) {
   if (b.rubble) {
     const s = (sz === 2 ? SPR.rubble2 : SPR.rubble1)[clamp(b.repair || 0, 0, 2)];
     g.drawImage(s, tX(b.gx), tY(b.gy) + sz * 32 - s.height);
+    return;
+  }
+  if (b.k === 'popcannon') {                    // v4c: base only — the barrel is a live overlay
+    g.drawImage(SPR.cannonBase, tX(b.gx), tY(b.gy) + 32 - SPR.cannonBase.height);
     return;
   }
   const lit = (islandPowered && b.k !== 'campfire') || (b.k === 'stargate' && legends);
@@ -2104,6 +2247,7 @@ function recomputeAnims() {
       case 'windmill': anims.push({ t: 'blades', x: x + 16, y: y - 3, b, sp: 1.6 + Math.random() * 0.5 }); break;
       case 'giantmill':anims.push({ t: 'bladesBig', x: x + 20, y: y - 14, b, sp: 1.1 }); break;
       case 'solar':    anims.push({ t: 'glint', x: x + 6, y: y + 6, b, cool: Math.random() * 4 }); break;
+      case 'popcannon':anims.push({ t: 'barrel', x: x + 16, y: y + 19, b }); break;   // v4c
       case 'battery':  anims.push({ t: 'bglow', x: x + 16, y: y + 6, b }); break;
       case 'lab':      anims.push({ t: 'bubbles', x: x + 9, y: y + 8, b, cool: Math.random() }); break;
       case 'well':     anims.push({ t: 'aura', x: x + 16, y: y + 8, b, cool: Math.random() }); break;
@@ -2130,7 +2274,7 @@ function recomputeAnims() {
    POOLS — particles / floaty texts / pipe dots (no per-frame allocation:
    fixed arrays, dead slots recycled).
    ═══════════════════════════════════════════════════════════════════════ */
-const P_MAX = 96, parts = [];
+const P_MAX = 48, parts = [];   // v4c: 96→48 — worst-case scenes stay well under the draw budget
 for (let i = 0; i < P_MAX; i++) parts.push({ on: false });
 function spawnP(x, y, spr, o) {
   o = o || {};
@@ -2161,7 +2305,7 @@ function addFloat(x, y, str, color, icon) {
     return;
   }
 }
-const D_MAX = 16, dots = [];
+const D_MAX = 12, dots = [];
 for (let i = 0; i < D_MAX; i++) dots.push({ on: false });
 let dotSpawnT = 0, dotRR = 0;
 function updateDots(dt) {
@@ -2342,11 +2486,7 @@ function ageUp() {
     const pad = buildings.find(b2 => b2.k === 'launchpad');
     if (pad) camPanTo(tX(pad.gx) + 32, tY(pad.gy) + 20, 2.6);
   }
-  /* new land can rise under a sailing boat — beach it gently, never strand */
-  for (const p of players) if (p.boat && !isWaterPx(p.x, p.y)) {
-    p.boat = false;
-    if (p.mode === 'boatmenu' || p.mode === 'settle') p.mode = 'walk';
-  }
+  landGrowthSanity(false);                      // v4d: boats push off, landlocked ports pack up
   refreshColonyChecks(); refreshFerries();      // new rings can reshape lanes/components
   recomputePipes(); recomputeAnims();
   terrainDirty = true;
@@ -2356,7 +2496,7 @@ function ageUp() {
 /* ── building placement ── */
 function validAt(k, gx, gy) {
   const s = B[k].size || 1, coastal = !!B[k].coastal;
-  if (!!B[k].moon !== (world === 'moon')) return false;   // moon buildings on the moon only
+  if (!B[k].both && !!B[k].moon !== (world === 'moon')) return false;   // moon buildings on the moon only (v4c: `both` = anywhere)
   if (gx < 0 || gy < 0 || gx + s > GW || gy + s > GH) return false;
   for (let dy = 0; dy < s; dy++) for (let dx = 0; dx < s; dx++) {
     if (!tileBuildable(gx + dx, gy + dy)) return false;
@@ -2520,26 +2660,38 @@ function spawnRobot(x, y, gold) {
   robots.push({ x, y, tx: x, ty: y, cool: 0, frame: 0, targ: null,
                 gold: !!gold, sp: gold ? 105 : 70 });     // golden robots hustle
 }
+/* v4d: one robot per target — a robot's `targ` IS its reservation; it clears
+   on retarget, on finish, or when the target goes invalid */
+function targReserved(r, t) {
+  for (const o of robots) if (o !== r && o.targ === t) return true;
+  return false;
+}
 function updateRobot(r, dt) {
-  /* drop finished / invalid targets (flora harvested, rubble repaired) */
-  if (r.targ && (r.targ.k ? !r.targ.rubble : r.targ.gone)) r.targ = null;
+  /* drop finished / invalid targets (flora harvested/napping, rubble repaired,
+     packed-up seaports are the kid's job — not a repair) */
+  if (r.targ && (r.targ.k ? (!r.targ.rubble || r.targ.packed) : (r.targ.gone || r.targ.sleepT > 0))) r.targ = null;
   if (!r.targ) {
+    r.seekT = (r.seekT || 0) - dt;               // gentle rescan pace when idle
+    if (r.seekT > 0) return;
     /* robots stay on their own island — never chase targets across water */
     const home = isleIdAt(Math.floor(r.x / TILE), Math.floor((r.y - GY0) / TILE));
     let bd = 1e9;
     for (const b of buildings) {                // rubble first — robots love fixing
-      if (!b.rubble) continue;
+      if (!b.rubble || b.packed) continue;
       if (home && isleIdAt(b.gx, b.gy) !== home) continue;
+      if (targReserved(r, b)) continue;         // v4d: someone's already on it
       const s = B[b.k].size || 1;
       const d = Math.hypot(tX(b.gx) + s * 16 - r.x, tY(b.gy) + s * 16 - r.y);
       if (d < bd) { bd = d; r.targ = b; }
     }
     if (!r.targ) for (const f of flora) {
-      if (f.gone) continue;
+      if (f.gone || f.sleepT > 0) continue;     // v4d: napping treasure trees rest
       if (home && isleIdAt(f.gx, f.gy) !== home) continue;
+      if (targReserved(r, f)) continue;         // v4d: spread out, little buddies
       const d = Math.hypot(tX(f.gx) + 16 - r.x, tY(f.gy) + 24 - r.y);
       if (d < bd) { bd = d; r.targ = f; }
     }
+    if (!r.targ) { r.seekT = 0.4; return; }
   }
   if (r.targ) {
     const s2 = r.targ.k ? (B[r.targ.k].size || 1) : 1;
@@ -2580,8 +2732,32 @@ function topResource() {
   for (const r of RES_LIST) if (r !== 'power' && !LUNAR[r] && RES_AGE[r] <= age) top = r;
   return top;
 }
+/* ── v4d: sleepy treasure trees — golden & rainbow trees nap for 60s after
+   10 harvests in a burst. They NEVER despawn or lose their magic; the nap
+   just throttles the firehose. Robots skip napping trees. ── */
+const SLEEP_AFTER = 10, SLEEP_SECS = 60;
+function sleepFlora(f) {
+  f.sleepT = SLEEP_SECS; f.zc = 0; f.shh = false; f.shakeT = 0;
+  bgDirty = true;                                // dim bake swaps in
+  addFloat(tX(f.gx) + 16, tY(f.gy) - 18, '💤', '#9fd4f0');
+  SFX.hungry();
+}
+function wakeFlora(f) {
+  f.sleepT = 0; f.zc = 0; f.shh = false;
+  bgDirty = true;                                // glow bake swaps back
+  for (let i = 0; i < 6; i++) spawnP(tX(f.gx) + 16, tY(f.gy) + 8, SPR.spark[i % 2], { life: 0.9 });
+  SFX.pop();
+}
+function countTreasureHarvest(f, n) {            // shared by whacks & cannon bursts
+  f.zc = (f.zc || 0) + n;
+  if (f.zc >= SLEEP_AFTER) sleepFlora(f);
+}
 function harvestFlora(f, px2, py2) {
   if (f.gone) return;
+  if (f.sleepT > 0) {                            // v4d: shh — it's napping (one gentle note)
+    if (!f.shh) { f.shh = true; addFloat(tX(f.gx) + 16, tY(f.gy) - 12, "SHH! IT'S SLEEPING 💤", '#9fd4f0'); }
+    return;
+  }
   f.shakeT = 0.28;
   bgDirty = true;
   if (f.rainbow) {                              // rainbow tree: 3 wood + 2 food + 1 best
@@ -2592,6 +2768,7 @@ function harvestFlora(f, px2, py2) {
     addFloat(tX(f.gx) + 16, tY(f.gy) - 26, '+1', RES_COL[top], top);
     for (let i = 0; i < 5; i++) spawnP(tX(f.gx) + 16, tY(f.gy) + 8, SPR.fw[i % 6], { life: 0.6 });
     SFX.chop(); SFX.coin();
+    countTreasureHarvest(f, 1);
     return;                                     // never depletes
   }
   if (f.type === 'tree') {
@@ -2599,6 +2776,7 @@ function harvestFlora(f, px2, py2) {
     res.wood += amt;
     addFloat(tX(f.gx) + 16, tY(f.gy) - 4, '+' + amt, RES_COL.wood, 'wood');
     for (let i = 0; i < 4; i++) spawnP(tX(f.gx) + 16, tY(f.gy) + 8, f.golden ? SPR.spark[0] : SPR.leaf, { life: 0.6 });
+    if (f.golden) countTreasureHarvest(f, 1);
     SFX.chop();
   } else if (f.type === 'mrock') {              // v4b: lunar regolith
     res.regolith += 2; life.regolith += 2;
@@ -2848,6 +3026,11 @@ function arriveOtherWorld(q) {
       drakes[i].y = tY(q.srcSite.gy) + q.srcSite.s * 32 + 12;
     }
   }
+  /* v4c: balls & wobbles never cross worlds */
+  clearBalls();
+  for (const b of buildings) if (b.wobT > 0) { b.wobT = 0; bgDirty = true; }
+  wobbleN = 0;
+  for (const p of players) if (p.mode === 'cannon') unmanCannon(p);
   swapWorlds();
   for (const pp of parts) pp.on = false;        // no stale debris across worlds
   for (const ff of floats) ff.on = false;
@@ -2869,6 +3052,7 @@ function arriveOtherWorld(q) {
     p.boat = false; p.target = null;
     if (q.dir === 'toEarth') { p.moor = p.moorE || null; p.moorE = null; }
   }
+  landGrowthSanity(true);                        // v4d: restored dinghies get a sanity pass
   camPan = null;
   updateCamera(0, true);
 }
@@ -3052,6 +3236,7 @@ function nearRubble(p) {
 }
 function repairWhack(b) {
   if (!b.rubble) return;
+  if (b.packed) { packWhack(b); return; }        // v4d: landlocked seaport packs up instead
   b.repair = (b.repair || 0) + 1;
   bgDirty = true;
   const s = B[b.k].size || 1, cx2 = tX(b.gx) + s * 16, cy2 = tY(b.gy) + s * 16;
@@ -3066,6 +3251,351 @@ function repairWhack(b) {
   } else {
     SFX.mine();
     addFloat(cx2, tY(b.gy) - 6, 'FIX ' + b.repair + '/3', '#ffd24a');
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   V4c — POP CANNONS: stationary physics launchers. Purely cooperative
+   tools: bursts repair rubble, harvest at 2x, open crates and intercept
+   meteors. Friendly buildings/players/pets make shots FIZZLE (boing,
+   zero damage). One bouncy energy ball model: ground pos + fake height.
+   ═══════════════════════════════════════════════════════════════════════ */
+const BALL_MAX = 3, balls = [];
+for (let i = 0; i < BALL_MAX; i++) balls.push({ on: false });
+
+function nearCannon(p) {
+  let bst = null, bd = 56;
+  for (const b of buildings) {
+    if (b.k !== 'popcannon' || b.rubble) continue;
+    if (players.some(q => q !== p && q.mode === 'cannon' && q.cannon === b)) continue;  // one operator
+    const d = Math.hypot(tX(b.gx) + 16 - p.x, tY(b.gy) + 16 - p.y);
+    if (d < bd) { bd = d; bst = b; }
+  }
+  return bst;
+}
+function manCannon(p, cn) {
+  p.mode = 'cannon'; p.cannon = cn; p.target = null; p.ghost = null;
+  cn.ang = cn.ang || 90;
+  if (cn.pow === undefined) cn.pow = 1;
+  /* sits on the little red seat at the cannon's left — the cannon stays visible */
+  p.x = tX(cn.gx) + 7; p.y = tY(cn.gy) + 37; p.dir = 2; p.flip = false;
+  p.arc = previewArc(cn);
+}
+function unmanCannon(p) {
+  p.mode = 'walk'; p.cannon = null; p.arc = null;
+}
+/* shared ballistic sim — the preview, the aim-assist hook and the live
+   ball all use the same numbers, so what you see is what you get */
+function simShot(cn, ang, pow, ptsOut) {
+  const rad = ang * Math.PI / 180;
+  let x = tX(cn.gx) + 16 + Math.cos(rad) * 10, y = tY(cn.gy) + 16 - Math.sin(rad) * 6;
+  let vx = Math.cos(rad) * CAN_GS[pow], vy = -Math.sin(rad) * CAN_GS[pow];
+  let h = 12, hv = CAN_HV[pow], bounced = false;
+  const dt = 1 / 60;
+  for (let i = 0; i < 400; i++) {
+    x += vx * dt; y += vy * dt; hv -= CAN_G * dt; h += hv * dt;
+    if (ptsOut) ptsOut.push({ x, y: y - h });
+    if (h <= 0 && hv < 0) {
+      const gx = Math.floor(x / TILE), gy = Math.floor((y - GY0) / TILE);
+      const ob = occ[gy] && occ[gy][gx];
+      const blocked = ob ||                      // rubble catches the ball too (see updateBalls)
+        (world === 'earth' ? isWater(gx, gy) : !isLand(gx, gy));
+      if (bounced || blocked) return { x, y };
+      bounced = true; h = 0; hv = -hv * 0.5; vx *= 0.72; vy *= 0.72;
+    }
+  }
+  return { x, y };
+}
+function previewArc(cn) {
+  const raw = [];
+  const end = simShot(cn, cn.ang || 90, cn.pow === undefined ? 1 : cn.pow, raw);
+  const pts = [];
+  for (let i = 0; i < 10; i++) pts.push(raw[Math.min(raw.length - 1, Math.floor(i * raw.length / 10))]);
+  return { pts, end };
+}
+/* test/aim-assist: point the manned cannon at (x,y), return the best miss distance */
+function aimCannonAt(p, x, y) {
+  const cn = p.cannon;
+  let bestD = 1e9, bestA = cn.ang || 90, bestP = cn.pow === undefined ? 1 : cn.pow;
+  for (let ang = 15; ang <= 165; ang += 15) for (let pow = 0; pow < 3; pow++) {
+    const e = simShot(cn, ang, pow);
+    const d = Math.hypot(e.x - x, e.y - y);
+    if (d < bestD) { bestD = d; bestA = ang; bestP = pow; }
+  }
+  cn.ang = bestA; cn.pow = bestP;
+  p.arc = previewArc(cn);
+  return bestD;
+}
+function fireCannon(p, cn) {
+  if ((cn.cd || 0) > 0) return false;
+  let bl = null;
+  for (const b of balls) if (!b.on) { bl = b; break; }
+  if (!bl) return false;
+  const pow = cn.pow === undefined ? 1 : cn.pow;
+  const rad = (cn.ang || 90) * Math.PI / 180;
+  bl.on = true;
+  bl.x = tX(cn.gx) + 16 + Math.cos(rad) * 10; bl.y = tY(cn.gy) + 16 - Math.sin(rad) * 6;
+  bl.vx = Math.cos(rad) * CAN_GS[pow]; bl.vy = -Math.sin(rad) * CAN_GS[pow];
+  bl.h = 12; bl.hv = CAN_HV[pow];
+  bl.bounced = false; bl.squash = 0; bl.trailT = 0;
+  bl.pi = p ? p.pi : 0; bl.cn = cn;
+  cn.recoil = 1; cn.cd = 0.45;
+  SFX.shoot();
+  for (let i = 0; i < 2; i++)
+    spawnP(bl.x, bl.y - bl.h, SPR.spark[i % 2], { vx: bl.vx * 0.3, vy: -30, g: 0, life: 0.4 });
+  return true;
+}
+/* a shot can't touch a living player/pet — it boings off harmlessly */
+function actorNear(x, y) {
+  for (const q of players) if (!q.aboard && Math.hypot(q.x - x, q.y - y) < 20) return true;
+  for (const d of drakes) if (world === 'earth' && Math.hypot(d.x - x, d.y - y) < 18) return true;
+  for (const r of robots) if (Math.hypot(r.x - x, r.y - y) < 18) return true;
+  return false;
+}
+function fizzleShot(ob, x, y) {
+  SFX.boing();
+  addFloat(x, y - 20, 'BOING!', '#8fd4ff');
+  for (let i = 0; i < 4; i++) spawnP(x, y - 6, SPR.puff[0], { vy: -18, g: -8, life: 0.5 });
+  if (ob && !(ob.wobT > 0)) { ob.wobT = 0.55; wobbleN++; bgDirty = true; }
+  else if (ob) ob.wobT = 0.55;
+  lastImpact = { type: 'fizzle', x, y };
+}
+function cannonRepair(b) {                       // burst "shakes it back together" — instant fix
+  b.rubble = false; b.repair = 0;
+  rubbleFixed++;
+  refreshColonyChecks();
+  bgDirty = true;
+  const s = B[b.k].size || 1, cx2 = tX(b.gx) + s * 16, cy2 = tY(b.gy) + s * 16;
+  SFX.fixed();
+  addFloat(cx2, tY(b.gy) - 6, 'FIXED!', '#7dff9a');
+  for (let i = 0; i < 10; i++) spawnP(cx2 + (Math.random() - 0.5) * s * 28, cy2 - 8, SPR.spark[i % 2], { life: 0.9 });
+}
+/* double-yield remote harvest — resources pop up toward the HUD */
+function blastHarvest(f) {
+  if (f.gone || f.sleepT > 0) return;            // v4d: napping treasure trees rest
+  const cx2 = tX(f.gx) + 16, cy2 = tY(f.gy) + 8;
+  if (f.rainbow) {                               // double bundle, never depletes
+    const top = topResource();
+    res.wood += 6; res.food += 4; res[top] += 2;
+    addFloat(cx2, cy2 - 10, '+6 wood +4 food!', RES_COL.wood, 'wood');
+    for (let i = 0; i < 5; i++) spawnP(cx2, cy2, SPR.fw[i % 6], { vy: -60, g: -20, life: 0.7 });
+    countTreasureHarvest(f, 2);                  // a blast is a double harvest
+    return;
+  }
+  if (f.golden) {                                // 2x a golden harvest, never depletes
+    res.wood += 12;
+    addFloat(cx2, cy2 - 10, '+12', RES_COL.wood, 'wood');
+    for (let i = 0; i < 4; i++) spawnP(cx2, cy2, SPR.spark[i % 2], { vy: -60, g: -20, life: 0.7 });
+    countTreasureHarvest(f, 2);
+    return;
+  }
+  const left = Math.max(1, 3 - f.hits);          // 2x everything still in it
+  const kind = f.type === 'tree' ? 'wood' : f.type === 'mrock' ? 'regolith'
+             : f.type === 'ice' ? 'ice' : 'stone';
+  const amt = left * 2 * 2;
+  res[kind] += amt;
+  if (kind in life) life[kind] += amt;
+  addFloat(cx2, cy2 - 10, '+' + amt, RES_COL[kind], kind);
+  const spr = f.type === 'tree' ? SPR.leaf : f.type === 'ice' ? SPR.iceChip : SPR.chip;
+  for (let i = 0; i < 4; i++) spawnP(cx2, cy2 + 6, spr, { vy: -55, g: -16, life: 0.6 });
+  f.gone = true; f.hits = 0; f.regrowT = 35 + Math.random() * 15;
+  bgDirty = true;
+}
+function burstAt(x, y) {
+  const gx0 = Math.floor(x / TILE), gy0 = Math.floor((y - GY0) / TILE);
+  shakeAmt = Math.max(shakeAmt, 2);
+  SFX.burst();
+  for (let i = 0; i < 9; i++) {
+    const a = i / 9 * 6.28, sp = 70 + Math.random() * 50;
+    spawnP(x, y, SPR.fw[i % 6], { vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, g: 20, life: 0.7 });
+  }
+  const inR = (bx, by, s) => Math.hypot(tX(bx) + (s || 1) * 16 - x, tY(by) + (s || 1) * 16 - y) <= 80;
+  for (const b of buildings)                     // rubble snaps back together (never packed-up ports)
+    if (b.rubble && !b.packed && inR(b.gx, b.gy, B[b.k].size)) cannonRepair(b);
+  for (const f of flora)                         // resource popper (2x yield)
+    if (!f.gone && inR(f.gx, f.gy, 1)) blastHarvest(f);
+  if (world === 'earth' && crate && !crate.opening && inR(crate.gx, crate.gy, 1)) openCrate();
+  SFX.coin();
+  lastImpact = { type: 'burst', x, y };
+}
+/* the ball has come to rest — figure out what it hit */
+function resolveImpact(bl) {
+  const x = bl.x, y = bl.y;
+  /* METEOR DEFENSE: any shot ending near a flashing target intercepts it */
+  if (disaster && disaster.type === 'meteor' && world === 'earth') {
+    let hit = false;
+    for (const t of disaster.targets) {
+      if (t.done) continue;
+      if (Math.hypot(t.x - x, t.y - y) < 80) {
+        t.done = true; t.defended = true; hit = true;
+        meteorsBlocked++;
+        addFloat(t.x, t.y - 34, 'DEFENDED!', '#7dff9a');
+        SFX.fixed();
+        for (let i = 0; i < 9; i++) {
+          const a = i / 9 * 6.28, sp = 80 + Math.random() * 60;
+          spawnP(t.x, t.y - 60, SPR.fw[i % 6], { vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, g: 10, life: 0.8 });
+        }
+      }
+    }
+    if (hit && disaster.targets.every(t => t.defended)) {
+      banners.push({ title: 'PERFECT DEFENSE!', sub: 'Every meteor stopped — a bonus crate is coming!', t: 0, dur: 3.4, legendary: true });
+      SFX.legendary();
+      if (!crate) spawnCrate(); else crateT = Math.min(crateT, 5);
+    }
+  }
+  const gx = Math.floor(x / TILE), gy = Math.floor((y - GY0) / TILE);
+  const ob = occ[gy] && occ[gy][gx];
+  /* rubble magnet: a near-miss (~3 tiles) still pops ON the rubble — the burst
+     "shakes it back together" reliably even in a packed town (kid-proof aim) */
+  let snap = null, sd = 100;
+  for (const b2 of buildings) {
+    if (!b2.rubble || b2.packed) continue;       // packed-up ports don't pull shots in
+    const s2 = B[b2.k].size || 1;
+    const d2 = Math.hypot(tX(b2.gx) + s2 * 16 - x, tY(b2.gy) + s2 * 16 - y);
+    if (d2 < sd) { sd = d2; snap = b2; }
+  }
+  if (snap) {
+    const s2 = B[snap.k].size || 1;
+    burstAt(tX(snap.gx) + s2 * 16, tY(snap.gy) + s2 * 16);
+  }
+  else if (ob && !ob.rubble) fizzleShot(ob, x, y);       // friendly structure: boing, zero damage
+  else if (actorNear(x, y)) fizzleShot(null, x, y);      // players & pets: boing off the head
+  else if (world === 'earth' && isWater(gx, gy)) {       // little splash
+    SFX.splash();
+    for (let i = 0; i < 6; i++) spawnP(x, y, SPR.wake, { vy: -20, g: -8, life: 0.6 });
+    lastImpact = { type: 'splash', x, y };
+  } else if (world === 'moon' && !isLand(gx, gy)) {      // drifted into space — twinkle out
+    SFX.pop();
+    for (let i = 0; i < 4; i++) spawnP(x, y, SPR.sparkB[i % 2], { vy: -12, g: 0, life: 0.7 });
+    lastImpact = { type: 'space', x, y };
+  } else burstAt(x, y);
+  autoPassCannon(bl);
+}
+/* 2P: alternating turns without menus — the waiting player takes over */
+function autoPassCannon(bl) {
+  if (players.length < 2) return;
+  const cn = bl.cn;
+  if (!cn || cn.rubble || buildings.indexOf(cn) < 0) return;
+  const shooter = players.find(q => q.pi === bl.pi);
+  const other = players.find(q => q.pi !== bl.pi);
+  if (!shooter || !other) return;
+  if (shooter.mode !== 'cannon' || shooter.cannon !== cn) return;
+  if (other.mode !== 'walk' || other.aboard || other.boat) return;
+  const cx2 = tX(cn.gx) + 16, cy2 = tY(cn.gy) + 16;
+  if (Math.hypot(other.x - cx2, other.y - cy2) > 70) return;
+  unmanCannon(shooter);
+  if (isLandPx(cx2 - 26, cy2 + 24)) { shooter.x = cx2 - 26; shooter.y = cy2 + 24; }
+  else if (isLandPx(cx2 + 26, cy2 + 24)) { shooter.x = cx2 + 26; shooter.y = cy2 + 24; }
+  manCannon(other, cn);
+  addFloat(cx2, cy2 - 58, "P" + (other.pi + 1) + "'S TURN!", other.pi ? '#ff9a8a' : '#8fd4ff');
+  SFX.confirm();
+}
+function updateBalls(dt) {
+  for (const bl of balls) {
+    if (!bl.on) continue;
+    bl.x += bl.vx * dt; bl.y += bl.vy * dt;
+    bl.hv -= CAN_G * dt; bl.h += bl.hv * dt;
+    if (bl.squash > 0) bl.squash = Math.max(0, bl.squash - dt * 1.4);
+    bl.trailT -= dt;
+    if (bl.trailT <= 0) {
+      bl.trailT = 0.15;
+      spawnP(bl.x, bl.y - bl.h, SPR.spark[1], { vx: 0, vy: 0, g: 0, life: 0.2 });
+    }
+    if (bl.h <= 0 && bl.hv < 0) {
+      const gx = Math.floor(bl.x / TILE), gy = Math.floor((bl.y - GY0) / TILE);
+      const ob = occ[gy] && occ[gy][gx];
+      /* rubble is a soft catcher: the ball pops right on it (reliable repairs) */
+      const blocked = ob || actorNear(bl.x, bl.y) ||
+        (world === 'earth' ? isWater(gx, gy) : !isLand(gx, gy));
+      if (!bl.bounced && !blocked) {             // first touch: one squashy bounce
+        bl.bounced = true; bl.h = 0;
+        bl.hv = -bl.hv * 0.5; bl.vx *= 0.72; bl.vy *= 0.72;
+        bl.squash = 0.34;
+        SFX.bounce();
+        spawnP(bl.x, bl.y, SPR.puff[0], { vy: -10, g: -8, life: 0.4 });
+      } else {                                   // second contact (or a fizzle/splash): pop!
+        resolveImpact(bl);
+        bl.on = false;
+      }
+    }
+  }
+}
+function clearBalls() { for (const bl of balls) bl.on = false; }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   V4d — LAND-GROWTH SANITY: after ANY land growth (age rings, colony
+   levels, max-age growth, settling) and once on every load, boats caught
+   on new land push off to the nearest water and landlocked seaports
+   convert to a pack-up state (3 whacks = full refund, rebuild on the
+   new shore at net-zero cost).
+   ═══════════════════════════════════════════════════════════════════════ */
+function nearestWaterTile(gx, gy) {
+  for (let r = 1; r < 14; r++) for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) {
+    if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+    if (isWater(gx + dx, gy + dy)) return { gx: gx + dx, gy: gy + dy };
+  }
+  return null;
+}
+function driftMoor(m, silent) {                  // slide a beached dinghy back to sea
+  const w = nearestWaterTile(Math.floor(m.x / TILE), Math.floor((m.y - GY0) / TILE));
+  if (!w) return false;
+  m.x = tX(w.gx) + 16; m.y = tY(w.gy) + 16;
+  if (!silent) {
+    SFX.splash();
+    for (let i = 0; i < 5; i++) spawnP(m.x, m.y + 4, SPR.wake, { vy: -14, g: -6, life: 0.6 });
+    addFloat(m.x, m.y - 30, 'THE BOAT DRIFTED OUT!', '#8fd4ff');
+  }
+  return true;
+}
+function landGrowthSanity(silent) {
+  /* sailing players gently beached; their dinghy slides off to the water */
+  if (world === 'earth') for (const p of players) {
+    if (p.boat && !isWaterPx(p.x, p.y)) {
+      p.boat = false;
+      if (p.mode === 'boatmenu' || p.mode === 'settle') p.mode = 'walk';
+      if (!p.moor) p.moor = { x: p.x, y: p.y };  // the boat stays with you…
+      if (!silent) addFloat(p.x, p.y - 44, 'BEACHED!', '#ffd24a');
+    }
+  }
+  /* moored + moon-stashed dinghies now on land drift to the nearest water */
+  inWorld('earth', () => {
+    for (const p of players) {
+      if (p.moor && !isWaterPx(p.moor.x, p.moor.y) && !driftMoor(p.moor, silent)) p.moor = null;
+      if (p.moorE && !isWaterPx(p.moorE.x, p.moorE.y) && !driftMoor(p.moorE, true)) p.moorE = null;
+    }
+    /* landlocked seaports pack up — the sea left them behind */
+    let changed = false;
+    for (const b of buildings) {
+      if (b.k !== 'seaport' || b.packed) continue;
+      if (sandAt(b.gx, b.gy)) continue;          // still on a beach — all good
+      b.rubble = true; b.packed = true; b.repair = 0; b.idle = null;
+      changed = true;
+      if (!silent) {
+        addFloat(tX(b.gx) + 16, tY(b.gy) - 12, 'THE SEA IS TOO FAR AWAY!', '#ff9a8a');
+        SFX.hungry();
+      }
+    }
+    if (changed) { refreshColonyChecks(); bgDirty = true; }
+  });
+}
+/* landlocked seaport pack-up: 3 whacks, FULL refund, never a repair */
+function packWhack(b) {
+  b.repair = (b.repair || 0) + 1;
+  bgDirty = true;
+  const s = B[b.k].size || 1, cx2 = tX(b.gx) + s * 16, cy2 = tY(b.gy) + s * 16;
+  for (let i = 0; i < 4; i++) spawnP(cx2, cy2, SPR.chip, { life: 0.5 });
+  if (b.repair >= 3) {
+    for (let dy = 0; dy < s; dy++) for (let dx = 0; dx < s; dx++) occ[b.gy + dy][b.gx + dx] = null;
+    buildings.splice(buildings.indexOf(b), 1);
+    refund(B[b.k].cost);                         // net-zero: rebuild on the new shore
+    SFX.pop(); SFX.coin();
+    addFloat(cx2, tY(b.gy) - 6, 'PACKED UP! FULL REFUND!', '#7dff9a');
+    for (let i = 0; i < 12; i++) spawnP(cx2 + (Math.random() - 0.5) * s * 28, cy2 - 8, SPR.spark[i % 2], { life: 0.9 });
+    refreshColonyChecks();
+    recomputePipes(); recomputeAnims();
+  } else {
+    SFX.mine();
+    addFloat(cx2, tY(b.gy) - 6, 'PACK ' + b.repair + '/3', '#ffd24a');
   }
 }
 
@@ -3185,6 +3715,7 @@ function trySettle(p) {
   out: for (let r = 1; r < 12; r++) for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) {
     if (isWater(isl.gx + dx, isl.gy + dy)) { p.moor = { x: tX(isl.gx + dx) + 16, y: tY(isl.gy + dy) + 16 }; break out; }
   }
+  landGrowthSanity(false);                      // v4d: the OTHER sailor may be under the new land
   terrainDirty = true;
   refreshColonyChecks(); refreshFerries();
   recomputePipes(); recomputeAnims();
@@ -3278,11 +3809,7 @@ function colonyLevelUp(il) {
     SFX.legendary();
     colonyFw = { x: tX(il.gx) + 16, y: tY(il.gy) + 16, t: 3.4, cool: 0 };   // short fireworks show
   }
-  /* a new ring can rise under a sailing boat — beach it gently */
-  for (const p of players) if (p.boat && !isWaterPx(p.x, p.y)) {
-    p.boat = false;
-    if (p.mode === 'boatmenu' || p.mode === 'settle') p.mode = 'walk';
-  }
+  landGrowthSanity(false);                      // v4d: boats push off, landlocked ports pack up
   camPanTo(tX(il.gx) + 16, tY(il.gy) + 16, 2.2);
   refreshColonyChecks();
   refreshFerries();
@@ -3358,19 +3885,23 @@ function saveGame() {
   const s = {
     v: 5, wld: world, name: islandName, seed, age, legends, rocketDone, firstPowerDone,
     moonRocketBought, moonArrived, moonReturnDone, returnFueled,
-    stars, goalI, cratesOpened, rubbleFixed,
+    stars, goalI, cratesOpened, rubbleFixed, mb: meteorsBlocked,
     rocketsLaunched, lastGift, battCharge,
     islands: settled.map(il => [il.gx, il.gy, il.steps, il.lvl]),   // v4a: colony level (spec/name re-derive from seed)
     grown: grownTiles, growNextPop, islandFull,
     campfireGone: !eD.buildings.some(b => b.k === 'campfire'),
     res, life, popF, playtime, crateT, rates, savedAt: Date.now(),
-    buildings: eD.buildings.filter(b => b.k !== 'campfire').map(b => [b.k, b.gx, b.gy, b.rubble ? 1 + (b.repair || 0) : 0]),
+    /* v4d: rubble field — 1-3 = repairable rubble, 4-6 = packed-up seaport */
+    buildings: eD.buildings.filter(b => b.k !== 'campfire').map(b => [b.k, b.gx, b.gy, b.rubble ? (b.packed ? 4 : 1) + (b.repair || 0) : 0]),
     flora: eD.flora.map(f => [f.type, f.gx, f.gy, f.rainbow ? 2 : f.golden ? 1 : 0, f.hits, f.gone ? Math.ceil(f.regrowT) : 0]),
     moonBuildings: mD.buildings.map(b => [b.k, b.gx, b.gy, b.rubble ? 1 + (b.repair || 0) : 0]),
     moonFlora: mD.flora.map(f => [f.type, f.gx, f.gy, f.hits, f.gone ? Math.ceil(f.regrowT) : 0]),
     robots: eD.robots.filter(r => !r.gold).length, goldRobots: eD.robots.filter(r => r.gold).length,
     moonRobots: mD.robots.filter(r => !r.gold).length, moonGoldRobots: mD.robots.filter(r => r.gold).length,
     drakes: drakes.map(d => d.blue ? 1 : 0),
+    /* v4d: P1's dinghy (moored + moon-stashed) survives save/load */
+    moors: players[0] ? [players[0].moor ? [Math.round(players[0].moor.x), Math.round(players[0].moor.y)] : 0,
+                         players[0].moorE ? [Math.round(players[0].moorE.x), Math.round(players[0].moorE.y)] : 0] : 0,
     thumb: thumbURL(eD.bgC, eD.W || EGW * TILE, eD.H || GY0 + EGH * TILE),
   };
   lsSet(SLOT_KEY(curSlot), JSON.stringify(s));
@@ -3415,6 +3946,7 @@ function resetWorldState() {
   gateSeq = null; confirmPrestige = null;
   disaster = null; disasterT = DIS_FIRST; sessionT = 0;
   goalI = 0; cratesOpened = 0; rubbleFixed = 0;
+  meteorsBlocked = 0; lastImpact = null; wobbleN = 0; clearBalls();
   rates = {}; playtime = 0; simAcc = 0; autosaveT = 0;
   banners = []; modal = null; paused = false; statsOpen = false;
   for (const p of parts) p.on = false;
@@ -3466,6 +3998,7 @@ function loadGame(slot) {
   goalI = s.goalI || 0;
   cratesOpened = s.cratesOpened || 0;
   rubbleFixed = s.rubbleFixed || 0;
+  meteorsBlocked = s.mb || 0;
   rocketsLaunched = s.rocketsLaunched || (s.rocketDone ? 1 : 0);   // old saves: infer
   lastGift = s.lastGift || null;
   moonRocketBought = !!s.moonRocketBought; moonArrived = !!s.moonArrived;
@@ -3505,7 +4038,8 @@ function loadGame(slot) {
     if (B[bb[0]].moon) { moonOld.push(bb); continue; }
     const [mgx, mgy] = migXY(bb[1], bb[2]);
     const b = addBuilding(bb[0], mgx, mgy);      // trust save even if flora landed there
-    if (bb[3]) { b.rubble = true; b.repair = clamp(bb[3] - 1, 0, 2); }
+    if (bb[3] >= 4) { b.rubble = true; b.packed = true; b.repair = clamp(bb[3] - 4, 0, 2); }   // v4d
+    else if (bb[3]) { b.rubble = true; b.repair = clamp(bb[3] - 1, 0, 2); }
   }
   flora = [];
   for (const ff of (s.flora || [])) {
@@ -3579,6 +4113,17 @@ function loadGame(slot) {
     if (pad) placePlayersAt({ gx: pad.gx, gy: pad.gy, s: B[pad.k].size || 1 });
     updateCamera(0, true);
   }
+  /* v4d: restore P1's dinghy, then silently heal the save — beached boats
+     drift back to sea, landlocked seaports become pack-up rubble */
+  if (Array.isArray(s.moors) && players[0]) {
+    if (s.moors[0]) players[0].moor = { x: s.moors[0][0], y: s.moors[0][1] };
+    if (s.moors[1]) players[0].moorE = { x: s.moors[1][0], y: s.moors[1][1] };
+    if (world === 'moon' && players[0].moor) {   // moon saves stash the dinghy Earth-side
+      players[0].moorE = players[0].moorE || players[0].moor;
+      players[0].moor = null;
+    }
+  }
+  landGrowthSanity(true);
   islandPowered = false;   // recomputed on first tick
   loading = true;
   economyTick(); simAcc = 0;
@@ -3674,6 +4219,8 @@ function doAction(p) {
     if (moonStage() === 3 && nearMoonPortB(p)) { tryFuel(p); return; }   // ✕ at the port = fuel up
     const rb2 = nearRubble(p);
     if (rb2) { repairWhack(rb2); return; }
+    const cn2 = nearCannon(p);                   // v4c: ✕ mans a pop cannon (moon too)
+    if (cn2) { manCannon(p, cn2); SFX.confirm(); return; }
     const f2 = nearFlora(p);
     if (f2) harvestFlora(f2, p.x, p.y);
     return;
@@ -3681,6 +4228,8 @@ function doAction(p) {
   if (crate && Math.hypot(tX(crate.gx) + 16 - p.x, tY(crate.gy) + 12 - p.y) < 52) { openCrate(); return; }
   const rb = nearRubble(p);
   if (rb) { repairWhack(rb); return; }
+  const cn = nearCannon(p);                      // v4c: ✕ mans a pop cannon
+  if (cn) { manCannon(p, cn); SFX.confirm(); return; }
   const sp = nearSeaport(p);
   if (sp && boardBoat(p, sp)) return;           // ✕ by the dock = set sail!
   if (tryBoardMoor(p)) return;                  // ✕ by your moored dinghy = sail on!
@@ -3693,7 +4242,7 @@ function menuItems() {
   for (const k in B) {
     const d = B[k];
     if (d.special || d.age > age) continue;
-    if (!!d.moon !== onMoon) continue;          // v4b: each world builds its own kinds
+    if (!d.both && !!d.moon !== onMoon) continue;   // v4b: each world builds its own kinds (v4c: `both` = anywhere)
     if (d.once && cnt(k) > 0) continue;         // one MOON PORT is plenty
     if (d.need && !d.need.every(n => cnt(n) > 0)) continue;   // star gate: needs the moon trio
     if (d.wonder && (cnt(k) > 0 || legends)) continue;        // wonders build exactly once
@@ -3706,7 +4255,7 @@ function menuItems() {
 }
 function updatePlayer(p, dt) {
   const v = moveVec(p.pi);
-  const inMenu = p.mode === 'menu' || p.mode === 'boatmenu';
+  const inMenu = p.mode === 'menu' || p.mode === 'boatmenu' || p.mode === 'cannon';
   let mx = 0, my = 0;
   if (!inMenu) { mx = v.dx; my = v.dy; }
   if ((mx || my)) { p.target = null; p.ghost = null; }
@@ -3862,6 +4411,15 @@ function onBtn(pi, b) {
     }
     else if (b === 'east') { p.mode = 'menu'; p.ghost = null; SFX.cancel(); }
     else if (b === 'west') { p.mode = 'walk'; p.ghost = null; SFX.cancel(); }
+  } else if (p.mode === 'cannon') {              // v4c: manning the pop cannon
+    const cn = p.cannon;
+    if (!cn || cn.rubble) { unmanCannon(p); return; }
+    if (b === 'left')  { cn.ang = Math.min(165, (cn.ang || 90) + 15); p.arc = previewArc(cn); SFX.ui(); }
+    else if (b === 'right') { cn.ang = Math.max(15, (cn.ang || 90) - 15); p.arc = previewArc(cn); SFX.ui(); }
+    else if (b === 'up')   { cn.pow = ((cn.pow === undefined ? 1 : cn.pow) + 1) % 3; p.arc = previewArc(cn); SFX.ui(); }
+    else if (b === 'down') { cn.pow = ((cn.pow === undefined ? 1 : cn.pow) + 2) % 3; p.arc = previewArc(cn); SFX.ui(); }
+    else if (b === 'south') { if (!fireCannon(p, cn)) SFX.cancel(); }
+    else if (b === 'east') { unmanCannon(p); SFX.cancel(); }
   }
 }
 function pauseOptions() {
@@ -3975,6 +4533,8 @@ function bindBtn(id, b) {
 }
 bindBtn('tbA', 'south'); bindBtn('tbB', 'east');
 bindBtn('tbBuild', 'west'); bindBtn('tbStats', 'north'); bindBtn('tbPause', 'start');
+/* v4c: cannon-manning touch cluster */
+bindBtn('tbCL', 'left'); bindBtn('tbCR', 'right'); bindBtn('tbCP', 'up'); bindBtn('tbCF', 'south');
 
 function canvasPoint(ev) {
   const r = canvas.getBoundingClientRect();
@@ -4039,6 +4599,7 @@ function tapAt(x, y) {
   if (statsOpen) { statsOpen = false; SFX.ui(); return; }
   const p = players[0];
   if (!p || p.aboard) return;                   // aboard: tbB (○) hops out
+  if (p.mode === 'cannon') return;              // v4c: dedicated ◀ ▶ PWR FIRE buttons drive it
   const wx = x + camX, wy = y + camY;           // tap → world coords through the camera
   if (p.mode === 'boatmenu') {
     const y0 = H - 114;
@@ -4289,6 +4850,24 @@ function drawMoonStrip() {
   }
 }
 
+/* v4d: slim dark pill behind the build-menu detail block — text/costs were
+   drawn straight over terrain and washed out on bright grass. ONE drawImage,
+   sized to the content, style-matched to the HUD chrome. */
+let pillRect = null, pillT = -9;
+function drawDetailPill(label, desc, nCost, yBase) {
+  ctx.font = '900 20px Verdana, sans-serif';
+  let bw = ctx.measureText(label).width;
+  if (desc) {
+    ctx.font = '700 12px Verdana, sans-serif';
+    bw = Math.max(bw, ctx.measureText(desc).width);
+  }
+  const x0 = W / 2 - bw / 2 - 24;
+  let x1 = W / 2 + bw / 2 + 24;
+  if (nCost) x1 = Math.max(x1, W / 2 + 240 + nCost * 43 + 12);   // cost row sits right of centre
+  ctx.drawImage(SPR.pillP, x0, yBase - 62, x1 - x0, 54);
+  pillRect = { x: x0, y: yBase - 62, w: x1 - x0, h: 54 };
+  pillT = T;
+}
 function drawMenu(p, yBase) {
   const items = menuItems();
   p.menuI = clamp(p.menuI, 0, items.length - 1);
@@ -4339,6 +4918,7 @@ function drawMenu(p, yBase) {
     label = B[it.k].name; cost = B[it.k].cost;
     const d = B[it.k];
     if (it.k === 'stargate') desc = 'opens the gate to the stars!';
+    else if (it.k === 'popcannon') desc = 'pop! fix, harvest & stop meteors!';
     else if (it.k === 'moonport') desc = 'a landing pad — your way home!';
     else if (d.pop) desc = '+' + d.pop + ' population' + (d.moon ? ' (on the moon!)' : '');
     else if (d.aura) desc = 'farms +50%!';
@@ -4348,6 +4928,7 @@ function drawMenu(p, yBase) {
     else if (d.store) desc = 'stores ' + d.store + ' power!';
     else if (d.prod) { const r = Object.keys(d.prod)[0]; desc = '+' + d.prod[r] + ' ' + r + '/s'; }
   }
+  drawDetailPill(label, desc, cost ? Object.keys(cost).length : 0, yBase);
   otxt(label, W / 2, yBase - 38, 20, '#fff');
   if (desc) txt(desc, W / 2, yBase - 16, 12, '#7dff9a', 'center');
   if (cost) {
@@ -4372,6 +4953,9 @@ function drawBoatMenu(p, yBase) {
   drawFit(SPR.tree[0], x0 + 158, yBase + 44, 40, 46);
   ctx.globalAlpha = 1;
   txt(max ? 'MAX!' : 'SETTLE', x0 + 170, yBase + 86, 9, max ? '#7a8b98' : '#cfe8f4', 'center');
+  drawDetailPill(max ? 'MAX ISLANDS!' : 'SETTLE ISLAND',
+                 max ? 'your archipelago is complete!' : 'raise a brand new island from the sea!',
+                 max ? 0 : Object.keys(settleCost()).length, yBase);
   otxt(max ? 'MAX ISLANDS!' : 'SETTLE ISLAND', W / 2, yBase - 38, 20, max ? '#7a8b98' : '#fff');
   if (max) txt('your archipelago is complete!', W / 2, yBase - 16, 12, '#9fd4f0', 'center');
   else {
@@ -4399,6 +4983,8 @@ function updateArrows() {
     a.y = clamp(H / 2 + dy * s, 72, H - 34);     // keep clear of the HUD bar
     a.ang = Math.atan2(dy, dx);
   };
+  if (scene === 'play')                          // v4c: track a ball that flew off-screen
+    for (const bl of balls) if (bl.on) { put(bl.x, bl.y - bl.h, SPR.arrowB, 'ball'); break; }
   if (scene === 'play' && world === 'earth') {
     if (disaster) {
       const t = disaster.targets.find(t2 => !t2.done) || disaster.targets[0];
@@ -4461,6 +5047,30 @@ function drawGhost(p) {
   }
 }
 
+/* v4c: manning HUD — 3 chunky power pips + label by the cannon, and the
+   dotted trajectory preview (pooled points, drawImage dots only) */
+function drawCannonUI(p) {
+  const cn = p.cannon;
+  if (!cn) return;
+  const cx2 = tX(cn.gx) + 16, cy2 = tY(cn.gy);
+  if (onCam(cx2, cy2, 64)) {
+    ctx.drawImage(SPR.powPips[cn.pow || 0], cx2 - 26, cy2 - 40);
+    otxt(['LOW', 'MED', 'HIGH'][cn.pow || 0], cx2 + 32, cy2 - 30, 11, '#ffd24a', 'left');
+    otxt('✕ FIRE!', cx2, cy2 - 50, 12, '#7dff9a');
+  }
+  if (p.arc) {
+    /* marching-ants dotted arc: 7 of 10 dots per frame, walking outward */
+    const pts = p.arc.pts, ph = (T * 9) | 0;
+    ctx.globalAlpha = 0.85;
+    for (let i = 0; i < pts.length; i++) {
+      if ((i + ph) % 10 >= 6) continue;
+      if (onCam(pts[i].x, pts[i].y, 16)) ctx.drawImage(SPR.aimDot, pts[i].x - 4, pts[i].y - 4);
+    }
+    ctx.globalAlpha = 1;
+    if (onCam(p.arc.end.x, p.arc.end.y, 24)) ctx.drawImage(SPR.aimRing, p.arc.end.x - 14, p.arc.end.y - 14);
+  }
+}
+
 function drawStats() {
   ctx.drawImage(SPR.dim, 0, 0);
   const x = W / 2 - 480, y = 80;
@@ -4508,6 +5118,7 @@ function drawStats() {
   txt('ROBOTS: ' + robots.length + (drakes.length > 1 ? ' · 2 DRAKES!' : drakes.length ? ' · PET DRAKE!' : ''), x + 380, iy, 12, '#9fd4f0');
   iy += 30;
   if (rocketsLaunched > 0) { txt('ROCKETS: ' + rocketsLaunched, x + 380, iy, 12, '#9fd4f0'); iy += 30; }
+  if (meteorsBlocked > 0 || cnt('popcannon') > 0) { txt('METEORS BLOCKED: ' + meteorsBlocked, x + 380, iy, 12, '#7dffe0'); iy += 30; }
   const mins = Math.floor(playtime / 60);
   txt('PLAY TIME: ' + mins + 'm', x + 380, iy, 12, '#9fd4f0');
   iy += 30;
@@ -4626,7 +5237,7 @@ function renderPlay() {
 
   /* ocean sparkles along the coast (culled to the window) */
   const nspark = Math.min(26, coast.length);
-  for (let i = 0, drawn = 0; i < nspark && drawn < 10; i++) {
+  for (let i = 0, drawn = 0; i < nspark && drawn < 7; i++) {
     const c = coast[(i * 43) % coast.length];
     if (!onCam(c.x, c.y, 0)) continue;
     drawn++;
@@ -4704,6 +5315,15 @@ function renderPlay() {
         if (ph < 0.16) ctx.drawImage(SPR.glint, a.x + ph * 110, a.y + ph * 26);
         break;
       }
+      case 'barrel': {                           // v4c: the cannon's live barrel
+        const cb = a.b;
+        const rec = (cb.recoil || 0) * 5;
+        ctx.translate(a.x, a.y);
+        ctx.rotate(-(cb.ang || 90) * Math.PI / 180);
+        ctx.drawImage(SPR.cannonBarrel, -7 - rec, -8);
+        reTx();
+        break;
+      }
       /* age 6 neon + age 7 moon overlays (1 drawImage each) */
       case 'beacon':
         ctx.globalAlpha = 0.4 + 0.4 * Math.sin(T * 4 + a.x);
@@ -4776,6 +5396,21 @@ function renderPlay() {
   /* shaking flora (temporarily lifted out of the static bg) */
   for (const f of flora) if (!f.gone && f.shakeT > 0 && onCam(tX(f.gx), tY(f.gy), 64)) drawFlora(ctx, f, true);
 
+  /* v4d: 💤 bubble bobbing over napping treasure trees (1 drawImage each, ≤ a couple exist) */
+  for (const f of flora) {
+    if (f.gone || !(f.sleepT > 0) || !onCam(tX(f.gx), tY(f.gy), 64)) continue;
+    ctx.drawImage(SPR.bubZzz, tX(f.gx) + 14, tY(f.gy) - 32 + Math.sin(T * 2.6 + f.gx) * 2);
+  }
+
+  /* v4c: fizzle-wobbling buildings (lifted out of the bg, boinging side to side) */
+  if (wobbleN > 0) for (const b of buildings) {
+    if (!(b.wobT > 0) || !onCam(tX(b.gx), tY(b.gy), 64)) continue;
+    const off = Math.sin(T * 26) * 3 * (b.wobT / 0.55);
+    ctx.translate(off, 0);
+    drawBuilding(ctx, b);
+    reTx();
+  }
+
   /* harvest / repair / sail / board target markers */
   for (const p of players) {
     if (p.mode !== 'walk' || p.aboard) continue;
@@ -4784,7 +5419,10 @@ function renderPlay() {
     if (rb) {
       const s2 = B[rb.k].size || 1;
       drawFit(SPR.mark, tX(rb.gx) + s2 * 16, tY(rb.gy) - 12 + bob, 16, 14);
-      otxt('✕ FIX!', tX(rb.gx) + s2 * 16, tY(rb.gy) - 24, 13, '#7dff9a');
+      if (rb.packed) {                           // v4d: landlocked seaport
+        otxt('THE SEA IS TOO FAR AWAY!', tX(rb.gx) + s2 * 16, tY(rb.gy) - 40, 12, '#ff9a8a');
+        otxt('✕ TO PACK IT UP', tX(rb.gx) + s2 * 16, tY(rb.gy) - 24, 13, '#ffd24a');
+      } else otxt('✕ FIX!', tX(rb.gx) + s2 * 16, tY(rb.gy) - 24, 13, '#7dff9a');
     } else if (world === 'moon') {
       /* v4b: lunar prompts — fuel at the port, mine rocks & ice */
       if (moonStage() === 3 && nearMoonPortB(p)) {
@@ -4805,6 +5443,8 @@ function renderPlay() {
       const f = nearFlora(p);
       if (f) drawFit(SPR.mark, tX(f.gx) + 16, tY(f.gy) - 12 + bob, 16, 14);
     }
+    const cnn = nearCannon(p);                   // v4c: manning prompt (both worlds)
+    if (cnn) otxt('✕ MAN THE CANNON!', tX(cnn.gx) + 16, tY(cnn.gy) - 28 + bob, 13, '#ffd24a');
     if (world === 'earth' && crate && Math.hypot(tX(crate.gx) + 16 - p.x, tY(crate.gy) + 12 - p.y) < 52)
       otxt('✕ OPEN!', tX(crate.gx) + 16, tY(crate.gy) - 24, 13, '#ffd24a');
     if (bZone && !p.aboard && Math.hypot(bZone.cx - p.x, bZone.cy - p.y) < 78)
@@ -4812,7 +5452,10 @@ function renderPlay() {
   }
 
   /* ghosts under everything mobile (hidden during cinematics) */
-  if (!rocketSeq && !gateSeq && !travelCin()) for (const p of players) drawGhost(p);
+  if (!rocketSeq && !gateSeq && !travelCin()) for (const p of players) {
+    drawGhost(p);
+    if (p.mode === 'cannon') drawCannonUI(p);   // v4c: pips + dotted arc preview
+  }
 
   /* cosmetic cargo ferries — hull + tiny crate, ≤3 in the world, culled */
   for (let i = 0; i < ferries.length; i++) {
@@ -4859,6 +5502,18 @@ function renderPlay() {
       } else ctx.drawImage(SPR.boat, p.x - 19, p.y - 12 + bob2);
     }
     if (players.length > 1) otxt('P' + (p.pi + 1), p.x, p.y - (p.boat ? 42 : 36), 10, p.pi ? '#ff9a8a' : '#8fd4ff');
+  }
+
+  /* v4c: bouncing energy balls (shadow on the ground, glow ball in the air) */
+  for (const bl of balls) {
+    if (!bl.on || !onCam(bl.x, bl.y, 64)) continue;
+    ctx.drawImage(SPR.ballShad, bl.x - 7, bl.y - 4);
+    if (bl.squash > 0.03) {                      // squash-and-stretch on the bounce
+      ctx.translate(bl.x, bl.y - bl.h);
+      ctx.scale(1 + bl.squash, 1 - bl.squash * 0.85);
+      ctx.drawImage(SPR.eball, -10, -10);
+      reTx();
+    } else ctx.drawImage(SPR.eball, bl.x - 10, bl.y - bl.h - 10);
   }
 
   /* rocket sequence */
@@ -4945,6 +5600,7 @@ function renderPlay() {
       }
     } else if (q.type === 'meteor' && q.phase === 'strike') {
       for (const tg2 of q.targets) {
+        if (tg2.defended) continue;                    // v4c: intercepted mid-air — no rock falls
         const ft = (q.t - tg2.delay) / 0.7;            // flight 0..1
         if (ft > 0 && ft < 1) {
           const mx2 = tg2.x + (1 - ft) * 420, my2 = tg2.y - (1 - ft) * 560;
@@ -5045,6 +5701,7 @@ function renderPlay() {
     else if (m === 'walk') hint = p0.boat ? '✕/Z LAND NEARBY · □/C SETTLE MENU · △/V STATS'
                                      : world === 'moon' ? '✕/Z MINE · □/C BUILD · △/V STATS'
                                      : '✕/Z CHOP · □/C BUILD · △/V STATS';
+    else if (m === 'cannon') hint = '◀ ▶ AIM · ▲ ▼ POWER · ✕ FIRE · ○ HOP OFF';
     else if (m === 'menu') hint = '◀ ▶ CHOOSE · ✕ OK · ○ BACK';
     else if (m === 'boatmenu') hint = '✕ SETTLE ISLAND · ○ BACK';
     else if (m === 'settle') hint = 'SAIL TO OPEN WATER · ✕ RAISE THE ISLAND · ○ BACK';
@@ -5151,9 +5808,15 @@ function updatePlay(dt) {
         f.gone = false; f.hits = 0; bgDirty = true;
         spawnP(tX(f.gx) + 16, tY(f.gy) + 16, SPR.spark[0], { vy: -20, g: 0, life: 0.7 });
       }
-    } else if (f.shakeT > 0) {
-      f.shakeT -= dt;
-      if (f.shakeT <= 0) bgDirty = true;
+    } else {
+      if (f.sleepT > 0) {                        // v4d: napping treasure trees
+        f.sleepT -= dt;
+        if (f.sleepT <= 0) wakeFlora(f);         // wakes with a sparkle
+      }
+      if (f.shakeT > 0) {
+        f.shakeT -= dt;
+        if (f.shakeT <= 0) bgDirty = true;
+      }
     }
   }
   /* ambient emitters (smoke / bubbles / auras) */
@@ -5178,6 +5841,9 @@ function updatePlay(dt) {
         spawnP(a.x + (Math.random() - 0.5) * 26, a.y + Math.random() * 16,
                a.gold ? SPR.spark[0] : SPR.sparkB[0], { vx: 0, vy: -18, g: 0, life: 0.9 });
       }
+    } else if (a.t === 'barrel') {               // v4c: recoil spring-back + fire cooldown
+      if (a.b.recoil > 0) a.b.recoil = Math.max(0, a.b.recoil - dt * 2.6);
+      if (a.b.cd > 0) a.b.cd -= dt;
     }
   }
   if (rocketSeq) updateRocket(dt);
@@ -5186,6 +5852,22 @@ function updatePlay(dt) {
   updateCamera(dt);
   updateDots(dt);
   updateFerries(dt);
+  /* v4c: cannon balls, fizzle wobbles, manning safety + touch UI class */
+  updateBalls(dt);
+  if (wobbleN > 0) for (const b of buildings) {
+    if (b.wobT > 0) {
+      b.wobT -= dt;
+      if (b.wobT <= 0) { b.wobT = 0; wobbleN--; bgDirty = true; }
+    }
+  }
+  for (const p of players)                       // a disaster rubbled the manned cannon → hop off
+    if (p.mode === 'cannon' && (!p.cannon || p.cannon.rubble || buildings.indexOf(p.cannon) < 0))
+      unmanCannon(p);
+  const man0 = !!(players[0] && players[0].mode === 'cannon');
+  if (man0 !== bodyManning) {
+    bodyManning = man0;
+    document.body.classList.toggle('manning', man0);
+  }
   /* pools */
   for (let i = 0; i < P_MAX; i++) {
     const p = parts[i];
@@ -5227,7 +5909,9 @@ window.__test = {
   walkTo(x, y) { if (players[0]) players[0].target = { x, y }; },
   walkToTile(gx, gy) { if (players[0]) players[0].target = { x: tX(gx) + 16, y: tY(gy) + 16 }; },
   arrived() { return !players[0] || !players[0].target; },
-  flora() { return flora.filter(f => !f.gone).map(f => ({ type: f.type, x: tX(f.gx) + 16, y: tY(f.gy) + 20 })); },
+  flora() { return flora.filter(f => !f.gone).map(f => ({ type: f.type, x: tX(f.gx) + 16, y: tY(f.gy) + 20,
+                                                          gx: f.gx, gy: f.gy, hits: f.hits, golden: !!f.golden, rainbow: !!f.rainbow,
+                                                          sleep: f.sleepT > 0, sleepT: f.sleepT || 0, zc: f.zc || 0 })); },
   findSpot(k) {
     for (let r = 1; r < 24; r++) for (let gy = CYG - r; gy <= CYG + r; gy++) for (let gx = CX - r; gx <= CX + r; gx++)
       if (validAt(k, gx, gy)) return { gx, gy };
@@ -5245,7 +5929,7 @@ window.__test = {
   removeCampfire() { const c = buildings.find(b => b.k === 'campfire'); return c ? removeBuilding(c) : false; },
   fastDisaster() { for (let i = 0; i < 400 && disaster; i++) updateDisaster(0.1); },
   fastGate() { for (let i = 0; i < 400 && gateSeq; i++) updateGate(0.1); },
-  robotTo(x, y) { if (robots[0]) { robots[0].x = x; robots[0].y = y; robots[0].targ = null; } },
+  robotTo(x, y, i) { const r = robots[i || 0]; if (r) { r.x = x; r.y = y; r.targ = null; r.seekT = 0; } },
   gotoRubble() {
     const b = buildings.find(b2 => b2.rubble);
     if (b && players[0]) {
@@ -5314,10 +5998,48 @@ window.__test = {
     });
   },
   crateAt(gx, gy) { crate = { gx, gy, t: 0, opening: 0 }; return true; },
+  plant(type, gx, gy, g) {                       // v4c test hook: deterministic flora (v4d: g=1 golden, g=2 rainbow)
+    if (!isLand(gx, gy) || occ[gy][gx] || floraAt(gx, gy)) return false;
+    flora.push({ type, gx, gy, hits: 0, gone: false, regrowT: 0, shakeT: 0, golden: g === 1, rainbow: g === 2 });
+    bgDirty = true;
+    return true;
+  },
+  /* ── v4d hooks ── */
+  whack(gx, gy) {                                // whack a tile (player code path): flora or rubble
+    const f = floraAt(gx, gy);
+    if (f) { harvestFlora(f, tX(gx) + 16, tY(gy) + 30); return true; }
+    const b = occ[gy] && occ[gy][gx];
+    if (b && b.rubble) { repairWhack(b); return true; }
+    return false;
+  },
+  burst(x, y) { burstAt(x, y); return lastImpact; },   // the cannon-repair path, sans ballistics
+  windSleep(sec) {                               // fast-forward nap timers (wake path included)
+    let n = 0;
+    for (const f of flora) if (f.sleepT > 0) { n++; f.sleepT -= sec; if (f.sleepT <= 0) wakeFlora(f); }
+    return n;
+  },
+  addRobot(x, y, gold) { spawnRobot(x, y, gold); return robots.length; },
+  robotsInfo() {
+    return robots.map(r => ({ x: Math.round(r.x), y: Math.round(r.y), gold: !!r.gold,
+      targ: r.targ ? (r.targ.k ? { b: r.targ.k, gx: r.targ.gx, gy: r.targ.gy }
+                               : { f: r.targ.type, gx: r.targ.gx, gy: r.targ.gy }) : null }));
+  },
+  raiseLand(gx, gy) {                            // raise one tile through the growth pipeline
+    if (!isWater(gx, gy)) return false;
+    landAge[gy][gx] = 1;
+    recomputeIsleIds();
+    landGrowthSanity(false);
+    refreshColonyChecks(); refreshFerries();
+    terrainDirty = true;
+    return true;
+  },
   isWater(gx, gy) { return isWater(gx, gy); },
   landAt(gx, gy) { return landAge[gy] ? landAge[gy][gx] : -1; },
   /* ── v4b hooks ── */
   warpTo(w) {                                    // test-only instant world switch
+    clearBalls(); wobbleN = 0;
+    for (const b of buildings) if (b.wobT > 0) { b.wobT = 0; bgDirty = true; }
+    for (const p of players) if (p.mode === 'cannon') unmanCannon(p);
     if (world !== w) swapWorlds();
     const pad = world === 'moon'
       ? (buildings.find(b => b.k === 'moonport') || buildings.find(b => b.k === 'lander'))
@@ -5355,6 +6077,48 @@ window.__test = {
   },
   moonStage() { return moonStage(); },
   fuelCost() { return FUEL_COST; },
+  /* ── v4c hooks — pop cannons ── */
+  cannons() {
+    return buildings.filter(b => b.k === 'popcannon').map(b => ({
+      gx: b.gx, gy: b.gy, x: tX(b.gx) + 16, y: tY(b.gy) + 16,
+      ang: b.ang || 90, pow: b.pow === undefined ? 1 : b.pow, rubble: !!b.rubble }));
+  },
+  cannonInfo(pi) {
+    const p = players[pi || 0];
+    if (!p || p.mode !== 'cannon' || !p.cannon) return null;
+    const cn = p.cannon;
+    const a = previewArc(cn);
+    return { ang: cn.ang, pow: cn.pow, arc: a.pts.map(q => ({ x: q.x, y: q.y })),
+             end: { x: a.end.x, y: a.end.y },
+             muzzle: { x: tX(cn.gx) + 16, y: tY(cn.gy) + 16 } };
+  },
+  setAim(ang, pow, pi) {
+    const p = players[pi || 0];
+    if (!p || p.mode !== 'cannon' || !p.cannon) return false;
+    p.cannon.ang = ang; p.cannon.pow = pow;
+    p.arc = previewArc(p.cannon);
+    return true;
+  },
+  aimAt(x, y, pi) {
+    const p = players[pi || 0];
+    if (!p || p.mode !== 'cannon' || !p.cannon) return -1;
+    return aimCannonAt(p, x, y);
+  },
+  fire(pi) {
+    const p = players[pi || 0];
+    return p && p.mode === 'cannon' && p.cannon ? fireCannon(p, p.cannon) : false;
+  },
+  balls() {
+    return balls.filter(b => b.on).map(b => ({
+      x: b.x, y: b.y, h: b.h, vx: b.vx, vy: b.vy, hv: b.hv, bounced: b.bounced, pi: b.pi }));
+  },
+  fastBalls() { for (let i = 0; i < 600 && balls.some(b => b.on); i++) updateBalls(1 / 60); },
+  cannonTuning() { return { gs: CAN_GS.slice(), hv: CAN_HV.slice(), g: CAN_G }; },
+  lastImpact() { return lastImpact; },
+  resetWarn() {
+    if (disaster && disaster.phase === 'warn') { disaster.t = 0; return true; }
+    return false;
+  },
   /* ── v4a hooks ── */
   colonies() {
     return settled.map(il => ({ gx: il.gx, gy: il.gy, steps: il.steps, lvl: il.lvl,
@@ -5407,8 +6171,16 @@ window.__test = {
       goalCount: GOALS.length, cratesOpened, rubbleFixed,
       islandName, capPop: capPop(),
       disaster: disaster ? { type: disaster.type, phase: disaster.phase,
-                             targets: disaster.targets.map(t => ({ gx: t.b.gx, gy: t.b.gy, done: t.done })) } : null,
-      rubble: buildings.filter(b => b.rubble).map(b => ({ k: b.k, gx: b.gx, gy: b.gy, repair: b.repair || 0 })),
+                             targets: disaster.targets.map(t => ({ gx: t.b.gx, gy: t.b.gy, x: t.x, y: t.y,
+                                                                   done: t.done, defended: !!t.defended })) } : null,
+      /* v4c */
+      meteorsBlocked,
+      ballsLive: balls.filter(b => b.on).length,
+      impact: lastImpact,
+      rubble: buildings.filter(b => b.rubble).map(b => ({ k: b.k, gx: b.gx, gy: b.gy, repair: b.repair || 0, packed: !!b.packed })),
+      /* v4d */
+      costPill: pillRect && T - pillT < 0.5 ? Object.assign({}, pillRect) : null,
+      moorE: players[0] && players[0].moorE ? { x: players[0].moorE.x, y: players[0].moorE.y } : null,
       /* v4b */
       wld: world,
       moon: { bought: moonRocketBought, arrived: moonArrived, returned: moonReturnDone, fueled: returnFueled },
