@@ -207,6 +207,10 @@ const SFX = {
   bounce:   () => blip(300, 0.07, 'sine', 0.06, 620),
   boing:    () => { blip(150, 0.08, 'sine', 0.09, 80); setTimeout(() => blip(190, 0.24, 'sine', 0.08, 540), 50); },
   burst:    () => { noiseBurst(0.2, 0.14, 2200, 300); blip(900, 0.18, 'triangle', 0.06, 260); },
+  /* v5b: interiors */
+  purr:     () => { blip(170, 0.32, 'sine', 0.05, 130); setTimeout(() => blip(210, 0.26, 'sine', 0.045, 150), 130); },
+  ding:     () => { blip(880, 0.16, 'triangle', 0.06); setTimeout(() => blip(1320, 0.3, 'triangle', 0.05), 110); },
+  door:     () => { blip(300, 0.08, 'triangle', 0.06, 420); setTimeout(() => blip(460, 0.1, 'triangle', 0.05, 620), 70); },
 };
 /* cozy ambient loop — soft pad chords + pentatonic plucks, scheduled ahead */
 const CHORDS = [[130.8, 196, 329.6], [110, 164.8, 261.6], [87.3, 130.8, 220], [98, 146.8, 246.9]];
@@ -353,6 +357,8 @@ const GOALS = [
   { t: 'BUILD A FARM',            ok: () => cnt('farm') >= 1 },
   { t: 'OPEN A CRATE',            ok: () => cratesOpened >= 1 },
   { t: 'LAY 10 PATH TILES',       ok: () => pathsLaid >= 10 },        // v5a
+  { t: 'GO INSIDE A HOUSE',       ok: () => insideCount >= 1 },       // v5b
+  { t: 'SAY HI TO 5 RESIDENTS',   ok: () => residentsGreeted >= 5 },  // v5b
   { t: 'REACH 30 POP',            ok: () => pop >= 30 },
   { t: 'BUILD A MINE + SMELTER',  ok: () => cnt('mine') >= 1 && cnt('smelter') >= 1 },
   { t: 'MAKE 80 METAL + PARTS',   ok: () => life.metal + life.parts >= 80 },
@@ -456,6 +462,13 @@ const edgeArrows = [{ on: false }, { on: false }, { on: false }];   // pooled ed
 /* ── v4a: colony levels for settled islands ── */
 let ferries = [];                             // cosmetic cargo dinghies (pooled, ≤1 per island)
 let colonyFw = null;                          // { x, y, t, cool } — colony-complete fireworks show
+/* ── v5b: walkable interiors — one dollhouse panel at a time ── */
+let interior = null;                          // { b, kind, world, room, solids, door, spots, residents, cat, hearts, ... }
+let insideCount = 0;                          // lifetime enters (goal; persisted)
+let residentsGreeted = 0;                     // lifetime hellos (goal; persisted)
+let catPets = 0;                              // session pets (charm counter)
+let cookieDay = '';                           // real-day stamp of the bakery cookie (persisted)
+let recentEvents = [];                        // ring buffer [{k, t}] — residents gossip about these (persisted)
 
 /* ═══════════════════════════════════════════════════════════════════════
    SPRITE ATLAS — everything baked once at load. P() draws chunky 2x
@@ -2199,6 +2212,7 @@ function growIsland() {
     /* per-archipelago: only "full" when no island can grow AND all are settled */
     if (!islandFull && settled.length >= SETTLE_MAX) {
       islandFull = true;
+      pushEvent('full');                        // v5b
       banners.push({ title: 'YOUR ARCHIPELAGO IS FULL!', sub: 'Every last tile tamed!', t: 0, dur: 3.6, legendary: true });
       SFX.fanfare();
       saveGame();
@@ -2265,7 +2279,8 @@ function camTarget() {
   }
   if (camPan) return camPan;
   let sx = 0, sy = 0, n = 0;
-  for (const p of players) { sx += p.x; sy += p.y; n++; }
+  for (const p of players) { if (p.inside) continue; sx += p.x; sy += p.y; n++; }   // v5b: follow OUTSIDE players only
+  if (!n && players.length) return { x: camX + W / 2, y: camY + H / 2 };            // everyone inside — hold still
   return n ? { x: sx / n, y: sy / n } : { x: tX(CX) + 16, y: tY(CYG) + 16 };
 }
 const camFollowing = () => !gateSeq && !rocketSeq && !travelCin() &&
@@ -2465,6 +2480,7 @@ function placeDecor(k, gx, gy) {
   recomputeAnims();
   if (d.golden) {
     goldenPlaced++;
+    pushEvent('golden');                        // v5b: residents WILL bring this up
     banners.push({ title: 'A ' + d.name + ' RISES!', sub: 'Pure gold, pure showing off. Magnificent!', t: 0, dur: 3.6, legendary: true });
     SFX.legendary();
     for (let i = 0; i < 12; i++) spawnP(tX(gx) + 16, tY(gy) + 8, SPR.spark[i % 2], { life: 1 });
@@ -3330,6 +3346,7 @@ function updateRocket(dt) {
     if (q.t > 4.5) {
       rocketSeq = null;
       rocketsLaunched++;
+      pushEvent('rocket');                      // v5b: the whole island saw it
       if (!q.again) {
         rocketDone = true;
         ageUp();                                // first launch → AGE 6 — CYBERPUNK!
@@ -3496,6 +3513,7 @@ function arriveOtherWorld(q) {
   }
   /* v4c: balls & wobbles never cross worlds */
   clearBalls();
+  closeInterior();                              // v5b: rooms never cross worlds
   for (const b of buildings) if (b.wobT > 0) { b.wobT = 0; bgDirty = true; }
   wobbleN = 0;
   for (const p of players) if (p.mode === 'cannon') unmanCannon(p);
@@ -3541,6 +3559,7 @@ function finishTravel(q) {
   } else {
     if (!moonReturnDone) {
       moonReturnDone = true; returnFueled = false;
+      pushEvent('moontrip');                    // v5b
       banners.push({ title: 'HOME SWEET EARTH!', sub: 'Moon travel is FREE forever — the drakes went wild!', t: 0, dur: 4.2, legendary: true });
       SFX.legendary();
       fwShow = Math.max(fwShow, 5); fwT = 0;    // welcome-home fireworks
@@ -3647,6 +3666,7 @@ function startDisaster(forceType) {
   }
   banners.push({ title: DIS_DEFS[type].title, sub: 'Quick — it will smash some buildings!', t: 0, dur: 2.6 });
   SFX.alarm();
+  pushEvent(type);                              // v5b: residents will gossip about this
   return true;
 }
 function smashBuilding(b) {
@@ -3705,6 +3725,7 @@ function nearRubble(p) {
 }
 function repairWhack(b) {
   if (!b.rubble) return;
+  doorCoolT = T + 0.8;                           // v5b: fix flurries never barge indoors
   if (b.packed) { packWhack(b); return; }        // v4d: landlocked seaport packs up instead
   b.repair = (b.repair || 0) + 1;
   bgDirty = true;
@@ -4178,6 +4199,7 @@ function trySettle(p) {
     spawnP(p.x + (Math.random() - 0.5) * 120, p.y + (Math.random() - 0.5) * 80, SPR.wake, { vy: -24, g: -8, life: 0.8 });
   banners.push({ title: 'OUTPOST FOUNDED!', sub: isl.name + ' — a fine place for ' + spec.toUpperCase() + '!', t: 0, dur: 3.4, legendary: true });
   SFX.legendary(); SFX.splash();
+  pushEvent('colony');                          // v5b
   /* the boat is beached on the brand-new shore — step off proudly, and the
      dinghy stays moored just off the coast so you can always sail home */
   p.boat = false; p.mode = 'walk';
@@ -4360,6 +4382,8 @@ function saveGame() {
     rocketsLaunched, lastGift, battCharge,
     /* v5a: decorations (additive) + goal counters */
     pathsLaid, goldenPlaced,
+    /* v5b: interiors remember ONLY these (rooms rebake from seed) */
+    cookieDay, events: recentEvents, greeted: residentsGreeted, insideCount,
     decor: eD.decor.map(t => [t.k, t.gx, t.gy]),
     moonDecor: mD.decor.map(t => [t.k, t.gx, t.gy]),
     islands: settled.map(il => [il.gx, il.gy, il.steps, il.lvl]),   // v4a: colony level (spec/name re-derive from seed)
@@ -4406,6 +4430,8 @@ function resetWorldState() {
   powerInc = 0; powerDem = 0; islandPowered = false;
   buildings = []; seqN = 1; flora = []; wires = []; anims = [];
   decor = []; decorMap = new Map(); pathsLaid = 0; goldenPlaced = 0; glowDirty = true;
+  interior = null; insideCount = 0; residentsGreeted = 0; catPets = 0;   // v5b
+  cookieDay = ''; recentEvents = [];
   for (const sk of sparks) sk.on = false;
   crate = null; crateT = 260 + Math.random() * 90;
   robots = []; drakes = []; egg = null; rocketSeq = null; rocketDone = false; legends = false;
@@ -4526,6 +4552,11 @@ function loadGame(slot) {
   }
   /* v5a: decorations (additive field — absent in old saves) */
   pathsLaid = s.pathsLaid || 0; goldenPlaced = s.goldenPlaced || 0;
+  /* v5b: cookie-day stamp + resident gossip buffer (additive fields) */
+  cookieDay = s.cookieDay || '';
+  recentEvents = Array.isArray(s.events) ? s.events.slice(-8).filter(e => e && e.k) : [];
+  residentsGreeted = s.greeted || 0;
+  insideCount = s.insideCount || 0;
   decor = []; decorMap = new Map();
   for (const dd of (s.decor || [])) {
     if (!D[dd[0]]) continue;
@@ -4671,6 +4702,810 @@ function eraseSlot(i) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════
+   V5b — "COME INSIDE": walkable building interiors. A dollhouse panel
+   (baked room bitmap + a handful of sprites) opens over the DIMMED world,
+   which keeps running behind it. One panel at a time, 2P-safe: outside
+   players keep playing; the camera follows only them. Interior state is
+   PURE seed + building identity — nothing saved except the cookie-day
+   stamp and the recent-events buffer.
+   ═══════════════════════════════════════════════════════════════════════ */
+const IPW = 900, IPH = 560;                    // room panel size
+const IPX = (W - IPW) / 2, IPY = (H - IPH) / 2;
+const IWALL = 128;                             // back-wall band; floor starts here
+const ENTERABLE = { cabin: 1, bakery: 1, lab: 1, factory: 1, moondome: 1, neontower: 1 };
+const KIND_POOL = { cabin: 'cabin', bakery: 'baker', lab: 'scientist', factory: 'worker',
+                    moondome: 'astronaut', neontower: 'lobby' };
+const RES_NAMES = ['PIP', 'ROSA', 'FINN', 'LULU', 'OTTO', 'MAEVE', 'GUS', 'ZOE', 'REX', 'IVY',
+                   'BEA', 'MAX', 'NELL', 'JOJO', 'SUNNY', 'DOT', 'HANK', 'WREN', 'KIT', 'POPPY'];
+const BAKER_REFUSE = "That was today's cookie — come back tomorrow!";
+/* contextual gossip — takes priority while the memory is fresh (~3 min) */
+const CONTEXT_LINES = {
+  meteor:  'DID YOU SEE THAT METEOR?! It went KABOOM!',
+  storm:   'WHAT A STORM! My hat nearly blew away!',
+  pirates: 'Pirates came by! I hid under my bed!',
+  rocket:  'A ROCKET went up! WHOOSH! I cheered so loud!',
+  golden:  'Have you SEEN the golden statue?! So shiny!',
+  moontrip:'You went to the MOON and came home! WOW!',
+  colony:  'A brand new island! Can we visit someday?',
+  full:    'The whole archipelago is FULL! Amazing!',
+};
+const RES_POOLS = {
+  milo: [
+    "I'm MILO! This is the best cabin ever.",
+    "CHIP snores. Don't tell him I said that.",
+    'I counted the clouds today. There were nine.',
+    "One day I'll build my own boat. A red one.",
+    'The campfire smoke smells like marshmallows.',
+    'I raced a crab on the beach. The crab won.',
+    "Red is the fastest color. That's why my shirt.",
+    'If you find treasure, I helped. Sort of.',
+    'I do the sweeping. CHIP does the napping.',
+    'Being a villager is GREAT. Ten out of ten.',
+    'I saw a fish jump THIS high. Higher, even.'],
+  chip: [
+    "I'm CHIP! The hat was my grandpa's.",
+    "I'm not small. My hat is just very big.",
+    'MILO says I snore. I say he dreams loudly.',
+    'I nap so hard I wake up tired.',
+    'Under this hat? Secret snacks. Shh.',
+    'I once ate four cookies. In a row!',
+    'The moon looks like a big cookie. I checked.',
+    "I'm in charge of important sitting.",
+    'My hat keeps the rain off THREE people.',
+    "Someday I'll be tall. The hat goes first.",
+    "I found a shiny pebble. It's my best friend."],
+  cabin: [
+    'Home sweet home! Watch the rug, it wiggles.',
+    'We had soup last night. Rock soup. Long story.',
+    'The hearth keeps us cozy all night long.',
+    'Did you wipe your feet? Just kidding. Or am I?',
+    'I love it when neighbors drop by!',
+    'This island gets prettier every single day.',
+    'The cat owns this house. We just live here.',
+    "I'm saving up for a bigger bed. Dream big!",
+    'Somebody keeps chopping trees. Rude! Also useful.',
+    'On windy nights the whole cabin hums a song.',
+    "You built all this? You're my hero!",
+    'I waved at a seagull today. It waved back. Sort of.'],
+  baker: [
+    'Fresh bread! Warm as a hug!',
+    'The secret ingredient is... more butter.',
+    "My oven has a name. It's Bernard.",
+    'Knead, rise, bake, repeat. Best job ever!',
+    "Flour on my nose? It's a fashion choice.",
+    'A bakery runs on love. And LOTS of firewood.',
+    'I dream in croissants.',
+    'The crust is the best part. Fight me. Politely.',
+    'Bread rises. The sun rises. Coincidence?!',
+    "Sniff the air! That's tomorrow's cookies.",
+    "I once baked a loaf as big as CHIP's hat.",
+    'Baking is just delicious science.'],
+  scientist: [
+    'Fun fact: octopuses have THREE hearts!',
+    'Fun fact: honey never ever spoils!',
+    "Fun fact: lightning is hotter than the sun's surface!",
+    'Fun fact: a day on Venus is longer than its year!',
+    'Fun fact: bananas glow a tiny bit. Radioactively!',
+    'Fun fact: snails can sleep for three years!',
+    'Fun fact: sharks are older than trees!',
+    'Fun fact: your bones are stronger than steel. Ish!',
+    'Fun fact: the moon has moonquakes!',
+    'Fun fact: butterflies taste with their FEET!',
+    'Fun fact: hot water can freeze faster than cold!',
+    'Fun fact: there are more stars than grains of sand!'],
+  worker: [
+    'Why did the gear go to school? To get sharper!',
+    "I'd tell you a conveyor joke, but it carries on.",
+    "Never trust stairs. They're always up to something.",
+    "I'm reading a book about glue. Can't put it down!",
+    'What do you call a fake noodle? An impasta!',
+    "Why don't skeletons fight? No guts!",
+    'I used to hate facial hair. Then it grew on me.',
+    "What's a robot's favorite snack? Micro-chips!",
+    'This factory is riveting. Get it? RIVETING?',
+    'I told a wood joke once. It was oak-ay.',
+    'Time flies like an arrow. Fruit flies like a banana!',
+    'Why was the metal sad? It had a lot on its plate.'],
+  astronaut: [
+    'The Earth looks like a marble from up here!',
+    'Moon dust gets EVERYWHERE. Even in socks.',
+    'I jumped two meters today. Low gravity rules!',
+    'Out the window: stars, stars, and more stars.',
+    'I miss rain a little. But space is worth it.',
+    'The plant is from Earth. I tell it about home.',
+    'Zero-gravity somersaults: ten out of ten.',
+    'Houston, we have NO problems. All good here!',
+    'I named a crater after my mom. She cried.',
+    'Freeze-dried ice cream tastes like clouds.',
+    'At night I count Earthrises. Well, THE Earthrise.',
+    'One small step for me, one giant nap afterwards.'],
+  lobby: [
+    'Welcome to the tower! Mind the neon.',
+    'The elevator dings but never opens. We love it anyway.',
+    'Floor 2 has a great view. If the elevator ever opens.',
+    "That plant? It's a hologram. Don't water it!",
+    'The neon hums a little tune at night.',
+    'Fanciest lobby on the island. Also the only one.',
+    "I've pressed the elevator button 4,000 times.",
+    "The future is now! It's very purple.",
+    'Some day the doors will open. I believe!',
+    'Robots vacuum the lobby at midnight. It tickles.',
+    "The tower has 12 floors. I've seen... one.",
+    'DING! Hear that? Still nothing. Classic.'],
+};
+
+/* ── recent-events ring buffer (persisted) ── */
+function pushEvent(k) {
+  recentEvents.push({ k, t: playtime });
+  if (recentEvents.length > 8) recentEvents.shift();
+}
+function latestEvent() {
+  for (let i = recentEvents.length - 1; i >= 0; i--)
+    if (playtime - recentEvents[i].t < 180 && CONTEXT_LINES[recentEvents[i].k]) return recentEvents[i];
+  return null;
+}
+
+/* ── interior sprites: mini resident avatars, the cat, speech bubble ── */
+function initInteriorSprites() {
+  /* resident avatar — same 12x16-unit language as the players; dirs [down, side] */
+  const mkRes = (shirt, shirtD, hair, skin, o) => {
+    o = o || {};
+    const dirs = [];
+    for (const d of [0, 2]) {
+      dirs.push([0, 1, 2].map(f => S(12, 16, (g, P) => {
+        shad(g, 12, 29, 7, 2.4);
+        const step = f === 0 ? 0 : (f === 1 ? 1 : -1);
+        const ty = o.small ? 2.6 : 0;            // CHIP is short
+        P(3.4 + (step > 0 ? 0.8 : 0), 13, 2, 2.4, '#4a3018');
+        P(6.6 + (step < 0 ? -0.8 : 0), 13, 2, 2.4, '#4a3018');
+        P(3, 8 + ty * 0.6, 6, 5.4 - ty * 0.6, shirt);
+        P(3, 8 + ty * 0.6, 1.4, 5.4 - ty * 0.6, shirtD);
+        P(1.8, 8.6 + ty * 0.5, 1.4, 2.6 + (step ? 0.8 : 0), skin);
+        P(8.8, 8.6 + ty * 0.5, 1.4, 2.6 - (step ? 0.8 : 0), skin);
+        P(3, 2 + ty, 6, 6, skin);
+        if (d === 0) {
+          P(3, 1.4 + ty, 6, 2.6, hair); P(2.6, 2 + ty, 1, 3, hair); P(8.4, 2 + ty, 1, 3, hair);
+          P(4.2, 5 + ty, 1.2, 1.4, '#2b2018'); P(6.6, 5 + ty, 1.2, 1.4, '#2b2018');
+          P(5.2, 6.8 + ty, 1.6, 0.6, '#c9765a');
+        } else {
+          P(3, 1.4 + ty, 6, 2.6, hair); P(2.6, 2 + ty, 1, 4, hair);
+          P(7, 5 + ty, 1.2, 1.4, '#2b2018');
+        }
+        if (o.hat) {                             // CHIP's enormous hat
+          P(0.4, 1.8 + ty, 11.2, 1.8, o.hat);
+          P(2.4, -0.4 + ty, 7.2, 2.6, o.hat);
+          P(2.4, 1 + ty, 7.2, 0.9, o.band || '#8a6a20');
+        }
+      })));
+    }
+    return dirs;
+  };
+  const SHIRTS = [['#5ab46a', '#3f8a4e'], ['#c9a53a', '#9a7c28'], ['#8a6bd0', '#6a4fa8'],
+                  ['#e0708a', '#b05468'], ['#4aa8c9', '#357a94'], ['#c96a3a', '#9a4e28'],
+                  ['#7a8a99', '#5c6a77'], ['#d0c04a', '#a89838']];
+  const HAIRS = ['#6e4526', '#2b2018', '#a86420', '#7a7a7a'];
+  const SKINS = ['#f0c090', '#e8b07a', '#c98d5c'];
+  SPR.resAv = SHIRTS.map((s, i) => mkRes(s[0], s[1], HAIRS[(i * 3 + 1) % 4], SKINS[i % 3]));
+  SPR.miloAv = mkRes('#d54a3a', '#a83a2c', '#6e4526', '#f0c090');                       // MILO — red shirt
+  SPR.chipAv = mkRes('#4aa8c9', '#357a94', '#2b2018', '#e8b07a',
+                     { small: true, hat: '#c9a53a', band: '#8a6a20' });                 // CHIP — small, big hat
+  /* the cabin cat — orange tabby, 2 tail-flick frames */
+  SPR.cat = [0, 1].map(v => S(12, 9, (g, P) => {
+    shad(g, 12, 16, 7, 2);
+    P(2, 3.4, 6.4, 4, '#e8913a');
+    P(2.6, 4.2, 5, 0.8, '#c9772a');
+    P(7.4, 1.4, 3.4, 3.4, '#e8913a');
+    P(7.6, 0.4, 1, 1.4, '#e8913a'); P(9.8, 0.4, 1, 1.4, '#e8913a');
+    P(8.2, 2.6, 0.8, 0.8, '#2b2018'); P(9.6, 2.6, 0.8, 0.8, '#2b2018');
+    P(8.9, 3.5, 0.9, 0.5, '#c9557a');
+    P(2.6, 6.8, 1.2, 1.2, '#c9772a'); P(6.4, 6.8, 1.2, 1.2, '#c9772a');
+    if (v) { P(0.4, 1.2, 1.4, 3, '#e8913a'); P(0.4, 1.2, 1.4, 0.8, '#c9772a'); }
+    else { P(0.4, 3.6, 1.4, 3, '#e8913a'); P(0.4, 5.8, 1.4, 0.8, '#c9772a'); }
+  }));
+  /* speech bubble (3-slice stretch) + tail */
+  SPR.bubP = (() => {
+    const [c, g] = C(120, 44);
+    g.fillStyle = 'rgba(10,25,40,0.35)'; rr(g, 3, 4, 116, 40, 12); g.fill();
+    g.fillStyle = '#fdfaf2'; rr(g, 0, 0, 116, 40, 12); g.fill();
+    g.strokeStyle = '#c9bfa8'; g.lineWidth = 2; rr(g, 1, 1, 114, 38, 11); g.stroke();
+    return c;
+  })();
+  SPR.bubTail = S(6, 5, (g, P) => { P(1, 0, 4, 1.6, '#fdfaf2'); P(2, 1.6, 2.4, 1.6, '#fdfaf2'); P(2.8, 3.2, 1.2, 1.4, '#fdfaf2'); });
+}
+
+/* ── the room bake: one handcrafted template per kind, seeded variation.
+   ALL path ops happen here (enter-time only). Returns solids/door/spots. ── */
+function bakeRoom(kind, rng, resN) {
+  const [c, g] = C(IPW, IPH);
+  const solids = [];
+  const sol = (x, y, w, h) => solids.push({ x, y, w, h });
+  const door = { x: IPW / 2 - 55, y: IPH - 54, w: 110, h: 44 };
+  const out = { c, solids, door, spots: [], cat: null, flame: null, ding: null };
+  const TH = {
+    cabin:    { wall: '#7a5433', wallD: '#5f4226', floor: '#a8794a', floorD: '#96693e', trim: '#3f2c16' },
+    bakery:   { wall: '#c9a172', wallD: '#a8825a', floor: '#e0c9a0', floorD: '#cdb488', trim: '#7a5230' },
+    lab:      { wall: '#5c6670', wallD: '#4a525a', floor: '#aab4bd', floorD: '#98a2ab', trim: '#333b42' },
+    factory:  { wall: '#6d6157', wallD: '#57493f', floor: '#8a8178', floorD: '#7a7168', trim: '#38312a' },
+    moondome: { wall: '#aab6c4', wallD: '#8a96a4', floor: '#d5dce4', floorD: '#c2cbd6', trim: '#525d6a' },
+    neontower:{ wall: '#2a2340', wallD: '#1e1930', floor: '#3a3352', floorD: '#312b47', trim: '#141022' },
+  }[kind];
+  /* shell: frame, back wall, floor, baseboard */
+  g.fillStyle = TH.trim; g.fillRect(0, 0, IPW, IPH);
+  g.fillStyle = TH.wallD; g.fillRect(10, 10, IPW - 20, IWALL - 10);
+  g.fillStyle = TH.wall; g.fillRect(10, 10, IPW - 20, IWALL - 34);
+  g.fillStyle = TH.floor; g.fillRect(10, IWALL, IPW - 20, IPH - IWALL - 10);
+  g.fillStyle = 'rgba(0,0,0,0.22)'; g.fillRect(10, IWALL, IPW - 20, 8);
+  /* floor pattern */
+  if (kind === 'cabin' || kind === 'bakery') {
+    g.fillStyle = 'rgba(0,0,0,0.13)';
+    for (let y = IWALL + 26; y < IPH - 12; y += 26) g.fillRect(12, y, IPW - 24, 2);
+    for (let i = 0; i < 40; i++) {
+      const sx2 = 20 + ((i * 173 + 31) % (IPW - 80)), sy2 = IWALL + 4 + ((i * 97 + 13) % (IPH - IWALL - 30));
+      g.fillRect(sx2, Math.floor((sy2 - IWALL) / 26) * 26 + IWALL + 4, 2, 20);
+    }
+  } else if (kind === 'lab' || kind === 'moondome') {
+    g.fillStyle = 'rgba(0,0,0,0.1)';
+    for (let y = IWALL + 48; y < IPH - 12; y += 48) g.fillRect(12, y, IPW - 24, 2);
+    for (let x = 58; x < IPW - 12; x += 48) g.fillRect(x, IWALL + 2, 2, IPH - IWALL - 14);
+  } else if (kind === 'factory') {
+    g.fillStyle = 'rgba(0,0,0,0.14)';
+    for (let y = IWALL + 78; y < IPH - 12; y += 78) g.fillRect(12, y, IPW - 24, 3);
+    for (let x = 90; x < IPW - 12; x += 96) g.fillRect(x, IWALL + 2, 3, IPH - IWALL - 14);
+    g.fillStyle = 'rgba(255,255,255,0.1)';
+    for (let i = 0; i < 60; i++) g.fillRect(20 + ((i * 96) % (IPW - 44)), IWALL + 10 + 78 * ((i / 9) | 0) % (IPH - IWALL - 40), 3, 3);
+  } else {                                       // neon lobby: glossy grid + magenta/cyan trim
+    g.fillStyle = 'rgba(89,224,255,0.08)';
+    for (let y = IWALL + 40; y < IPH - 12; y += 40) g.fillRect(12, y, IPW - 24, 2);
+    g.fillStyle = '#59e0ff'; g.fillRect(10, IWALL - 4, IPW - 20, 3);
+    g.fillStyle = '#f05ad0'; g.fillRect(10, IPH - 14, IPW - 20, 3);
+  }
+  /* side + top walkability guards */
+  sol(0, 0, 28, IPH);
+  sol(IPW - 28, 0, 28, IPH);
+  /* baked helpers */
+  const win = (x, y) => {                        // cozy wall window
+    g.fillStyle = TH.trim; g.fillRect(x - 4, y - 4, 66, 54);
+    g.fillStyle = kind === 'moondome' ? '#0a1226' : '#bfe6ff'; g.fillRect(x, y, 58, 46);
+    g.fillStyle = 'rgba(255,255,255,0.5)'; g.fillRect(x + 6, y + 4, 10, 38);
+    g.fillStyle = TH.trim; g.fillRect(x + 27, y, 4, 46); g.fillRect(x, y + 21, 58, 4);
+  };
+  const rugC = ['#b0483a', '#3a7bd5', '#4cae5c', '#c9822a'][(rng() * 4) | 0];
+  if (kind === 'cabin') {
+    /* hearth — stone chimney with live flame overlay */
+    const hx = IPW / 2 - 60 + ((rng() * 80) | 0) - 40;
+    g.fillStyle = '#8f979f'; g.fillRect(hx, 18, 120, 102);
+    g.fillStyle = '#767d85';
+    for (let i = 0; i < 14; i++) g.fillRect(hx + 6 + (i % 4) * 28 + (((i / 4) | 0) % 2) * 12, 24 + ((i / 4) | 0) * 24, 24, 18);
+    g.fillStyle = '#2b1c10'; g.fillRect(hx + 26, 62, 68, 56);
+    g.fillStyle = '#4a2c18'; g.fillRect(hx + 18, 112, 84, 10);
+    g.fillStyle = '#6e4023'; g.fillRect(hx + 34, 104, 52, 8);
+    out.flame = { x: hx + 50, y: 74 };
+    win(hx - 110, 40); win(hx + 160, 40);
+    /* rug (walkable) + the cat */
+    g.fillStyle = rugC;
+    g.beginPath(); g.ellipse(IPW / 2, 330, 130, 62, 0, 0, 6.3); g.fill();
+    g.strokeStyle = 'rgba(255,255,255,0.35)'; g.lineWidth = 3;
+    g.beginPath(); g.ellipse(IPW / 2, 330, 108, 48, 0, 0, 6.3); g.stroke();
+    out.cat = { x: IPW / 2 + ((rng() * 90) | 0) - 45, y: 330 };
+    /* beds — one per resident */
+    const BLK = ['#b0483a', '#3a7bd5', '#4cae5c'];
+    for (let i = 0; i < resN; i++) {
+      const bx = 52, by = 170 + i * 126;
+      g.fillStyle = '#5f3a22'; g.fillRect(bx - 6, by - 8, 88, 104);
+      g.fillStyle = '#e8dcc4'; g.fillRect(bx, by, 76, 30);
+      g.fillStyle = '#fff'; g.fillRect(bx + 12, by + 6, 52, 18);
+      g.fillStyle = BLK[(i + ((rng() * 3) | 0)) % 3]; g.fillRect(bx, by + 30, 76, 58);
+      g.fillStyle = 'rgba(255,255,255,0.25)'; g.fillRect(bx, by + 34, 76, 6);
+      sol(bx - 6, by - 8, 88, 100);
+    }
+    /* table + stools */
+    const txx = IPW - 320 + ((rng() * 50) | 0);
+    g.fillStyle = '#5f3a22'; g.fillRect(txx + 8, 300, 12, 66); g.fillRect(txx + 128, 300, 12, 66);
+    g.fillStyle = '#9c6b3d'; g.fillRect(txx, 272, 148, 40);
+    g.fillStyle = '#b07c48'; g.fillRect(txx, 272, 148, 8);
+    g.fillStyle = '#c9822a'; g.fillRect(txx + 56, 282, 30, 16);   // fruit bowl
+    g.fillStyle = '#e8543a'; g.fillRect(txx + 62, 278, 8, 8); g.fillStyle = '#4cb45a'; g.fillRect(txx + 74, 278, 8, 8);
+    g.fillStyle = '#8a5c33'; g.fillRect(txx - 34, 330, 24, 22); g.fillRect(txx + 158, 330, 24, 22);
+    sol(txx, 276, 148, 78);
+  } else if (kind === 'bakery') {
+    /* the big oven */
+    const ox = IPW / 2 - 90 + ((rng() * 60) | 0) - 30;
+    g.fillStyle = '#4a5058'; g.fillRect(ox, 16, 180, 106);
+    g.fillStyle = '#5f666e'; g.fillRect(ox + 8, 24, 164, 90);
+    g.fillStyle = '#2b1c10'; g.fillRect(ox + 40, 58, 100, 52);
+    g.fillStyle = '#111'; g.fillRect(ox + 48, 66, 84, 40);
+    g.fillStyle = '#8f979f'; g.fillRect(ox + 30, 40, 120, 10);
+    out.flame = { x: ox + 80, y: 74 };
+    win(ox - 100, 40);
+    /* counter with bread + cake */
+    const cx2 = 150 + ((rng() * 70) | 0);
+    g.fillStyle = '#8a5c33'; g.fillRect(cx2, 272, 290, 62);
+    g.fillStyle = '#b07c48'; g.fillRect(cx2, 272, 290, 12);
+    g.fillStyle = '#e0a35c'; g.fillRect(cx2 + 22, 258, 52, 18); g.fillRect(cx2 + 92, 258, 52, 18);
+    g.fillStyle = '#f0c063'; g.fillRect(cx2 + 28, 254, 40, 8); g.fillRect(cx2 + 98, 254, 40, 8);
+    g.fillStyle = '#f0a5c8'; g.fillRect(cx2 + 190, 250, 56, 26);   // cake!
+    g.fillStyle = '#fff'; g.fillRect(cx2 + 190, 250, 56, 8);
+    g.fillStyle = '#e8543a'; g.fillRect(cx2 + 214, 244, 8, 8);
+    sol(cx2, 276, 290, 66);
+    /* bread shelves on the right wall */
+    const shx = IPW - 160;
+    g.fillStyle = '#6e4526'; g.fillRect(shx, 150, 92, 230);
+    for (let r2 = 0; r2 < 4; r2++) {
+      g.fillStyle = '#8a5c33'; g.fillRect(shx + 6, 168 + r2 * 54, 80, 10);
+      g.fillStyle = '#e0a35c';
+      for (let b2 = 0; b2 < 3; b2++) g.fillRect(shx + 10 + b2 * 26, 150 + r2 * 54, 20, 16);
+    }
+    sol(shx - 4, 154, 100, 230);
+    /* flour sacks */
+    g.fillStyle = '#e8dcc4'; g.fillRect(60, 420, 44, 52); g.fillRect(112, 434, 40, 38);
+    g.fillStyle = '#c9bfa8'; g.fillRect(60, 420, 44, 10);
+    sol(56, 424, 100, 50);
+  } else if (kind === 'lab') {
+    /* chalkboard with doodled equations */
+    const bx = IPW / 2 - 170 + ((rng() * 60) | 0) - 30;
+    g.fillStyle = '#5f3a22'; g.fillRect(bx - 8, 22, 356, 98);
+    g.fillStyle = '#2e5240'; g.fillRect(bx, 30, 340, 82);
+    g.strokeStyle = '#e8f4ec'; g.lineWidth = 3; g.lineCap = 'round';
+    g.font = '700 22px Verdana, sans-serif'; g.fillStyle = '#e8f4ec';
+    g.fillText('E=mc²', bx + 18, 62);
+    g.fillText('2+2=🐟?', bx + 130, 92);
+    g.beginPath(); g.moveTo(bx + 250, 96); g.lineTo(bx + 268, 58); g.lineTo(bx + 286, 96); g.stroke();   // rocket doodle
+    g.beginPath(); g.arc(bx + 268, 48, 9, 0, 6.3); g.stroke();
+    g.beginPath(); g.moveTo(bx + 20, 100); g.quadraticCurveTo(bx + 60, 78, bx + 100, 100); g.stroke();   // island squiggle
+    win(bx + 370, 40);
+    /* flask bench */
+    const fx = 190 + ((rng() * 70) | 0);
+    g.fillStyle = '#39424a'; g.fillRect(fx, 280, 310, 58);
+    g.fillStyle = '#4a525a'; g.fillRect(fx, 280, 310, 10);
+    const FCOL = ['#7dff9a', '#59e0ff', '#f0a5f0', '#ffd24a'];
+    for (let i = 0; i < 4; i++) {
+      const flx = fx + 30 + i * 72;
+      g.fillStyle = FCOL[(i + ((rng() * 4) | 0)) % 4];
+      g.fillRect(flx, 254, 22, 26); g.fillRect(flx + 7, 242, 8, 14);
+      g.fillStyle = 'rgba(255,255,255,0.5)'; g.fillRect(flx + 3, 258, 5, 14);
+    }
+    sol(fx, 284, 310, 62);
+    /* bubbling master flask on a stand */
+    g.fillStyle = '#39424a'; g.fillRect(IPW - 200, 380, 64, 46);
+    g.fillStyle = '#7dff9a'; g.fillRect(IPW - 188, 344, 40, 40);
+    g.fillStyle = '#b8ffd0'; g.fillRect(IPW - 182, 350, 10, 20);
+    g.fillStyle = 'rgba(125,255,154,0.4)'; g.fillRect(IPW - 178, 330, 8, 8); g.fillRect(IPW - 164, 320, 6, 6);
+    sol(IPW - 204, 384, 72, 46);
+    /* book stack */
+    g.fillStyle = '#b0483a'; g.fillRect(70, 400, 54, 12);
+    g.fillStyle = '#3a7bd5'; g.fillRect(76, 388, 46, 12);
+    g.fillStyle = '#c9822a'; g.fillRect(72, 376, 50, 12);
+    sol(64, 380, 66, 34);
+  } else if (kind === 'factory') {
+    /* tool wall */
+    const twx = IPW / 2 - 160;
+    g.fillStyle = '#8a7c6e'; g.fillRect(twx, 24, 320, 96);
+    g.fillStyle = 'rgba(0,0,0,0.18)';
+    for (let i = 0; i < 24; i++) g.fillRect(twx + 14 + (i % 8) * 38, 34 + ((i / 8) | 0) * 28, 4, 4);
+    g.fillStyle = '#c9d2da';                     // wrenches + hammer
+    g.fillRect(twx + 24, 40, 10, 52); g.fillRect(twx + 18, 34, 22, 12);
+    g.fillRect(twx + 90, 44, 10, 46); g.fillStyle = '#8a5c33'; g.fillRect(twx + 84, 34, 22, 14);
+    g.fillStyle = '#c9d2da'; g.fillRect(twx + 160, 38, 34, 10); g.fillRect(twx + 172, 48, 10, 44);
+    g.fillStyle = '#ffd24a'; g.fillRect(twx + 240, 40, 44, 30);
+    g.fillStyle = '#2b2f34'; g.fillRect(twx + 246, 46, 32, 18);
+    /* big wall gears */
+    g.fillStyle = '#5c6670';
+    g.beginPath(); g.arc(90, 70, 34, 0, 6.3); g.fill();
+    g.beginPath(); g.arc(150, 96, 22, 0, 6.3); g.fill();
+    g.fillStyle = '#39424a';
+    g.beginPath(); g.arc(90, 70, 12, 0, 6.3); g.fill();
+    g.beginPath(); g.arc(150, 96, 8, 0, 6.3); g.fill();
+    /* conveyor with crates */
+    const cvx = 170 + ((rng() * 50) | 0);
+    g.fillStyle = '#39424a'; g.fillRect(cvx, 300, 430, 58);
+    g.fillStyle = '#20262c'; g.fillRect(cvx + 8, 308, 414, 30);
+    g.fillStyle = '#4a525a';
+    for (let i = 0; i < 9; i++) g.fillRect(cvx + 18 + i * 46, 340, 26, 12);
+    g.fillStyle = '#9c6b3d'; g.fillRect(cvx + 50, 282, 40, 34); g.fillRect(cvx + 220, 282, 40, 34);
+    g.fillStyle = '#b07c48'; g.fillRect(cvx + 50, 282, 40, 8); g.fillRect(cvx + 220, 282, 40, 8);
+    sol(cvx, 304, 430, 60);
+    /* barrel */
+    g.fillStyle = '#7a5433'; g.fillRect(IPW - 180, 410, 48, 56);
+    g.fillStyle = '#9c6b3d'; g.fillRect(IPW - 180, 418, 48, 8); g.fillRect(IPW - 180, 444, 48, 8);
+    sol(IPW - 186, 414, 60, 54);
+  } else if (kind === 'moondome') {
+    /* the window home: stars + Earth */
+    const wx2 = IPW / 2 - 150;
+    g.fillStyle = '#525d6a'; g.fillRect(wx2 - 8, 18, 316, 104);
+    g.fillStyle = '#060a18'; g.fillRect(wx2, 26, 300, 88);
+    g.fillStyle = '#fff';
+    for (let i = 0; i < 26; i++) g.fillRect(wx2 + 8 + ((i * 67) % 286), 30 + ((i * 41) % 78), i % 5 ? 2 : 3, i % 5 ? 2 : 3);
+    if (SPR.earthBall) g.drawImage(SPR.earthBall, wx2 + 210, 38, 56, 56);
+    g.fillStyle = '#525d6a'; g.fillRect(wx2 + 146, 26, 8, 88);
+    /* bunks (stacked) */
+    g.fillStyle = '#8a96a4'; g.fillRect(48, 170, 100, 190);
+    for (let i = 0; i < 2; i++) {
+      g.fillStyle = '#c2cbd6'; g.fillRect(56, 186 + i * 90, 84, 26);
+      g.fillStyle = '#3a7bd5'; g.fillRect(56, 206 + i * 90, 84, 30);
+      g.fillStyle = '#fff'; g.fillRect(62, 190 + i * 90, 30, 14);
+    }
+    sol(44, 174, 110, 188);
+    /* potted earth-plant */
+    const px2 = IPW - 190 + ((rng() * 40) | 0);
+    g.fillStyle = '#b0653a'; g.fillRect(px2, 320, 44, 36);
+    g.fillStyle = '#4cae5c'; g.fillRect(px2 + 14, 280, 14, 44);
+    g.fillRect(px2 - 2, 292, 20, 12); g.fillRect(px2 + 26, 288, 20, 12);
+    g.fillStyle = '#7dd88a'; g.fillRect(px2 + 2, 294, 8, 6); g.fillRect(px2 + 32, 290, 8, 6);
+    sol(px2 - 6, 324, 56, 36);
+    /* control console */
+    g.fillStyle = '#525d6a'; g.fillRect(IPW - 260, 420, 150, 48);
+    g.fillStyle = '#59e0ff'; g.fillRect(IPW - 250, 428, 40, 20);
+    g.fillStyle = '#7dff9a'; g.fillRect(IPW - 200, 428, 12, 8); g.fillStyle = '#ff6b6b'; g.fillRect(IPW - 182, 428, 12, 8);
+    sol(IPW - 266, 424, 162, 48);
+  } else {                                       // neontower lobby
+    /* elevator doors — they ding. they never open. */
+    const ex = IPW / 2 - 80;
+    g.fillStyle = '#141022'; g.fillRect(ex - 14, 14, 188, 110);
+    g.fillStyle = '#8a94a4'; g.fillRect(ex, 26, 76, 96); g.fillRect(ex + 84, 26, 76, 96);
+    g.fillStyle = '#b8c2cc'; g.fillRect(ex, 26, 76, 8); g.fillRect(ex + 84, 26, 76, 8);
+    g.fillStyle = '#0a0816'; g.fillRect(ex + 76, 26, 8, 96);
+    g.fillStyle = '#59e0ff'; g.fillRect(ex - 10, 18, 180, 4);
+    g.fillStyle = '#ffd24a'; g.fillRect(ex + 74, 6, 12, 8);       // the light that DINGS
+    g.fillStyle = '#39424a'; g.fillRect(ex + 172, 60, 14, 22);
+    g.fillStyle = '#ffd24a'; g.fillRect(ex + 176, 66, 6, 4);      // call button (pressed 4,000 times)
+    out.ding = { x: ex + 80, y: 12 };
+    /* holo-plant */
+    const hx2 = 90 + ((rng() * 40) | 0);
+    g.fillStyle = '#39424a'; g.fillRect(hx2, 320, 46, 34);
+    g.fillStyle = 'rgba(125,255,224,0.7)';
+    g.fillRect(hx2 + 16, 276, 12, 48); g.fillRect(hx2 - 2, 290, 20, 10); g.fillRect(hx2 + 28, 284, 20, 10);
+    g.fillStyle = 'rgba(89,224,255,0.3)'; g.fillRect(hx2 - 6, 270, 58, 90);
+    sol(hx2 - 6, 324, 58, 34);
+    /* lobby desk */
+    const dx2 = IPW - 300 + ((rng() * 40) | 0);
+    g.fillStyle = '#141022'; g.fillRect(dx2, 290, 190, 56);
+    g.fillStyle = '#f05ad0'; g.fillRect(dx2, 290, 190, 6);
+    g.fillStyle = '#59e0ff'; g.fillRect(dx2 + 20, 306, 40, 22);
+    sol(dx2, 294, 190, 60);
+    /* neon sofa */
+    g.fillStyle = '#312b47'; g.fillRect(120, 430, 150, 40);
+    g.fillStyle = '#f05ad0'; g.fillRect(120, 430, 150, 6);
+    sol(114, 434, 162, 40);
+  }
+  /* door mat + threshold */
+  g.fillStyle = TH.trim; g.fillRect(door.x - 8, IPH - 22, door.w + 16, 22);
+  g.fillStyle = kind === 'neontower' ? '#3a3352' : '#b0653a';
+  g.fillRect(door.x, door.y, door.w, 34);
+  g.fillStyle = 'rgba(255,255,255,0.3)'; g.fillRect(door.x + 6, door.y + 5, door.w - 12, 3);
+  g.fillStyle = 'rgba(255,255,255,0.65)';
+  g.beginPath(); g.moveTo(IPW / 2 - 9, door.y + 14); g.lineTo(IPW / 2 + 9, door.y + 14); g.lineTo(IPW / 2, door.y + 26); g.fill();
+  /* wander spots — free floor points clear of furniture and the mat */
+  for (let y = IWALL + 44; y < IPH - 78; y += 54) for (let x = 76; x < IPW - 76; x += 66) {
+    let ok = true;
+    for (const s of solids) if (x > s.x - 20 && x < s.x + s.w + 20 && y > s.y - 10 && y < s.y + s.h + 16) { ok = false; break; }
+    if (ok && out.cat && Math.hypot(out.cat.x - x, out.cat.y - y) < 40) ok = false;
+    if (ok) out.spots.push({ x, y });
+  }
+  return out;
+}
+
+/* ── interior state machinery ── */
+function firstHomeCabin() {                      // MILO & CHIP's place — the FIRST cabin on the home island
+  if (world !== 'earth') return null;
+  const home = isleIdAt(CX, CYG);
+  for (const b of buildings) if (b.k === 'cabin' && isleIdAt(b.gx, b.gy) === home) return b;
+  return null;
+}
+const enterAllowed = () => !(disaster && disaster.phase === 'strike') && !travel && !rocketSeq && !gateSeq;
+let doorCoolT = 0;                               // brief lockout after repair whacks — the extra ✕ of a
+                                                 // fix flurry must never barge into the fixed house
+function nearDoorB(p) {                          // the NEAREST enterable door P is standing at
+  if (p.boat || p.aboard || p.inside || T < doorCoolT) return null;
+  let bst = null, bd = 46;
+  for (const b of buildings) {
+    if (b.rubble || !ENTERABLE[b.k]) continue;
+    const s = B[b.k].size || 1;
+    const d = Math.hypot(tX(b.gx) + s * 16 - p.x, tY(b.gy) + s * 32 + 8 - p.y);
+    if (d < bd) { bd = d; bst = b; }
+  }
+  return bst;
+}
+function buildInterior(b) {
+  const kind = b.k;
+  const sd = (((seed % 65536) * 977 + b.gx * 131 + b.gy * 313) >>> 0) || 1;
+  const rng = mulberry(sd);
+  const isFirst = kind === 'cabin' && b === firstHomeCabin();
+  let resN = 1;
+  if (isFirst) resN = 2;
+  else if (kind === 'cabin') resN = 1 + ((rng() * 3) | 0);
+  else if (kind === 'lab') resN = 1;
+  else resN = 1 + (rng() < 0.45 ? 1 : 0);
+  const room = bakeRoom(kind, rng, resN);
+  /* residents — seeded names/looks; MILO + CHIP always own the first cabin */
+  const residents = [];
+  const used = new Set();
+  for (let i = 0; i < resN; i++) {
+    let name, spr, small = false;
+    if (isFirst) {
+      name = i === 0 ? 'MILO' : 'CHIP';
+      spr = i === 0 ? SPR.miloAv : SPR.chipAv;
+      small = i === 1;
+    } else {
+      let ni = (rng() * RES_NAMES.length) | 0;
+      while (used.has(ni)) ni = (ni + 1) % RES_NAMES.length;
+      used.add(ni);
+      name = RES_NAMES[ni];
+      spr = SPR.resAv[(rng() * SPR.resAv.length) | 0];
+    }
+    const sp0 = room.spots.length ? room.spots[(rng() * room.spots.length) | 0] : { x: IPW / 2, y: 300 };
+    const pool = name === 'MILO' ? RES_POOLS.milo : name === 'CHIP' ? RES_POOLS.chip
+               : RES_POOLS[KIND_POOL[kind]] || RES_POOLS.cabin;
+    residents.push({ name, spr, small, pool, x: sp0.x, y: sp0.y, tx: sp0.x, ty: sp0.y,
+                     wt: 1 + rng() * 3, frame: 0, moving: false, side: false, flip: false,
+                     sayT: 0, say: null, sayLines: null, last: null, greeted: false,
+                     baker: kind === 'bakery' && i === 0 });
+  }
+  interior = { b, kind, world, room: room.c, solids: room.solids, door: room.door,
+               spots: room.spots, residents, cat: room.cat, flame: room.flame,
+               ding: room.ding, dingT: 4 + Math.random() * 6, dingF: 0,
+               hearts: [{ on: false }, { on: false }, { on: false }, { on: false }, { on: false }, { on: false }],
+               drawList: [] };
+}
+function enterInterior(p, b) {
+  if (!enterAllowed()) { SFX.cancel(); return false; }
+  if (interior && interior.b !== b) {            // one house at a time — kid-legible
+    addFloat(p.x, p.y - 40, 'ONE HOUSE AT A TIME!', '#ff9a8a');
+    SFX.cancel();
+    return false;
+  }
+  if (!interior) buildInterior(b);
+  p.inside = true;
+  p.ix = interior.door.x + interior.door.w / 2 + (p.pi ? 22 : 0);
+  p.iy = interior.door.y - 12;
+  p.itarget = null; p.target = null; p.ghost = null; p.enterB = null;
+  p.mode = 'walk'; p.dir = 1;                    // stepping in, facing up
+  insideCount++;
+  SFX.door();
+  return true;
+}
+function exitInterior(p) {
+  if (!p.inside) return;
+  p.inside = false; p.itarget = null;
+  SFX.door();
+  if (!players.some(q => q.inside)) interior = null;
+}
+function closeInterior() {
+  for (const p of players) { p.inside = false; p.itarget = null; }
+  interior = null;
+}
+function iBlocked(x, y) {                        // feet-point vs furniture footprints
+  for (const s of interior.solids)
+    if (x > s.x - 12 && x < s.x + s.w + 12 && y > s.y - 2 && y < s.y + s.h + 8) return true;
+  return false;
+}
+function updateInsidePlayer(p, dt) {
+  const v = moveVec(p.pi);
+  let mx = v.dx, my = v.dy;
+  if (mx || my) p.itarget = null;
+  else if (p.itarget) {
+    const d = Math.hypot(p.itarget.x - p.ix, p.itarget.y - p.iy);
+    if (d < 5) p.itarget = null;
+    else { mx = (p.itarget.x - p.ix) / d; my = (p.itarget.y - p.iy) / d; }
+  }
+  p.moving = !!(mx || my);
+  if (p.moving) {
+    const sp = 190 * dt;
+    const nx = clamp(p.ix + mx * sp, 42, IPW - 42);
+    const ny = clamp(p.iy + my * sp, IWALL + 16, IPH - 22);
+    if (!iBlocked(nx, ny)) { p.ix = nx; p.iy = ny; }
+    else if (!iBlocked(nx, p.iy)) { p.ix = nx; p.itarget = null; }
+    else if (!iBlocked(p.ix, ny)) { p.iy = ny; p.itarget = null; }
+    else p.itarget = null;
+    p.frame += dt * 7;
+    if (Math.abs(mx) > Math.abs(my)) { p.dir = 2; p.flip = mx < 0; }
+    else p.dir = my < 0 ? 1 : 0;
+    /* walking onto the door mat steps back outside */
+    const dm = interior.door;
+    if (p.iy > dm.y + 4 && p.ix > dm.x - 4 && p.ix < dm.x + dm.w + 4) exitInterior(p);
+  } else p.frame = 0;
+}
+function updateInterior(dt) {
+  const I = interior;
+  if (!I) return;
+  if (I.world !== world || I.b.rubble || buildings.indexOf(I.b) < 0 || !players.some(p2 => p2.inside)) {
+    closeInterior();
+    return;
+  }
+  for (const r of I.residents) {
+    r.moving = false;
+    if (r.sayT > 0) { r.sayT -= dt; r.frame = 0; continue; }
+    const dx = r.tx - r.x, dy = r.ty - r.y, d = Math.hypot(dx, dy);
+    if (d < 5) {
+      r.frame = 0;
+      r.wt -= dt;
+      if (r.wt <= 0 && I.spots.length) {
+        const s = I.spots[(Math.random() * I.spots.length) | 0];
+        r.tx = s.x; r.ty = s.y;
+        r.wt = 3.5 + Math.random() * 6;
+      }
+    } else {
+      const sp = 34 * dt;
+      const nx = r.x + dx / d * sp, ny = r.y + dy / d * sp;
+      if (!iBlocked(nx, ny)) { r.x = nx; r.y = ny; }
+      else { r.tx = r.x; r.ty = r.y; }
+      r.moving = true;
+      r.frame += dt * 5;
+      r.side = Math.abs(dx) > Math.abs(dy);
+      r.flip = dx < 0;
+    }
+  }
+  for (const h of I.hearts) {
+    if (!h.on) continue;
+    h.t += dt; h.y -= 26 * dt;
+    if (h.t > 1) h.on = false;
+  }
+  if (I.ding) {                                  // the elevator dings. it never opens. running gag.
+    I.dingT -= dt;
+    if (I.dingT <= 0) { I.dingT = 7 + Math.random() * 8; I.dingF = 1; SFX.ding(); }
+    if (I.dingF > 0) I.dingF -= dt;
+  }
+}
+/* ── talking, petting, cookies ── */
+function wrapSay(str) {
+  ctx.font = '700 13px Verdana, sans-serif';
+  const words = str.split(' ');
+  const lines = [];
+  let cur = '';
+  for (const w2 of words) {
+    const t2 = cur ? cur + ' ' + w2 : w2;
+    if (ctx.measureText(t2).width > 250 && cur) { lines.push(cur); cur = w2; }
+    else cur = t2;
+  }
+  if (cur) lines.push(cur);
+  let mw = 0;
+  for (const l of lines) mw = Math.max(mw, ctx.measureText(l).width);
+  return { lines, w: mw };
+}
+function talkToResident(p, r) {
+  let line = null;
+  if (r.baker) {                                 // the daily cookie — once per real day per save
+    const today = new Date().toDateString();
+    if (cookieDay !== today) {
+      cookieDay = today;
+      res.food += 50;
+      banners.push({ title: 'FRESH COOKIE!', sub: '+50 food — still warm from the oven!', t: 0, dur: 3, legendary: true });
+      line = 'A fresh cookie, baked just for you! Eat up!';
+      SFX.fanfare();
+      saveGame();
+    } else if (r.last !== BAKER_REFUSE) line = BAKER_REFUSE;
+  }
+  if (!line) {
+    const ev = latestEvent();
+    if (ev && CONTEXT_LINES[ev.k] !== r.last) line = CONTEXT_LINES[ev.k];
+  }
+  if (!line) {
+    let li = (Math.random() * r.pool.length) | 0;
+    if (r.pool[li] === r.last) li = (li + 1) % r.pool.length;
+    line = r.pool[li];
+  }
+  r.last = line; r.say = line;
+  r.sayLines = wrapSay(line);
+  r.sayT = 3.8;
+  r.side = true; r.flip = r.x > p.ix;            // turn toward the visitor
+  if (!r.greeted) { r.greeted = true; residentsGreeted++; }
+  SFX.pop();
+  return line;
+}
+function petCatDo(p) {
+  catPets++;
+  SFX.purr();
+  let n = 0;
+  for (const h of interior.hearts) {
+    if (h.on || n >= 3) continue;
+    h.on = true; h.x = interior.cat.x + (n - 1) * 16; h.y = interior.cat.y - 26 - n * 5; h.t = 0;
+    n++;
+  }
+}
+function interactInside(p) {
+  const I = interior;
+  if (!I) return;
+  if (I.cat && Math.hypot(I.cat.x - p.ix, I.cat.y - p.iy) < 52) { petCatDo(p); return; }
+  let bst = null, bd = 58;
+  for (const r of I.residents) {
+    const d = Math.hypot(r.x - p.ix, r.y - p.iy);
+    if (d < bd) { bd = d; bst = r; }
+  }
+  if (bst) { talkToResident(p, bst); return; }
+  SFX.ui();
+}
+/* ── the dollhouse render: 1 dim + 1 room blit + a handful of sprites ── */
+function drawRoomActor(spr2, x, y, flip) {
+  if (flip) {
+    ctx.translate(IPX + x, 0); ctx.scale(-1, 1);
+    ctx.drawImage(spr2, -24, IPY + y - 60, 48, 64);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+  } else ctx.drawImage(spr2, IPX + x - 24, IPY + y - 60, 48, 64);
+}
+function roomTitle(I) {
+  if (I.kind === 'cabin') {
+    const names = I.residents.map(r => r.name);
+    return names.join(' & ') + "'S CABIN";
+  }
+  return { bakery: 'THE BAKERY', lab: 'THE LAB', factory: 'THE FACTORY',
+           moondome: 'MOON DOME', neontower: 'NEON TOWER LOBBY' }[I.kind] || 'INSIDE';
+}
+function drawInterior() {
+  const I = interior;
+  ctx.drawImage(SPR.dim, 0, 0);
+  ctx.drawImage(I.room, IPX, IPY);
+  if (I.flame) ctx.drawImage(SPR.flame[((T * 9) | 0) % 3], IPX + I.flame.x, IPY + I.flame.y, 20, 26);
+  if (I.ding && I.dingF > 0) {
+    ctx.globalAlpha = clamp(I.dingF, 0, 1);
+    ctx.drawImage(SPR.lampGlow, IPX + I.ding.x - 15, IPY + I.ding.y - 15);
+    otxt('DING!', IPX + I.ding.x, IPY + I.ding.y - 16, 13, '#ffd24a');
+    ctx.globalAlpha = 1;
+  }
+  /* y-sorted actors (≤ 6 — reused list) */
+  const L = I.drawList;
+  L.length = 0;
+  if (I.cat) L.push({ y: I.cat.y, cat: true });
+  for (const r of I.residents) L.push({ y: r.y, r });
+  for (const p of players) if (p.inside) L.push({ y: p.iy, p });
+  L.sort((a, b2) => a.y - b2.y);
+  for (const it of L) {
+    if (it.cat) {
+      ctx.drawImage(SPR.cat[((T * 2) | 0) % 2], IPX + I.cat.x - 24, IPY + I.cat.y - 28, 48, 36);
+    } else if (it.r) {
+      const r = it.r;
+      const dirF = r.spr[r.side ? 1 : 0];
+      drawRoomActor(r.moving ? dirF[1 + ((r.frame | 0) % 2)] : dirF[0], r.x, r.y, r.flip);
+    } else {
+      const p = it.p;
+      const frames = SPR.av[p.pi][p.dir];
+      drawRoomActor(p.moving ? frames[1 + ((p.frame | 0) % 2)] : frames[0], p.ix, p.iy, p.flip && p.dir === 2);
+    }
+  }
+  /* hearts */
+  for (const h of I.hearts) {
+    if (!h.on) continue;
+    ctx.globalAlpha = clamp(1.2 - h.t, 0, 1);
+    ctx.drawImage(SPR.heart, IPX + h.x - 6, IPY + h.y - 6);
+  }
+  ctx.globalAlpha = 1;
+  /* names + bubbles + prompts */
+  otxt(roomTitle(I), W / 2, IPY + 36, 20, '#ffd24a');
+  for (const r of I.residents)
+    otxt(r.name, IPX + r.x, IPY + r.y - (r.small ? 58 : 66), 10, '#cfe8f4');
+  for (const r of I.residents) {
+    if (r.sayT <= 0 || !r.sayLines) continue;
+    const bw = r.sayLines.w + 30, bh = r.sayLines.lines.length * 17 + 15;
+    const bx = clamp(IPX + r.x - bw / 2, IPX + 8, IPX + IPW - 8 - bw);
+    const by = IPY + r.y - 70 - bh;
+    ctx.drawImage(SPR.bubP, 0, 0, 14, 44, bx, by, 14, bh);
+    ctx.drawImage(SPR.bubP, 14, 0, 92, 44, bx + 14, by, bw - 28, bh);
+    ctx.drawImage(SPR.bubP, 106, 0, 14, 44, bx + bw - 14, by, 14, bh);
+    ctx.drawImage(SPR.bubTail, IPX + r.x - 6, by + bh - 3);
+    for (let i = 0; i < r.sayLines.lines.length; i++)
+      txt(r.sayLines.lines[i], bx + bw / 2, by + 19 + i * 17, 13, '#22303c', 'center');
+  }
+  const dm = I.door;
+  otxt('○ GO OUTSIDE', IPX + dm.x + dm.w / 2, IPY + dm.y - 8, 12, '#ffd1a1');
+  const bob2 = Math.sin(T * 4) * 2;
+  for (const p of players) {
+    if (!p.inside) continue;
+    if (players.length > 1) otxt('P' + (p.pi + 1), IPX + p.ix, IPY + p.iy - 66, 10, p.pi ? '#ff9a8a' : '#8fd4ff');
+    if (I.cat && Math.hypot(I.cat.x - p.ix, I.cat.y - p.iy) < 52) {
+      otxt('✕ PET THE CAT', IPX + I.cat.x, IPY + I.cat.y - 38 + bob2, 13, '#7dff9a');
+      continue;
+    }
+    let bst = null, bd = 58;
+    for (const r of I.residents) {
+      const d = Math.hypot(r.x - p.ix, r.y - p.iy);
+      if (d < bd) { bd = d; bst = r; }
+    }
+    if (bst && bst.sayT <= 0) {
+      const cookie = bst.baker && cookieDay !== new Date().toDateString();
+      otxt(cookie ? '✕ COOKIE!' : '✕ SAY HI!', IPX + bst.x, IPY + bst.y - 76 + bob2, 13, cookie ? '#ffd24a' : '#7dff9a');
+    }
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
    PLAYERS & INPUT — pad (ArcadeController, guarded), keyboard, touch.
    Menu/pause edges come from the press-EVENT stream; held movement is
    polled per frame. START = pause. South = confirm. West = build menu.
@@ -4680,6 +5515,7 @@ function mkPlayer(pi) {
            dir: 0, flip: false, frame: 0, moving: false,
            boat: false, wakeT: 0, shoreX: 0, shoreY: 0, moor: null, moorE: null,
            aboard: false, dustT: 0, strip: 'build',
+           inside: false, ix: 0, iy: 0, itarget: null, enterB: null,   // v5b interiors
            mode: 'walk', menuI: 0, placeK: null, target: null, ghost: null };
 }
 function joinP2() {
@@ -4723,6 +5559,8 @@ function doAction(p) {
     if (rb2) { repairWhack(rb2); return; }
     const cn2 = nearCannon(p);                   // v4c: ✕ mans a pop cannon (moon too)
     if (cn2) { manCannon(p, cn2); SFX.confirm(); return; }
+    const dr2 = nearDoorB(p);                    // v5b: ✕ at a moon-dome door = go inside
+    if (dr2) { enterInterior(p, dr2); return; }
     const f2 = nearFlora(p);
     if (f2) harvestFlora(f2, p.x, p.y);
     return;
@@ -4735,6 +5573,8 @@ function doAction(p) {
   const sp = nearSeaport(p);
   if (sp && boardBoat(p, sp)) return;           // ✕ by the dock = set sail!
   if (tryBoardMoor(p)) return;                  // ✕ by your moored dinghy = sail on!
+  const dr = nearDoorB(p);                      // v5b: ✕ at a door = go inside!
+  if (dr) { enterInterior(p, dr); return; }
   const f = nearFlora(p);
   if (f) harvestFlora(f, p.x, p.y);
 }
@@ -4780,14 +5620,22 @@ function hopSection(p, dir) {                    // L1/R1: jump between dividers
   p.menuI = secs[(cur + dir + secs.length) % secs.length];
 }
 function updatePlayer(p, dt) {
+  if (p.inside) { updateInsidePlayer(p, dt); return; }   // v5b: room-space movement
   const v = moveVec(p.pi);
   const inMenu = p.mode === 'menu' || p.mode === 'boatmenu' || p.mode === 'cannon';
   let mx = 0, my = 0;
   if (!inMenu) { mx = v.dx; my = v.dy; }
-  if ((mx || my)) { p.target = null; p.ghost = null; }
+  if ((mx || my)) { p.target = null; p.ghost = null; p.enterB = null; }
   else if (p.target) {
     const d = Math.hypot(p.target.x - p.x, p.target.y - p.y);
-    if (d < 6) p.target = null;
+    if (d < 6) {
+      p.target = null;
+      if (p.enterB) {                            // v5b touch: tapped a door — step in on arrival
+        const eb = p.enterB;
+        p.enterB = null;
+        if (nearDoorB(p) === eb) enterInterior(p, eb);
+      }
+    }
     else { mx = (p.target.x - p.x) / d; my = (p.target.y - p.y) / d; }
   }
   p.moving = !!(mx || my);
@@ -4893,6 +5741,15 @@ function onBtn(pi, b) {
     return;
   }
   if (b === 'north') { statsOpen = true; SFX.ui(); return; }
+  if (p.inside) {                                // v5b: inside a building
+    if (b === 'south') interactInside(p);
+    else if (b === 'east') exitInterior(p);
+    else if (b === 'west') {                     // menus close the panel first
+      exitInterior(p);
+      p.mode = 'menu'; p.menuI = 0; SFX.ui();
+    }
+    return;
+  }
   if (p.mode === 'walk') {
     if (b === 'south') doAction(p);
     else if (b === 'east' && p.boat) tryDisembark(p);          // ○ also steps ashore
@@ -4987,6 +5844,7 @@ function pauseBtn(pi, b) {
       confirmPrestige = { yes: false };          // defaults to NO
       SFX.ui();
     } else if (o === 'SAVE & QUIT') {
+      closeInterior();                           // v5b
       saveGame(); paused = false; players = [];
       scene = 'title'; document.body.classList.remove('in-play');
       loadSlotSummaries(); SFX.confirm();
@@ -5141,6 +5999,18 @@ function tapAt(x, y) {
   const p = players[0];
   if (!p || p.aboard) return;                   // aboard: tbB (○) hops out
   if (p.mode === 'cannon') return;              // v4c: dedicated ◀ ▶ PWR FIRE buttons drive it
+  if (interior && p.inside) {                   // v5b: taps land in room space
+    const rx = x - IPX, ry = y - IPY;
+    if (rx < 0 || ry < 0 || rx > IPW || ry > IPH) return;
+    const dm = interior.door;
+    if (rx > dm.x && rx < dm.x + dm.w && ry > dm.y - 10) { exitInterior(p); return; }
+    const r = interior.residents.find(r2 => Math.hypot(r2.x - rx, (r2.y - 30) - ry) < 44);
+    if (r && Math.hypot(r.x - p.ix, r.y - p.iy) < 58) { talkToResident(p, r); return; }
+    if (interior.cat && Math.hypot(interior.cat.x - rx, interior.cat.y - ry) < 40 &&
+        Math.hypot(interior.cat.x - p.ix, interior.cat.y - p.iy) < 52) { petCatDo(p); return; }
+    p.itarget = { x: clamp(rx, 42, IPW - 42), y: clamp(ry, IWALL + 16, IPH - 24) };
+    return;
+  }
   const wx = x + camX, wy = y + camY;           // tap → world coords through the camera
   if (p.mode === 'boatmenu') {
     const y0 = H - 114;
@@ -5175,7 +6045,19 @@ function tapAt(x, y) {
     }
     return;
   }
-  if (y > 44) { p.target = { x: clamp(wx, 8, WORLD_W - 8), y: clamp(wy, GY0 + 8, WORLD_H - 8) }; }
+  if (y > 44) {
+    /* v5b: tapping an enterable building walks to its door and steps in */
+    const tgx = Math.floor(wx / TILE), tgy = Math.floor((wy - GY0) / TILE);
+    const tb = occ[tgy] && occ[tgy][tgx];
+    if (tb && ENTERABLE[tb.k] && !tb.rubble && !p.boat && enterAllowed()) {
+      const ts = B[tb.k].size || 1;
+      if (nearDoorB(p) === tb) { enterInterior(p, tb); return; }
+      p.target = { x: tX(tb.gx) + ts * 16, y: tY(tb.gy) + ts * 32 + 14 };
+      p.enterB = tb;
+      return;
+    }
+    p.target = { x: clamp(wx, 8, WORLD_W - 8), y: clamp(wy, GY0 + 8, WORLD_H - 8) };
+  }
 }
 canvas.addEventListener('touchstart', ev => { ev.preventDefault(); ensureAudio(); const q = canvasPoint(ev); tapAt(q.x, q.y); }, { passive: false });
 canvas.addEventListener('mousedown', ev => { ensureAudio(); const q = canvasPoint(ev); tapAt(q.x, q.y); });
@@ -6005,7 +6887,7 @@ function renderPlay() {
 
   /* harvest / repair / sail / board target markers */
   for (const p of players) {
-    if (p.mode !== 'walk' || p.aboard) continue;
+    if (p.mode !== 'walk' || p.aboard || p.inside) continue;
     if (p.boat) continue;
     const rb = nearRubble(p);
     if (rb) {
@@ -6037,6 +6919,11 @@ function renderPlay() {
     }
     const cnn = nearCannon(p);                   // v4c: manning prompt (both worlds)
     if (cnn) otxt('✕ MAN THE CANNON!', tX(cnn.gx) + 16, tY(cnn.gy) - 28 + bob, 13, '#ffd24a');
+    const drB = nearDoorB(p);                    // v5b: enterable door (both worlds)
+    if (drB && enterAllowed() && !cnn) {
+      const ds = B[drB.k].size || 1;
+      otxt('✕ GO INSIDE', tX(drB.gx) + ds * 16, tY(drB.gy) + ds * 32 + 30 + bob, 13, '#ffd1a1');
+    }
     if (world === 'earth' && crate && Math.hypot(tX(crate.gx) + 16 - p.x, tY(crate.gy) + 12 - p.y) < 52)
       otxt('✕ OPEN!', tX(crate.gx) + 16, tY(crate.gy) - 24, 13, '#ffd24a');
     if (bZone && !p.aboard && Math.hypot(bZone.cx - p.x, bZone.cy - p.y) < 78)
@@ -6075,7 +6962,7 @@ function renderPlay() {
     ctx.drawImage((dr.blue ? SPR.drakeB : SPR.drake)[(dr.frame | 0) % 2], dr.x - 11, dr.y - 14 + Math.sin(T * 5 + (dr.blue ? 2 : 0)) * 2);
   }
   for (const p of players) {
-    if (p.aboard) continue;                     // aboard: drawn as a head in the rocket window
+    if (p.aboard || p.inside) continue;         // aboard/inside: drawn elsewhere
     if (p.moor && !p.boat && onCam(p.moor.x, p.moor.y, 48))     // the waiting dinghy
       ctx.drawImage(SPR.boat, p.moor.x - 19, p.moor.y - 12 + Math.sin(T * 3.2 + p.pi * 2) * 1.6);
     const bob2 = p.boat ? Math.sin(T * 3.2 + p.pi * 2) * 1.6 : 0;
@@ -6279,6 +7166,7 @@ function renderPlay() {
 
   drawArrows();                                  // edge pointers so kids never lose an event
   drawHUD();
+  if (interior) drawInterior();                  // v5b: the dollhouse panel over the dimmed world
   for (const p of players) {
     if (p.mode === 'menu') drawMenu(p, H - 114 - (p.pi ? 170 : 0));
     else if (p.mode === 'boatmenu') drawBoatMenu(p, H - 114 - (p.pi ? 170 : 0));
@@ -6290,6 +7178,7 @@ function renderPlay() {
     const m = p0.mode;
     let hint = '';
     if (p0.aboard) hint = '○/X HOP OUT';
+    else if (p0.inside) hint = '✕/Z SAY HI · ○/X GO OUTSIDE';
     else if (m === 'walk') hint = p0.boat ? '✕/Z LAND NEARBY · □/C SETTLE MENU · △/V STATS'
                                      : world === 'moon' ? '✕/Z MINE · □/C BUILD · △/V STATS'
                                      : '✕/Z CHOP · □/C BUILD · △/V STATS';
@@ -6339,6 +7228,7 @@ function updatePlay(dt) {
   if (travel) updateTravel(dt);
   if (!rocketSeq && !gateSeq && !travelCin())
     for (const p of players) if (!p.aboard) updatePlayer(p, dt);
+  if (interior) updateInterior(dt);              // v5b: residents wander, hearts float, elevators ding
   for (const r of robots) updateRobot(r, dt);
   if (world === 'earth')
     for (let i = 0; i < drakes.length; i++) updateDrake(drakes[i], i, dt);
@@ -6633,7 +7523,7 @@ window.__test = {
   landAt(gx, gy) { return landAge[gy] ? landAge[gy][gx] : -1; },
   /* ── v4b hooks ── */
   warpTo(w) {                                    // test-only instant world switch
-    clearBalls(); wobbleN = 0;
+    clearBalls(); wobbleN = 0; closeInterior();
     for (const b of buildings) if (b.wobT > 0) { b.wobT = 0; bgDirty = true; }
     for (const p of players) if (p.mode === 'cannon') unmanCannon(p);
     if (world !== w) swapWorlds();
@@ -6817,6 +7707,13 @@ window.__test = {
       decorCount: decor.length,
       decorList: decor.map(t => [t.k, t.gx, t.gy]),
       pathsLaid, goldenPlaced,
+      /* v5b */
+      interior: interior ? { kind: interior.kind, gx: interior.b.gx, gy: interior.b.gy } : null,
+      inside: players.map(p => !!p.inside),
+      insideCount, residentsGreeted, catPets, cookieDay,
+      slot: curSlot,
+      floatsLive: floats.filter(f => f.on).map(f => f.str),
+      nearDoor: players[0] && !players[0].inside ? !!nearDoorB(players[0]) : false,
     };
   },
   /* ── v5a hooks ── */
@@ -6834,11 +7731,69 @@ window.__test = {
              plugged: buildings.filter(b => b.idle === 'plug').length,
              conn: buildings.filter(b => B[b.k].needPower && b.conn).length };
   },
+  /* ── v5b hooks — walkable interiors ── */
+  enterHouse(gx, gy, pi) {                       // teleport to the door + enter through the player path
+    const p = players[pi || 0];
+    const b2 = occ[gy] && occ[gy][gx];
+    if (!p || !b2 || !ENTERABLE[b2.k]) return false;
+    const s = B[b2.k].size || 1;
+    p.x = tX(b2.gx) + s * 16; p.y = tY(b2.gy) + s * 32 + 12;
+    p.target = null; p.boat = false;
+    return enterInterior(p, b2) ? interior.kind : false;
+  },
+  firstCabin() {
+    const b = firstHomeCabin();
+    return b ? { gx: b.gx, gy: b.gy } : null;
+  },
+  interiorInfo() {
+    if (!interior) return null;
+    return { kind: interior.kind, panel: { x: IPX, y: IPY, w: IPW, h: IPH },
+             door: Object.assign({}, interior.door),
+             solids: interior.solids.map(s => Object.assign({}, s)),
+             spots: interior.spots.length,
+             cat: interior.cat ? { x: interior.cat.x, y: interior.cat.y } : null,
+             hearts: interior.hearts.filter(h => h.on).length,
+             residents: interior.residents.map(r => ({ name: r.name, x: Math.round(r.x), y: Math.round(r.y),
+               baker: !!r.baker, greeted: !!r.greeted, say: r.sayT > 0 ? r.say : null })),
+             players: players.map(p => p.inside ? { x: Math.round(p.ix), y: Math.round(p.iy) } : null) };
+  },
+  teleInside(pi, x, y) {
+    const p = players[pi || 0];
+    if (!p || !p.inside) return false;
+    p.ix = x; p.iy = y; p.itarget = null;
+    return true;
+  },
+  talkToName(name, pi) {                         // stand by the named resident and say hi
+    const p = players[pi || 0];
+    if (!p || !p.inside || !interior) return null;
+    const r = interior.residents.find(r2 => r2.name === name) || interior.residents[0];
+    if (!r) return null;
+    p.ix = clamp(r.x + 8, 42, IPW - 42); p.iy = clamp(r.y + 20, IWALL + 16, IPH - 22); p.itarget = null;
+    return talkToResident(p, r);
+  },
+  petTheCat(pi) {
+    const p = players[pi || 0];
+    if (!p || !p.inside || !interior || !interior.cat) return -1;
+    p.ix = interior.cat.x; p.iy = clamp(interior.cat.y + 24, IWALL + 16, IPH - 22);
+    interactInside(p);
+    return catPets;
+  },
+  exitHouse(pi) {
+    const p = players[pi || 0];
+    if (!p || !p.inside) return false;
+    exitInterior(p);
+    return true;
+  },
+  events() { return recentEvents.map(e => e.k); },
+  addEvent(k) { pushEvent(k); return recentEvents.length; },
+  setCookieDay(v) { cookieDay = v || ''; },
+  roomBlocked(x, y) { return interior ? iBlocked(x, y) : null; },
 };
 
 /* ───── boot ───── */
 initSprites();
 initDecorSprites();                             // v5a: paths, garden, showpieces, gold
+initInteriorSprites();                          // v5b: residents, the cat, speech bubbles
 extraSprites();
 otherWorld = mkMoonBundle();                    // the moon bundle waits in the wings
 loadSlotSummaries();
