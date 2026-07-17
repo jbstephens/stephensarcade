@@ -85,6 +85,10 @@ if [ -f "$WAYFIRE_INI" ] && ! grep -q "ses-kiosk" "$WAYFIRE_INI"; then
   fi
 fi
 
+# Current-mode helper for the kiosk drift watchdog (JSON-based; the
+# human-readable wlr-randr output is unreliable to parse).
+sudo install -m 0755 "$(dirname "$0")/ses-curmode" /usr/local/bin/ses-curmode
+
 # Idle-pad watchdog — powers off DualShocks idle for 15 min by dropping
 # their Bluetooth link (press PS to wake). Watches only the gamepad event
 # node, never the motion-sensor/touchpad sub-devices.

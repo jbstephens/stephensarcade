@@ -47,13 +47,33 @@ fi
 # loop below brings it back with fresh timings in seconds.
 if [ -n "$MODE" ] && [ -n "${WAYLAND_DISPLAY:-}" ] && command -v wlr-randr >/dev/null 2>&1; then
   (
+    # JSON-based mode detection via ses-curmode: the human-readable
+    # "(current)" marker flaps between wlr-randr calls, which made the
+    # old awk parser return empty and the watchdog no-op silently.
+    WLOG=/tmp/ses-kiosk-watchdog.log
+    MISSES=0
+    echo "$(date -Is) watchdog: armed (want $MODE)" >> "$WLOG"
     while true; do
       sleep 10
-      CUR=$(wlr-randr 2>/dev/null | awk '/\(current\)/ { split($3, hz, "."); print $1 "@" hz[1]; exit }')
-      if [ -n "$CUR" ] && [ "$CUR" != "$MODE" ]; then
-        echo "ses-kiosk: display drifted to $CUR — reasserting $MODE" >&2
+      CUR=$(/usr/local/bin/ses-curmode 2>>"$WLOG")
+      if [ -z "$CUR" ]; then
+        MISSES=$((MISSES + 1))
+        echo "$(date -Is) watchdog: cannot read current mode (miss $MISSES)" >> "$WLOG"
+        if [ "$MISSES" -ge 6 ]; then
+          # unreadable for a minute: defensively reassert (idempotent if
+          # already correct); no browser bounce on this blind path
+          echo "$(date -Is) watchdog: blind reassert of $MODE" >> "$WLOG"
+          OUT=$(wlr-randr 2>/dev/null | awk 'NR==1 {print $1}')
+          wlr-randr --output "${OUT:-HDMI-A-1}" --mode "$MODE" >>"$WLOG" 2>&1
+          MISSES=0
+        fi
+        continue
+      fi
+      MISSES=0
+      if [ "$CUR" != "$MODE" ]; then
+        echo "$(date -Is) watchdog: display drifted to $CUR — reasserting $MODE" | tee -a "$WLOG" >&2
         OUT=$(wlr-randr 2>/dev/null | awk 'NR==1 {print $1}')
-        wlr-randr --output "$OUT" --mode "$MODE" 2>/dev/null
+        wlr-randr --output "${OUT:-HDMI-A-1}" --mode "$MODE" >>"$WLOG" 2>&1
         sleep 2
         pkill -f "$BROWSER" 2>/dev/null || pkill chromium 2>/dev/null
       fi
