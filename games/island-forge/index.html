@@ -246,12 +246,14 @@ function musicTick() {
 
 /* ───── resources & buildings data (ALL balance lives here) ───── */
 const RES_LIST = ['wood', 'stone', 'food', 'ore', 'metal', 'parts', 'power', 'science',
-                  'regolith', 'ice', 'he3'];
+                  'regolith', 'ice', 'he3', 'fuel'];
 const RES_AGE  = { wood: 1, stone: 1, food: 2, ore: 3, metal: 3, parts: 3, power: 4, science: 5,
-                   regolith: 7, ice: 7, he3: 7 };
+                   regolith: 7, ice: 7, he3: 7, fuel: 7 };
 const RES_COL  = { wood: '#e0a35c', stone: '#c2cbd4', food: '#ff8f6b', ore: '#a99bf0',
                    metal: '#e8eef4', parts: '#ffd24a', power: '#59e0ff', science: '#7dff9a', pop: '#ffd1a1',
-                   regolith: '#c2c9d6', ice: '#9fe8ff', he3: '#7dffe0' };
+                   regolith: '#c2c9d6', ice: '#9fe8ff', he3: '#7dffe0', fuel: '#ff9a4a' };
+/* v6a: FUEL joins the HUD only once it exists somewhere (refined or granted) */
+const fuelSeen = () => (res.fuel || 0) > 0 || (life.fuel || 0) > 0 || cruiserStage > 0;
 const LUNAR = { regolith: 1, ice: 1, he3: 1 };  // shown in the HUD only once discovered
 const AGE_NAMES = [null, 'CAMPFIRE', 'FARMING', 'INDUSTRY', 'ELECTRICITY', 'SCIENCE', 'CYBERPUNK', 'MOON COLONY'];
 const AGE_SUBS  = [null, 'Chop wood, build cabins!', 'Grow food for your people!',
@@ -296,6 +298,17 @@ const B = {
   lander:    { name: 'LUNAR LANDER', age: 7, size: 2, cost: {}, prod: { power: 6 },                  moon: true, special: true },
   stargate:  { name: 'STAR GATE',    age: 7, size: 2, cost: { metal: 400, parts: 200, science: 120 },moon: true, wonder: true,
                need: ['moondome', 'regomine', 'helium3'], grp: 'tools' },
+  /* ═══ v6a — THE MOON EXPANSION: the moon grows into a shipbuilding hub ═══ */
+  greenhouse:  { name: 'CRATER GREENHOUSE', age: 7, size: 1, cost: { metal: 40, ice: 20 },
+                 prod: { food: 3 }, needPower: 3, moon: true, grp: 'food' },
+  he3refinery: { name: 'HE-3 REFINERY', age: 7, size: 1, cost: { metal: 80, parts: 30 },
+                 cons: { he3: 0.4, ice: 0.4 }, prod: { fuel: 0.4 }, needPower: 4, moon: true, grp: 'industry' },
+  rovergarage: { name: 'ROVER GARAGE', age: 7, size: 1, cost: { metal: 40, parts: 20 },
+                 rover: true, max: 3, needPower: 2, moon: true, grp: 'tools' },
+  observatory: { name: 'OBSERVATORY', age: 7, size: 1, cost: { metal: 60, science: 20 },
+                 needPower: 2, moon: true, needLegends: true, grp: 'tools' },
+  shipyard:    { name: 'SHIPYARD', age: 7, size: 2, cost: { metal: 150, parts: 80, science: 30 },
+                 needPower: 6, moon: true, needMars: true, once: true, noremove: true, grp: 'tools' },
   giantmill: { name: 'GIANT WINDMILL', age: 4, size: 1, cost: {}, prod: { power: 12 }, special: true },
   statue:    { name: 'GOLD STATUE', age: 5, size: 1, cost: {}, special: true },
 };
@@ -328,6 +341,14 @@ const DECOR_GRPS = ['paths', 'garden', 'show', 'golden'];
 const GRP_COL = { homes: '#ff9a6b', food: '#7dff9a', industry: '#c9d2da', power: '#59e0ff',
                   tools: '#ffd24a', paths: '#e0c08a', garden: '#7dff9a', show: '#ff8ade', golden: '#ffd24a' };
 const ROCKET_COST = { metal: 150, parts: 80, science: 40 };
+/* v6a: the MARS CRUISER is funded in 3 installments at the Shipyard
+   (totals 200 metal · 100 parts · 50 FUEL) — hull, wings, engines */
+const CRUISER_STAGES = [
+  { metal: 70, parts: 35, fuel: 17 },
+  { metal: 70, parts: 35, fuel: 17 },
+  { metal: 60, parts: 30, fuel: 16 },
+];
+const CRUISER_STAGE_NAMES = ['HULL BUILT!', 'WINGS ON!', 'THE MARS CRUISER IS READY!'];
 const MOON_ROCKET_COST = { metal: 150, parts: 80, science: 40 };  // one-time; travel is free after the first round trip
 const FUEL_COST = { ice: 10, he3: 5 };          // first return flight (survival arc)
 const REQ_NEXT = {
@@ -389,6 +410,18 @@ const GOALS = [
   { t: 'OPEN THE STAR GATE',      ok: () => legends },
   { t: 'PLACE A GOLDEN SHOWPIECE',ok: () => goldenPlaced >= 1 },      // v5a
   { t: 'LAUNCH 2 ROCKETS',        ok: () => rocketsLaunched >= 2 },
+  /* ── v6a: the Moon Expansion ladder (appended — goalI stays aligned) ── */
+  { t: 'SPOT MARS',               ok: () => marsSpotted,
+    live: () => cnt('observatory') ? 'SPOT MARS: PRESS ✕ AT THE OBSERVATORY!'
+                                   : 'SPOT MARS: BUILD A MOON OBSERVATORY!' },
+  { t: 'BUILD THE SHIPYARD',      ok: () => cnt('shipyard') >= 1 },
+  { t: 'REFINE 20 FUEL',          ok: () => (life.fuel || 0) >= 20,
+    live: () => 'REFINE 20 FUEL: ' + Math.min(20, Math.floor(life.fuel || 0)) + '/20 (HE-3 REFINERY)' },
+  { t: 'MOON SALAD',              ok: () => cnt('greenhouse') >= 1,
+    live: () => 'MOON SALAD: BUILD A CRATER GREENHOUSE!' },
+  { t: 'BUILD A MOON ROVER',      ok: () => roverCount() >= 1 },
+  { t: 'BUILD THE MARS CRUISER',  ok: () => cruiserStage >= 3,
+    live: () => cruiserStage > 0 ? 'MARS CRUISER: STAGE ' + cruiserStage + '/3 — FUND AT THE SHIPYARD!' : null },
 ];
 
 /* ───── gentle disasters (age 3+, kid-visible warning, nothing lost) ───── */
@@ -432,7 +465,13 @@ let moonArrived = false;                      // first landing done
 let moonReturnDone = false;                   // first round trip done → travel free forever
 let returnFueled = false;                     // survival arc: return rocket fueled at the Moon Port
 const travelCin = () => !!travel && travel.phase !== 'board';   // cinematic phases
-let res = {}, life = { metal: 0, parts: 0, science: 0, regolith: 0, ice: 0 };
+/* ── v6a: the Moon Expansion ── */
+let marsSpotted = false;                      // Observatory vignette seen → SHIPYARD unlocked
+let cruiserStage = 0;                         // MARS CRUISER installments funded (0-3; 3 = ready)
+let vignette = null;                          // { t } — the telescope view panel (modal-ish)
+let forcedSeed = 0;                           // test hook: pin the next new game's seed
+const DEF_NAMES = ['ISLE', 'ATOLL', 'CAY', 'REEF', 'KEY', 'SHOAL'];   // skipped-name variety
+let res = {}, life = { metal: 0, parts: 0, science: 0, regolith: 0, ice: 0, fuel: 0 };
 let pop = 2, popF = 2, hungry = false, firstPowerDone = false;
 let powerInc = 0, powerDem = 0, islandPowered = false;
 let battCharge = 0, battCap = 0;             // stored power-seconds across all batteries
@@ -1031,6 +1070,176 @@ function initSprites() {
     P(26.6, 6.4, 3, 2.6, lit ? '#ffd75e' : '#39424c');
     P(27.6, 0.6, 1, 4, '#9aa2ad'); P(26.9, -0.4, 2.4, 1.4, lit ? '#7dffe0' : '#2a6655');
   });
+  /* ═══ v6a — MOON EXPANSION buildings (all baked, moon-only) ═══ */
+  /* CRATER GREENHOUSE — glass dome over a crater, glowing green inside */
+  mk('greenhouse', 16, 14, (g, P, lit) => {
+    shad(g, 16, 25, 13, 3.5);
+    g.fillStyle = '#8f96a1'; g.beginPath(); g.ellipse(16, 20, 14, 6.4, 0, 0, 6.3); g.fill();
+    g.fillStyle = '#7c838e'; g.beginPath(); g.ellipse(16, 20.6, 11.6, 4.8, 0, 0, 6.3); g.fill();
+    const gr = g.createRadialGradient(16, 19, 1, 16, 19, 12);
+    gr.addColorStop(0, lit ? 'rgba(150,255,170,0.95)' : 'rgba(110,220,140,0.9)');
+    gr.addColorStop(1, 'rgba(60,160,90,0.55)');
+    g.fillStyle = gr; g.beginPath(); g.ellipse(16, 19.6, 10.6, 4.4, 0, 0, 6.3); g.fill();
+    g.fillStyle = '#2c7a3a';
+    for (let i = 0; i < 4; i++) g.fillRect(8 + i * 4.4, 16.6, 2.4, 3.6);
+    g.fillStyle = '#54bd62';
+    for (let i = 0; i < 4; i++) g.fillRect(8.6 + i * 4.4, 15.4, 1.2, 2.2);
+    g.fillStyle = 'rgba(190,235,255,0.4)';
+    g.beginPath(); g.ellipse(16, 19, 12.6, 12, 0, 3.14, 6.3); g.fill();
+    g.strokeStyle = 'rgba(230,248,255,0.75)'; g.lineWidth = 1.4;
+    g.beginPath(); g.ellipse(16, 19, 12.6, 12, 0, 3.14, 6.3); g.stroke();
+    g.beginPath(); g.ellipse(16, 19, 6, 12, 0, 3.14, 6.3); g.stroke();
+    g.fillStyle = 'rgba(255,255,255,0.7)'; g.fillRect(9, 9.6, 4, 2);
+    P(1, 9, 2, 2.2, '#8a93a0'); P(13, 9, 2, 2.2, '#8a93a0');           // airlock stubs
+  });
+  /* HE-3 REFINERY — twin tank cluster, hazard bands, vent stack */
+  mk('he3refinery', 16, 22, (g, P, lit) => {
+    shad(g, 16, 41, 13, 4);
+    P(11.6, 1, 2.4, 8, '#8a96a4'); P(11.6, 1, 1, 8, '#a8b2bf'); P(11.2, 0.2, 3.2, 1.2, '#6d747c');
+    P(2, 8, 5.4, 13, '#d8e2ec'); P(2, 8, 1.8, 13, '#eef4f9'); P(6, 8, 1.4, 13, '#b4c0cc');
+    P(8.4, 10, 5.4, 11, '#c2ccd8'); P(8.4, 10, 1.8, 11, '#dde5ec'); P(12.4, 10, 1.4, 11, '#a4b0bc');
+    P(2.6, 6.6, 4.2, 1.6, '#aab6c4'); P(9, 8.6, 4.2, 1.6, '#aab6c4');
+    P(2, 12, 12, 1.6, '#ff8a3a'); P(2, 17, 12, 1.6, '#ff8a3a');
+    P(7.2, 13.6, 1.4, 5.6, '#6d7883');
+    P(3, 19.6, 10, 1.4, '#6d747c');
+    P(3.4, 9, 1.6, 2, lit ? '#7dffe0' : '#2a6655');
+    P(9.8, 11.2, 1.6, 2, lit ? '#ffd24a' : '#8a6a12');
+  });
+  /* ROVER GARAGE — big-door shed that rolls out a MOON ROVER */
+  mk('rovergarage', 16, 16, (g, P, lit) => {
+    shad(g, 16, 29, 13, 4);
+    P(1.6, 6, 12.8, 9.4, '#9aa4ae'); P(1.6, 6, 12.8, 1.2, '#b8c2cc'); P(1.6, 6, 1.4, 9.4, '#aab6c0');
+    P(1, 4.4, 14, 2, '#7d8892'); P(2, 3.6, 12, 1.2, '#8a96a4');
+    P(3.4, 8, 9.2, 7.4, '#39424c'); P(3.9, 8.5, 8.2, 6.4, '#2a3138');
+    for (let i = 0; i < 3; i++) P(4.4, 9.6 + i * 1.9, 7.2, 0.8, '#454f58');
+    P(3.4, 8, 9.2, 1, lit ? '#ffd24a' : '#8a6a12');
+    P(12.6, 1.6, 0.8, 3, '#6d7883'); P(12.2, 1, 1.6, 1, '#ff5f4a');
+    P(2.2, 9.4, 0.8, 3.6, lit ? '#59e0ff' : '#2a5a6a');
+    P(5.6, 13.4, 4.8, 1.4, '#d9a520'); P(5.6, 13.4, 4.8, 0.5, '#f0c542');   // rover peeking out
+  });
+  /* OBSERVATORY — silver dome, slit, telescope tube reaching for Mars */
+  mk('observatory', 16, 20, (g, P, lit) => {
+    shad(g, 16, 37, 12, 3.5);
+    /* telescope tube (behind the dome, aimed up-left) */
+    g.save(); g.translate(13, 18); g.rotate(-0.65);
+    g.fillStyle = '#6d7883'; g.fillRect(-2.2, -19, 4.6, 15);
+    g.fillStyle = '#8a96a4'; g.fillRect(-2.2, -19, 1.6, 15);
+    g.fillStyle = lit ? '#9fe8ff' : '#3a7a8f'; g.fillRect(-2.7, -20.6, 5.6, 2.2);
+    g.restore();
+    /* cylindrical base */
+    P(3, 11.4, 10, 7.6, '#aab6c4'); P(3, 11.4, 10, 1, '#c2cbd6'); P(3, 11.4, 1.6, 7.6, '#bcc6d2');
+    P(6.6, 14.6, 2.6, 4.4, '#39424c');
+    P(10.6, 13.2, 2, 1.8, lit ? '#ffd75e' : '#39424c');
+    /* dome with slit */
+    g.fillStyle = lit ? '#dfe8f2' : '#c9d4de';
+    g.beginPath(); g.ellipse(16, 23, 11.6, 10, 0, 3.14, 6.3); g.fill();
+    g.fillStyle = '#525d6a'; g.fillRect(11.4, 13.6, 5, 9.4);
+    g.fillStyle = '#39424c'; g.fillRect(12.4, 13.6, 3, 9.4);
+    P(1.6, 10.2, 12.8, 1.2, '#8a96a4');                                 // base ring
+  });
+  /* SHIPYARD — 2x2 wonder-class gantry frame over a striped work deck */
+  mk('shipyard', 32, 30, (g, P, lit) => {
+    shad(g, 32, 57, 28, 5);
+    P(2, 22, 28, 6, '#8a93a0'); P(2, 22, 28, 1.2, '#a8b2bf'); P(3, 26.6, 26, 1.4, '#6d747c');
+    for (let i = 0; i < 7; i++) P(3 + i * 4, 27.2, 2, 1, i % 2 ? '#ffd24a' : '#2b2f34');
+    const tower = x => {
+      P(x, 3.4, 3, 19, '#c0402f'); P(x, 3.4, 1.2, 19, '#d95a44');
+      P(x - 1, 9, 5, 1, '#8a2a1e'); P(x - 1, 15, 5, 1, '#8a2a1e');
+    };
+    tower(3); tower(26);
+    P(3, 1.6, 26, 2.2, '#c0402f'); P(3, 1.6, 26, 0.9, '#d95a44');
+    P(14.6, 3.8, 1, 4.4, '#8a93a0'); P(13.6, 8, 3, 2, '#ffd24a'); P(14.2, 8.5, 1.8, 1, '#8a6a12');
+    P(8, 3.8, 0.7, 3, '#8a93a0'); P(23, 3.8, 0.7, 3, '#8a93a0');
+    P(25.4, 16, 6, 6, '#c9d2da'); P(25.4, 16, 6, 1, '#e8eef4');
+    P(26.4, 17.4, 3, 2.4, lit ? '#ffd75e' : '#39424c');
+    P(3.4, 17.6, 4, 4.4, '#6d747c'); P(4, 18.4, 2.6, 1.6, lit ? '#59e0ff' : '#2a5a6a');
+    P(2.4, 0.4, 1.2, 1.2, lit ? '#ff8a8a' : '#8a3a3a'); P(28.4, 0.4, 1.2, 1.2, lit ? '#ff8a8a' : '#8a3a3a');
+  });
+  /* MOON ROVER — chunky 6-wheeler; frames alternate wheel-hub highlights */
+  SPR.rover = [0, 1].map(v => S(14, 11, (g, P) => {
+    shad(g, 14, 20, 9, 2.4);
+    for (let i = 0; i < 3; i++) {
+      P(1.6 + i * 4.4, 7.4, 3.2, 3.2, '#2b2f34');
+      P(2.4 + i * 4.4 + (v ? 0.7 : 0), 8.3, 1.2, 1.2, '#8a919e');
+    }
+    P(1, 4.6, 12, 3.4, '#9aa4ae'); P(1, 4.6, 12, 1, '#b8c2cc');
+    P(2, 3.2, 7, 1.6, '#d9a520'); P(2, 3.2, 7, 0.6, '#f0c542');
+    P(10, 1.8, 2.6, 2.8, '#7d8892'); P(10.6, 2.4, 1.4, 1.1, '#59e0ff');
+    P(9.4, 0.6, 0.6, 2, '#6d7883');
+    P(3, 5.4, 2, 1.6, '#39424c');
+    P(11.4, 5.4, 1.4, 1.4, '#e05a3a');
+  }));
+  /* THE MARS CRUISER — staged bakes: hull → +wings → +engines (complete) */
+  const mkCruiser = stage => {
+    const [c, g] = C(150, 62);
+    const P = (x, y, w, h, col) => { g.fillStyle = col; g.fillRect(x, y, w, h); };
+    g.fillStyle = 'rgba(30,34,44,0.35)';
+    g.beginPath(); g.ellipse(78, 57, 60, 4.6, 0, 0, 6.3); g.fill();
+    if (stage >= 2) {                            // swept red wings
+      g.fillStyle = '#c0402f';
+      g.beginPath(); g.moveTo(44, 36); g.lineTo(12, 54); g.lineTo(60, 46); g.closePath(); g.fill();
+      g.beginPath(); g.moveTo(96, 36); g.lineTo(130, 54); g.lineTo(84, 46); g.closePath(); g.fill();
+      g.fillStyle = '#d95a44';
+      g.beginPath(); g.moveTo(44, 36); g.lineTo(22, 48); g.lineTo(58, 42); g.closePath(); g.fill();
+    }
+    P(36, 46, 4, 8, '#6d747c'); P(100, 46, 4, 8, '#6d747c');            // landing skids
+    P(32, 53, 12, 2.6, '#8a93a0'); P(96, 53, 12, 2.6, '#8a93a0');
+    P(24, 26, 96, 18, '#e8eef4'); P(24, 26, 96, 5, '#ffffff'); P(24, 40, 96, 4, '#c2ccd8');
+    g.fillStyle = '#e8eef4';                                            // nose cone (points right)
+    g.beginPath(); g.moveTo(120, 26); g.lineTo(147, 35); g.lineTo(120, 44); g.closePath(); g.fill();
+    g.fillStyle = '#e04a38';
+    g.beginPath(); g.moveTo(132, 30); g.lineTo(147, 35); g.lineTo(132, 40); g.closePath(); g.fill();
+    P(24, 32, 96, 3, '#e04a38');                                        // red racing stripe
+    P(104, 28, 12, 7, '#59c9f0'); P(106, 29, 4, 3, '#c9f0ff');          // cockpit
+    for (let i = 0; i < 4; i++) P(40 + i * 16, 36, 7, 3.6, '#7d8892');  // portholes
+    P(62, 21.6, 24, 5, '#c2ccd8');
+    if (stage >= 3) {                            // twin engines + tail fin
+      P(12, 23, 16, 9, '#8a93a0'); P(12, 23, 16, 2.6, '#a8b2bf');
+      P(12, 38, 16, 9, '#8a93a0'); P(12, 38, 16, 2.6, '#a8b2bf');
+      P(9, 24.6, 4, 6, '#59e0ff'); P(9, 39.6, 4, 6, '#59e0ff');
+      P(10, 26.2, 2, 2.8, '#c9f6ff'); P(10, 41.2, 2, 2.8, '#c9f6ff');
+      P(58, 12, 5, 10, '#c0402f'); P(52, 9.4, 22, 4, '#e04a38'); P(52, 9.4, 22, 1.6, '#f0705e');
+      P(66, 14, 4, 4, '#fff3b0');                                       // gleam — she's DONE
+    }
+    return c;
+  };
+  SPR.cruiserStg = [1, 2, 3].map(mkCruiser);
+  SPR.greenGlow = glowDot(16, '#7dff9a');        // greenhouse garden glow
+  /* the telescope view — brass rim, deep space, MARS with polar cap */
+  SPR.marsView = (() => {
+    const [c, g] = C(360, 360);
+    g.fillStyle = '#b8860b'; g.beginPath(); g.arc(180, 180, 178, 0, 6.3); g.fill();
+    g.fillStyle = '#e8c25a'; g.beginPath(); g.arc(180, 180, 171, 0, 6.3); g.fill();
+    g.fillStyle = '#04060f'; g.beginPath(); g.arc(180, 180, 161, 0, 6.3); g.fill();
+    g.save(); g.beginPath(); g.arc(180, 180, 161, 0, 6.3); g.clip();
+    for (let i = 0; i < 70; i++) {
+      g.fillStyle = i % 5 ? 'rgba(255,255,255,0.8)' : 'rgba(160,210,255,0.9)';
+      g.fillRect(26 + (i * 97) % 308, 26 + (i * 61 + 13) % 308, i % 3 ? 2 : 3, i % 3 ? 2 : 3);
+    }
+    const mx = 214, my = 152, mr = 52;
+    const halo = g.createRadialGradient(mx, my, mr * 0.6, mx, my, mr * 1.9);
+    halo.addColorStop(0, 'rgba(255,120,70,0.35)'); halo.addColorStop(1, 'rgba(255,120,70,0)');
+    g.fillStyle = halo; g.fillRect(mx - mr * 2, my - mr * 2, mr * 4, mr * 4);
+    g.fillStyle = '#b8432a'; g.beginPath(); g.arc(mx, my, mr, 0, 6.3); g.fill();
+    g.fillStyle = '#d05a36'; g.beginPath(); g.arc(mx - 6, my - 6, mr - 7, 0, 6.3); g.fill();
+    g.save(); g.beginPath(); g.arc(mx, my, mr, 0, 6.3); g.clip();
+    g.fillStyle = '#9a3620';
+    g.beginPath(); g.ellipse(mx - 14, my + 8, 20, 9, 0.4, 0, 6.3); g.fill();
+    g.beginPath(); g.ellipse(mx + 20, my - 12, 13, 7, -0.3, 0, 6.3); g.fill();
+    g.beginPath(); g.ellipse(mx + 6, my + 28, 15, 6, 0.2, 0, 6.3); g.fill();
+    g.fillStyle = '#f4e8e0';
+    g.beginPath(); g.ellipse(mx - 4, my - mr + 8, 17, 7, 0.1, 0, 6.3); g.fill();
+    g.fillStyle = 'rgba(20,8,8,0.4)';
+    g.beginPath(); g.arc(mx + 30, my + 18, mr, 0, 6.3); g.fill();
+    g.restore();
+    g.strokeStyle = 'rgba(125,255,224,0.3)'; g.lineWidth = 2;
+    g.beginPath(); g.moveTo(180, 28); g.lineTo(180, 332); g.moveTo(28, 180); g.lineTo(332, 180); g.stroke();
+    g.strokeStyle = 'rgba(125,255,224,0.5)';
+    g.beginPath(); g.arc(mx, my, mr + 16, 0, 6.3); g.stroke();
+    g.restore();
+    return c;
+  })();
+
   /* boarding-zone ring (pulsing, baked) + tiny aboard heads for the window */
   SPR.zoneRing = (() => {
     const [c, g] = C(96, 96);
@@ -1400,6 +1609,7 @@ function initSprites() {
     regolith: mkIcon((g, P) => { P(2, 4, 6, 4, '#8a919e'); P(3, 3, 4, 2, '#a5adba'); P(4, 4.6, 2, 1.4, '#e8edf5'); P(6.6, 6.6, 1, 1, '#cdd4e0'); }),
     ice:   mkIcon((g, P) => { P(4, 1, 2, 7, '#7fd0f4'); P(4, 1, 0.8, 7, '#c9f0ff'); P(2, 3.6, 1.6, 4.4, '#5ab4e0'); P(6.6, 4, 1.6, 4, '#5ab4e0'); P(1.4, 8, 7.2, 1.4, '#9fe0ff'); }),
     he3:   mkIcon((g, P) => { P(3, 2, 4, 7, '#3aa890'); P(3.6, 2.6, 1.2, 5.8, '#7dffe0'); P(3.4, 0.8, 3.2, 1.4, '#2a7a68'); P(5.2, 4, 1.4, 2, '#0f4438'); }),
+    fuel:  mkIcon((g, P) => { P(2.4, 3, 5.6, 6.4, '#e05a3a'); P(2.4, 3, 1.6, 6.4, '#f0705e'); P(3.4, 1.6, 2, 1.6, '#8f979f'); P(5.8, 1.9, 2.4, 1, '#c0402f'); P(4.4, 5.2, 1.8, 2.6, '#ffd24a'); P(4.9, 4.5, 0.8, 1, '#ffd24a'); }),
   };
 
   /* UI chrome panels */
@@ -2739,6 +2949,14 @@ function recomputeAnims() {
       case 'lander':   anims.push({ t: 'landerGlow', x: x + 32, y: y + 40, b });
                        anims.push({ t: 'beacon', x: x + 15, y: y + 2, b, m: true }); break;
       case 'moonport': anims.push({ t: 'beacon', x: x + 56, y: y + 2, b }); break;
+      /* v6a — the moon expansion */
+      case 'greenhouse': anims.push({ t: 'ghglow', x: x + 16, y: y + 20, b });
+                         anims.push({ t: 'aura', x: x + 16, y: y + 10, b, cool: Math.random() }); break;
+      case 'he3refinery':anims.push({ t: 'smoke', x: x + 25, y: y - 42, b, cool: Math.random(), soft: true });
+                         anims.push({ t: 'beacon', x: x + 8, y: y + 18, b }); break;
+      case 'observatory':anims.push({ t: 'beacon', x: x + 22, y: y - 2, b, m: true }); break;
+      case 'shipyard':   anims.push({ t: 'weld', x: x + 12, y: y + 44, b, cool: Math.random() });
+                         anims.push({ t: 'beacon', x: x + 5, y: y + 1, b, m: true }); break;
     }
   }
   /* v5a: decoration overlays — fountain sparkle, waving flags, warm lamps,
@@ -2889,6 +3107,7 @@ function economyTick() {
       if (r === 'science') life.science += amt;
       if (r === 'regolith') life.regolith += amt;
       if (r === 'ice') life.ice += amt;
+      if (r === 'fuel') life.fuel += amt;        // v6a: REFINE 20 FUEL goal
     }
   }
   /* population eats (age 2+); never dies — growth just pauses */
@@ -3004,6 +3223,8 @@ function placeBuilding(k, gx, gy) {
   payCost(B[k].cost);
   const b = addBuilding(k, gx, gy);
   if (B[k].robot) spawnRobot(tX(gx) + 16, tY(gy) + 40);
+  if (B[k].rover) spawnRover(tX(gx) + 16, tY(gy) + 40);      // v6a: garage rolls out a rover
+  if (k === 'greenhouse') pushEvent('salad');                // v6a: dome residents will rave
   SFX.place();
   const s = B[k].size || 1;
   for (let i = 0; i < 8; i++)
@@ -3144,6 +3365,20 @@ function spawnRobot(x, y, gold) {
   robots.push({ x, y, tx: x, ty: y, cool: 0, frame: 0, targ: null,
                 gold: !!gold, sp: gold ? 105 : 70 });     // golden robots hustle
 }
+/* v6a: MOON ROVERS — chunky 6-wheelers that trundle between regolith rocks
+   and ice patches. Reuse the robot brain + reservation; hard cap of 3. */
+function roverCount() {
+  let n = 0;
+  for (const r of robots) if (r.rover) n++;
+  if (otherWorld) for (const r of otherWorld.robots) if (r.rover) n++;
+  return n;
+}
+function spawnRover(x, y) {
+  if (roverCount() >= 3) return false;          // cap 3 — the moon isn't a parking lot
+  robots.push({ x, y, tx: x, ty: y, cool: 0, frame: 0, targ: null,
+                rover: true, sp: 55, dustT: 0 });
+  return true;
+}
 /* v4d: one robot per target — a robot's `targ` IS its reservation; it clears
    on retarget, on finish, or when the target goes invalid */
 function targReserved(r, t) {
@@ -3160,7 +3395,7 @@ function updateRobot(r, dt) {
     /* robots stay on their own island — never chase targets across water */
     const home = isleIdAt(Math.floor(r.x / TILE), Math.floor((r.y - GY0) / TILE));
     let bd = 1e9;
-    for (const b of buildings) {                // rubble first — robots love fixing
+    if (!r.rover) for (const b of buildings) {  // rubble first — robots love fixing (rovers don't)
       if (!b.rubble || b.packed) continue;
       if (home && isleIdAt(b.gx, b.gy) !== home) continue;
       if (targReserved(r, b)) continue;         // v4d: someone's already on it
@@ -3170,6 +3405,7 @@ function updateRobot(r, dt) {
     }
     if (!r.targ) for (const f of flora) {
       if (f.gone || f.sleepT > 0) continue;     // v4d: napping treasure trees rest
+      if (r.rover && f.type !== 'mrock' && f.type !== 'ice') continue;   // v6a: rovers mine only
       if (home && isleIdAt(f.gx, f.gy) !== home) continue;
       if (targReserved(r, f)) continue;         // v4d: spread out, little buddies
       const d = Math.hypot(tX(f.gx) + 16 - r.x, tY(f.gy) + 24 - r.y);
@@ -3188,6 +3424,14 @@ function updateRobot(r, dt) {
       else if (isLandPx(r.x, ny)) r.y = ny;
       else r.targ = null;
       r.frame += dt * 6;
+      if (r.rover) {                            // v6a: grey dust kicked up behind the wheels
+        r.dustT -= dt;
+        if (r.dustT <= 0) {
+          r.dustT = 0.18;
+          spawnP(r.x + (Math.random() - 0.5) * 8, r.y + 2, SPR.puffDark[1],
+                 { vx: (Math.random() - 0.5) * 14, vy: -6 - Math.random() * 6, g: -5, life: 0.5 });
+        }
+      }
     } else {
       r.cool -= dt;
       if (r.cool <= 0) {
@@ -3213,7 +3457,7 @@ function updateDrake(dr, i, dt) {
 /* highest unlocked stockpile resource (power is a meter, not a pile) */
 function topResource() {
   let top = 'wood';
-  for (const r of RES_LIST) if (r !== 'power' && !LUNAR[r] && RES_AGE[r] <= age) top = r;
+  for (const r of RES_LIST) if (r !== 'power' && r !== 'fuel' && !LUNAR[r] && RES_AGE[r] <= age) top = r;
   return top;
 }
 /* ── v4d: sleepy treasure trees — golden & rainbow trees nap for 60s after
@@ -3420,6 +3664,59 @@ function tryFuel(p) {
   saveGame();
   return true;
 }
+/* ═══ v6a — THE MOON EXPANSION: Observatory vignette + Mars Cruiser ═══ */
+function nearKindB(p, k, r) {                    // nearest living building of kind k
+  const s = B[k].size || 1;
+  for (const b of buildings) {
+    if (b.k !== k || b.rubble) continue;
+    if (Math.hypot(tX(b.gx) + s * 16 - p.x, tY(b.gy) + s * 16 - p.y) < r) return b;
+  }
+  return null;
+}
+/* the telescope vignette — a dollhouse-style panel over the dimmed world.
+   First look fires SPOT MARS and unlocks the SHIPYARD blueprint. */
+function openVignette() {
+  vignette = { t: 0 };
+  SFX.confirm();
+  if (!marsSpotted) {
+    marsSpotted = true;
+    banners.push({ title: 'MARS AWAITS!', sub: 'A red world twinkles — the SHIPYARD blueprint is unlocked!',
+                   t: 0, dur: 4.2, legendary: true });
+    SFX.legendary();
+    saveGame();
+  }
+}
+function closeVignette() { vignette = null; SFX.confirm(); }
+/* fund the MARS CRUISER at the shipyard — 3 installments, then she's parked */
+function fundCruiser(p, sy) {
+  if (cruiserStage >= 3) {                       // inspect the finished beauty
+    addFloat(p.x, p.y - 44, 'READY FOR MARS — NEXT UPDATE!', '#ffd24a');
+    SFX.ding();
+    return false;
+  }
+  const cost = CRUISER_STAGES[cruiserStage];
+  if (!canAfford(cost)) {
+    SFX.cancel();
+    const need = Object.keys(cost).filter(r2 => (res[r2] || 0) < cost[r2])
+      .map(r2 => cost[r2] + ' ' + r2.toUpperCase()).join(' + ');
+    addFloat(p.x, p.y - 44, 'NEED ' + need + '!', '#ff9a8a');
+    return false;
+  }
+  payCost(cost);
+  cruiserStage++;
+  const done = cruiserStage >= 3;
+  banners.push({ title: CRUISER_STAGE_NAMES[cruiserStage - 1],
+                 sub: done ? 'She gleams on the gantry — ready for the red planet!'
+                           : 'Stage ' + cruiserStage + '/3 — keep funding at the shipyard!',
+                 t: 0, dur: done ? 4.2 : 3, legendary: done });
+  if (done) SFX.legendary(); else SFX.place();
+  const cx2 = tX(sy.gx) + 32, cy2 = tY(sy.gy) + 32;
+  for (let i = 0; i < (done ? 14 : 8); i++)
+    spawnP(cx2 + (Math.random() - 0.5) * 70, cy2 - 16 - Math.random() * 20, SPR.spark[i % 2], { life: 0.9 });
+  saveGame();
+  return true;
+}
+
 function boardTravel(p, bp) {
   if (p.aboard || p.boat) return;
   p.aboard = true; p.target = null; p.mode = 'walk'; p.ghost = null;
@@ -4378,6 +4675,7 @@ function saveGame() {
   const s = {
     v: 6, wld: world, name: islandName, seed, age, legends, rocketDone, firstPowerDone,
     moonRocketBought, moonArrived, moonReturnDone, returnFueled,
+    marsSpotted, cruiserStage,                   // v6a (additive)
     stars, goalI, cratesOpened, rubbleFixed, mb: meteorsBlocked,
     rocketsLaunched, lastGift, battCharge,
     /* v5a: decorations (additive) + goal counters */
@@ -4396,7 +4694,8 @@ function saveGame() {
     moonBuildings: mD.buildings.map(b => [b.k, b.gx, b.gy, b.rubble ? 1 + (b.repair || 0) : 0]),
     moonFlora: mD.flora.map(f => [f.type, f.gx, f.gy, f.hits, f.gone ? Math.ceil(f.regrowT) : 0]),
     robots: eD.robots.filter(r => !r.gold).length, goldRobots: eD.robots.filter(r => r.gold).length,
-    moonRobots: mD.robots.filter(r => !r.gold).length, moonGoldRobots: mD.robots.filter(r => r.gold).length,
+    moonRobots: mD.robots.filter(r => !r.gold && !r.rover).length, moonGoldRobots: mD.robots.filter(r => r.gold).length,
+    moonRovers: mD.robots.filter(r => r.rover).length,                 // v6a
     drakes: drakes.map(d => d.blue ? 1 : 0),
     /* v4d: P1's dinghy (moored + moon-stashed) survives save/load */
     moors: players[0] ? [players[0].moor ? [Math.round(players[0].moor.x), Math.round(players[0].moor.y)] : 0,
@@ -4424,8 +4723,8 @@ function loadSlotSummaries() {
 }
 function resetWorldState() {
   if (world === 'moon') swapWorlds();           // Earth is always the reset baseline
-  res = { wood: 0, stone: 0, food: 0, ore: 0, metal: 0, parts: 0, science: 0, regolith: 0, ice: 0, he3: 0 };
-  life = { metal: 0, parts: 0, science: 0, regolith: 0, ice: 0 };
+  res = { wood: 0, stone: 0, food: 0, ore: 0, metal: 0, parts: 0, science: 0, regolith: 0, ice: 0, he3: 0, fuel: 0 };
+  life = { metal: 0, parts: 0, science: 0, regolith: 0, ice: 0, fuel: 0 };
   pop = 2; popF = 2; hungry = false; firstPowerDone = false;
   powerInc = 0; powerDem = 0; islandPowered = false;
   buildings = []; seqN = 1; flora = []; wires = []; anims = [];
@@ -4441,6 +4740,8 @@ function resetWorldState() {
   settled = []; camPan = null; ferries = []; colonyFw = null;
   /* v4b: relock the moon + clear its world bundle */
   travel = null; moonRocketBought = false; moonArrived = false; moonReturnDone = false; returnFueled = false;
+  /* v6a: REFORGE clears the whole moon expansion (stars persist elsewhere) */
+  marsSpotted = false; cruiserStage = 0; vignette = null;
   const m = otherWorld;
   m.landAge = []; m.occ = []; m.isleId = []; m.coast = [];
   m.buildings = []; m.flora = []; m.wires = []; m.anims = []; m.robots = []; m.ferries = [];
@@ -4470,7 +4771,10 @@ function newGame(slot, nm, keepStars) {
   age = 1;
   resetWorldState();
   if (!keepStars) stars = 0;
-  genIsland((Date.now() % 100000) + slot * 7 + 1);
+  genIsland(forcedSeed || ((Date.now() % 100000) + slot * 7 + 1));
+  forcedSeed = 0;
+  /* v6a: skipped name entry → a seed-picked default (twin ISLEs confused the family) */
+  if (!islandName) islandName = DEF_NAMES[seed % DEF_NAMES.length];
   scatterFlora(1);
   addBuilding('campfire', CX, CYG);
   recomputePower(); recomputeAnims();
@@ -4507,6 +4811,7 @@ function loadGame(slot) {
   lastGift = s.lastGift || null;
   moonRocketBought = !!s.moonRocketBought; moonArrived = !!s.moonArrived;
   moonReturnDone = !!s.moonReturnDone; returnFueled = !!s.returnFueled;
+  marsSpotted = !!s.marsSpotted; cruiserStage = s.cruiserStage || 0;   // v6a (absent in old saves)
   age = 1;
   genIsland(s.seed || 1);
   age = s.age || 1;
@@ -4528,8 +4833,8 @@ function loadGame(slot) {
   recomputeIsleIds();
   growNextPop = s.growNextPop || 0;
   islandFull = old ? false : !!s.islandFull;     // the v3 sea has room again!
-  res = Object.assign({ wood: 0, stone: 0, food: 0, ore: 0, metal: 0, parts: 0, science: 0, regolith: 0, ice: 0, he3: 0 }, s.res);
-  life = Object.assign({ metal: 0, parts: 0, science: 0, regolith: 0, ice: 0 }, s.life);
+  res = Object.assign({ wood: 0, stone: 0, food: 0, ore: 0, metal: 0, parts: 0, science: 0, regolith: 0, ice: 0, he3: 0, fuel: 0 }, s.res);
+  life = Object.assign({ metal: 0, parts: 0, science: 0, regolith: 0, ice: 0, fuel: 0 }, s.life);
   popF = s.popF || 2; pop = Math.floor(popF);
   playtime = s.playtime || 0; crateT = s.crateT || 280;
   if (!s.campfireGone) addBuilding('campfire', CX, CYG);  // retired campfires stay gone
@@ -4603,6 +4908,7 @@ function loadGame(slot) {
       }
       for (let i = 0; i < (s.moonRobots || 0); i++) spawnRobot(tX(MCX) + 16 + i * 10, tY(MCY) + 40);
       for (let i = 0; i < (s.moonGoldRobots || 0); i++) spawnRobot(tX(MCX) + 16 + i * 10, tY(MCY) + 50, true);
+      for (let i = 0; i < (s.moonRovers || 0); i++) spawnRover(tX(MCX) + 16 + i * 12, tY(MCY) + 60);   // v6a
     } else {
       genMoon(seed);                             // fresh moon with lander + rocks + ice
       /* transplant old moon buildings to sensible spots near the base */
@@ -4728,6 +5034,7 @@ const CONTEXT_LINES = {
   moontrip:'You went to the MOON and came home! WOW!',
   colony:  'A brand new island! Can we visit someday?',
   full:    'The whole archipelago is FULL! Amazing!',
+  salad:   'FRESH SALAD from the crater greenhouse! CRUNCH!',   // v6a
 };
 const RES_POOLS = {
   milo: [
@@ -5272,6 +5579,7 @@ function exitInterior(p) {
 function closeInterior() {
   for (const p of players) { p.inside = false; p.itarget = null; }
   interior = null;
+  vignette = null;                               // v6a: panels never cross transitions
 }
 function iBlocked(x, y) {                        // feet-point vs furniture footprints
   for (const s of interior.solids)
@@ -5557,6 +5865,10 @@ function doAction(p) {
     if (moonStage() === 3 && nearMoonPortB(p)) { tryFuel(p); return; }   // ✕ at the port = fuel up
     const rb2 = nearRubble(p);
     if (rb2) { repairWhack(rb2); return; }
+    const ob = nearKindB(p, 'observatory', 60);  // v6a: ✕ at the telescope = SPOT MARS
+    if (ob) { openVignette(); return; }
+    const sy2 = nearKindB(p, 'shipyard', 88);    // v6a: ✕ at the shipyard = fund the cruiser
+    if (sy2) { fundCruiser(p, sy2); return; }
     const cn2 = nearCannon(p);                   // v4c: ✕ mans a pop cannon (moon too)
     if (cn2) { manCannon(p, cn2); SFX.confirm(); return; }
     const dr2 = nearDoorB(p);                    // v5b: ✕ at a moon-dome door = go inside
@@ -5588,6 +5900,9 @@ function menuItems() {
     if (d.once && cnt(k) > 0) continue;         // one MOON PORT is plenty
     if (d.need && !d.need.every(n => cnt(n) > 0)) continue;   // star gate: needs the moon trio
     if (d.wonder && (cnt(k) > 0 || legends)) continue;        // wonders build exactly once
+    if (d.needLegends && !legends) continue;    // v6a: OBSERVATORY unlocks with the Star Gate
+    if (d.needMars && !marsSpotted) continue;   // v6a: SHIPYARD unlocks after SPOT MARS
+    if (d.max && cnt(k) >= d.max) continue;     // v6a: rover garages cap at 3
     pool.push({ k, grp: d.grp || 'tools' });
   }
   /* v5a: the strip is grouped by section (divider posts; L1/R1 hop) */
@@ -5706,6 +6021,10 @@ function onBtn(pi, b) {
   /* scene === play */
   if (modal) {
     if (b === 'south' || b === 'east' || b === 'start') { modal = null; SFX.confirm(); }
+    return;
+  }
+  if (vignette) {                                // v6a: the telescope panel
+    if (b === 'south' || b === 'east' || b === 'start') closeVignette();
     return;
   }
   if (confirmPrestige) {
@@ -5889,7 +6208,7 @@ function nameBtn(b) {
   }
 }
 function finishName() {
-  const nm = (nameSt.name || '').trim() || 'ISLE';
+  const nm = (nameSt.name || '').trim();        // v6a: empty → newGame seed-picks a default
   const slot = nameSt.slot;
   nameSt = null;
   SFX.confirm();
@@ -5978,6 +6297,7 @@ function tapAt(x, y) {
   }
   /* play */
   if (modal) { onBtn(0, 'south'); return; }
+  if (vignette) { closeVignette(); return; }     // v6a: tap anywhere closes the telescope
   if (confirmPrestige) {
     if (y > 380 && y < 460) { confirmPrestige.yes = x < W / 2; onBtn(0, 'south'); }
     else { confirmPrestige = null; SFX.cancel(); }
@@ -6200,11 +6520,14 @@ function drawHUD() {
   for (const r of RES_LIST) {
     if (RES_AGE[r] > age) continue;
     if (LUNAR[r] && !lunarSeen) continue;
+    if (r === 'fuel' && !fuelSeen()) continue;   // v6a: FUEL appears once discovered
     vis.push(r);
   }
-  const tight = vis.length > 8;
-  let x = tight ? 292 : 306;
-  const sp2 = tight ? 72 : 88, spPow = tight ? 86 : 96, fs = tight ? 11.5 : 13;
+  const tight = vis.length > 8, extraTight = vis.length > 11;   // v6a: 12 icons w/ FUEL
+  let x = extraTight ? 284 : tight ? 292 : 306;
+  const sp2 = extraTight ? 67 : tight ? 72 : 88,
+        spPow = extraTight ? 78 : tight ? 86 : 96,
+        fs = extraTight ? 11 : tight ? 11.5 : 13;
   for (const r of vis) {
     ctx.drawImage(SPR.icon[r], x, 8);
     if (r === 'power') {
@@ -6364,6 +6687,10 @@ function drawMenu(p, yBase) {
     else if (it.k === 'popcannon') desc = 'pop! fix, harvest & stop meteors!';
     else if (it.k === 'moonport') desc = 'a landing pad — your way home!';
     else if (it.k === 'pole') desc = 'carries power to nearby buildings!';
+    else if (it.k === 'observatory') desc = 'peer into the deep black...';
+    else if (it.k === 'rovergarage') desc = 'a rover that mines for you! (max 3)';
+    else if (it.k === 'he3refinery') desc = 'he-3 + ice → rocket FUEL!';
+    else if (it.k === 'shipyard') desc = 'build THE MARS CRUISER here!';
     else if (d.pop) desc = '+' + d.pop + ' population' + (d.moon ? ' (on the moon!)' : '');
     else if (d.aura) desc = 'farms +50%!';
     else if (d.coastal) desc = 'build on a beach — set sail!';
@@ -6539,6 +6866,7 @@ function drawStats() {
   let ry = y + 170;
   for (const r of RES_LIST) {
     if (RES_AGE[r] > age) continue;
+    if (r === 'fuel' && !fuelSeen()) continue;   // v6a
     ctx.drawImage(SPR.icon[r], x + 40, ry - 15);
     if (r === 'power') {
       txt('POWER', x + 70, ry, 13, '#cfe8f4');
@@ -6636,6 +6964,22 @@ function drawModal() {
     ly += 34;
   }
   otxt('✕ OK!', W / 2, y + 344, 18, '#7dff9a');
+}
+
+/* v6a: the Observatory telescope vignette — dim + panel + baked Mars view
+   + one twinkling spark. Pure drawImage/text in the hot path. */
+function drawVignette() {
+  ctx.drawImage(SPR.dim, 0, 0);
+  const x = W / 2 - 310, y = H / 2 - 255;
+  ctx.drawImage(SPR.modalP, x, y, 620, 510);
+  otxt('THE OBSERVATORY', W / 2, y + 52, 26, '#9fe8ff');
+  const vx = W / 2 - 180, vy = y + 70;
+  ctx.drawImage(SPR.marsView, vx, vy, 360, 360);
+  ctx.globalAlpha = 0.4 + 0.6 * Math.abs(Math.sin(T * 3.4));   // Mars twinkles hello
+  ctx.drawImage(SPR.spark[((T * 6) | 0) % 2], vx + 238, vy + 92);
+  ctx.globalAlpha = 1;
+  txt('A twinkling RED PLANET hangs in the black...', W / 2, y + 456, 14, '#ffd1a1', 'center');
+  otxt('✕ OK!', W / 2, y + 488, 16, '#7dff9a');
 }
 
 function drawPrestige() {
@@ -6842,6 +7186,11 @@ function renderPlay() {
           ctx.globalAlpha = 1;
         }
         break;
+      case 'ghglow':                             // v6a: the greenhouse garden breathes green
+        ctx.globalAlpha = 0.3 + 0.16 * Math.sin(T * 2.2 + a.x);
+        ctx.drawImage(SPR.greenGlow, a.x - 16, a.y - 20);
+        ctx.globalAlpha = 1;
+        break;
     }
   }
 
@@ -6903,6 +7252,14 @@ function renderPlay() {
         const port = buildings.find(b2 => b2.k === 'moonport');
         if (port) otxt('✕ FUEL THE ROCKET!', tX(port.gx) + 32, tY(port.gy) - 14, 14, '#7dffe0');
       }
+      /* v6a: telescope + cruiser-funding prompts */
+      const obP = nearKindB(p, 'observatory', 60);
+      if (obP) otxt('✕ LOOK THROUGH THE TELESCOPE!', tX(obP.gx) + 16, tY(obP.gy) - 26 + bob, 13, '#ff9a8a');
+      const syP = nearKindB(p, 'shipyard', 88);
+      if (syP) otxt(cruiserStage >= 3 ? '✕ ADMIRE THE MARS CRUISER!'
+                    : cruiserStage > 0 ? '✕ FUND STAGE ' + (cruiserStage + 1) + '/3!'
+                    : '✕ FUND THE MARS CRUISER!',
+                    tX(syP.gx) + 32, tY(syP.gy) - 24 + bob, 13, '#ffd24a');
       const f = nearFlora(p);
       if (f) {
         drawFit(SPR.mark, tX(f.gx) + 16, tY(f.gy) - 12 + bob, 16, 14);
@@ -6955,7 +7312,8 @@ function renderPlay() {
   /* robots, drakes, players (+ boats) */
   for (const r of robots) {
     if (!onCam(r.x, r.y, 48)) continue;
-    ctx.drawImage((r.gold ? SPR.robotG : SPR.robot)[(r.frame | 0) % 2], r.x - 12, r.y - 26);
+    if (r.rover) ctx.drawImage(SPR.rover[(r.frame | 0) % 2], r.x - 14, r.y - 20);   // v6a
+    else ctx.drawImage((r.gold ? SPR.robotG : SPR.robot)[(r.frame | 0) % 2], r.x - 12, r.y - 26);
   }
   if (world === 'earth') for (const dr of drakes) {   // drakes never board — Earth pets
     if (!onCam(dr.x, dr.y, 48)) continue;
@@ -7037,6 +7395,24 @@ function renderPlay() {
       ctx.drawImage(SPR.rocket, tX(gx3) + 12, tY(at.gy) + 46 - 92);
     }
   }
+  /* v6a: the MARS CRUISER on the shipyard gantry — staged hull → wings →
+     engines, plus 3 progress pips while she's still being funded */
+  if (world === 'moon') {
+    const syB = buildings.find(b2 => b2.k === 'shipyard' && !b2.rubble);
+    if (syB && onCam(tX(syB.gx) + 32, tY(syB.gy) + 32, 160)) {
+      if (cruiserStage > 0) {
+        const cs = SPR.cruiserStg[Math.min(cruiserStage, 3) - 1];
+        ctx.drawImage(cs, tX(syB.gx) + 32 - cs.width / 2, tY(syB.gy) + 56 - cs.height);
+        /* re-draw the gantry frame IN FRONT — the ship sits in the dry dock */
+        const sg = (islandPowered ? SPR.bLit : SPR.b).shipyard;
+        ctx.drawImage(sg, tX(syB.gx), tY(syB.gy) + 64 - sg.height);
+      }
+      if (cruiserStage < 3)
+        for (let i = 0; i < 3; i++)
+          ctx.drawImage(i < cruiserStage ? SPR.pipOn : SPR.pipOff, tX(syB.gx) + 12 + i * 15, tY(syB.gy) - 14);
+    }
+  }
+
   /* travel cinematic: countdown / lift-off / landing */
   if (travelCin() && travel.phase !== 'stars') {
     const st = travel.phase === 'land' ? travel.site : travel.srcSite;
@@ -7172,7 +7548,7 @@ function renderPlay() {
     else if (p.mode === 'boatmenu') drawBoatMenu(p, H - 114 - (p.pi ? 170 : 0));
   }
   /* contextual hint line (touch users have DOM buttons in this corner) */
-  if (!paused && !modal && !rocketSeq && !gateSeq && !travelCin() && !confirmPrestige && players[0] &&
+  if (!paused && !modal && !vignette && !rocketSeq && !gateSeq && !travelCin() && !confirmPrestige && players[0] &&
       !(AC && AC.currentInputSource() === 'touch')) {
     const p0 = players[0];
     const m = p0.mode;
@@ -7191,6 +7567,7 @@ function renderPlay() {
     else if (m === 'remove') hint = 'STAND ON A BUILDING · ✕ REMOVE · ○ BACK';
     txt(hint, 12, H - 12, 11, 'rgba(220,240,255,0.75)');
   }
+  if (vignette) drawVignette();                  // v6a: the telescope panel
   if (statsOpen) drawStats();
   if (paused) drawPause();
   if (modal) drawModal();
@@ -7212,7 +7589,7 @@ function updatePlay(dt) {
     banners[0].t += dt * (banners.length > 1 ? 2.4 : 1);   // queued banners drain fast
     if (banners[0].t > banners[0].dur) banners.shift();
   }
-  if (paused || modal || confirmPrestige) return;
+  if (paused || modal || confirmPrestige || vignette) return;
   playtime += dt;
   sessionT += dt;
   simAcc += dt;
@@ -7330,6 +7707,15 @@ function updatePlay(dt) {
         spawnP(a.x + (Math.random() - 0.5) * 6, a.y - 14,
                a.gold ? SPR.spark[1] : SPR.sparkB[(Math.random() * 2) | 0],
                { vx: (Math.random() - 0.5) * 26, vy: -34, g: 90, life: 0.8 });
+      }
+    } else if (a.t === 'weld') {                 // v6a: gantry sparks while the cruiser is mid-build
+      if (cruiserStage > 0 && cruiserStage < 3) {
+        a.cool -= dt;
+        if (a.cool <= 0) {
+          a.cool = 0.4 + Math.random() * 0.5;
+          spawnP(a.x + Math.random() * 44, a.y - 14 - Math.random() * 22, SPR.spark[(Math.random() * 2) | 0],
+                 { vx: (Math.random() - 0.5) * 50, vy: 20 + Math.random() * 30, g: 60, life: 0.45 });
+        }
       }
     } else if (a.t === 'barrel') {               // v4c: recoil spring-back + fire cooldown
       if (a.b.recoil > 0) a.b.recoil = Math.max(0, a.b.recoil - dt * 2.6);
@@ -7714,6 +8100,12 @@ window.__test = {
       slot: curSlot,
       floatsLive: floats.filter(f => f.on).map(f => f.str),
       nearDoor: players[0] && !players[0].inside ? !!nearDoorB(players[0]) : false,
+      /* v6a */
+      seed,
+      marsSpotted, cruiserStage,
+      vignette: !!vignette,
+      rovers: roverCount(),
+      fuelSeen: fuelSeen(),
     };
   },
   /* ── v5a hooks ── */
@@ -7788,6 +8180,32 @@ window.__test = {
   addEvent(k) { pushEvent(k); return recentEvents.length; },
   setCookieDay(v) { cookieDay = v || ''; },
   roomBlocked(x, y) { return interior ? iBlocked(x, y) : null; },
+  /* ── v6a hooks — the Moon Expansion ── */
+  forceSeed(n) { forcedSeed = n; },              // pin the NEXT new game's seed (name variety)
+  setGoalI(n) { goalI = n; return goalI; },
+  goalList() { return GOALS.map(g => g.t); },
+  menuKeys() {                                   // the ACTIVE world's build strip, by key
+    return menuItems().map(it => it.k || (it.rocket && 'rocket') ||
+                                 (it.moonrocket && 'moonrocket') || (it.remove && 'remove') || null);
+  },
+  gotoKind(k) {                                  // park P1 right at a building of kind k
+    const b = buildings.find(b2 => b2.k === k && !b2.rubble);
+    if (!b || !players[0]) return false;
+    const s = B[k].size || 1;
+    players[0].x = tX(b.gx) + s * 16; players[0].y = tY(b.gy) + s * 32 + 10;
+    players[0].target = null; players[0].boat = false;
+    updateCamera(0, true);
+    return true;
+  },
+  cruiserInfo() {
+    return { stage: cruiserStage, mars: marsSpotted,
+             next: cruiserStage < 3 ? Object.assign({}, CRUISER_STAGES[cruiserStage]) : null };
+  },
+  roversInfo() {
+    return robots.filter(r => r.rover).map(r => ({ x: Math.round(r.x), y: Math.round(r.y),
+      targ: r.targ ? { f: r.targ.type, gx: r.targ.gx, gy: r.targ.gy } : null }));
+  },
+  closeVignette() { if (vignette) closeVignette(); return !vignette; },
 };
 
 /* ───── boot ───── */
