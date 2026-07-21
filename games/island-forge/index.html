@@ -213,6 +213,11 @@ const SFX = {
   purr:     () => { blip(170, 0.32, 'sine', 0.05, 130); setTimeout(() => blip(210, 0.26, 'sine', 0.045, 150), 130); },
   ding:     () => { blip(880, 0.16, 'triangle', 0.06); setTimeout(() => blip(1320, 0.3, 'triangle', 0.05), 110); },
   door:     () => { blip(300, 0.08, 'triangle', 0.06, 420); setTimeout(() => blip(460, 0.1, 'triangle', 0.05, 620), 70); },
+  /* v7: asteroid rush */
+  jet:      () => { noiseBurst(0.22, 0.09, 2000, 500); blip(540, 0.3, 'sine', 0.05, 180); },
+  thunk:    () => { blip(120, 0.12, 'square', 0.09, 70); noiseBurst(0.08, 0.1, 700, 250);
+                    setTimeout(() => blip(760, 0.07, 'triangle', 0.05, 1100), 70); },
+  zap:      () => { blip(1400, 0.09, 'sawtooth', 0.045, 300); noiseBurst(0.06, 0.07, 3200, 1200); },
 };
 /* cozy ambient loop — soft pad chords + pentatonic plucks, scheduled ahead */
 const CHORDS = [[130.8, 196, 329.6], [110, 164.8, 261.6], [87.3, 130.8, 220], [98, 146.8, 246.9]];
@@ -248,19 +253,30 @@ function musicTick() {
 
 /* ───── resources & buildings data (ALL balance lives here) ───── */
 const RES_LIST = ['wood', 'stone', 'food', 'ore', 'metal', 'parts', 'power', 'science',
-                  'regolith', 'ice', 'he3', 'fuel', 'rediron', 'frost'];
+                  'regolith', 'ice', 'he3', 'fuel', 'rediron', 'frost',
+                  'astroiron', 'crystal', 'alloy', 'starsteel'];   // v7: the asteroid haul
 const RES_AGE  = { wood: 1, stone: 1, food: 2, ore: 3, metal: 3, parts: 3, power: 4, science: 5,
-                   regolith: 7, ice: 7, he3: 7, fuel: 7, rediron: 7, frost: 7 };
+                   regolith: 7, ice: 7, he3: 7, fuel: 7, rediron: 7, frost: 7,
+                   astroiron: 7, crystal: 7, alloy: 7, starsteel: 7 };
 const RES_COL  = { wood: '#e0a35c', stone: '#c2cbd4', food: '#ff8f6b', ore: '#a99bf0',
                    metal: '#e8eef4', parts: '#ffd24a', power: '#59e0ff', science: '#7dff9a', pop: '#ffd1a1',
                    regolith: '#c2c9d6', ice: '#9fe8ff', he3: '#7dffe0', fuel: '#ff9a4a',
-                   rediron: '#ff8a66', frost: '#dff2ff' };
+                   rediron: '#ff8a66', frost: '#dff2ff',
+                   astroiron: '#d8c49a', crystal: '#c99bff', alloy: '#7dffe0', starsteel: '#9fd8ff' };
 /* v6a: FUEL joins the HUD only once it exists somewhere (refined or granted) */
 const fuelSeen = () => (res.fuel || 0) > 0 || (life.fuel || 0) > 0 || cruiserStage > 0;
 const LUNAR = { regolith: 1, ice: 1, he3: 1 };  // shown in the HUD only once discovered
 /* v6b: Mars resources likewise stay hidden until the red planet touches them */
 const MARTIAN = { rediron: 1, frost: 1 };
 const marsSeen = () => marsArrived || (res.rediron || 0) > 0 || (res.frost || 0) > 0;
+/* ── v7: asteroid resources hide until the first haul touches Earth (in
+   transit they're CRATES on the barge — the `cargo` object — not HUD piles) */
+const ASTRO = { astroiron: 1, crystal: 1, alloy: 1, starsteel: 1 };
+const astroSeen = () => ['astroiron', 'crystal', 'alloy', 'starsteel']
+  .some(r => (res[r] || 0) > 0 || (life[r] || 0) > 0);
+const starsteelSeen = () => (res.starsteel || 0) > 0 || (life.starsteel || 0) > 0;
+const cargoTotal = () => (cargo.astroiron || 0) + (cargo.crystal || 0) + (cargo.alloy || 0);
+const bargeSlots = () => bargeUpgraded ? 12 : 8;
 const AGE_NAMES = [null, 'CAMPFIRE', 'FARMING', 'INDUSTRY', 'ELECTRICITY', 'SCIENCE', 'CYBERPUNK', 'MOON COLONY'];
 const AGE_SUBS  = [null, 'Chop wood, build cabins!', 'Grow food for your people!',
                    'Dig ore, forge metal!', 'Light up the island!', 'Reach for the stars!',
@@ -329,9 +345,52 @@ const B = {
                  pop: 16, needPower: 2, mars: true, grp: 'homes' },
   marsyard:    { name: 'MARS SHIPYARD', age: 7, size: 2, cost: { rediron: 150, parts: 80, science: 30 },
                  needPower: 6, mars: true, once: true, noremove: true, grp: 'tools' },
+  /* ═══ v7 — THE ASTEROID RUSH: Earth refining + mission-only kit ═══ */
+  refinery:    { name: 'REFINERY', age: 7, size: 2, cost: { metal: 80, parts: 40, science: 20 },
+                 cons: { astroiron: 0.5, crystal: 0.2 }, prod: { starsteel: 0.25 },
+                 needPower: 5, needAstro: true, grp: 'industry' },
+  /* mission-only structures — built INSTANTLY from cargo chunks (see MB),
+     abandoned when the barge leaves. `mission` = home world 'mission'. */
+  cargoloader: { name: 'CARGO LOADER', age: 7, size: 2, cost: {}, mission: true, special: true, noremove: true },
+  minidrill:   { name: 'MINI DRILL', age: 7, size: 1, cost: {}, mission: true, special: true },
+  boostbattery:{ name: 'BOOST BATTERY', age: 7, size: 1, cost: {}, mission: true, special: true },
+  /* MEGASTRUCTURES — Earth-only trophies FED with starsteel in installments
+     (fundCruiser pattern per-instance; `stage` = feeds delivered, persisted).
+     pop/prod/needPower only count once COMPLETE (see MEGA + economyTick). */
+  arcology:    { name: 'ARCOLOGY', age: 7, size: 3, cost: { starsteel: 6 },
+                 pop: 120, mega: true, grp: 'mega' },
+  crystalspire:{ name: 'CRYSTAL SPIRE', age: 7, size: 2, cost: { starsteel: 5, crystal: 5 },
+                 prod: { science: 6 }, needPower: 6, mega: true, grp: 'mega' },
+  starharbor:  { name: 'STAR HARBOR', age: 7, size: 3, cost: { starsteel: 5, alloy: 2 },
+                 pop: 40, mega: true, once: true, noremove: true, grp: 'mega' },
   giantmill: { name: 'GIANT WINDMILL', age: 4, size: 1, cost: {}, prod: { power: 12 }, special: true },
   statue:    { name: 'GOLD STATUE', age: 5, size: 1, cost: {}, special: true },
 };
+/* ── v7: megastructure feeding ladders (cost above = the FOUNDATION) ── */
+const MEGA = {
+  arcology:     { feeds: [{ starsteel: 12 }, { starsteel: 12 }, { starsteel: 12 }, { starsteel: 12 }],
+                  done: 'THE ARCOLOGY RISES!', sub: 'A whole sky-city — +120 pop!' },
+  crystalspire: { feeds: [{ starsteel: 10, crystal: 2 }, { starsteel: 10, crystal: 2 }, { starsteel: 10, crystal: 2 }],
+                  done: 'THE CRYSTAL SPIRE SHINES!', sub: 'Violet light touches the clouds — science +6/s!' },
+  starharbor:   { feeds: [{ starsteel: 12, alloy: 1 }, { starsteel: 12, alloy: 1 }, { starsteel: 12, alloy: 1 }],
+                  done: 'THE STAR HARBOR OPENS!', sub: 'Drone freighters will fetch your cargo — automatically!' },
+};
+const megaMax = k => MEGA[k].feeds.length;
+const megaDone = b => B[b.k].mega && (b.stage || 0) >= megaMax(b.k);
+function megaCompleteCnt(k) {
+  let n = 0;
+  for (const b of allB()) if (b.k === k && megaDone(b)) n++;
+  return n;
+}
+function megaCompleteTotal() {
+  let n = 0;
+  for (const b of allB()) if (B[b.k].mega && megaDone(b)) n++;
+  return n;
+}
+/* ── v7: mission structures cost CARGO CHUNKS (banked crates first, then
+   carried) — never HUD resources. Built instantly, no removal refunds. ── */
+const MB = { minidrill: { astroiron: 2 }, popcannon: { astroiron: 3 }, boostbattery: { crystal: 2 } };
+const BOOST_SECS = 45, BOOST_MAX = 2;
 /* ═══ v5a: DECORATIONS — pure cosmetics. No economy effect, full refund,
    disasters never touch them, prestige clears them with the world. ═══ */
 const D = {
@@ -356,10 +415,11 @@ const D = {
   goldarch:     { name: 'GOLDEN ARCH',     cost: { wood: 150000, stone: 50000 },grp: 'golden', golden: true },
   goldgnome:    { name: 'GOLDEN GNOME',    cost: { wood: 250000 },              grp: 'golden', golden: true },
 };
-const BUILD_GRPS = ['homes', 'food', 'industry', 'power', 'tools'];
+const BUILD_GRPS = ['homes', 'food', 'industry', 'power', 'tools', 'mega'];   // v7: mega appended
 const DECOR_GRPS = ['paths', 'garden', 'show', 'golden'];
 const GRP_COL = { homes: '#ff9a6b', food: '#7dff9a', industry: '#c9d2da', power: '#59e0ff',
-                  tools: '#ffd24a', paths: '#e0c08a', garden: '#7dff9a', show: '#ff8ade', golden: '#ffd24a' };
+                  tools: '#ffd24a', paths: '#e0c08a', garden: '#7dff9a', show: '#ff8ade', golden: '#ffd24a',
+                  mega: '#b7e3ff' };
 const ROCKET_COST = { metal: 150, parts: 80, science: 40 };
 /* v6a: the MARS CRUISER is funded in 3 installments at the Shipyard
    (totals 200 metal · 100 parts · 50 FUEL) — hull, wings, engines */
@@ -374,6 +434,18 @@ const FUEL_COST = { ice: 10, he3: 5 };          // first return flight (survival
 /* v6b: fueling the cruiser's first official ride home — FUEL is refined on
    the MOON (global pool), so the supply chain reaches across two worlds */
 const MARS_FUEL_COST = { frost: 10, fuel: 5 };
+/* ── v7: THE SURVEY BARGE — funded at the MARS SHIPYARD in 3 installments
+   (fundCruiser pattern; rediron mined on Mars, fuel refined on the Moon) ── */
+const BARGE_STAGES = [
+  { rediron: 70, parts: 35, fuel: 17 },
+  { rediron: 70, parts: 35, fuel: 17 },
+  { rediron: 60, parts: 30, fuel: 16 },
+];
+const BARGE_STAGE_NAMES = ['KEEL LAID!', 'SCANNER UP!', 'THE SURVEY BARGE IS READY!'];
+const BARGE_UPGRADE_COST = { rediron: 60, parts: 30 };   // +4 crate slots, once
+/* mission battery (seconds) by asteroid difficulty stars 1..3 */
+const EXP_BATT = [0, 240, 200, 170];
+const MISSION_GW = 42, MISSION_GH = 24;         // ≥ one screen — the camera insists
 const REQ_NEXT = {
   1: { text: 'BUILD 3 CABINS · REACH 12 POP',
        prog: () => Math.min(cnt('cabin') / 3, pop / 12),
@@ -456,6 +528,25 @@ const GOALS = [
     live: () => cnt('marsport') ? 'TAME A DUST DEVIL: POP ITS TARGETS WITH A CANNON!' : null },
   { t: 'BUILD THE MARS SHIPYARD', ok: () => cnt('marsyard') >= 1,
     live: () => 'BUILD THE MARS SHIPYARD: THE BELT AWAITS — SOMEDAY!' },
+  /* ── v7: THE ASTEROID RUSH (appended — goalI stays aligned) ── */
+  { t: 'BUILD THE SURVEY BARGE',  ok: () => bargeStage >= 3,
+    live: () => !marsBaseDone ? 'BUILD THE SURVEY BARGE: FINISH THE MARS BASE FIRST!'
+              : bargeStage > 0 ? 'SURVEY BARGE: STAGE ' + bargeStage + '/3 — FUND AT THE MARS SHIPYARD!'
+              : 'BUILD THE SURVEY BARGE: FUND HER AT THE MARS SHIPYARD!' },
+  { t: 'FIRST EXPEDITION',        ok: () => expeditionsDone >= 1,
+    live: () => 'FIRST EXPEDITION: BOARD THE SURVEY BARGE AT THE MARS SHIPYARD!' },
+  { t: 'HAUL CARGO HOME',         ok: () => firstHaulDone,
+    live: () => 'HAUL CARGO HOME: MARS → MOON → EARTH — ALL THE WAY!' },
+  { t: 'BUILD THE REFINERY',      ok: () => cnt('refinery') >= 1 },
+  { t: 'FORGE 20 STARSTEEL',      ok: () => (life.starsteel || 0) >= 20,
+    live: () => 'FORGE 20 STARSTEEL: ' + Math.min(20, Math.floor(life.starsteel || 0)) + '/20 (THE REFINERY)' },
+  { t: 'RAISE AN ARCOLOGY',       ok: () => megaCompleteCnt('arcology') >= 1 },
+  { t: 'LIGHT THE CRYSTAL SPIRE', ok: () => megaCompleteCnt('crystalspire') >= 1 },
+  { t: 'BUILD THE STAR HARBOR',   ok: () => megaCompleteCnt('starharbor') >= 1 },
+  { t: 'FIND AN ALIEN BEACON',    ok: () => beaconsFound >= 1,
+    live: () => 'FIND AN ALIEN BEACON: SCAN FOR A RARE PURPLE ASTEROID!' },
+  { t: 'RAISE 3 MEGASTRUCTURES',  ok: () => megaCompleteTotal() >= 3,
+    live: () => 'RAISE 3 MEGASTRUCTURES: THE NINE PLANETS AWAIT — SOMEDAY!' },
 ];
 
 /* ───── gentle disasters (age 3+, kid-visible warning, nothing lost) ───── */
@@ -511,6 +602,20 @@ let marsFueled = false;                       // survival arc: cruiser fueled at
 let marsBaseDone = false;                     // MARS BASE COMPLETE → global METAL +10%
 let devilsTamed = 0;                          // dust-devil targets intercepted (goal; persisted)
 let cruiserAt = 'moon';                       // where the MARS CRUISER is parked (moon | mars)
+/* ── v7: THE ASTEROID RUSH ── */
+let bargeStage = 0;                           // SURVEY BARGE installments (0-3; 3 = ready)
+let bargeUpgraded = false;                    // cargo hold 8 → 12 crates (once)
+let expedCounter = 0;                         // bumps per scan — seeds the card deck
+let lastRareAt = 0;                           // pity clock: 8 scans without a rare forces one
+let expeditionsDone = 0;                      // stats + goal (persisted)
+let firstHaulDone = false;                    // first Earth delivery → EXPRESS LINE unlocked
+let beaconsFound = 0;                         // alien beacons recovered (persisted)
+let mapAssembled = false;                     // the star-map vignette fired (v8's hook)
+let cargo = { astroiron: 0, crystal: 0, alloy: 0 };   // crates aboard the barge (single source of truth)
+let exped = null;                             // live mission { timer, timerMax, stars, type, hazard, tmpl, chunks, pebbles, ... }
+let scanScr = null;                           // the CHOOSE-AN-ASTEROID screen { cards, sel, t }
+let forceRare = false;                        // test hook: next scan deals a rare card
+let unloadFx = 0;                             // Earth unload beat timer (crates + coins)
 let forcedSeed = 0;                           // test hook: pin the next new game's seed
 const DEF_NAMES = ['ISLE', 'ATOLL', 'CAY', 'REEF', 'KEY', 'SHOAL'];   // skipped-name variety
 let res = {}, life = { metal: 0, parts: 0, science: 0, regolith: 0, ice: 0, fuel: 0 };
@@ -1542,6 +1647,492 @@ function initSprites() {
     P(8, 18, 16, 3, '#54221a'); P(8, 18, 16, 0.8, '#7d3a28');
   });
 
+  /* ═══ v7 — THE ASTEROID RUSH: barge, belt rocks, deposits, megastructures ═══ */
+  /* THE SURVEY BARGE — a chunky boxy mining tug (nothing sleek about her):
+     staged hull → scanner dish → thruster pods. Points right, like the cruiser. */
+  const mkBarge = stage => {
+    const [c, g] = C(140, 66);
+    const P = (x, y, w, h, col) => { g.fillStyle = col; g.fillRect(x, y, w, h); };
+    g.fillStyle = 'rgba(30,34,44,0.35)';
+    g.beginPath(); g.ellipse(70, 61, 56, 4.6, 0, 0, 6.3); g.fill();
+    P(30, 48, 5, 8, '#6d747c'); P(96, 48, 5, 8, '#6d747c');             // stumpy skids
+    P(26, 55, 14, 3, '#8a93a0'); P(92, 55, 14, 3, '#8a93a0');
+    P(18, 24, 104, 24, '#c2a86a'); P(18, 24, 104, 5, '#e0c88a');        // boxy ochre hull
+    P(18, 43, 104, 5, '#8a7444');
+    P(18, 24, 5, 24, '#a08850');
+    P(118, 28, 14, 16, '#9aa2ad'); P(118, 28, 14, 4, '#c2cad4');        // blunt nose block
+    P(129, 32, 6, 8, '#59c9f0'); P(130, 33, 3, 3, '#c9f0ff');           // cockpit slab
+    for (let i = 0; i < 4; i++) P(28 + i * 22, 33, 12, 8, i % 2 ? '#7d6a3c' : '#6a5a34');   // cargo bay doors
+    for (let i = 0; i < 4; i++) P(30 + i * 22, 35, 8, 1.6, '#3c341e');
+    P(20, 18, 96, 7, '#8a93a0'); P(20, 18, 96, 2, '#aab6c0');           // deck rail
+    P(24, 10, 12, 9, '#c0402f'); P(24, 10, 12, 2.6, '#d95a44');         // red wheelhouse
+    P(27, 12.6, 5, 3.6, '#ffd75e');
+    if (stage >= 2) {                            // the SCANNER dish on a mast
+      P(64, 4, 3, 15, '#6d7883');
+      g.fillStyle = '#c9d2da'; g.beginPath(); g.ellipse(66, 4, 10, 5, -0.5, 0, 6.3); g.fill();
+      g.fillStyle = '#7dffe0'; g.beginPath(); g.ellipse(66, 4, 4.6, 2.2, -0.5, 0, 6.3); g.fill();
+      P(64.5, 0, 2, 3, '#e8eef4');
+    }
+    if (stage >= 3) {                            // squat thruster pods, teal exhaust rings
+      P(4, 26, 15, 9, '#8a93a0'); P(4, 26, 15, 2.4, '#aab6c0');
+      P(4, 38, 15, 9, '#8a93a0'); P(4, 38, 15, 2.4, '#aab6c0');
+      P(1, 27.6, 4, 6, '#7dffe0'); P(1, 39.6, 4, 6, '#7dffe0');
+      P(2, 29.2, 2, 2.8, '#d8fff4'); P(2, 41.2, 2, 2.8, '#d8fff4');
+      P(50, 8, 4, 11, '#c0402f'); P(44, 5.4, 16, 3.6, '#d95a44'); P(44, 5.4, 16, 1.4, '#f0705e');
+      P(110, 20, 4, 4, '#fff3b0');               // gleam — ready for the Belt
+    }
+    return c;
+  };
+  SPR.bargeStg = [1, 2, 3].map(mkBarge);
+  /* rock warp — deep blue-black space, silver-blue streaks, tumbling rocks */
+  SPR.warpRock = (() => {
+    const [c, g] = C(W, H);
+    const gr = g.createLinearGradient(0, 0, 0, H);
+    gr.addColorStop(0, '#040610'); gr.addColorStop(0.55, '#0a1024'); gr.addColorStop(1, '#141c36');
+    g.fillStyle = gr; g.fillRect(0, 0, W, H);
+    for (let i = 0; i < 120; i++) {
+      const x = (i * 229 + 53) % W, y = (i * 137 + 71) % H;
+      g.fillStyle = i % 5 ? 'rgba(210,225,255,0.7)' : 'rgba(159,216,255,0.9)';
+      g.fillRect(x, y, i % 3 ? 2 : 3, i % 3 ? 2 : 3);
+    }
+    const neb = g.createRadialGradient(W * 0.72, H * 0.3, 20, W * 0.72, H * 0.3, 300);
+    neb.addColorStop(0, 'rgba(110,140,220,0.14)'); neb.addColorStop(1, 'rgba(110,140,220,0)');
+    g.fillStyle = neb; g.fillRect(0, 0, W, H);
+    return c;
+  })();
+  SPR.streakSilver = (() => {
+    const [c, g] = C(5, 34);
+    const gr = g.createLinearGradient(0, 0, 0, 34);
+    gr.addColorStop(0, 'rgba(180,210,255,0)'); gr.addColorStop(0.5, 'rgba(200,225,255,0.85)'); gr.addColorStop(1, 'rgba(180,210,255,0)');
+    g.fillStyle = gr; g.fillRect(1, 0, 3, 34);
+    return c;
+  })();
+  /* small tumbling rock silhouettes for the warp (2 shapes) */
+  SPR.warpRockBit = [0, 1].map(v => S(v ? 8 : 11, v ? 7 : 9, (g, P) => {
+    P(1, 2, v ? 6 : 9, v ? 4 : 5, '#2a2f42');
+    P(2, 1, v ? 4 : 6, 2, '#3a4158');
+    P(v ? 2 : 3, v ? 4 : 5, 3, 2, '#1c2033');
+    P(2, 2, 2, 1, '#4c557a');
+  }));
+  /* tiny planet balls for the EXPRESS fly-by beats */
+  SPR.ballMars = (() => {
+    const [c, g] = C(26, 26);
+    g.fillStyle = '#b8432a'; g.beginPath(); g.arc(13, 13, 12, 0, 6.3); g.fill();
+    g.fillStyle = '#d05a36'; g.beginPath(); g.arc(11, 11, 9, 0, 6.3); g.fill();
+    g.fillStyle = '#9a3620'; g.beginPath(); g.ellipse(11, 16, 6, 3, 0.3, 0, 6.3); g.fill();
+    g.fillStyle = '#f4e8e0'; g.beginPath(); g.ellipse(12, 4, 5, 2, 0.1, 0, 6.3); g.fill();
+    g.fillStyle = 'rgba(20,8,8,0.4)'; g.beginPath(); g.arc(19, 17, 12, 0, 6.3); g.fill();
+    return c;
+  })();
+  SPR.ballMoon = (() => {
+    const [c, g] = C(20, 20);
+    g.fillStyle = '#b8bfc9'; g.beginPath(); g.arc(10, 10, 9, 0, 6.3); g.fill();
+    g.fillStyle = '#d5dce4'; g.beginPath(); g.arc(8, 8, 6.6, 0, 6.3); g.fill();
+    g.fillStyle = '#8a919c';
+    g.beginPath(); g.arc(7, 11, 2.2, 0, 6.3); g.fill();
+    g.beginPath(); g.arc(12, 6, 1.5, 0, 6.3); g.fill();
+    g.fillStyle = 'rgba(30,34,44,0.4)'; g.beginPath(); g.arc(15, 13, 9, 0, 6.3); g.fill();
+    return c;
+  })();
+  /* asteroid ground — grey-brown cratered rock, 4 variants */
+  SPR.astile = [0, 1, 2, 3].map(v => S(16, 16, (g, P) => {
+    P(0, 0, 16, 16, ['#5c584e', '#635e52', '#575349', '#4e4a42'][v]);
+    for (let i = 0; i < 12; i++) {
+      const x = (i * 7 + v * 5) % 16, y = (i * 11 + v * 3 + 2) % 16;
+      P(x, y, 1, 1, i % 3 ? '#494539' : '#736d5c');
+    }
+    /* a little crater bowl per variant */
+    const cx3 = (v * 5 + 4) % 10 + 3, cy3 = (v * 7 + 5) % 10 + 3;
+    g.fillStyle = '#3c3931'; g.beginPath(); g.ellipse(cx3 * 2, cy3 * 2 + 1, 5.6, 3.6, 0, 0, 6.3); g.fill();
+    g.fillStyle = '#2f2d26'; g.beginPath(); g.ellipse(cx3 * 2, cy3 * 2 + 2, 4, 2.4, 0, 0, 6.3); g.fill();
+    g.fillStyle = '#7d776a'; g.fillRect(cx3 * 2 - 5, cy3 * 2 - 4, 8, 1.6);
+  }));
+  /* ASTEROID DEPOSITS — 3 damage stages each: whole → cracked → breaking.
+     astroiron = grey-gold nuggets · crystal = violet gems. Big = 2x scale. */
+  const mkDep = (kind, big) => [0, 1, 2].map(st => {
+    const u = big ? 26 : 16, hh = big ? 20 : 12;
+    return S(u, hh, (g, P) => {
+      const cx3 = u / 2;
+      g.fillStyle = 'rgba(10,10,16,0.4)';
+      g.beginPath(); g.ellipse(cx3 * 2, hh * 2 - 3, (big ? 20 : 11) - st * 2, big ? 4.4 : 3, 0, 0, 6.3); g.fill();
+      const sz = [1, 0.92, 0.8][st], w = (big ? 20 : 12) * sz, h = (big ? 14 : 8) * sz;
+      const x0 = cx3 - w / 2, y0 = hh - 2 - h;
+      P(x0, y0 + 1, w, h - 1, '#494539');                       // host rock
+      P(x0 + 1, y0, w - 2, h - 2, '#5c584e');
+      P(x0 + 1.4, y0 + 0.6, w / 2.4, 1.4, '#736d5c');
+      if (kind === 'astroiron') {                                // grey-gold nuggets
+        P(x0 + w * 0.18, y0 + h * 0.3, w * 0.24, h * 0.3, '#d8c49a');
+        P(x0 + w * 0.22, y0 + h * 0.34, w * 0.1, h * 0.14, '#f0e2bc');
+        P(x0 + w * 0.58, y0 + h * 0.44, w * 0.2, h * 0.26, '#b8a276');
+        P(x0 + w * 0.62, y0 + h * 0.48, w * 0.08, h * 0.1, '#f0e2bc');
+        P(x0 + w * 0.42, y0 + h * 0.16, w * 0.12, h * 0.18, '#d8c49a');
+      } else {                                                   // violet gem cluster
+        const gem = (gx3, gy3, gw2, gh2) => {
+          g.fillStyle = '#8a5cc9'; g.beginPath();
+          g.moveTo((x0 + gx3 + gw2 / 2) * 2, (y0 + gy3 - gh2 * 0.6) * 2);
+          g.lineTo((x0 + gx3 + gw2) * 2, (y0 + gy3 + gh2 * 0.5) * 2);
+          g.lineTo((x0 + gx3) * 2, (y0 + gy3 + gh2 * 0.5) * 2);
+          g.closePath(); g.fill();
+          P(x0 + gx3 + gw2 * 0.36, gy3 + y0 - gh2 * 0.2, gw2 * 0.24, gh2 * 0.5, '#c99bff');
+        };
+        gem(w * 0.16, h * 0.42, w * 0.26, h * 0.62);
+        gem(w * 0.52, h * 0.36, w * 0.32, h * 0.8);
+        gem(w * 0.38, h * 0.58, w * 0.2, h * 0.4);
+      }
+      if (st >= 1) {                                             // cracks spread
+        g.strokeStyle = '#211f1a'; g.lineWidth = 1.6;
+        g.beginPath(); g.moveTo((x0 + w * 0.3) * 2, y0 * 2); g.lineTo((x0 + w * 0.5) * 2, (y0 + h * 0.6) * 2);
+        g.lineTo((x0 + w * 0.34) * 2, (y0 + h) * 2); g.stroke();
+      }
+      if (st >= 2) {
+        g.strokeStyle = '#211f1a'; g.lineWidth = 1.6;
+        g.beginPath(); g.moveTo((x0 + w * 0.72) * 2, (y0 + h * 0.1) * 2); g.lineTo((x0 + w * 0.6) * 2, (y0 + h * 0.66) * 2);
+        g.lineTo((x0 + w * 0.82) * 2, (y0 + h) * 2); g.stroke();
+        P(x0 - 1.4, y0 + h - 1.4, 2.4, 1.6, '#494539');          // spalled shards
+        P(x0 + w - 1, y0 + h - 1, 2.2, 1.4, '#494539');
+      }
+    });
+  });
+  SPR.depIron = mkDep('astroiron', false); SPR.depIronBig = mkDep('astroiron', true);
+  SPR.depCrys = mkDep('crystal', false);  SPR.depCrysBig = mkDep('crystal', true);
+  /* THE ALIEN VAULT — teal-glyph monolith, cannon-crack only (3 shots) */
+  SPR.vault = [0, 1, 2].map(st => S(24, 22, (g, P) => {
+    g.fillStyle = 'rgba(10,10,16,0.45)';
+    g.beginPath(); g.ellipse(24, 41, 19, 4.4, 0, 0, 6.3); g.fill();
+    P(4, 6, 16, 14, '#2a3550'); P(5, 7, 14, 12, '#354468');     // dark monolith slab
+    P(5, 7, 14, 1.6, '#4a5c8a'); P(5, 7, 1.4, 12, '#4a5c8a');
+    P(9, 2, 6, 4.4, '#2a3550'); P(10, 3, 4, 2.6, '#354468');    // crown block
+    /* glowing glyphs (baked gradient dots — NEVER shadowBlur) */
+    const glow = (gx3, gy3, r) => {
+      const gr2 = g.createRadialGradient(gx3 * 2, gy3 * 2, 1, gx3 * 2, gy3 * 2, r * 2);
+      gr2.addColorStop(0, 'rgba(125,255,224,0.95)'); gr2.addColorStop(1, 'rgba(125,255,224,0)');
+      g.fillStyle = gr2; g.fillRect((gx3 - r) * 2, (gy3 - r) * 2, r * 4, r * 4);
+    };
+    glow(12, 10, 3); glow(8.6, 14.6, 2.2); glow(15.4, 15, 2.2);
+    P(11.2, 9.2, 1.6, 1.6, '#d8fff4'); P(8, 14, 1.2, 1.2, '#d8fff4'); P(14.8, 14.4, 1.2, 1.2, '#d8fff4');
+    P(7, 11.6, 10, 0.7, '#5fe8c8'); P(9, 17, 6, 0.7, '#5fe8c8');
+    if (st >= 1) { g.strokeStyle = '#0f1420'; g.lineWidth = 2;
+      g.beginPath(); g.moveTo(14, 14); g.lineTo(22, 26); g.lineTo(16, 38); g.stroke(); }
+    if (st >= 2) { g.strokeStyle = '#0f1420'; g.lineWidth = 2;
+      g.beginPath(); g.moveTo(32, 12); g.lineTo(26, 24); g.lineTo(34, 36); g.stroke();
+      P(3.4, 17.6, 3, 2.4, '#2a3550'); P(18, 18.4, 2.6, 2, '#2a3550'); }
+  }));
+  /* cargo CHUNKS — the pick-up-able nuggets that drift out of a burst */
+  SPR.chunkSpr = {
+    astroiron: S(6, 6, (g, P) => { P(0.6, 1.6, 4.6, 3.4, '#b8a276'); P(1.4, 0.8, 3, 2, '#d8c49a'); P(2, 1.4, 1.4, 1, '#f0e2bc'); }),
+    crystal:   S(6, 6, (g, P) => { P(1.6, 0.6, 2.6, 4.6, '#8a5cc9'); P(2.2, 1.2, 1.2, 2.6, '#c99bff'); P(0.8, 2.6, 1, 2, '#6a44a0'); P(4, 2.4, 1, 2.2, '#6a44a0'); }),
+    alloy:     S(6, 6, (g, P) => { P(0.8, 1.4, 4.4, 3.2, '#2a6655'); P(1.4, 1, 3, 2.2, '#3aa890'); P(2.2, 1.6, 1.4, 1, '#7dffe0'); P(1, 4, 4, 0.7, '#1a4438'); }),
+  };
+  /* the ALIEN BEACON pickup — a floating teal tetrahedron, softly glowing */
+  SPR.beaconPick = (() => {
+    const [c, g] = C(34, 34);
+    const gl = g.createRadialGradient(17, 17, 2, 17, 17, 16);
+    gl.addColorStop(0, 'rgba(125,255,224,0.5)'); gl.addColorStop(1, 'rgba(125,255,224,0)');
+    g.fillStyle = gl; g.fillRect(0, 0, 34, 34);
+    g.fillStyle = '#2a6655'; g.beginPath(); g.moveTo(17, 6); g.lineTo(27, 24); g.lineTo(7, 24); g.closePath(); g.fill();
+    g.fillStyle = '#3aa890'; g.beginPath(); g.moveTo(17, 6); g.lineTo(22, 24); g.lineTo(7, 24); g.closePath(); g.fill();
+    g.fillStyle = '#7dffe0'; g.fillRect(15, 14, 4, 4);
+    g.fillStyle = '#d8fff4'; g.fillRect(16, 15, 2, 2);
+    return c;
+  })();
+  /* pebble-shower bits: telegraph shadow ring + the falling rock */
+  SPR.pebShadow = (() => {
+    const [c, g] = C(40, 24);
+    g.strokeStyle = 'rgba(255,210,74,0.8)'; g.lineWidth = 3; g.setLineDash([6, 5]);
+    g.beginPath(); g.ellipse(20, 12, 16, 9, 0, 0, 6.3); g.stroke();
+    g.fillStyle = 'rgba(20,18,12,0.35)'; g.beginPath(); g.ellipse(20, 12, 10, 5.6, 0, 0, 6.3); g.fill();
+    return c;
+  })();
+  SPR.pebble = S(7, 6, (g, P) => { P(1, 1.6, 5, 3.4, '#5c584e'); P(1.8, 0.8, 3.4, 2, '#736d5c'); P(2.4, 4.4, 2.6, 0.8, '#3c3931'); });
+  /* dizzy stars — 2 frames orbiting over a bonked head */
+  SPR.dizzy = [0, 1].map(v => S(14, 6, (g, P) => {
+    const st = (x, y) => { P(x, y, 2, 2, '#fff3b0'); P(x + 0.6, y - 0.6, 0.8, 0.8, '#ffd24a'); };
+    if (v) { st(1, 2); st(6, 0.6); st(11, 2.4); } else { st(3, 0.6); st(8.6, 2.4); st(11.6, 0.4); }
+  }));
+  /* solar-flare wash — ONE full-screen warm gradient, alpha'd in the hot path */
+  SPR.flareWash = (() => {
+    const [c, g] = C(W, H);
+    const gr = g.createLinearGradient(0, 0, W, H * 0.6);
+    gr.addColorStop(0, 'rgba(255,214,120,0.55)'); gr.addColorStop(0.55, 'rgba(255,170,80,0.28)'); gr.addColorStop(1, 'rgba(255,140,60,0.08)');
+    g.fillStyle = gr; g.fillRect(0, 0, W, H);
+    return c;
+  })();
+  /* cracked-edge tile overlay (crumble hazard): idle cracks + angry stage */
+  SPR.crackTile = [0, 1].map(v => S(16, 16, (g, P) => {
+    g.strokeStyle = v ? 'rgba(255,154,138,0.9)' : 'rgba(20,18,14,0.55)'; g.lineWidth = 2;
+    g.beginPath(); g.moveTo(6, 2); g.lineTo(14, 12); g.lineTo(8, 22); g.lineTo(16, 30);
+    g.moveTo(22, 4); g.lineTo(18, 16); g.lineTo(26, 24); g.stroke();
+    if (v) { P(1, 1, 2, 2, '#ff9a8a'); P(13, 12, 2, 2, '#ff9a8a'); }
+  }));
+  /* mini drill — a stubby auto-piston rig */
+  mk('minidrill', 16, 14, (g, P, lit) => {
+    shad(g, 16, 25, 10, 3);
+    P(4, 8, 8, 5, '#8a93a0'); P(4, 8, 8, 1.4, '#aab6c0');       // base skid
+    P(6.6, 2, 2.8, 7, '#6d7883'); P(6.6, 2, 1, 7, '#8a96a4');   // piston mast
+    P(5.6, 1, 4.8, 1.8, '#c0402f'); P(5.6, 1, 4.8, 0.7, '#d95a44');
+    g.fillStyle = '#c9d2da'; g.beginPath();                      // drill cone
+    g.moveTo(13, 18); g.lineTo(19, 18); g.lineTo(16, 25); g.closePath(); g.fill();
+    P(11.6, 10.6, 2.4, 1.8, lit ? '#7dffe0' : '#2a6655');        // status lamp
+    P(4.6, 9, 1.6, 1.2, '#ffd24a');
+  });
+  /* boost battery — a big friendly power pack plugged into nothing but hope */
+  mk('boostbattery', 16, 14, (g, P, lit) => {
+    shad(g, 16, 25, 10, 3);
+    P(4, 4, 8, 9, '#2a7a8f'); P(4, 4, 8, 2, '#3fa8bf');
+    P(5.6, 2.6, 4.8, 1.8, '#8a93a0'); P(6.6, 1.6, 2.8, 1.2, '#aab6c0');   // terminal cap
+    P(6, 6.4, 4, 5, lit ? '#7dffe0' : '#59e0ff');                // charge window
+    P(7, 7.4, 2, 3, '#d8fff4');
+    P(4.6, 11.4, 6.8, 0.8, '#1a4a58');
+  });
+  /* CARGO LOADER — the drop-off pad: deck, crane arm, crate stack */
+  mk('cargoloader', 32, 20, (g, P, lit) => {
+    g.fillStyle = 'rgba(10,10,16,0.4)';
+    g.beginPath(); g.ellipse(32, 37, 27, 5, 0, 0, 6.3); g.fill();
+    P(3, 10, 26, 8, '#6a6456'); P(3, 10, 26, 1.4, '#8a8474');   // deck plate
+    P(5, 12, 22, 4.6, '#57523f'); P(6, 13, 20, 2.6, '#494539');
+    for (let i = 0; i < 6; i++) P(4.4 + i * 4.2, 17, 1.6, 1, i % 2 ? '#ffd24a' : '#8a6a12');
+    P(24, 2, 2, 9, '#8a93a0'); P(18, 2, 8, 1.6, '#aab6c0');     // crane mast + jib
+    P(18.6, 3.6, 0.7, 3, '#6d7883'); P(17.6, 6.4, 2.6, 2, '#c0402f');   // hook block
+    P(6, 6.6, 5, 4, '#c2a86a'); P(6, 6.6, 5, 1.2, '#e0c88a');   // waiting crate
+    P(7, 8, 3, 0.8, '#8a7444');
+    P(28.6, 3, 1.6, 1.6, lit ? '#7dffe0' : '#2a6655');
+  });
+  /* REFINERY — industrial-cozy: twin kilns, glowing pour spout, brick stack */
+  mk('refinery', 32, 26, (g, P, lit) => {
+    shad(g, 32, 49, 26, 5);
+    P(2, 14, 28, 10, '#8a7a6a'); P(2, 14, 28, 1.6, '#a89684');  // long brick hall
+    P(2, 22.6, 28, 1.4, '#5c5044');
+    for (let i = 0; i < 7; i++) P(3 + i * 4, 15.8, 3.2, 0.8, '#6d5f50');
+    const kiln = x => {
+      P(x, 6, 8, 9, '#6d747c'); P(x, 6, 8, 2, '#8a96a4');
+      g.fillStyle = lit ? '#ffb45e' : '#e07030';
+      g.beginPath(); g.ellipse((x + 4) * 2, 15 * 2, 5.6, 4, 0, 0, 6.3); g.fill();
+      g.fillStyle = lit ? '#fff3b0' : '#ffd24a';
+      g.beginPath(); g.ellipse((x + 4) * 2, 15.4 * 2, 3, 2.2, 0, 0, 6.3); g.fill();
+    };
+    kiln(4); kiln(14);
+    P(24, 2, 4, 12, '#9a5a3c'); P(24, 2, 4, 1.4, '#b87050');    // brick stack
+    P(24.6, 3.6, 0.8, 10, '#7d452e'); P(26.6, 3.6, 0.8, 10, '#7d452e');
+    /* the POUR SPOUT — baked warm glow (gradients, never shadowBlur) */
+    P(9, 17.6, 6, 1.6, '#57523f');
+    const pour = g.createRadialGradient(24, 40, 1, 24, 40, 9);
+    pour.addColorStop(0, 'rgba(255,214,94,0.95)'); pour.addColorStop(0.5, 'rgba(255,150,60,0.6)'); pour.addColorStop(1, 'rgba(255,150,60,0)');
+    g.fillStyle = pour; g.fillRect(15, 31, 18, 18);
+    P(11.4, 19.4, 1.2, 3.4, lit ? '#ffd75e' : '#e0a030');
+    P(20, 17, 7, 5.6, '#6d747c'); P(20, 17, 7, 1.2, '#8a96a4'); // control shed
+    P(21.4, 18.6, 3, 2.4, lit ? '#9fd8ff' : '#39424c');
+    P(29.4, 12.4, 1.6, 1.6, lit ? '#ff8a8a' : '#8a3a3a');
+  });
+
+  /* ── the MEGASTRUCTURES — tall pseudo-3D staged bakes, SC2K energy ── */
+  SPR.mega = {}; SPR.megaLit = {};
+  const mkMega = (k, w, h, maxStage, fn) => {
+    SPR.mega[k] = []; SPR.megaLit[k] = [];
+    for (let st = 0; st <= maxStage; st++) {
+      SPR.mega[k].push(S(w, h, (g, P) => fn(g, P, st, false)));
+      SPR.megaLit[k].push(S(w, h, (g, P) => fn(g, P, st, true)));
+    }
+    SPR.b[k] = SPR.mega[k][maxStage];            // strip icon / ghost = the dream
+    SPR.bLit[k] = SPR.megaLit[k][maxStage];
+  };
+  /* shared construction dressing: scaffold band + crane silhouette */
+  const scaffold = (g, P, x, y, w2) => {
+    P(x, y, w2, 0.8, '#8a7444'); P(x, y + 2.6, w2, 0.8, '#8a7444');
+    for (let i = 0; i <= w2; i += 4) P(x + i, y, 0.8, 3.4, '#a08850');
+  };
+  const crane = (g, P, x, y, hgt) => {
+    P(x, y, 1.6, hgt, '#c9a227'); P(x - 5, y, 12, 1.2, '#c9a227');
+    P(x + 6.4, y + 1, 0.5, 4, '#8a7444'); P(x + 5.6, y + 5, 2.2, 1.6, '#c0402f');
+    P(x - 5, y - 1.2, 3, 1.2, '#a8841e');
+    for (let i = 0; i < hgt - 2; i += 3) P(x + 0.4, y + 1.4 + i, 0.8, 1.4, '#8a6a12');
+  };
+  /* window grid helper — lit warm at night, cool glass by day */
+  const winGrid = (g, P, x, y, w2, h2, cols, rows, lit, col) => {
+    const cw = w2 / cols, ch = h2 / rows;
+    for (let r = 0; r < rows; r++) for (let cc = 0; cc < cols; cc++) {
+      const on = lit && ((r * 7 + cc * 3 + (x | 0)) % 5 !== 1);   // a few windows sleep
+      P(x + cc * cw + cw * 0.18, y + r * ch + ch * 0.2, cw * 0.62, ch * 0.56,
+        on ? (col || '#ffd75e') : '#2c3540');
+    }
+  };
+  /* ARCOLOGY — 3x3 stepped sky-ziggurat: podium + 4 tiers + garden dome.
+     stage 0 = foundation slab · 1 podium · 2 low tiers · 3 high tiers · 4 done */
+  mkMega('arcology', 48, 152, 4, (g, P, st, lit) => {
+    const GND = 148;                              // ground line (art units)
+    g.fillStyle = 'rgba(20,24,34,0.35)';
+    g.beginPath(); g.ellipse(48, GND * 2 + 4, 46, 7, 0, 0, 6.3); g.fill();
+    /* foundation slab + groundwork */
+    P(2, GND - 5, 44, 5, '#8a8ea4'); P(2, GND - 5, 44, 1.2, '#aab2c8');
+    P(4, GND - 6.2, 40, 1.4, '#6d7288');
+    if (st === 0) {
+      for (let i = 0; i < 8; i++) P(6 + i * 5, GND - 9, 1, 4, '#8a7444');   // rebar forest
+      scaffold(g, P, 4, GND - 12, 40);
+      crane(g, P, 34, GND - 42, 37);
+      P(8, GND - 8.6, 6, 3.4, '#c2a86a'); P(16, GND - 8, 5, 2.8, '#c2a86a');   // supply crates
+      return;
+    }
+    /* podium: arched entry + street trees */
+    P(4, GND - 27, 40, 22, '#9aa2b8'); P(4, GND - 27, 40, 2, '#c2c9da');
+    P(4, GND - 27, 1.6, 22, '#b2bacc');
+    for (let i = 0; i < 4; i++) {                 // grand arches
+      const ax = 8 + i * 9.6;
+      g.fillStyle = lit ? '#ffd75e' : '#2c3540';
+      g.beginPath(); g.arc((ax + 2.6) * 2, (GND - 7) * 2, 5, Math.PI, 0); g.fill();
+      g.fillRect((ax) * 2 + 0.2, (GND - 7) * 2, 10.3, 8);
+    }
+    winGrid(g, P, 7, GND - 24, 34, 8, 8, 2, lit);
+    P(1, GND - 5.6, 3, 1.4, '#3a7d4a'); P(0.6, GND - 8, 3.6, 2.8, '#4a9d5c');   // street trees
+    P(44, GND - 5.6, 3, 1.4, '#3a7d4a'); P(43.6, GND - 8, 3.6, 2.8, '#4a9d5c');
+    const tier = (x, y, w2, h2, cols, rows) => {
+      P(x, y, w2, h2, '#a8b0c6'); P(x, y, w2, 1.6, '#d2d8e8'); P(x, y, 1.4, h2, '#bcc4d8');
+      P(x + w2 - 1.2, y, 1.2, h2, '#8a92a8');
+      winGrid(g, P, x + 2, y + 3, w2 - 4, h2 - 5, cols, rows, lit);
+      P(x - 0.8, y + h2 - 1, w2 + 1.6, 1.4, '#6d7288');          // setback ledge
+    };
+    if (st === 1) { scaffold(g, P, 4, GND - 31, 40); crane(g, P, 36, GND - 62, 34); return; }
+    tier(8, GND - 55, 32, 28, 7, 5);              // tier 1+2 block
+    if (st === 2) { scaffold(g, P, 8, GND - 59, 32); crane(g, P, 34, GND - 88, 32); return; }
+    tier(12, GND - 83, 24, 28, 5, 5);             // tier 3+4 block
+    if (st === 3) { scaffold(g, P, 12, GND - 87, 24); crane(g, P, 32, GND - 112, 24); return; }
+    tier(16, GND - 105, 16, 22, 3, 4);            // crown tier
+    /* rooftop garden dome + spire (complete only) */
+    g.fillStyle = lit ? 'rgba(150,255,170,0.8)' : 'rgba(110,220,140,0.7)';
+    g.beginPath(); g.ellipse(48, (GND - 106) * 2, 13, 10, 0, 3.14, 6.3); g.fill();
+    g.strokeStyle = 'rgba(240,255,245,0.8)'; g.lineWidth = 1.2;
+    g.beginPath(); g.ellipse(48, (GND - 106) * 2, 13, 10, 0, 3.14, 6.3); g.stroke();
+    P(23.2, GND - 118, 1.6, 8, '#c9d2da');
+    P(22.4, GND - 119.4, 3.2, 1.6, lit ? '#ff8a8a' : '#8a3a3a');   // beacon tip
+    P(19, GND - 108.6, 3, 1.4, '#3a7d4a'); P(26, GND - 108.6, 3, 1.4, '#3a7d4a');
+  });
+  /* CRYSTAL SPIRE — 2x2 tapering violet glass needle with a night beam.
+     stage 0 foundation · 1 base trunk · 2 mid facets · 3 lit crown+beam */
+  mkMega('crystalspire', 32, 148, 3, (g, P, st, lit) => {
+    const GND = 144;
+    g.fillStyle = 'rgba(20,24,34,0.35)';
+    g.beginPath(); g.ellipse(32, GND * 2 + 4, 30, 6, 0, 0, 6.3); g.fill();
+    P(3, GND - 5, 26, 5, '#8a8ea4'); P(3, GND - 5, 26, 1.2, '#aab2c8');
+    if (st === 0) {
+      for (let i = 0; i < 5; i++) P(6 + i * 4.6, GND - 8.6, 1, 4, '#8a7444');
+      scaffold(g, P, 4, GND - 12, 24);
+      crane(g, P, 24, GND - 38, 34);
+      return;
+    }
+    /* violet glass trunk — big facets with baked sheen */
+    const facet = (x, y, w2, h2) => {
+      P(x, y, w2, h2, '#6a44a0'); P(x, y, w2 * 0.42, h2, '#8a5cc9');
+      P(x + w2 * 0.12, y, w2 * 0.14, h2, '#c99bff');
+      P(x + w2 - 1.2, y, 1.2, h2, '#4a2c78');
+      for (let yy = y + 4; yy < y + h2 - 2; yy += 7)
+        P(x + w2 * 0.55, yy, w2 * 0.3, 2.6, lit ? '#e8d4ff' : '#5a3a8a');
+    };
+    facet(6, GND - 42, 20, 37);
+    P(4.6, GND - 43.4, 22.8, 1.6, '#3a2260');
+    if (st === 1) { scaffold(g, P, 6, GND - 46, 20); crane(g, P, 24, GND - 72, 30); return; }
+    facet(9, GND - 84, 14, 42);
+    P(7.8, GND - 85.4, 16.4, 1.6, '#3a2260');
+    if (st === 2) { scaffold(g, P, 9, GND - 88, 14); crane(g, P, 22, GND - 110, 26); return; }
+    /* crown needle + the beam (lit variant only — baked violet gradient) */
+    g.fillStyle = '#8a5cc9';
+    g.beginPath(); g.moveTo(22, (GND - 84) * 2); g.lineTo(42, (GND - 84) * 2);
+    g.lineTo(32, (GND - 126) * 2); g.closePath(); g.fill();
+    g.fillStyle = '#c99bff';
+    g.beginPath(); g.moveTo(26, (GND - 84) * 2); g.lineTo(33, (GND - 84) * 2);
+    g.lineTo(32, (GND - 122) * 2); g.closePath(); g.fill();
+    if (lit) {
+      const beam = g.createLinearGradient(0, 0, 0, (GND - 120) * 2);
+      beam.addColorStop(0, 'rgba(201,155,255,0)'); beam.addColorStop(0.75, 'rgba(201,155,255,0.34)'); beam.addColorStop(1, 'rgba(232,212,255,0.7)');
+      g.fillStyle = beam; g.fillRect(58, 0, 12, (GND - 120) * 2);
+      const tip = g.createRadialGradient(64, (GND - 125) * 2, 1, 64, (GND - 125) * 2, 14);
+      tip.addColorStop(0, 'rgba(240,228,255,0.95)'); tip.addColorStop(1, 'rgba(201,155,255,0)');
+      g.fillStyle = tip; g.fillRect(50, (GND - 132) * 2, 28, 28);
+    }
+    P(31.2, GND - 128, 1.6, 3, '#e8d4ff');
+  });
+  /* STAR HARBOR — 3x3 landing deck on pylons + control tower + drone pad.
+     stage 0 foundation · 1 deck · 2 tower · 3 complete (dish + drone) */
+  mkMega('starharbor', 48, 110, 3, (g, P, st, lit) => {
+    const GND = 106;
+    g.fillStyle = 'rgba(20,24,34,0.35)';
+    g.beginPath(); g.ellipse(48, GND * 2 + 4, 46, 7, 0, 0, 6.3); g.fill();
+    P(2, GND - 5, 44, 5, '#8a8ea4'); P(2, GND - 5, 44, 1.2, '#aab2c8');
+    if (st === 0) {
+      for (let i = 0; i < 7; i++) P(6 + i * 5.6, GND - 8.6, 1, 4, '#8a7444');
+      scaffold(g, P, 4, GND - 12, 40);
+      crane(g, P, 36, GND - 34, 28);
+      return;
+    }
+    /* pylons + the big landing deck with a glowing ring pad */
+    P(8, GND - 22, 3, 17, '#6d7288'); P(37, GND - 22, 3, 17, '#6d7288');
+    P(22.6, GND - 22, 3, 17, '#7d8298');
+    P(3, GND - 28, 42, 7, '#9aa2b8'); P(3, GND - 28, 42, 1.8, '#c2c9da');
+    P(3, GND - 22.4, 42, 1.4, '#6d7288');
+    g.strokeStyle = lit ? '#7dffe0' : '#2a6655'; g.lineWidth = 2.4;
+    g.beginPath(); g.ellipse(46, (GND - 24.6) * 2, 24, 6.5, 0, 0, 6.3); g.stroke();
+    P(21.8, GND - 26.4, 4.4, 1, lit ? '#7dffe0' : '#2a6655');
+    for (let i = 0; i < 8; i++) P(5 + i * 5.2, GND - 27.2, 1.2, 0.8, i % 2 ? (lit ? '#ffd24a' : '#8a6a12') : (lit ? '#7dffe0' : '#2a6655'));
+    if (st === 1) { scaffold(g, P, 3, GND - 32, 42); crane(g, P, 38, GND - 52, 22); return; }
+    /* control tower with lit windows */
+    P(33, GND - 52, 9, 24, '#a8b0c6'); P(33, GND - 52, 9, 1.6, '#d2d8e8'); P(33, GND - 52, 1.2, 24, '#bcc4d8');
+    winGrid(g, P, 34, GND - 49, 7, 12, 2, 4, lit, '#9fd8ff');
+    P(31.6, GND - 54, 11.8, 2.2, '#6d7288');
+    if (st === 2) { scaffold(g, P, 33, GND - 56, 9); crane(g, P, 28, GND - 70, 18); return; }
+    /* complete: glass cab, radar dish, parked drone freighter */
+    P(31, GND - 60, 13, 6, '#2a3550'); P(31, GND - 60, 13, 1.4, '#4a5c8a');
+    P(32.4, GND - 58.6, 10.2, 3.4, lit ? '#9fd8ff' : '#59c9f0');
+    g.fillStyle = '#c9d2da'; g.beginPath(); g.ellipse(70, (GND - 63) * 2, 9, 4.4, -0.5, 0, 6.3); g.fill();
+    g.fillStyle = '#7dffe0'; g.beginPath(); g.ellipse(70, (GND - 63) * 2, 4, 1.8, -0.5, 0, 6.3); g.fill();
+    P(34.4, GND - 63, 1, 3.4, '#8a93a0');
+    P(30.8, GND - 66.2, 2, 2, lit ? '#ff8a8a' : '#8a3a3a');
+    /* the drone freighter sits on the ring, crates aboard */
+    P(8, GND - 33.6, 12, 4, '#8a93a0'); P(8, GND - 33.6, 12, 1.2, '#aab6c0');
+    P(19.4, GND - 32.6, 2.6, 2, '#59c9f0');
+    P(6.4, GND - 32, 2, 1.6, '#7dffe0'); P(9.6, GND - 36, 3.4, 2.6, '#c2a86a'); P(13.6, GND - 35.4, 2.8, 2, '#c2a86a');
+  });
+  /* the little DRONE FREIGHTER that ferries auto-cargo (2 frames, hover bob) */
+  SPR.drone = [0, 1].map(v => S(16, 9, (g, P) => {
+    P(2, 3, 12, 3.4, '#8a93a0'); P(2, 3, 12, 1, '#aab6c0');
+    P(12.6, 3.6, 1.6, 2, '#59c9f0');
+    P(5, 6.4, 4, 2, '#c2a86a'); P(5, 6.4, 4, 0.6, '#e0c88a');
+    P(0.6, 2 + (v ? 0.5 : 0), 2.4, 1, '#7dffe0'); P(13, 1.4 + (v ? 0 : 0.5), 2.4, 1, '#7dffe0');
+    P(3, 1.6, 2, 1.4, '#6d7883'); P(11, 1.6, 2, 1.4, '#6d7883');
+  }));
+  /* the STAR MAP — baked chart for the beacons vignette (drawn in quarters
+     that slide together as the fragments assemble) */
+  SPR.starMap = (() => {
+    const [c, g] = C(520, 360);
+    g.fillStyle = '#0a1024'; g.fillRect(0, 0, 520, 360);
+    g.strokeStyle = 'rgba(125,255,224,0.25)'; g.lineWidth = 2;
+    g.strokeRect(6, 6, 508, 348);
+    for (let i = 0; i < 90; i++) {
+      g.fillStyle = i % 6 ? 'rgba(200,220,255,0.5)' : 'rgba(159,216,255,0.8)';
+      g.fillRect(14 + (i * 173) % 492, 14 + (i * 97 + 31) % 332, i % 4 ? 2 : 3, i % 4 ? 2 : 3);
+    }
+    /* the sun + nine orbit rings + nine little worlds */
+    const sx = 96, sy = 186;
+    const sun = g.createRadialGradient(sx, sy, 2, sx, sy, 26);
+    sun.addColorStop(0, 'rgba(255,240,180,1)'); sun.addColorStop(0.4, 'rgba(255,200,90,0.8)'); sun.addColorStop(1, 'rgba(255,200,90,0)');
+    g.fillStyle = sun; g.fillRect(sx - 26, sy - 26, 52, 52);
+    const cols = ['#c2c9d6', '#e8c25a', '#59a0e0', '#d05a36', '#e0a35c', '#d8c49a', '#9fe8ff', '#5a78e0', '#c9b0a0'];
+    for (let i = 0; i < 9; i++) {
+      const r = 42 + i * 42;
+      g.strokeStyle = 'rgba(125,255,224,0.16)'; g.lineWidth = 1.4;
+      g.beginPath(); g.ellipse(sx, sy, r, r * 0.42, 0, 0, 6.3); g.stroke();
+      const a = (i * 2.1 + 0.7) % 6.28;
+      const px2 = sx + Math.cos(a) * r, py2 = sy + Math.sin(a) * r * 0.42;
+      g.fillStyle = cols[i]; g.beginPath(); g.arc(px2, py2, i === 4 ? 7 : 4 + (i % 3), 0, 6.3); g.fill();
+      if (i === 5) { g.strokeStyle = '#e8d8b0'; g.lineWidth = 2;
+        g.beginPath(); g.ellipse(px2, py2, 11, 3.4, -0.4, 0, 6.3); g.stroke(); }
+    }
+    /* alien glyph annotations */
+    g.fillStyle = 'rgba(125,255,224,0.7)';
+    for (let i = 0; i < 7; i++) {
+      const gx3 = 420 + (i % 2) * 40, gy3 = 40 + i * 30;
+      g.fillRect(gx3, gy3, 14, 2); g.fillRect(gx3 + 5, gy3 - 5, 2, 12);
+      if (i % 2) g.fillRect(gx3 + 10, gy3 + 4, 4, 4);
+    }
+    return c;
+  })();
+
   /* boarding-zone ring (pulsing, baked) + tiny aboard heads for the window */
   SPR.zoneRing = (() => {
     const [c, g] = C(96, 96);
@@ -1914,6 +2505,11 @@ function initSprites() {
     fuel:  mkIcon((g, P) => { P(2.4, 3, 5.6, 6.4, '#e05a3a'); P(2.4, 3, 1.6, 6.4, '#f0705e'); P(3.4, 1.6, 2, 1.6, '#8f979f'); P(5.8, 1.9, 2.4, 1, '#c0402f'); P(4.4, 5.2, 1.8, 2.6, '#ffd24a'); P(4.9, 4.5, 0.8, 1, '#ffd24a'); }),
     rediron: mkIcon((g, P) => { P(2, 4, 6, 4, '#5c2418'); P(3, 3, 4, 2, '#7d3020'); P(4, 4.6, 2, 1.4, '#a84a30'); P(6.2, 6.4, 1.4, 1, '#e0e6f0'); }),
     frost: mkIcon((g, P) => { P(1.6, 6.4, 7, 2, '#cfe8f8'); P(2.6, 5, 5, 1.6, '#eef6ff'); P(4, 3.6, 2.4, 1.6, '#ffffff'); P(6.4, 4.6, 1.4, 0.8, '#dff2ff'); P(1.6, 8, 7, 0.8, '#a8d4ec'); }),
+    /* v7: the asteroid haul */
+    astroiron: mkIcon((g, P) => { P(2, 4, 6, 4.4, '#8a7a58'); P(3, 3, 4, 2.4, '#b8a276'); P(3.6, 4, 2.6, 2, '#d8c49a'); P(4.2, 4.6, 1.2, 1, '#f0e2bc'); P(6.6, 6.8, 1.2, 0.8, '#f0e2bc'); }),
+    crystal: mkIcon((g, P) => { P(3.6, 1.6, 2.8, 6.4, '#8a5cc9'); P(4.4, 2.4, 1.2, 4.4, '#c99bff'); P(1.8, 4, 1.6, 3.6, '#6a44a0'); P(6.8, 3.6, 1.4, 4, '#6a44a0'); P(2.6, 8, 5, 1, '#4a2c78'); }),
+    alloy: mkIcon((g, P) => { P(2, 3.4, 6, 4.4, '#2a6655'); P(2.8, 2.6, 4.4, 3, '#3aa890'); P(3.6, 3.4, 2.2, 1.6, '#7dffe0'); P(4.2, 4, 1, 0.8, '#d8fff4'); P(2, 7.2, 6, 0.7, '#1a4438'); }),
+    starsteel: mkIcon((g, P) => { P(1.6, 3, 6.8, 2, '#9fd8ff'); P(1.6, 5.4, 6.8, 2, '#6da8d8'); P(2.2, 3.4, 2.4, 0.8, '#e8f6ff'); P(2.2, 5.8, 2.4, 0.8, '#cfe8ff'); P(6.6, 1.6, 1.6, 1.6, '#fff3b0'); P(7.1, 1, 0.6, 2.8, '#fff3b0'); P(6.4, 2.1, 2, 0.6, '#fff3b0'); }),
   };
 
   /* UI chrome panels */
@@ -2775,6 +3371,122 @@ function genMars(sd, bare) {
   while (frosts < 6 && fi >= 0) { const t = free[fi--]; if (!spare(t)) continue; flora.push({ type: 'frost', gx: t.gx, gy: t.gy, hits: 0, gone: false, regrowT: 0, shakeT: 0, golden: false }); frosts++; }
 }
 
+/* ═══ v7: MISSION WORLDS — ephemeral asteroid maps. NEVER saved: built at
+   scan-confirm, discarded at departure. 7 handcrafted chunk-silhouette
+   templates × seeded variation (mirror/flip, node placement, hazard). ═══ */
+/* each template = list of wobble-ellipse blobs [cx, cy, rx, ry] (+ optional
+   carve blobs and 1-tile bridges). Template 6 = the rare alien layout. */
+const MTEMPLATES = [
+  { blobs: [[21, 12, 10.5, 6.4]] },                                              // one big
+  { blobs: [[13, 11, 7, 5], [31, 14, 6, 4.4]] },                                 // twin
+  { blobs: [[21, 12, 10.5, 6.6]], carve: [[21, 12, 4.6, 2.7]] },                 // ring
+  { blobs: [[16, 8, 9, 4.2], [12, 15, 4.6, 5.2], [30, 16, 5, 3.6]] },            // L + spur
+  { blobs: [[9, 7, 4.8, 3.4], [31, 6, 4.4, 3], [11, 18, 4.4, 3.2], [30, 17, 5.2, 3.6], [21, 12, 3.6, 2.6]] },   // scattered
+  { blobs: [[8, 12, 4.8, 3.6], [21, 12, 4.8, 3.6], [34, 12, 4.8, 3.6]],
+    bridges: [[12, 17, 12], [25, 30, 12]] },                                     // bridge-of-three
+  { blobs: [[21, 12, 5.6, 4.2], [9, 7, 4, 3], [33, 8, 4.2, 3], [21, 20, 5, 2.8]], vault: [21, 11] },   // rare-alien
+];
+function genMission(sd, card) {
+  const rng = mulberry((sd * 41 + 17) >>> 0);
+  const tp = MTEMPLATES[card.tmpl];
+  const flip = rng() < 0.5, mir = rng() < 0.5;   // seeded mirror/flip variation
+  const mx2 = gx => flip ? GW - 1 - gx : gx, my2 = gy => mir ? GH - 1 - gy : gy;
+  const s0 = rng() * 6.28, s1 = rng() * 6.28;
+  landAge = []; occ = [];
+  for (let gy = 0; gy < GH; gy++) {
+    landAge[gy] = []; occ[gy] = [];
+    for (let gx = 0; gx < GW; gx++) { occ[gy][gx] = null; landAge[gy][gx] = 0; }
+  }
+  const stamp = (bl, val) => {
+    const [bcx, bcy, brx, bry] = bl;
+    for (let gy = 2; gy < GH - 2; gy++) for (let gx = 2; gx < GW - 2; gx++) {
+      const dx = (gx - bcx) / brx, dy = (gy - bcy) / bry;
+      const r = Math.hypot(dx, dy), ang = Math.atan2(dy, dx);
+      const wob = 1 + 0.13 * Math.sin(ang * 3 + s0) + 0.08 * Math.sin(ang * 5 + s1);
+      if (r < wob * 0.92) landAge[my2(gy)][mx2(gx)] = val;
+    }
+  };
+  for (const bl of tp.blobs) stamp(bl, 1);
+  for (const bl of (tp.carve || [])) stamp(bl, 0);
+  for (const br of (tp.bridges || [])) {         // 1-wide rock catwalks
+    const [x0, x1, by] = br;
+    for (let gx = x0; gx <= x1; gx++) landAge[my2(by)][mx2(gx)] = 1;
+  }
+  recomputeIsleIds();
+  buildings = []; flora = []; wires = []; anims = []; robots = []; ferries = [];
+  decor = []; decorMap = new Map();
+  terrainDirty = true; bgDirty = true;
+  /* the LARGEST chunk hosts the barge + CARGO LOADER */
+  const sizes = {};
+  for (let gy = 0; gy < GH; gy++) for (let gx = 0; gx < GW; gx++)
+    if (landAge[gy][gx]) sizes[isleId[gy][gx]] = (sizes[isleId[gy][gx]] || 0) + 1;
+  let bigId = 0, bigN = 0;
+  for (const id in sizes) if (sizes[id] > bigN) { bigN = sizes[id]; bigId = +id; }
+  let cx3 = 0, cy3 = 0, cn2 = 0;
+  for (let gy = 0; gy < GH; gy++) for (let gx = 0; gx < GW; gx++)
+    if (landAge[gy][gx] && isleId[gy][gx] === bigId) { cx3 += gx; cy3 += gy; cn2++; }
+  cx3 = Math.round(cx3 / cn2); cy3 = Math.round(cy3 / cn2);
+  const ls = moonPlaceSpot('cargoloader', cx3, cy3);
+  const loader = ls ? addBuilding('cargoloader', ls.gx, ls.gy) : null;
+  /* deposits — richer with more stars; every chunk gets at least one so the
+     jet hop matters. Vault (rare template) sits on the centre chunk. */
+  const smallN = [0, 6, 8, 10][card.stars], bigDepN = [0, 1, 2, 3][card.stars];
+  const free = [];
+  for (let gy = 0; gy < GH; gy++) for (let gx = 0; gx < GW; gx++) {
+    if (!landAge[gy][gx] || occ[gy][gx]) continue;
+    if (loader && Math.hypot(gx - (loader.gx + 1), gy - loader.gy) < 3) continue;
+    free.push({ gx, gy, il: isleId[gy][gx] });
+  }
+  for (let i = free.length - 1; i > 0; i--) {
+    const j = (rng() * (i + 1)) | 0;
+    const t = free[i]; free[i] = free[j]; free[j] = t;
+  }
+  const depRes = () => rng() < 0.7 ? card.type : (card.type === 'crystal' ? 'astroiron' : 'crystal');
+  const mkD = (t, big) => flora.push({ type: 'dep', res: card.type === 'alloy' ? (rng() < 0.5 ? 'astroiron' : 'crystal') : depRes(),
+                                       big, gx: t.gx, gy: t.gy, hits: 0, gone: false, regrowT: 0, shakeT: 0, golden: false });
+  const seenIsle = new Set();
+  let sN = 0, bN = 0;
+  if (card.tmpl === 6) {                         // the ALIEN VAULT, dead centre
+    let bt = null, bd = 1e9;
+    for (const t of free) {
+      const d = Math.hypot(t.gx - (flip ? GW - 1 - 21 : 21), t.gy - (mir ? GH - 1 - 11 : 11));
+      if (t.il !== bigId && d < bd) { bd = d; bt = t; }   // vault on the centre chunk (not the loader's)
+    }
+    if (!bt) bt = free[0];
+    flora.push({ type: 'vault', gx: bt.gx, gy: bt.gy, hits: 0, gone: false, regrowT: 0, shakeT: 0, golden: false });
+    seenIsle.add(bt.il);
+  }
+  for (const t of free) {
+    if (flora.some(f => Math.abs(f.gx - t.gx) < 2 && Math.abs(f.gy - t.gy) < 2)) continue;
+    if (!seenIsle.has(t.il)) { mkD(t, false); sN++; seenIsle.add(t.il); continue; }   // 1 per chunk first
+    if (bN < bigDepN && rng() < 0.3) { mkD(t, true); bN++; }
+    else if (sN < smallN) { mkD(t, false); sN++; }
+    if (sN >= smallN && bN >= bigDepN) break;
+  }
+  /* the live expedition state (allocated ONCE per mission — pools inside) */
+  const chunks = [];
+  for (let i = 0; i < 40; i++) chunks.push({ on: false });
+  const pebbles = [];
+  for (let i = 0; i < 8; i++) pebbles.push({ on: false });
+  /* crumble hazard: mark bare edge tiles (never under deposits/loader) */
+  const crumbles = [];
+  if (card.hazard === 'crumble') {
+    for (const t of free) {
+      if (crumbles.length >= 12) break;
+      const edge = !isLand(t.gx - 1, t.gy) || !isLand(t.gx + 1, t.gy) || !isLand(t.gx, t.gy - 1) || !isLand(t.gx, t.gy + 1);
+      if (!edge || occ[t.gy][t.gx] || floraAt(t.gx, t.gy)) continue;
+      if (loader && Math.hypot(t.gx - loader.gx, t.gy - loader.gy) < 4) continue;
+      crumbles.push({ gx: t.gx, gy: t.gy, t: -1, goneT: 0 });
+    }
+  }
+  exped = { stars: card.stars, type: card.type, hazard: card.hazard, tmpl: card.tmpl, rare: !!card.rare,
+            timer: EXP_BATT[card.stars], timerMax: EXP_BATT[card.stars], warned: false, rescue: 0,
+            chunks, pebbles, crumbles, boosts: 0, beacon: null, fullT: 0,
+            pebT: 16 + rng() * 6, flareT: 24 + rng() * 8, flareA: 0, flareWarnT: 0, sparkT: 5,
+            started: false };
+  recomputePower(); recomputeAnims();
+}
+
 /* ── max-age land growth: at Age 7 the island keeps spreading every +25 pop ── */
 function growCandidates() {
   const out = [];
@@ -3212,10 +3924,55 @@ function rebuildMarsTerrain() {
   drawDecorTerrain(tg);
   drawWires(tg);
 }
+/* ── v7: the MISSION bake — deep-space starfield (near-black indigo, a warm
+   sun-glow corner, tiny Earth/Moon/Mars dots) under cratered rock chunks.
+   ALL of it lives in this one bake — zero per-frame cost. ── */
+function rebuildMissionTerrain() {
+  const gr = tg.createLinearGradient(0, 0, WORLD_W, WORLD_H);
+  gr.addColorStop(0, '#05070f'); gr.addColorStop(0.55, '#090d1e'); gr.addColorStop(1, '#0e1428');
+  tg.fillStyle = gr; tg.fillRect(0, 0, WORLD_W, WORLD_H);
+  /* stars in 3 brightnesses */
+  for (let i = 0; i < 150; i++) {
+    const x = (i * 211 + 43) % WORLD_W, y = (i * 149 + 87) % WORLD_H;
+    if (isLandPx(x, y) || isLandPx(x, y + 6)) continue;
+    tg.fillStyle = i % 7 === 0 ? 'rgba(230,240,255,0.95)' : i % 3 ? 'rgba(180,200,240,0.55)' : 'rgba(130,150,200,0.35)';
+    tg.fillRect(x, y, i % 7 === 0 ? 3 : 2, i % 7 === 0 ? 3 : 2);
+  }
+  /* the faraway sun warms one corner */
+  const sun = tg.createRadialGradient(WORLD_W - 60, 60, 10, WORLD_W - 60, 60, 420);
+  sun.addColorStop(0, 'rgba(255,220,150,0.30)'); sun.addColorStop(0.4, 'rgba(255,190,110,0.10)'); sun.addColorStop(1, 'rgba(255,190,110,0)');
+  tg.fillStyle = sun; tg.fillRect(0, 0, WORLD_W, WORLD_H);
+  /* home, tiny and far: Earth + Moon + Mars dots */
+  tg.drawImage(SPR.earthBall, 70, WORLD_H - 120, 16, 16);
+  tg.fillStyle = '#b8bfc9'; tg.beginPath(); tg.arc(92, WORLD_H - 114, 3, 0, 6.3); tg.fill();
+  tg.drawImage(SPR.ballMars, 150, WORLD_H - 90, 10, 10);
+  coast = [];                                    // no surf out here either
+  /* cratered rock tiles + pale sunlit rims */
+  for (let gy = 0; gy < GH; gy++) for (let gx = 0; gx < GW; gx++) {
+    if (!isLand(gx, gy)) continue;
+    const x = tX(gx), y = tY(gy);
+    tg.drawImage(SPR.astile[(gx * 7 + gy * 13 + (gx * gy) % 5) % 4], x, y);
+    tg.fillStyle = 'rgba(220,225,240,0.30)';     // pale rocky rims (sun side)
+    if (!isLand(gx, gy - 1)) tg.fillRect(x, y, 32, 3);
+    if (!isLand(gx + 1, gy)) tg.fillRect(x + 29, y, 3, 32);
+    tg.fillStyle = 'rgba(6,8,16,0.5)';           // shadow side
+    if (!isLand(gx - 1, gy)) tg.fillRect(x, y, 3, 32);
+  }
+  /* underside cliffs — the chunks read as floating rocks */
+  for (let gy = 0; gy < GH; gy++) for (let gx = 0; gx < GW; gx++) {
+    if (!isLand(gx, gy) || isLand(gx, gy + 1)) continue;
+    const x = tX(gx), y = tY(gy);
+    tg.fillStyle = '#38352c'; tg.fillRect(x, y + 26, 32, 6);
+    tg.fillStyle = '#211f1a'; tg.fillRect(x, y + 30, 32, 4);
+    tg.fillStyle = '#16140f'; tg.fillRect(x + 3, y + 34, 26, 3);
+    tg.fillRect(x + 8, y + 37, 14, 2);
+  }
+}
 function rebuildTerrain() {
   terrainDirty = false;
   if (world === 'moon') { rebuildMoonTerrain(); bgDirty = true; return; }
   if (world === 'mars') { rebuildMarsTerrain(); bgDirty = true; return; }
+  if (world === 'mission') { rebuildMissionTerrain(); bgDirty = true; return; }   // v7
   const gr = tg.createLinearGradient(0, 0, 0, WORLD_H);
   gr.addColorStop(0, '#2b7db8'); gr.addColorStop(1, '#175a92');
   tg.fillStyle = gr; tg.fillRect(0, 0, WORLD_W, WORLD_H);
@@ -3329,6 +4086,12 @@ function floraSprite(f) {
   if (f.type === 'ice') return SPR.ice[Math.min(f.hits, 2)];
   if (f.type === 'hem') return SPR.hem[Math.min(f.hits, 2)];         // v6b: hematite
   if (f.type === 'frost') return SPR.frost[Math.min(f.hits, 2)];     // v6b: frost patch
+  if (f.type === 'dep') {                                            // v7: asteroid deposits
+    const st = Math.min(f.hits, 2);
+    if (f.res === 'crystal') return (f.big ? SPR.depCrysBig : SPR.depCrys)[st];
+    return (f.big ? SPR.depIronBig : SPR.depIron)[st];
+  }
+  if (f.type === 'vault') return SPR.vault[Math.min(f.hits, 2)];     // v7: the alien vault
   return SPR.rock[Math.min(f.hits, 2)];
 }
 function drawFlora(g, f, shake) {
@@ -3345,6 +4108,12 @@ function drawBuilding(g, b) {
   }
   if (b.k === 'popcannon') {                    // v4c: base only — the barrel is a live overlay
     g.drawImage(SPR.cannonBase, tX(b.gx), tY(b.gy) + 32 - SPR.cannonBase.height);
+    return;
+  }
+  if (B[b.k].mega) {                            // v7: staged megastructure bakes
+    const arr = (islandPowered ? SPR.megaLit : SPR.mega)[b.k];
+    const ms = arr[clamp(b.stage || 0, 0, arr.length - 1)];
+    g.drawImage(ms, tX(b.gx), tY(b.gy) + sz * 32 - ms.height);
     return;
   }
   const lit = (islandPowered && b.k !== 'campfire') || (b.k === 'stargate' && legends);
@@ -3406,6 +4175,15 @@ function recomputeAnims() {
       case 'marslander': anims.push({ t: 'landerGlow', x: x + 32, y: y + 40, b });
                          anims.push({ t: 'beacon', x: x + 15, y: y + 2, b, m: true }); break;
       case 'marsport':   anims.push({ t: 'beacon', x: x + 56, y: y + 2, b }); break;
+      /* v7 — asteroid rush */
+      case 'refinery':   anims.push({ t: 'furnace', x: x + 16, y: y + 30, b });
+                         anims.push({ t: 'smoke', x: x + 52, y: y - 4, b, cool: Math.random() }); break;
+      case 'cargoloader':anims.push({ t: 'beacon', x: x + 57, y: y + 8, b, m: true }); break;
+      case 'minidrill':  anims.push({ t: 'beacon', x: x + 25, y: y + 22, b, m: true }); break;
+      case 'arcology':   if (megaDone(b)) anims.push({ t: 'beacon', x: x + 48, y: y - 208, b }); break;
+      case 'crystalspire': if (megaDone(b)) anims.push({ t: 'aura', x: x + 32, y: y - 200, b, cool: Math.random() }); break;
+      case 'starharbor': if (megaDone(b)) { anims.push({ t: 'beacon', x: x + 63, y: y - 36, b, m: true });
+                                            anims.push({ t: 'droneHome', x: x + 48, y: y + 20, b, ph: Math.random() * 20 }); } break;
     }
   }
   /* v5a: decoration overlays — fountain sparkle, waving flags, warm lamps,
@@ -3494,7 +4272,11 @@ const cnt = k => {
 };
 function capPop() {
   let c = 2;
-  for (const b of allB()) if (!b.rubble && B[b.k].pop) c += B[b.k].pop;
+  for (const b of allB()) {
+    if (b.rubble || !B[b.k].pop) continue;
+    if (B[b.k].mega && !megaDone(b)) continue;   // v7: nobody lives on a construction site
+    c += B[b.k].pop;
+  }
   return c;
 }
 function canAfford(cost) { for (const r in cost) if ((res[r] || 0) < cost[r]) return false; return true; }
@@ -3519,6 +4301,7 @@ function economyTick() {
   for (const b of every) {
     if (b.rubble) continue;                     // rubble makes nothing
     const d = B[b.k];
+    if (d.mega && !megaDone(b)) continue;       // v7: construction sites draw nothing yet
     if (d.prod && d.prod.power) powerInc += d.prod.power * mult;
     if (d.needPower && b.conn) powerDem += d.needPower;   // v5a: only the WIRED city draws
   }
@@ -3532,6 +4315,7 @@ function economyTick() {
     const d = B[b.k];
     b.idle = null;
     if (b.rubble) continue;
+    if (d.mega && !megaDone(b)) continue;       // v7: under construction — feeds first!
     if (d.needPower) {
       if (!b.conn) { b.powered = false; b.idle = 'plug'; continue; }   // v5a: wire it in! (🔌)
       if (avail >= d.needPower) { avail -= d.needPower; b.powered = true; }
@@ -3558,6 +4342,7 @@ function economyTick() {
       if (r === 'regolith') life.regolith += amt;
       if (r === 'ice') life.ice += amt;
       if (r === 'fuel') life.fuel += amt;        // v6a: REFINE 20 FUEL goal
+      if (r === 'starsteel') life.starsteel += amt;   // v7: FORGE 20 STARSTEEL goal
     }
   }
   /* population eats (age 2+); never dies — growth just pauses */
@@ -3659,7 +4444,7 @@ function ageUp() {
 
 /* ── building placement ── */
 /* each building kind has a HOME world; `both` = buildable anywhere (v4c) */
-const bHome = k => B[k].moon ? 'moon' : B[k].mars ? 'mars' : 'earth';
+const bHome = k => B[k].moon ? 'moon' : B[k].mars ? 'mars' : B[k].mission ? 'mission' : 'earth';   // v7
 function validAt(k, gx, gy) {
   const s = B[k].size || 1, coastal = !!B[k].coastal;
   if (!B[k].both && bHome(k) !== world) return false;   // each world builds its own kinds
@@ -3669,6 +4454,9 @@ function validAt(k, gx, gy) {
     /* coastal buildings (seaport) NEED a beach tile; everything else avoids
        sand — except POWER POLES, which march across any land (v5a) */
     if (!B[k].pole && sandAt(gx + dx, gy + dy) !== coastal) return false;
+    /* v7: megastructures rise on the MAIN island only (kid-legible skyline),
+       and never so far north the tower would poke out of the world bake */
+    if (B[k].mega && (gy < 7 || isleIdAt(gx + dx, gy + dy) !== isleIdAt(CX, CYG))) return false;
   }
   return true;
 }
@@ -3683,9 +4471,14 @@ function addBuilding(k, gx, gy) {
   return b;
 }
 function placeBuilding(k, gx, gy) {
+  if (world === 'mission') return placeMissionB(k, gx, gy);   // v7: chunks, not resources
   if (!validAt(k, gx, gy) || !canAfford(B[k].cost)) return false;
   payCost(B[k].cost);
   const b = addBuilding(k, gx, gy);
+  if (B[k].mega) {                               // v7: a FOUNDATION rises — feed it starsteel!
+    b.stage = 0;
+    banners.push({ title: 'FOUNDATION LAID!', sub: '✕ at the site delivers starsteel — ' + megaMax(k) + ' loads to go!', t: 0, dur: 3 });
+  }
   if (B[k].robot) spawnRobot(tX(gx) + 16, tY(gy) + 40);
   if (B[k].rover) spawnRover(tX(gx) + 16, tY(gy) + 40);      // v6a: garage rolls out a rover
   if (k === 'greenhouse') pushEvent('salad');                // v6a: dome residents will rave
@@ -3713,6 +4506,10 @@ function removeBuilding(b) {
   if (b.k === 'campfire') {                     // thanks, old friend
     res.wood += 20;
     addFloat(tX(b.gx) + s * 16, tY(b.gy), '+20 wood · GOODBYE OLD FLAME', '#ffb46a', 'wood');
+  } else if (B[b.k].mega) {                     // v7: foundation + every delivered feed comes back
+    refund(B[b.k].cost);
+    for (let i = 0; i < (b.stage || 0); i++) refund(MEGA[b.k].feeds[i]);
+    addFloat(tX(b.gx) + s * 16, tY(b.gy), 'REFUNDED!', '#7dff9a');
   } else {
     refund(B[b.k].cost);
     addFloat(tX(b.gx) + s * 16, tY(b.gy), 'REFUNDED!', '#7dff9a');
@@ -3994,6 +4791,23 @@ function harvestFlora(f, px2, py2) {
     addFloat(tX(f.gx) + 16, tY(f.gy) - 4, '+2', RES_COL.frost, 'frost');
     for (let i = 0; i < 4; i++) spawnP(tX(f.gx) + 16, tY(f.gy) + 12, SPR.iceChip, { life: 0.5 });
     SFX.mine(); SFX.pop();
+  } else if (f.type === 'dep') {                // v7: asteroid deposit — whacks crack it
+    if (f.big) {                                 // big ones laugh at pickaxes
+      addFloat(tX(f.gx) + 16, tY(f.gy) - 14, 'TOO TOUGH! CANNON OR DRILL!', '#ffd24a');
+      SFX.cancel();
+      f.shakeT = 0;
+      return;
+    }
+    f.hits++;
+    for (let i = 0; i < 4; i++) spawnP(tX(f.gx) + 16, tY(f.gy) + 12, SPR.chip, { life: 0.5 });
+    if (f.hits >= 3) burstDeposit(f);
+    else { SFX.mine(); addFloat(tX(f.gx) + 16, tY(f.gy) - 8, 'CRACK ' + f.hits + '/3', '#d8c49a'); }
+    return;                                      // no coin, no default depletion
+  } else if (f.type === 'vault') {              // v7: the alien vault shrugs off everything but cannons
+    addFloat(tX(f.gx) + 16, tY(f.gy) - 18, 'SEALED TIGHT — CANNON ONLY!', '#7dffe0');
+    SFX.cancel();
+    f.shakeT = 0;
+    return;
   } else {
     res.stone += 2;
     addFloat(tX(f.gx) + 16, tY(f.gy) - 4, '+2', RES_COL.stone, 'stone');
@@ -4120,6 +4934,15 @@ function boardingPads() {
       if (sy) zone(sy, 'cruiser', 'mars');
     }
   } else if (world === 'mars') {
+    /* v7: the SURVEY BARGE waits beside the MARS SHIPYARD. Loaded + express
+       unlocked → she flies the cargo straight home; otherwise → the belt! */
+    if (bargeStage >= 3) {
+      /* parked just far enough from the yard that ✕ AT the yard still
+         means "upgrade", and ✕ AT the barge means "fly" */
+      const my = buildings.find(b => b.k === 'marsyard' && !b.rubble);
+      if (my) out.push({ b: my, ship: 'barge', to: (firstHaulDone && cargoTotal() > 0) ? 'earth' : 'scan',
+                         cx: tX(my.gx) + 118, cy: tY(my.gy) + 74 });
+    }
     /* kid-proof absolute: pre-fuel the cruiser waits at the LANDER and can
        ALWAYS fly home free — nobody strands on the red planet, ever */
     if (marsReturnDone || marsFueled) {
@@ -4128,6 +4951,10 @@ function boardingPads() {
     }
     const l = buildings.find(b => b.k === 'marslander');
     if (l) zone(l, 'cruiser', 'moon');
+  } else if (world === 'mission') {
+    /* v7: home is the barge at the CARGO LOADER — always boardable */
+    const cl = buildings.find(b => b.k === 'cargoloader');
+    if (cl) out.push({ b: cl, ship: 'barge', to: 'mars', cx: tX(cl.gx) + 32, cy: tY(cl.gy) + 76 });
   }
   return out;
 }
@@ -4251,11 +5078,13 @@ function boardTravel(p, bp) {
   if (!travel) {
     const s = B[bp.b.k].size || 1;
     travel = { phase: 'board', ship: bp.ship, from: world, to: bp.to,
-               dir: bp.to === 'mars' ? 'toMars'
+               dir: bp.to === 'scan' ? 'toBelt'
+                  : bp.to === 'mars' ? 'toMars'
                   : bp.to === 'earth' ? 'toEarth'
                   : world === 'mars' ? 'toMoonHome' : 'toMoon',
+               express: bp.ship === 'barge' && bp.to === 'earth',   // v7: EXPRESS HOME
                pad: bp.b, srcSite: { gx: bp.b.gx, gy: bp.b.gy, s }, destPad: null, site: null,
-               t: 0, n: 5, ry: 0 };
+               t: 0, n: bp.ship === 'barge' ? 3 : 5, ry: 0 };
   }
   SFX.confirm();
   addFloat(bp.cx, bp.cy - 76, 'P' + (p.pi + 1) + ' ABOARD!', p.pi ? '#ff9a8a' : '#8fd4ff');
@@ -4287,16 +5116,18 @@ function placePlayersAt(site) {
 }
 function updateTravel(dt) {
   const q = travel;
+  const n0 = q.ship === 'barge' ? 3 : 5;         // v7: the barge counts a snappy 3-2-1
   if (q.phase === 'board') {
     if (players.length && players.every(p => p.aboard)) {
-      q.phase = 'count'; q.t = 0; q.n = 5; SFX.count();
+      q.phase = 'count'; q.t = 0; q.n = n0; SFX.count();
     }
     return;
   }
   if (q.phase === 'count' && !players.every(p => p.aboard)) {   // P2 joined mid-count
-    q.phase = 'board'; q.t = 0; q.n = 5;
+    q.phase = 'board'; q.t = 0; q.n = n0;
     return;
   }
+  if (q.phase === 'scan') { if (scanScr) scanScr.t += dt; return; }   // v7: waiting on the choice
   q.t += dt;
   if (q.phase === 'count') {
     shakeAmt = Math.max(shakeAmt, 1.2);
@@ -4316,8 +5147,13 @@ function updateTravel(dt) {
     }
     if (q.t > 2.6) { q.phase = 'stars'; q.t = 0; shakeAmt = 0; }
   } else if (q.phase === 'stars') {
-    if (!q.sw && q.t > 1.1) { q.sw = true; arriveOtherWorld(q); }
-    if (q.t > 2.4) { q.phase = 'land'; q.t = 0; q.ry = 430; }
+    if (q.to === 'scan') {                       // v7: the SCAN takes over mid-warp
+      if (q.t > 1.2) { q.phase = 'scan'; q.t = 0; scanScr = genScanCards(); SFX.ding(); }
+      return;
+    }
+    const starsDur = q.express ? 3.4 : 2.4;      // express: time to wave at Mars + the Moon
+    if (!q.sw && q.t > (q.express ? 2.1 : 1.1)) { q.sw = true; arriveOtherWorld(q); }
+    if (q.t > starsDur) { q.phase = 'land'; q.t = 0; q.ry = 430; }
   } else if (q.phase === 'land') {
     const f = clamp(q.t / 2.2, 0, 1);
     q.ry = (1 - f) * (1 - f) * 430;
@@ -4346,6 +5182,7 @@ function arriveOtherWorld(q) {
   wobbleN = 0;
   for (const p of players) if (p.mode === 'cannon') unmanCannon(p);
   swapTo(q.to);
+  if (q.from === 'mission') { parked.delete('mission'); exped = null; }   // v7: asteroid maps evaporate
   for (const pp of parts) pp.on = false;        // no stale debris across worlds
   for (const ff of floats) ff.on = false;
   if (q.ship === 'cruiser') cruiserAt = q.to === 'mars' ? 'mars' : 'moon';
@@ -4365,7 +5202,10 @@ function arriveOtherWorld(q) {
       : (moonArrived
           ? (buildings.find(b => b.k === 'moonport') || buildings.find(b => b.k === 'lander'))
           : buildings.find(b => b.k === 'lander'));
-  else if (q.to === 'mars') dp = (marsFueled || marsReturnDone)
+  else if (q.to === 'mars') dp = q.ship === 'barge'
+      ? (buildings.find(b => b.k === 'marsyard') ||
+         buildings.find(b => b.k === 'marsport') || buildings.find(b => b.k === 'marslander'))
+      : (marsFueled || marsReturnDone)
       ? (buildings.find(b => b.k === 'marsport') || buildings.find(b => b.k === 'marslander'))
       : buildings.find(b => b.k === 'marslander');
   else dp = buildings.find(b => b.k === 'launchpad' && !b.rubble);
@@ -4388,6 +5228,40 @@ function finishTravel(q) {
   placePlayersAt(q.site);
   shakeAmt = 0;
   travel = null;
+  if (q.to === 'mission') {                      // v7: boots on the asteroid!
+    exped.started = true;
+    banners.push({ title: 'ASTEROID ANCHORED!', sub: 'Mine fast — the ship battery is ticking!', t: 0, dur: 3.2 });
+    SFX.fanfare();
+    updateCamera(0, true);
+    return;                                      // no save — mission worlds are never saved
+  }
+  if (q.from === 'mission') {                    // v7: home at Mars, mission bookkeeping
+    expeditionsDone++;
+    const harbor = megaCompleteCnt('starharbor') >= 1;
+    if (q.rescue) {
+      banners.push({ title: 'SAFE AND SOUND!', sub: 'The tug kept every banked crate — good haul anyway!', t: 0, dur: 3.6, legendary: true });
+      SFX.fanfare();
+    } else {
+      banners.push({ title: 'EXPEDITION COMPLETE!', sub: cargoTotal() > 0 ? 'Crates aboard: ' + cargoTotal() + ' — cargo unloads on EARTH!' : 'Back at the shipyard — scan again anytime!', t: 0, dur: 3.4 });
+      SFX.fanfare();
+    }
+    if (harbor && cargoTotal() > 0) {            // STAR HARBOR: drones fetch it instantly
+      const got = Object.assign({}, cargo);
+      for (const r in got) { res[r] = (res[r] || 0) + got[r]; life[r] = (life[r] || 0) + got[r]; }
+      cargo = { astroiron: 0, crystal: 0, alloy: 0 };
+      banners.push({ title: 'STAR HARBOR RECEIVED YOUR CARGO!', sub: 'Drone freighters whisked every crate to Earth!', t: 0, dur: 3.8, legendary: true });
+      SFX.legendary(); SFX.coin();
+    }
+    updateCamera(0, true);
+    saveGame();
+    return;
+  }
+  if (q.to === 'earth' && cargoTotal() > 0) {    // v7: THE UNLOAD BEAT (relay or express)
+    unloadCargoOnEarth(q);
+  } else if (q.to === 'moon' && q.from === 'mars' && cargoTotal() > 0 && !firstHaulDone) {
+    banners.push({ title: 'CARGO TRANSFERRED!', sub: 'The crates ride with you — next stop: EARTH!', t: 0, dur: 3, legendary: true });
+    SFX.thunk();
+  }
   if (q.to === 'mars') {
     if (!marsArrived) {
       marsArrived = true;
@@ -4431,6 +5305,608 @@ function finishTravel(q) {
   }
   updateCamera(0, true);
   saveGame();
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   V7 — THE ASTEROID RUSH: scan → choose → land → mine → load → home.
+   Asteroids are replayable day-trips, never a colony. Fuel from the Moon,
+   launch from Mars, refine on Earth — every world keeps its job.
+   ═══════════════════════════════════════════════════════════════════════ */
+/* fund THE SURVEY BARGE at the Mars Shipyard — fundCruiser, verbatim shape */
+function fundBarge(p, my) {
+  if (bargeStage >= 3) return false;
+  const cost = BARGE_STAGES[bargeStage];
+  if (!canAfford(cost)) {
+    SFX.cancel();
+    const need = Object.keys(cost).filter(r2 => (res[r2] || 0) < cost[r2])
+      .map(r2 => cost[r2] + ' ' + (r2 === 'rediron' ? 'RED IRON' : r2.toUpperCase())).join(' + ');
+    addFloat(p.x, p.y - 44, 'NEED ' + need + '!', '#ff9a8a');
+    return false;
+  }
+  payCost(cost);
+  bargeStage++;
+  const done = bargeStage >= 3;
+  banners.push({ title: BARGE_STAGE_NAMES[bargeStage - 1],
+                 sub: done ? 'Board her and SCAN THE BELT — asteroids await!'
+                           : 'Stage ' + bargeStage + '/3 — keep funding at the Mars Shipyard!',
+                 t: 0, dur: done ? 4.2 : 3, legendary: done });
+  if (done) SFX.legendary(); else SFX.place();
+  const cx2 = tX(my.gx) + 32, cy2 = tY(my.gy) + 32;
+  for (let i = 0; i < (done ? 14 : 8); i++)
+    spawnP(cx2 + (Math.random() - 0.5) * 70, cy2 - 16 - Math.random() * 20, SPR.spark[i % 2], { life: 0.9 });
+  saveGame();
+  return true;
+}
+/* one-time hold upgrade: 8 → 12 crates */
+function tryBargeUpgrade(p) {
+  if (bargeUpgraded) return false;
+  if (!canAfford(BARGE_UPGRADE_COST)) {
+    SFX.cancel();
+    addFloat(p.x, p.y - 44, 'NEED ' + BARGE_UPGRADE_COST.rediron + ' RED IRON + ' + BARGE_UPGRADE_COST.parts + ' PARTS!', '#ff9a8a');
+    return false;
+  }
+  payCost(BARGE_UPGRADE_COST);
+  bargeUpgraded = true;
+  banners.push({ title: 'BIGGER CARGO HOLD!', sub: 'The barge now carries 12 crates — haul it ALL home!', t: 0, dur: 3.4, legendary: true });
+  SFX.legendary();
+  saveGame();
+  return true;
+}
+
+/* ── THE SCAN — three seeded asteroid cards, one rare in ~6 (pity at 8) ── */
+function bakeCardPreview(card) {
+  const [c, g] = C(150, 96);
+  const rng2 = mulberry((card.sd * 7 + 3) >>> 0);
+  for (let i = 0; i < 24; i++) {
+    g.fillStyle = i % 5 ? 'rgba(200,215,255,0.5)' : 'rgba(159,216,255,0.8)';
+    g.fillRect((rng2() * 146) | 0, (rng2() * 92) | 0, i % 3 ? 2 : 3, i % 3 ? 2 : 3);
+  }
+  const body = card.rare ? '#3a4468' : card.type === 'crystal' ? '#5c5470' : '#5c584e';
+  const hi   = card.rare ? '#5a6a9a' : card.type === 'crystal' ? '#746a8a' : '#736d5c';
+  const s0 = rng2() * 6.28, s1 = rng2() * 6.28;
+  const cx3 = 75, cy3 = 48, rx = 40 + rng2() * 8, ry = 24 + rng2() * 6;
+  g.fillStyle = body; g.beginPath();
+  for (let a = 0; a <= 40; a++) {
+    const th = a / 40 * 6.283;
+    const wob = 1 + 0.14 * Math.sin(th * 3 + s0) + 0.09 * Math.sin(th * 5 + s1);
+    const px2 = cx3 + Math.cos(th) * rx * wob, py2 = cy3 + Math.sin(th) * ry * wob;
+    if (a) g.lineTo(px2, py2); else g.moveTo(px2, py2);
+  }
+  g.closePath(); g.fill();
+  g.fillStyle = hi; g.beginPath(); g.ellipse(cx3 - 8, cy3 - 7, rx * 0.6, ry * 0.55, -0.3, 0, 6.3); g.fill();
+  for (let i = 0; i < 4; i++) {                  // craters
+    const a2 = rng2() * 6.28, rr2 = rng2() * 0.55 + 0.15;
+    const px2 = cx3 + Math.cos(a2) * rx * rr2, py2 = cy3 + Math.sin(a2) * ry * rr2;
+    g.fillStyle = 'rgba(20,20,28,0.5)'; g.beginPath(); g.ellipse(px2, py2, 5 + rng2() * 4, 3 + rng2() * 2.4, 0, 0, 6.3); g.fill();
+  }
+  /* resource sparkle dots in the type colour */
+  g.fillStyle = card.rare ? '#7dffe0' : card.type === 'crystal' ? '#c99bff' : '#d8c49a';
+  for (let i = 0; i < 7; i++) {
+    const a2 = rng2() * 6.28, rr2 = rng2() * 0.7;
+    g.fillRect(cx3 + Math.cos(a2) * rx * rr2 - 1.4, cy3 + Math.sin(a2) * ry * rr2 - 1.4, 3, 3);
+  }
+  if (card.rare) {                               // teal glyph glow on the vault rock
+    const gl = g.createRadialGradient(cx3, cy3, 2, cx3, cy3, 22);
+    gl.addColorStop(0, 'rgba(125,255,224,0.55)'); gl.addColorStop(1, 'rgba(125,255,224,0)');
+    g.fillStyle = gl; g.fillRect(cx3 - 22, cy3 - 22, 44, 44);
+    g.fillStyle = '#d8fff4'; g.fillRect(cx3 - 1.6, cy3 - 6, 3.2, 12); g.fillRect(cx3 - 6, cy3 - 1.6, 12, 3.2);
+  }
+  return c;
+}
+function genScanCards() {
+  expedCounter++;
+  const rng = mulberry((seed * 57 + expedCounter * 131 + 7) >>> 0);
+  const pity = expedCounter - lastRareAt >= 8;
+  const rare = forceRare || pity || rng() < 1 / 6;
+  forceRare = false;
+  const rareIdx = rare ? (rng() * 3) | 0 : -1;
+  const cards = [];
+  for (let i = 0; i < 3; i++) {
+    let card;
+    if (i === rareIdx) {
+      card = { type: 'alloy', stars: 3, hazard: 'sparky', rare: true, tmpl: 6, sd: (rng() * 1e9) | 0 };
+    } else {
+      const stars = 1 + ((rng() * 3) | 0);
+      card = { type: rng() < 0.5 ? 'astroiron' : 'crystal', stars,
+               hazard: ['pebbles', 'crumble', 'flare', 'drift'][(rng() * 4) | 0],
+               rare: false, tmpl: (rng() * 6) | 0, sd: (rng() * 1e9) | 0 };
+    }
+    card.prev = bakeCardPreview(card);           // menu-time bake — allowed off the hot path
+    cards.push(card);
+  }
+  if (rareIdx >= 0) lastRareAt = expedCounter;
+  return { cards, sel: 0, t: 0 };
+}
+function confirmScan() {
+  const card = scanScr.cards[scanScr.sel];
+  scanScr = null;
+  SFX.confirm();
+  /* raise the mission world and dive in (arriveOtherWorld's job, bespoke) */
+  clearBalls(); closeInterior();
+  for (const p of players) if (p.mode === 'cannon') unmanCannon(p);
+  parked.set('mission', mkWorldBundle('mission', MISSION_GW, MISSION_GH));
+  swapTo('mission');
+  for (const pp of parts) pp.on = false;
+  for (const ff of floats) ff.on = false;
+  genMission(seed + expedCounter * 977 + card.sd % 1000, card);
+  const q = travel;
+  const cl = buildings.find(b => b.k === 'cargoloader');
+  q.destPad = cl || null;
+  q.site = cl ? { gx: cl.gx, gy: cl.gy, s: 2 } : { gx: MISSION_GW >> 1, gy: MISSION_GH >> 1, s: 2 };
+  for (const p of players) {
+    p.x = tX(q.site.gx) + q.site.s * 16; p.y = tY(q.site.gy) + q.site.s * 32 + 20;
+    p.boat = false; p.target = null; p.carry = []; p.hop = null; p.hopH = 0; p.stunT = 0;
+  }
+  q.to = 'mission'; q.phase = 'land'; q.t = 0; q.ry = 430; q.dusted = false;
+  landGrowthSanity(true);
+  camPan = null;
+  updateCamera(0, true);
+}
+function cancelScan() {                          // ○ at the scan = fly right back, free
+  scanScr = null;
+  SFX.cancel();
+  const q = travel;
+  q.to = 'mars'; q.site = q.srcSite; q.destPad = q.pad;
+  q.phase = 'land'; q.t = 0; q.ry = 430; q.dusted = false; q.cancelled = true;
+  banners.push({ title: 'HEADING BACK!', sub: 'The belt will still be there tomorrow.', t: 0, dur: 2.4 });
+}
+function scanBtn(pi, b) {                        // pad/keyboard on the scan screen (P1 chooses)
+  if (!scanScr) return;
+  if (b === 'start') { paused = true; pauseOwner = pi; pauseIdx = 0; SFX.ui(); return; }
+  if (pi !== 0) return;
+  if (b === 'left')  { scanScr.sel = (scanScr.sel + 2) % 3; SFX.ui(); }
+  else if (b === 'right') { scanScr.sel = (scanScr.sel + 1) % 3; SFX.ui(); }
+  else if (b === 'south') confirmScan();
+  else if (b === 'east') cancelScan();
+}
+/* quit/reforge safety valve: resolve any live expedition RIGHT NOW (banked
+   cargo kept aboard, mission world discarded) — nothing dangles */
+function abortExpeditionState() {
+  if (scanScr) { scanScr = null; }
+  if (world === 'mission') {
+    swapTo('mars');
+    parked.delete('mission');
+    exped = null;
+    expeditionsDone++;
+    const my = buildings.find(b => b.k === 'marsyard') || buildings.find(b => b.k === 'marslander');
+    if (my) placePlayersAt({ gx: my.gx, gy: my.gy, s: B[my.k].size || 1 });
+    updateCamera(0, true);
+  }
+  if (travel && (travel.ship === 'barge' || travel.from === 'mission' || travel.to === 'scan')) {
+    for (const p of players) p.aboard = false;
+    travel = null;
+    if (world === 'mars') {
+      const my = buildings.find(b => b.k === 'marsyard');
+      if (my) placePlayersAt({ gx: my.gx, gy: my.gy, s: 2 });
+    }
+    updateCamera(0, true);
+  }
+  exped = null;
+  parked.delete('mission');
+}
+
+/* ── the Earth UNLOAD BEAT — crates down, resources pour in, coins ring ── */
+function unloadCargoOnEarth(q) {
+  const got = Object.assign({}, cargo);
+  cargo = { astroiron: 0, crystal: 0, alloy: 0 };
+  const pad = q.site;
+  let dx2 = 0;
+  for (const r in got) {
+    if (!got[r]) continue;
+    res[r] = (res[r] || 0) + got[r];
+    life[r] = (life[r] || 0) + got[r];
+    addFloat(tX(pad.gx) + pad.s * 16 - 40 + dx2, tY(pad.gy) - 20 - dx2 * 0.4, '+' + got[r], RES_COL[r], r);
+    dx2 += 44;
+  }
+  unloadFx = 1.6;                                // little crate-rain at the pad (render + SFX)
+  SFX.thunk(); SFX.coin();
+  setTimeout(() => { SFX.thunk(); SFX.coin(); }, 260);
+  setTimeout(() => SFX.coin(), 520);
+  if (!firstHaulDone) {
+    firstHaulDone = true;
+    banners.push({ title: 'ASTEROID CARGO DELIVERED!', sub: 'EXPRESS LINE unlocked — the barge can fly you straight home!', t: 0, dur: 4.4, legendary: true });
+    SFX.legendary();
+    fwShow = Math.max(fwShow, 4); fwT = 0;
+    pushEvent('haul');
+  } else {
+    banners.push({ title: 'ASTEROID CARGO DELIVERED!', sub: 'The refinery is hungry — forge that STARSTEEL!', t: 0, dur: 3.2, legendary: true });
+    SFX.fanfare();
+  }
+  if (q.express)
+    banners.push({ title: 'THE BARGE HEADS HOME!', sub: 'She flies herself back to the Mars Shipyard.', t: 0, dur: 2.4 });
+}
+
+/* ── deposits burst into drifting CHUNKS (pooled — never allocated hot) ── */
+function spawnChunk(x, y, resK, kick) {
+  if (!exped) return;
+  for (const ch of exped.chunks) {
+    if (ch.on) continue;
+    const a = Math.random() * 6.28;
+    const sp = (kick || 1) * (26 + Math.random() * 30) * (exped.hazard === 'drift' ? 1.8 : 1);
+    ch.on = true; ch.x = x; ch.y = y; ch.res = resK;
+    ch.vx = Math.cos(a) * sp; ch.vy = Math.sin(a) * sp;
+    return;
+  }
+}
+function burstDeposit(f) {
+  const cx2 = tX(f.gx) + 16, cy2 = tY(f.gy) + 8;
+  const n = f.big ? 5 : 2 + ((Math.random() * 2) | 0);
+  for (let i = 0; i < n; i++) spawnChunk(cx2, cy2, f.res);
+  f.gone = true; f.hits = 0; f.regrowT = 99999;  // deposits never regrow — day trips!
+  bgDirty = true;
+  SFX.burst(); SFX.pop();
+  addFloat(cx2, cy2 - 14, 'CHUNKS!', RES_COL[f.res]);
+  for (let i = 0; i < 6; i++) spawnP(cx2, cy2, SPR.chip, { vy: -40, g: -10, life: 0.6 });
+}
+function vaultBurst(f) {
+  const cx2 = tX(f.gx) + 16, cy2 = tY(f.gy) + 8;
+  const n = 2 + ((Math.random() * 2) | 0);       // 2-3 ALIEN ALLOY chunks
+  for (let i = 0; i < n; i++) spawnChunk(cx2, cy2, 'alloy');
+  exped.beacon = { x: cx2, y: cy2 + 14, t: 0 };  // ...and THE BEACON drops free
+  f.gone = true; f.hits = 0; f.regrowT = 99999;
+  bgDirty = true;
+  SFX.burst(); SFX.legendary();
+  banners.push({ title: 'THE VAULT CRACKS OPEN!', sub: 'Alien alloy — and something is glowing in there...', t: 0, dur: 3.4, legendary: true });
+  for (let i = 0; i < 10; i++) spawnP(cx2, cy2, SPR.sparkB[i % 2], { vy: -50, g: -8, life: 0.9 });
+}
+/* one cannon blast on a deposit: smalls burst, bigs + the vault crack 1/3 */
+function depositBlast(f) {
+  const cx2 = tX(f.gx) + 16, cy2 = tY(f.gy) + 8;
+  if (f.type === 'vault') {
+    f.hits++;
+    f.shakeT = 0.3; bgDirty = true;
+    if (f.hits >= 3) vaultBurst(f);
+    else { SFX.mine(); addFloat(cx2, cy2 - 14, 'CRACK ' + f.hits + '/3!', '#7dffe0'); }
+    return;
+  }
+  if (!f.big) { burstDeposit(f); return; }
+  f.hits++;
+  f.shakeT = 0.3; bgDirty = true;
+  if (f.hits >= 3) burstDeposit(f);
+  else { SFX.mine(); addFloat(cx2, cy2 - 14, 'CRACK ' + f.hits + '/3', '#d8c49a'); }
+}
+
+/* ── mission structures: paid in cargo chunks (banked first, then carried) ── */
+function cargoAvail(r) {
+  let n = cargo[r] || 0;
+  for (const p of players) for (const ck of (p.carry || [])) if (ck === r) n++;
+  return n;
+}
+function missionAfford(cost) {
+  for (const r in cost) if (cargoAvail(r) < cost[r]) return false;
+  return true;
+}
+function payMissionCost(cost) {
+  for (const r in cost) {
+    let need = cost[r];
+    const fromBank = Math.min(need, cargo[r] || 0);
+    cargo[r] -= fromBank; need -= fromBank;
+    for (const p of players) {
+      while (need > 0 && (p.carry || []).indexOf(r) >= 0) {
+        p.carry.splice(p.carry.indexOf(r), 1); need--;
+      }
+    }
+  }
+}
+function placeMissionB(k, gx, gy) {
+  const cost = MB[k];
+  if (!cost || !validAt(k, gx, gy) || !missionAfford(cost)) return false;
+  if (k === 'boostbattery' && exped.boosts >= BOOST_MAX) {
+    addFloat(tX(gx) + 16, tY(gy) - 10, 'MAX ' + BOOST_MAX + ' PER TRIP!', '#ff9a8a');
+    SFX.cancel();
+    return false;
+  }
+  payMissionCost(cost);
+  const costStr = Object.keys(cost).map(r => '-' + cost[r] + ' ' + (r === 'astroiron' ? 'IRON' : r.toUpperCase())).join(' ');
+  addFloat(tX(gx) + 16, tY(gy) - 22, costStr, '#ffd24a');
+  const b = addBuilding(k, gx, gy);
+  if (k === 'minidrill') b.drillT = 5;
+  if (k === 'boostbattery') {
+    exped.boosts++;
+    exped.timer += BOOST_SECS; exped.timerMax += BOOST_SECS;
+    addFloat(tX(gx) + 16, tY(gy) - 36, '+' + BOOST_SECS + 's BATTERY!', '#7dffe0');
+    SFX.power();
+  }
+  SFX.place();
+  for (let i = 0; i < 8; i++)
+    spawnP(tX(gx) + 16 + (Math.random() - 0.5) * 26, tY(gy) + 30, SPR.puff[1], { vy: -25, g: -10, life: 0.5 });
+  return true;
+}
+
+/* ── JET HOP — pushing off a chunk edge scans 6 tiles (3 lanes) for land ── */
+function tryJetHop(p, mx, my) {
+  if (p.hop || p.stunT > 0) return;
+  const m = Math.hypot(mx, my);
+  if (!m) return;
+  const dx = mx / m, dy = my / m;
+  for (let i = 1; i <= 6; i++) {
+    for (const lane of [0, -1, 1]) {
+      const px2 = p.x + dx * 32 * i + (-dy) * 32 * lane;
+      const py2 = p.y + dy * 32 * i + dx * 32 * lane;
+      if (!isLandPx(px2, py2)) continue;
+      const gx = Math.floor(px2 / TILE), gy = Math.floor((py2 - GY0) / TILE);
+      if (occ[gy] && occ[gy][gx]) continue;      // never land ON a structure
+      p.hop = { t: 0, dur: 0.4 + i * 0.05, x0: p.x, y0: p.y, x1: tX(gx) + 16, y1: tY(gy) + 16, bounce: false };
+      p.target = null;
+      SFX.jet();
+      for (let j = 0; j < 3; j++)
+        spawnP(p.x - dx * 6, p.y + 4, SPR.puffDark[j % 2], { vx: -dx * 30, vy: -dy * 30 - 8, g: -6, life: 0.4 });
+      return;
+    }
+  }
+  /* nothing to land on: a soft 0.25s bounce-back — never strands, no drama */
+  p.hop = { t: 0, dur: 0.25, x0: p.x, y0: p.y, xm: p.x + dx * 15, ym: p.y + dy * 15, bounce: true };
+  p.target = null;
+  SFX.bounce();
+}
+
+/* ── auto-rescue: battery empty → the tug scoops everyone up, banked cargo
+   safe, un-banked ground chunks stay behind. Never a fail state. ── */
+function startRescue() {
+  const cl = buildings.find(b => b.k === 'cargoloader');
+  banners.push({ title: 'RESCUE TUG INBOUND!', sub: 'Battery empty — everyone aboard, banked crates safe!', t: 0, dur: 3.2, legendary: true });
+  SFX.alarm(); SFX.rumble();
+  for (const p of players) {
+    p.aboard = true; p.hop = null; p.hopH = 0; p.stunT = 0; p.carry = [];
+    if (p.mode === 'cannon') unmanCannon(p);
+    p.mode = 'walk'; p.ghost = null; p.target = null;
+  }
+  const s = 2;
+  travel = { phase: 'lift', ship: 'barge', from: 'mission', to: 'mars', dir: 'toMars', rescue: true,
+             pad: cl, srcSite: cl ? { gx: cl.gx, gy: cl.gy, s } : { gx: MISSION_GW >> 1, gy: MISSION_GH >> 1, s },
+             destPad: null, site: null, t: 0, n: 0, ry: 0 };
+}
+
+/* ── the per-frame mission brain (timer, hazards, chunks, drills, banking) ── */
+function updateMission(dt) {
+  const q = exped;
+  if (!q || !q.started) return;
+  const cl = buildings.find(b => b.k === 'cargoloader');
+  /* battery drains only while actually on the rock */
+  if (!travel) {
+    q.timer -= dt;
+    if (!q.warned && q.timer <= q.timerMax * 0.25) {
+      q.warned = true;
+      banners.push({ title: 'BATTERY LOW!', sub: 'HEAD BACK TO THE SHIP — bank your chunks!', t: 0, dur: 3 });
+      SFX.alarm();
+    }
+    if (q.timer <= 0) { q.timer = 0; startRescue(); return; }
+  }
+  /* chunks drift, bounce softly at the world edge, clamp for pickup */
+  for (const ch of q.chunks) {
+    if (!ch.on) continue;
+    ch.x += ch.vx * dt; ch.y += ch.vy * dt;
+    const fr = q.hazard === 'drift' ? 0.995 : 0.975;   // DRIFT FIELD: chase-fun
+    ch.vx *= fr; ch.vy *= fr;
+    if (ch.x < 24) { ch.x = 24; ch.vx = Math.abs(ch.vx) * 0.6; }
+    if (ch.x > WORLD_W - 24) { ch.x = WORLD_W - 24; ch.vx = -Math.abs(ch.vx) * 0.6; }
+    if (ch.y < GY0 + 24) { ch.y = GY0 + 24; ch.vy = Math.abs(ch.vy) * 0.6; }
+    if (ch.y > WORLD_H - 24) { ch.y = WORLD_H - 24; ch.vy = -Math.abs(ch.vy) * 0.6; }
+    /* pickup: forgiving radius, works mid-hop, 2 per pair of arms */
+    for (const p of players) {
+      if (p.aboard || (p.carry || []).length >= 2) continue;
+      if (Math.hypot(ch.x - p.x, ch.y - p.y) < 26) {
+        ch.on = false;
+        p.carry = p.carry || [];
+        p.carry.push(ch.res);
+        addFloat(p.x, p.y - 40, 'GOT IT!', RES_COL[ch.res]);
+        SFX.pop(); SFX.coin();
+        break;
+      }
+    }
+  }
+  /* the beacon pickup (rare missions) */
+  if (q.beacon) {
+    q.beacon.t += dt;
+    for (const p of players) {
+      if (p.aboard || Math.hypot(q.beacon.x - p.x, q.beacon.y - p.y) >= 30) continue;
+      q.beacon = null;
+      beaconsFound++;
+      banners.push({ title: 'ALIEN BEACON DISCOVERED!', sub: beaconsFound >= 3 ? 'The fragments hum together...' : 'Beacon ' + beaconsFound + ' — someone MADE this...', t: 0, dur: 4, legendary: true });
+      SFX.legendary();
+      fwShow = Math.max(fwShow, 3); fwT = 0;
+      if (beaconsFound >= 3 && !mapAssembled) { mapAssembled = true; vignette = { t: 0, map: true }; }
+      break;
+    }
+  }
+  /* banking at the CARGO LOADER */
+  if (cl) {
+    const lx = tX(cl.gx) + 32, ly = tY(cl.gy) + 32;
+    q.fullT -= dt;
+    for (const p of players) {
+      if (p.aboard || !(p.carry || []).length) continue;
+      if (Math.hypot(lx - p.x, ly - p.y) > 56) continue;
+      while (p.carry.length) {
+        if (cargoTotal() >= bargeSlots()) {
+          if (q.fullT <= 0) { q.fullT = 1.2; addFloat(lx, ly - 46, 'CARGO FULL!', '#ff9a8a'); SFX.cancel(); }
+          break;
+        }
+        const r = p.carry.pop();
+        cargo[r] = (cargo[r] || 0) + 1;
+        addFloat(lx, ly - 130, '+1 CRATE (' + cargoTotal() + '/' + bargeSlots() + ')', RES_COL[r]);   // above the BOARD prompt
+        SFX.thunk();
+      }
+    }
+  }
+  /* MINI DRILLS auto-crack the deposit beside them (flares pause them) */
+  const flaring = q.flareA > 0.35;
+  for (const b of buildings) {
+    if (b.k !== 'minidrill' || flaring) continue;
+    b.drillT = (b.drillT === undefined ? 5 : b.drillT) - dt;
+    if (b.drillT > 0) continue;
+    b.drillT = 6;
+    let target = null;
+    for (const f of flora) {
+      if (f.gone || f.type !== 'dep') continue;
+      if (Math.abs(f.gx - b.gx) <= 1 && Math.abs(f.gy - b.gy) <= 1) { target = f; break; }
+    }
+    if (!target) continue;
+    target.hits++;
+    target.shakeT = 0.3; bgDirty = true;
+    SFX.mine();
+    for (let i = 0; i < 3; i++) spawnP(tX(target.gx) + 16, tY(target.gy) + 10, SPR.chip, { life: 0.5 });
+    if (target.hits >= 3) burstDeposit(target);
+  }
+  if (travel) return;                            // hazards nap during boarding/cinematics
+  /* ── the ONE hazard of this mission ── */
+  if (q.hazard === 'pebbles') {
+    q.pebT -= dt;
+    if (q.pebT <= 0) {
+      q.pebT = 20 - q.stars * 2 + Math.random() * 6;
+      let n = 1 + q.stars;
+      for (const pb of q.pebbles) {
+        if (pb.on || n <= 0) continue;
+        /* aim near the players so the dodge game is real (but fair) */
+        const pp = players[(Math.random() * players.length) | 0];
+        for (let tr = 0; tr < 14; tr++) {
+          const px2 = pp.x + (Math.random() - 0.5) * 300, py2 = pp.y + (Math.random() - 0.5) * 220;
+          if (!isLandPx(px2, py2)) continue;
+          pb.on = true; pb.x = px2; pb.y = py2; pb.warnT = 1.2; pb.fallT = 0.35;
+          n--;
+          break;
+        }
+        if (n <= 0) break;
+      }
+      if (q.pebbles.some(pb => pb.on)) { addFloat(players[0].x, players[0].y - 52, 'PEBBLES INCOMING!', '#ffd24a'); SFX.alarm(); }
+    }
+    for (const pb of q.pebbles) {
+      if (!pb.on) continue;
+      if (pb.warnT > 0) { pb.warnT -= dt; continue; }
+      pb.fallT -= dt;
+      if (pb.fallT > 0) continue;
+      pb.on = false;                             // THUMP
+      shakeAmt = Math.max(shakeAmt, 2);
+      SFX.mine(); SFX.pop();
+      for (let i = 0; i < 5; i++) spawnP(pb.x, pb.y, SPR.chip, { vy: -30, g: -8, life: 0.5 });
+      for (const ch of q.chunks) {               // scatter loose chunks a little
+        if (!ch.on || Math.hypot(ch.x - pb.x, ch.y - pb.y) > 46) continue;
+        const a = Math.atan2(ch.y - pb.y, ch.x - pb.x);
+        ch.vx += Math.cos(a) * 70; ch.vy += Math.sin(a) * 70;
+      }
+      for (const p of players) {                 // brief dizzy — zero damage, ever
+        if (!p.aboard && !p.hop && Math.hypot(p.x - pb.x, p.y - pb.y) < 34) p.stunT = 0.6;
+      }
+    }
+  } else if (q.hazard === 'crumble') {
+    for (const cr of q.crumbles) {
+      if (cr.goneT > 0) {                        // respawns after 8s
+        cr.goneT -= dt;
+        if (cr.goneT <= 0) { landAge[cr.gy][cr.gx] = 1; recomputeIsleIds(); terrainDirty = true; }
+        continue;
+      }
+      const stood = players.some(p => !p.aboard && !p.hop &&
+        Math.floor(p.x / TILE) === cr.gx && Math.floor((p.y - GY0) / TILE) === cr.gy);
+      if (cr.t < 0) { if (stood) { cr.t = 1.5; SFX.hungry(); } continue; }
+      cr.t -= dt;
+      if (cr.t > 0) continue;
+      cr.t = -1; cr.goneT = 8;                   // the tile falls away
+      landAge[cr.gy][cr.gx] = 0;
+      recomputeIsleIds();
+      terrainDirty = true;
+      SFX.boom();
+      for (let i = 0; i < 5; i++) spawnP(tX(cr.gx) + 16, tY(cr.gy) + 16, SPR.chip, { vy: 30, g: 10, life: 0.6 });
+      for (const p of players) {                 // anyone on it auto-hops to safety
+        if (p.aboard || p.hop) continue;
+        if (Math.floor(p.x / TILE) !== cr.gx || Math.floor((p.y - GY0) / TILE) !== cr.gy) continue;
+        out2: for (let r = 1; r < 6; r++) for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) {
+          const gx = cr.gx + dx, gy = cr.gy + dy;
+          if (!isLand(gx, gy) || (occ[gy] && occ[gy][gx])) continue;
+          p.hop = { t: 0, dur: 0.4, x0: p.x, y0: p.y, x1: tX(gx) + 16, y1: tY(gy) + 16, bounce: false };
+          SFX.jet();
+          break out2;
+        }
+      }
+    }
+  } else if (q.hazard === 'flare') {
+    if (q.flareA > 0) {                          // the sweep itself
+      q.flareA -= dt / 5;
+      if (q.flareA < 0) q.flareA = 0;
+    } else if (q.flareWarnT > 0) {
+      q.flareWarnT -= dt;
+      if (q.flareWarnT <= 0) {
+        q.flareA = 1;                            // WHOOSH — 5s of glow
+        for (const p of players) {
+          if (p.aboard || p.hop) continue;
+          let cover = buildings.some(b => Math.hypot(tX(b.gx) + 16 - p.x, tY(b.gy) + 16 - p.y) < 52);
+          if (!cover) cover = flora.some(f => !f.gone && (f.type === 'dep' || f.type === 'vault') &&
+                                         Math.hypot(tX(f.gx) + 16 - p.x, tY(f.gy) + 16 - p.y) < 52);
+          if (!cover) { p.stunT = 1; addFloat(p.x, p.y - 40, 'WHOA — SPARKLES!', '#ffd24a'); }
+        }
+      }
+    } else {
+      q.flareT -= dt;
+      if (q.flareT <= 0) {
+        q.flareT = 26 + Math.random() * 8;
+        q.flareWarnT = 2.5;
+        banners.push({ title: 'FLARE!', sub: 'DUCK BEHIND A BIG ROCK!', t: 0, dur: 2.2 });
+        SFX.alarm();
+      }
+    }
+  } else if (q.hazard === 'sparky') {
+    const vault = flora.find(f => f.type === 'vault' && !f.gone);
+    if (vault) {
+      q.sparkT -= dt;
+      if (q.sparkT <= 0) {
+        q.sparkT = 7;
+        const vx2 = tX(vault.gx) + 16, vy2 = tY(vault.gy) + 16;
+        SFX.zap();
+        for (let i = 0; i < 10; i++) {
+          const a = i / 10 * 6.28;
+          spawnP(vx2, vy2, SPR.sparkB[i % 2], { vx: Math.cos(a) * 110, vy: Math.sin(a) * 110, g: 0, life: 0.5 });
+        }
+        for (const p of players) {               // harmless knockback, never off the rock
+          if (p.aboard || p.hop) continue;
+          const d = Math.hypot(p.x - vx2, p.y - vy2);
+          if (d > 76) continue;
+          const a = Math.atan2(p.y - vy2, p.x - vx2);
+          for (let s2 = 40; s2 > 0; s2 -= 8) {
+            const nx = p.x + Math.cos(a) * s2, ny = p.y + Math.sin(a) * s2;
+            if (isLandPx(nx, ny)) { p.x = nx; p.y = ny; break; }
+          }
+          addFloat(p.x, p.y - 40, 'ZAP!', '#7dffe0');
+        }
+      }
+    }
+  }
+}
+
+/* ── feeding a MEGASTRUCTURE: ✕ at the site delivers the next load ── */
+function nearMega(p) {
+  let bst = null, bd = 92;
+  for (const b of buildings) {
+    if (!B[b.k].mega || megaDone(b)) continue;
+    const s = B[b.k].size || 1;
+    const d = Math.hypot(tX(b.gx) + s * 16 - p.x, tY(b.gy) + s * 16 - p.y);
+    if (d < bd) { bd = d; bst = b; }
+  }
+  return bst;
+}
+function feedMega(p, b) {
+  const cost = MEGA[b.k].feeds[b.stage || 0];
+  if (!canAfford(cost)) {
+    SFX.cancel();
+    const need = Object.keys(cost).map(r2 => cost[r2] + ' ' + r2.toUpperCase()).join(' + ');
+    addFloat(p.x, p.y - 44, 'NEED ' + need + '!', '#ff9a8a');
+    return false;
+  }
+  payCost(cost);
+  b.stage = (b.stage || 0) + 1;
+  bgDirty = true;
+  const s = B[b.k].size || 1, cx2 = tX(b.gx) + s * 16, cy2 = tY(b.gy) + s * 16;
+  if (megaDone(b)) {
+    banners.push({ title: MEGA[b.k].done, sub: MEGA[b.k].sub, t: 0, dur: 4.4, legendary: true });
+    SFX.legendary();
+    fwShow = Math.max(fwShow, 6); fwT = 0;
+    pushEvent('megadone');
+    recomputePower(); recomputeAnims();
+  } else {
+    banners.push({ title: 'FLOORS RISING!', sub: B[b.k].name + ': ' + b.stage + '/' + megaMax(b.k) + ' loads delivered!', t: 0, dur: 2.6 });
+    SFX.place();
+  }
+  for (let i = 0; i < (megaDone(b) ? 16 : 8); i++)
+    spawnP(cx2 + (Math.random() - 0.5) * s * 30, cy2 - 30 - Math.random() * 40, SPR.spark[i % 2], { life: 0.9 });
+  saveGame();
+  return true;
 }
 
 /* ── STAR GATE cinematic (the new finale) ── */
@@ -4491,7 +5967,7 @@ function eligibleDisasterTargets() {
   for (const b of buildings) {
     if (b.rubble) continue;
     const d = B[b.k];
-    if (d.special || d.wonder || d.moon || d.noremove || b.k === 'launchpad') continue;
+    if (d.special || d.wonder || d.moon || d.noremove || d.mega || b.k === 'launchpad') continue;   // v7: megas are trophies
     out.push(b);
   }
   return out;
@@ -4502,7 +5978,7 @@ function startDisaster(forceType) {
      only after the MARS PORT stands, never during the survival arc.
      The moon stays exempt. Nothing ever fires mid-transition. */
   if (travel) return false;
-  if (world === 'moon') return false;
+  if (world === 'moon' || world === 'mission') return false;   // v7: the belt has its own weather
   if (world === 'mars' && (!marsReturnDone || cnt('marsport') < 1)) return false;
   if (world === 'mars' && forceType && forceType !== 'dustdevil') return false;
   if (world === 'earth' && forceType === 'dustdevil') return false;
@@ -4736,6 +6212,7 @@ function cannonRepair(b) {                       // burst "shakes it back togeth
 function blastHarvest(f) {
   if (f.gone || f.sleepT > 0) return;            // v4d: napping treasure trees rest
   const cx2 = tX(f.gx) + 16, cy2 = tY(f.gy) + 8;
+  if (f.type === 'dep' || f.type === 'vault') { depositBlast(f); return; }   // v7
   if (f.rainbow) {                               // double bundle, never depletes
     const top = topResource();
     res.wood += 6; res.food += 4; res[top] += 2;
@@ -4779,6 +6256,22 @@ function burstAt(x, y) {
   for (const f of flora)                         // resource popper (2x yield)
     if (!f.gone && inR(f.gx, f.gy, 1)) blastHarvest(f);
   if (world === 'earth' && crate && !crate.opening && inR(crate.gx, crate.gy, 1)) openCrate();
+  if (world === 'mission' && exped) {            // v7: belt ballistics
+    for (const ch of exped.chunks) {             // billiards — knock chunks toward the loader!
+      if (!ch.on) continue;
+      const d = Math.hypot(ch.x - x, ch.y - y);
+      if (d > 90) continue;
+      const a = Math.atan2(ch.y - y, ch.x - x);
+      ch.vx += Math.cos(a) * 130; ch.vy += Math.sin(a) * 130;
+    }
+    for (const pb of exped.pebbles) {            // pop incoming pebbles = bonus iron
+      if (!pb.on || Math.hypot(pb.x - x, pb.y - y) > 64) continue;
+      pb.on = false;
+      spawnChunk(pb.x, pb.y, 'astroiron');
+      addFloat(pb.x, pb.y - 24, 'POPPED!', '#7dff9a');
+      SFX.fixed();
+    }
+  }
   SFX.coin();
   lastImpact = { type: 'burst', x, y };
 }
@@ -4824,8 +6317,25 @@ function resolveImpact(bl) {
   if (snap) {
     const s2 = B[snap.k].size || 1;
     burstAt(tX(snap.gx) + s2 * 16, tY(snap.gy) + s2 * 16);
+    autoPassCannon(bl);
+    return;
   }
-  else if (ob && !ob.rubble) fizzleShot(ob, x, y);       // friendly structure: boing, zero damage
+  /* v7: DEPOSIT magnet — on missions a near-miss still pops ON the big
+     deposit/vault (the rubble-magnet philosophy: kid-proof aim) */
+  if (world === 'mission') {
+    let dSnap = null, dd2 = 110;
+    for (const f2 of flora) {
+      if (f2.gone || !(f2.type === 'vault' || f2.type === 'dep')) continue;
+      const d3 = Math.hypot(tX(f2.gx) + 16 - x, tY(f2.gy) + 12 - y);
+      if (d3 < dd2) { dd2 = d3; dSnap = f2; }
+    }
+    if (dSnap) {
+      burstAt(tX(dSnap.gx) + 16, tY(dSnap.gy) + 12);
+      autoPassCannon(bl);
+      return;
+    }
+  }
+  if (ob && !ob.rubble) fizzleShot(ob, x, y);            // friendly structure: boing, zero damage
   else if (actorNear(x, y)) fizzleShot(null, x, y);      // players & pets: boing off the head
   else if (world === 'earth' && isWater(gx, gy)) {       // little splash
     SFX.splash();
@@ -5250,10 +6760,15 @@ function saveGame() {
   /* v4b/v6b: serialize EVERY world, whichever is active */
   const eD = worldData('earth'), mD = worldData('moon'), rD = worldData('mars');
   const s = {
-    v: 6, wld: world, name: islandName, seed, age, legends, rocketDone, firstPowerDone,
+    v: 6, wld: world === 'mission' ? 'mars' : world, name: islandName, seed, age, legends, rocketDone, firstPowerDone,
     moonRocketBought, moonArrived, moonReturnDone, returnFueled,
     marsSpotted, cruiserStage,                   // v6a (additive)
     marsArrived, marsReturnDone, marsFueled, marsBaseDone, devilsTamed, cruiserAt,   // v6b (additive)
+    /* v7 (additive) — mission maps are NEVER saved; a save taken mid-mission
+       marks rescueMe and resolves as a rescue on the next load */
+    bargeStage, bargeUpgraded, expedCounter, lastRareAt, expeditionsDone,
+    firstHaulDone, beaconsFound, mapAssembled, cargo,
+    rescueMe: world === 'mission' ? 1 : 0,
     stars, goalI, cratesOpened, rubbleFixed, mb: meteorsBlocked,
     rocketsLaunched, lastGift, battCharge,
     /* v5a: decorations (additive) + goal counters */
@@ -5268,7 +6783,7 @@ function saveGame() {
     campfireGone: !eD.buildings.some(b => b.k === 'campfire'),
     res, life, popF, playtime, crateT, rates, savedAt: Date.now(),
     /* v4d: rubble field — 1-3 = repairable rubble, 4-6 = packed-up seaport */
-    buildings: eD.buildings.filter(b => b.k !== 'campfire').map(b => [b.k, b.gx, b.gy, b.rubble ? (b.packed ? 4 : 1) + (b.repair || 0) : 0]),
+    buildings: eD.buildings.filter(b => b.k !== 'campfire').map(b => [b.k, b.gx, b.gy, b.rubble ? (b.packed ? 4 : 1) + (b.repair || 0) : 0, b.stage || 0]),   // v7: [4] = mega feed stage (additive)
     flora: eD.flora.map(f => [f.type, f.gx, f.gy, f.rainbow ? 2 : f.golden ? 1 : 0, f.hits, f.gone ? Math.ceil(f.regrowT) : 0]),
     moonBuildings: mD.buildings.map(b => [b.k, b.gx, b.gy, b.rubble ? 1 + (b.repair || 0) : 0]),
     moonFlora: mD.flora.map(f => [f.type, f.gx, f.gy, f.hits, f.gone ? Math.ceil(f.regrowT) : 0]),
@@ -5304,9 +6819,13 @@ function loadSlotSummaries() {
   }
 }
 function resetWorldState() {
+  if (world === 'mission') swapTo('mars');      // v7: never reset FROM an asteroid
+  parked.delete('mission');
   swapTo('earth');                              // Earth is always the reset baseline
-  res = { wood: 0, stone: 0, food: 0, ore: 0, metal: 0, parts: 0, science: 0, regolith: 0, ice: 0, he3: 0, fuel: 0, rediron: 0, frost: 0 };
-  life = { metal: 0, parts: 0, science: 0, regolith: 0, ice: 0, fuel: 0, rediron: 0, frost: 0 };
+  res = { wood: 0, stone: 0, food: 0, ore: 0, metal: 0, parts: 0, science: 0, regolith: 0, ice: 0, he3: 0, fuel: 0, rediron: 0, frost: 0,
+          astroiron: 0, crystal: 0, alloy: 0, starsteel: 0 };
+  life = { metal: 0, parts: 0, science: 0, regolith: 0, ice: 0, fuel: 0, rediron: 0, frost: 0,
+           astroiron: 0, crystal: 0, alloy: 0, starsteel: 0 };
   pop = 2; popF = 2; hungry = false; firstPowerDone = false;
   powerInc = 0; powerDem = 0; islandPowered = false;
   buildings = []; seqN = 1; flora = []; wires = []; anims = [];
@@ -5327,6 +6846,11 @@ function resetWorldState() {
   /* v6b: REFORGE resets the entire cosmos — Mars included */
   marsArrived = false; marsReturnDone = false; marsFueled = false;
   marsBaseDone = false; devilsTamed = 0; cruiserAt = 'moon';
+  /* v7: ...and the belt (stars persist elsewhere) */
+  bargeStage = 0; bargeUpgraded = false; expedCounter = 0; lastRareAt = 0;
+  expeditionsDone = 0; firstHaulDone = false; beaconsFound = 0; mapAssembled = false;
+  cargo = { astroiron: 0, crystal: 0, alloy: 0 };
+  exped = null; scanScr = null; forceRare = false; unloadFx = 0;
   for (const m of parked.values()) {
     m.landAge = []; m.occ = []; m.isleId = []; m.coast = [];
     m.buildings = []; m.flora = []; m.wires = []; m.anims = []; m.robots = []; m.ferries = [];
@@ -5403,6 +6927,12 @@ function loadGame(slot) {
   marsArrived = !!s.marsArrived; marsReturnDone = !!s.marsReturnDone;
   marsFueled = !!s.marsFueled; marsBaseDone = !!s.marsBaseDone;
   devilsTamed = s.devilsTamed || 0; cruiserAt = s.cruiserAt || 'moon';
+  /* v7 (additive — a v6 save loads with all of this at zero) */
+  bargeStage = s.bargeStage || 0; bargeUpgraded = !!s.bargeUpgraded;
+  expedCounter = s.expedCounter || 0; lastRareAt = s.lastRareAt || 0;
+  expeditionsDone = s.expeditionsDone || 0; firstHaulDone = !!s.firstHaulDone;
+  beaconsFound = s.beaconsFound || 0; mapAssembled = !!s.mapAssembled;
+  cargo = Object.assign({ astroiron: 0, crystal: 0, alloy: 0 }, s.cargo);
   age = 1;
   genIsland(s.seed || 1);
   age = s.age || 1;
@@ -5424,8 +6954,10 @@ function loadGame(slot) {
   recomputeIsleIds();
   growNextPop = s.growNextPop || 0;
   islandFull = old ? false : !!s.islandFull;     // the v3 sea has room again!
-  res = Object.assign({ wood: 0, stone: 0, food: 0, ore: 0, metal: 0, parts: 0, science: 0, regolith: 0, ice: 0, he3: 0, fuel: 0, rediron: 0, frost: 0 }, s.res);
-  life = Object.assign({ metal: 0, parts: 0, science: 0, regolith: 0, ice: 0, fuel: 0, rediron: 0, frost: 0 }, s.life);
+  res = Object.assign({ wood: 0, stone: 0, food: 0, ore: 0, metal: 0, parts: 0, science: 0, regolith: 0, ice: 0, he3: 0, fuel: 0, rediron: 0, frost: 0,
+                        astroiron: 0, crystal: 0, alloy: 0, starsteel: 0 }, s.res);
+  life = Object.assign({ metal: 0, parts: 0, science: 0, regolith: 0, ice: 0, fuel: 0, rediron: 0, frost: 0,
+                         astroiron: 0, crystal: 0, alloy: 0, starsteel: 0 }, s.life);
   popF = s.popF || 2; pop = Math.floor(popF);
   playtime = s.playtime || 0; crateT = s.crateT || 280;
   if (!s.campfireGone) addBuilding('campfire', CX, CYG);  // retired campfires stay gone
@@ -5440,6 +6972,7 @@ function loadGame(slot) {
     const b = addBuilding(bb[0], mgx, mgy);      // trust save even if flora landed there
     if (bb[3] >= 4) { b.rubble = true; b.packed = true; b.repair = clamp(bb[3] - 4, 0, 2); }   // v4d
     else if (bb[3]) { b.rubble = true; b.repair = clamp(bb[3] - 1, 0, 2); }
+    if (B[bb[0]].mega) b.stage = clamp(bb[4] || 0, 0, megaMax(bb[0]));   // v7: feed stage
   }
   flora = [];
   for (const ff of (s.flora || [])) {
@@ -5561,10 +7094,18 @@ function loadGame(slot) {
   if (!preV5 && (s.wld === 'moon' || s.wld === 'mars')) {
     swapTo(s.wld);
     const pad = s.wld === 'mars'
-      ? (buildings.find(b => b.k === 'marsport') || buildings.find(b => b.k === 'marslander'))
+      ? (s.rescueMe && buildings.find(b => b.k === 'marsyard')) ||
+        (buildings.find(b => b.k === 'marsport') || buildings.find(b => b.k === 'marslander'))
       : (buildings.find(b => b.k === 'moonport') || buildings.find(b => b.k === 'lander'));
     if (pad) placePlayersAt({ gx: pad.gx, gy: pad.gy, s: B[pad.k].size || 1 });
     updateCamera(0, true);
+  }
+  /* v7: a save taken mid-mission resolves as a RESCUE — home at the barge,
+     banked crates intact, the asteroid long gone (mission maps never save) */
+  if (s.rescueMe) {
+    expeditionsDone++;
+    banners.push({ title: 'RESCUE TUG BROUGHT YOU HOME!', sub: 'Every banked crate is safe aboard the barge!', t: 0, dur: 4, legendary: true });
+    SFX.fanfare();
   }
   /* v4d: restore P1's dinghy, then silently heal the save — beached boats
      drift back to sea, landlocked seaports become pack-up rubble */
@@ -5656,6 +7197,8 @@ const CONTEXT_LINES = {
   salad:   'FRESH SALAD from the crater greenhouse! CRUNCH!',   // v6a
   marstrip:"You've been to MARS?! What's it LIKE?",             // v6b
   marsbase:"A whole base on MARS! We're a SPACE family!",       // v6b
+  haul:    'Rocks from SPACE landed at the pad! Real space rocks!',   // v7
+  megadone:'Have you SEEN the skyline?! We live in the future!',      // v7
 };
 const RES_POOLS = {
   milo: [
@@ -6337,9 +7880,23 @@ function talkToResident(p, r) {
     if (ev && CONTEXT_LINES[ev.k] !== r.last) line = CONTEXT_LINES[ev.k];
   }
   if (!line) {
-    let li = (Math.random() * r.pool.length) | 0;
-    if (r.pool[li] === r.last) li = (li + 1) % r.pool.length;
-    line = r.pool[li];
+    /* v7: MILO & CHIP pick up asteroid gossip once the rush is real */
+    let pool = r.pool;
+    if (r.name === 'MILO' || r.name === 'CHIP') {
+      const extra = [];
+      if (bargeStage > 0) extra.push.apply(extra, r.name === 'MILO'
+        ? ['Space rocks are just rocks that went places.', 'I asked for an asteroid. A SMALL one.']
+        : ['My hat could catch an asteroid. Probably.']);
+      if (beaconsFound > 0) extra.push.apply(extra, r.name === 'MILO'
+        ? ['That beacon hums. I hum BACK. We talk.']
+        : ['The glowy triangle winked at me. I winked first though.']);
+      if (megaCompleteTotal() > 0 && r.name === 'CHIP')
+        extra.push('The towers are taller than my hat. Barely.');
+      if (extra.length) pool = pool.concat(extra);
+    }
+    let li = (Math.random() * pool.length) | 0;
+    if (pool[li] === r.last) li = (li + 1) % pool.length;
+    line = pool[li];
   }
   r.last = line; r.say = line;
   r.sayLines = wrapSay(line);
@@ -6535,8 +8092,14 @@ function doAction(p) {
     if (marsStage() === 3 && nearKindB(p, 'marsport', 84)) { tryMarsFuel(p); return; }
     const rb3 = nearRubble(p);
     if (rb3) { repairWhack(rb3); return; }
-    const my = nearKindB(p, 'marsyard', 88);     // the tease — no ship funding yet
-    if (my) { addFloat(p.x, p.y - 44, 'THE BELT AWAITS — SOMEDAY!', '#ffd24a'); SFX.ding(); return; }
+    const my = nearKindB(p, 'marsyard', 88);     // v7: tease → barge funding → hold upgrade
+    if (my) {
+      if (!marsBaseDone) { addFloat(p.x, p.y - 44, 'THE BELT AWAITS — SOMEDAY!', '#ffd24a'); SFX.ding(); return; }
+      if (bargeStage < 3) { fundBarge(p, my); return; }
+      if (expeditionsDone >= 1 && !bargeUpgraded) { tryBargeUpgrade(p); return; }
+      addFloat(p.x, p.y - 44, 'BOARD THE BARGE TO SCAN THE BELT!', '#7dffe0'); SFX.ding();
+      return;
+    }
     const cn3 = nearCannon(p);                   // pop cannons vs dust devils
     if (cn3) { manCannon(p, cn3); SFX.confirm(); return; }
     const dr3 = nearDoorB(p);                    // ✕ at a hab-dome door = go inside
@@ -6545,9 +8108,18 @@ function doAction(p) {
     if (f3) harvestFlora(f3, p.x, p.y);
     return;
   }
+  if (world === 'mission') {                     // v7 — out on a rock in the belt
+    const cn4 = nearCannon(p);                   // cannons crack the BIG deposits
+    if (cn4) { manCannon(p, cn4); SFX.confirm(); return; }
+    const f4 = nearFlora(p);
+    if (f4) harvestFlora(f4, p.x, p.y);
+    return;
+  }
   if (crate && Math.hypot(tX(crate.gx) + 16 - p.x, tY(crate.gy) + 12 - p.y) < 52) { openCrate(); return; }
   const rb = nearRubble(p);
   if (rb) { repairWhack(rb); return; }
+  const mg = nearMega(p);                        // v7: ✕ at a rising megastructure = deliver
+  if (mg) { feedMega(p, mg); return; }
   const cn = nearCannon(p);                      // v4c: ✕ mans a pop cannon
   if (cn) { manCannon(p, cn); SFX.confirm(); return; }
   const sp = nearSeaport(p);
@@ -6559,6 +8131,11 @@ function doAction(p) {
   if (f) harvestFlora(f, p.x, p.y);
 }
 function menuItems() {
+  if (world === 'mission') {                     // v7: the mission kit replaces the strip
+    return [{ k: 'minidrill', mission: true, grp: 'tools' },
+            { k: 'popcannon', mission: true, grp: 'tools' },
+            { k: 'boostbattery', mission: true, grp: 'power' }];
+  }
   const pool = [];
   const onMoon = world === 'moon';
   for (const k in B) {
@@ -6571,6 +8148,8 @@ function menuItems() {
     if (d.needLegends && !legends) continue;    // v6a: OBSERVATORY unlocks with the Star Gate
     if (d.needMars && !marsSpotted) continue;   // v6a: SHIPYARD unlocks after SPOT MARS
     if (d.max && cnt(k) >= d.max) continue;     // v6a: rover garages cap at 3
+    if (d.needAstro && !astroSeen()) continue;  // v7: REFINERY waits for the first haul
+    if (d.grp === 'mega' && !starsteelSeen()) continue;   // v7: megas wait for starsteel
     pool.push({ k, grp: d.grp || 'tools' });
   }
   /* v5a: the strip is grouped by section (divider posts; L1/R1 hop) */
@@ -6588,7 +8167,7 @@ function decorItems() {
   items.push({ remove: true, grp: 'golden' });
   return items;
 }
-const stripItems = p => (p && p.strip === 'decor') ? decorItems() : menuItems();
+const stripItems = p => (p && p.strip === 'decor' && world !== 'mission') ? decorItems() : menuItems();   // v7: no decor runs to the belt
 function stripSections(items) {                  // start index of each group
   const secs = [];
   for (let i = 0; i < items.length; i++)
@@ -6604,6 +8183,30 @@ function hopSection(p, dir) {                    // L1/R1: jump between dividers
 }
 function updatePlayer(p, dt) {
   if (p.inside) { updateInsidePlayer(p, dt); return; }   // v5b: room-space movement
+  /* v7: mid-JET-HOP — precomputed tween, input ignored until touchdown */
+  if (p.hop) {
+    const h = p.hop;
+    h.t += dt;
+    const f = clamp(h.t / h.dur, 0, 1);
+    if (h.bounce) {                              // out-and-back: no land in reach
+      const ff = f < 0.5 ? f * 2 : (1 - f) * 2;
+      p.x = h.x0 + (h.xm - h.x0) * ff; p.y = h.y0 + (h.ym - h.y0) * ff;
+      p.hopH = Math.sin(f * Math.PI) * 8;
+    } else {
+      p.x = h.x0 + (h.x1 - h.x0) * f; p.y = h.y0 + (h.y1 - h.y0) * f;
+      p.hopH = Math.sin(f * Math.PI) * 26;
+      p.jetT = (p.jetT || 0) - dt;
+      if (p.jetT <= 0) {
+        p.jetT = 0.08;
+        spawnP(p.x, p.y + 4 - p.hopH * 0.4, SPR.puffDark[(Math.random() * 2) | 0],
+               { vx: (Math.random() - 0.5) * 20, vy: 14, g: -6, life: 0.35 });
+      }
+    }
+    if (f >= 1) { p.hop = null; p.hopH = 0; }
+    p.frame += dt * 7;
+    return;
+  }
+  if (p.stunT > 0) { p.stunT -= dt; p.frame = 0; return; }   // v7: brief dizzy — just stars
   const v = moveVec(p.pi);
   const inMenu = p.mode === 'menu' || p.mode === 'boatmenu' || p.mode === 'cannon';
   let mx = 0, my = 0;
@@ -6636,10 +8239,17 @@ function updatePlayer(p, dt) {
       ny = clamp(ny, camY + 14, camY + H - 14);
     }
     const pass = p.boat ? isWaterPx : isLandPx;
+    /* v7: the axis-slide fallback only counts when that axis actually moves —
+       otherwise a straight push off a cliff "slid" zero pixels forever and
+       the jet hop never fired */
     if (pass(nx, ny)) { p.x = nx; p.y = ny; }
-    else if (pass(nx, p.y)) { p.x = nx; p.target = null; }
-    else if (pass(p.x, ny)) { p.y = ny; p.target = null; }
-    else p.target = null;
+    else if (mx && pass(nx, p.y)) { p.x = nx; p.target = null; }
+    else if (my && pass(p.x, ny)) { p.y = ny; p.target = null; }
+    else {
+      p.target = null;
+      /* v7: on a mission, pushing into space = JET HOP to the next chunk */
+      if (world === 'mission' && !p.boat) tryJetHop(p, mx, my);
+    }
     p.frame += dt * 7;
     if (Math.abs(mx) > Math.abs(my)) { p.dir = 2; p.flip = mx < 0; }
     else p.dir = my < 0 ? 1 : 0;
@@ -6707,6 +8317,7 @@ function onBtn(pi, b) {
     return;
   }
   if (rocketSeq || gateSeq) return;
+  if (travel && travel.phase === 'scan') { scanBtn(pi, b); return; }   // v7: the scan screen
   if (travel && travel.phase !== 'board' && travel.phase !== 'count') return;   // mid-flight
   if (paused) { pauseBtn(pi, b); return; }
   if (b === 'start') {
@@ -6761,6 +8372,7 @@ function onBtn(pi, b) {
     else if (b === 'right') { p.menuI = (p.menuI + 1) % items.length; SFX.ui(); }
     else if (b === 'l1' || b === 'r1') { hopSection(p, b === 'r1' ? 1 : -1); SFX.ui(); }
     else if (b === 'west') {                     // v5a: □ folds BUILD ↔ DECORATE
+      if (world === 'mission') { SFX.cancel(); return; }   // v7: no garden gnomes in the belt
       p.strip = p.strip === 'decor' ? 'build' : 'decor';
       p.menuI = 0; SFX.ui();
     }
@@ -6771,8 +8383,9 @@ function onBtn(pi, b) {
         if (buyRocket()) { p.mode = 'walk'; SFX.confirm(); } else SFX.cancel();
       } else if (it.moonrocket) {
         if (buyMoonRocket()) { p.mode = 'walk'; SFX.confirm(); } else SFX.cancel();
-      } else if (canAfford((B[it.k] || D[it.k]).cost)) { p.mode = 'place'; p.placeK = it.k; p.ghost = null; SFX.confirm(); }
-      else SFX.cancel();
+      } else if (it.mission ? missionAfford(MB[it.k]) : canAfford((B[it.k] || D[it.k]).cost)) {
+        p.mode = 'place'; p.placeK = it.k; p.ghost = null; SFX.confirm();
+      } else SFX.cancel();
     }
     else if (b === 'east') { p.mode = 'walk'; SFX.cancel(); }
   } else if (p.mode === 'place') {
@@ -6833,6 +8446,7 @@ function pauseBtn(pi, b) {
       SFX.ui();
     } else if (o === 'SAVE & QUIT') {
       closeInterior();                           // v5b
+      abortExpeditionState();                    // v7: live missions resolve as a rescue
       saveGame(); paused = false; players = [];
       scene = 'title'; document.body.classList.remove('in-play');
       loadSlotSummaries(); SFX.confirm();
@@ -6970,6 +8584,18 @@ function tapAt(x, y) {
   if (confirmPrestige) {
     if (y > 380 && y < 460) { confirmPrestige.yes = x < W / 2; onBtn(0, 'south'); }
     else { confirmPrestige = null; SFX.cancel(); }
+    return;
+  }
+  if (travel && travel.phase === 'scan' && scanScr) {   // v7: tap a card / tap it again to go
+    for (let i = 0; i < 3; i++) {
+      const cx2 = W / 2 + (i - 1) * 330;
+      if (x > cx2 - 140 && x < cx2 + 140 && y > 190 && y < 570) {
+        if (scanScr.sel === i) confirmScan();
+        else { scanScr.sel = i; SFX.ui(); }
+        return;
+      }
+    }
+    if (y > 640) cancelScan();                   // the bottom hint row = fly back
     return;
   }
   if (rocketSeq || gateSeq || travelCin()) return;
@@ -7172,7 +8798,8 @@ function drawHUD() {
      v4b: the LUNAR MISSION checklist while on the moon (first trip). */
   let focusIl = null;
   for (const p of players) { focusIl = playerColony(p); if (focusIl) break; }
-  if (world === 'moon' && !moonReturnDone) drawMoonStrip();
+  if (world === 'mission' && !travelCin()) drawMissionStrip();   // v7: battery + crates rule the screen
+  else if (world === 'moon' && !moonReturnDone) drawMoonStrip();
   else if (world === 'mars' && !marsReturnDone) drawMarsStrip();   // v6b: the MARS MISSION
   else if (focusIl) drawColonyStrip(focusIl);
   else if (goalI < GOALS.length) {
@@ -7191,15 +8818,19 @@ function drawHUD() {
     if (RES_AGE[r] > age) continue;
     if (LUNAR[r] && !lunarSeen) continue;
     if (MARTIAN[r] && !marsSeen()) continue;     // v6b: Mars resources appear on discovery
+    if (ASTRO[r] && !astroSeen()) continue;      // v7: belt resources appear after the first haul
+    if (r === 'alloy' && !((res.alloy || 0) > 0 || (life.alloy || 0) > 0)) continue;   // v7: rare — earns its slot
     if (r === 'fuel' && !fuelSeen()) continue;   // v6a: FUEL appears once discovered
     vis.push(r);
   }
-  /* v6b: a fourth, ultra-tight tier absorbs the 14-icon Mars row */
-  const tight = vis.length > 8, extraTight = vis.length > 11, ultraTight = vis.length > 12;
-  let x = extraTight ? 284 : tight ? 292 : 306;
-  const sp2 = ultraTight ? 56 : extraTight ? 67 : tight ? 72 : 88,
-        spPow = ultraTight ? 70 : extraTight ? 78 : tight ? 86 : 96,
-        fs = ultraTight ? 10 : extraTight ? 11 : tight ? 11.5 : 13;
+  /* v6b: a fourth, ultra-tight tier absorbs the 14-icon Mars row.
+     v7: a fifth, heroic tier squeezes the 17-18 icon endgame in. */
+  const tight = vis.length > 8, extraTight = vis.length > 11, ultraTight = vis.length > 12,
+        heroTight = vis.length > 14;
+  let x = heroTight ? 272 : extraTight ? 284 : tight ? 292 : 306;
+  const sp2 = heroTight ? 47 : ultraTight ? 56 : extraTight ? 67 : tight ? 72 : 88,
+        spPow = heroTight ? 60 : ultraTight ? 70 : extraTight ? 78 : tight ? 86 : 96,
+        fs = heroTight ? 9 : ultraTight ? 10 : extraTight ? 11 : tight ? 11.5 : 13;
   for (const r of vis) {
     ctx.drawImage(SPR.icon[r], x, 8);
     if (r === 'power') {
@@ -7297,6 +8928,38 @@ function drawMarsStrip() {
   }
 }
 
+/* v7: MISSION HUD — one big friendly SHIP BATTERY meter + the crate count.
+   Pure drawImage/fillRect/text — pinned where the goal strip usually sits. */
+function drawMissionStrip() {
+  if (!exped) return;
+  ctx.drawImage(SPR.colonyP, 8, 48);
+  /* battery icon (chunky, drawn with 3 rects) */
+  const frac = clamp(exped.timer / exped.timerMax, 0, 1);
+  const low = frac <= 0.25;
+  const pulse = low ? 0.55 + 0.45 * Math.abs(Math.sin(T * 6)) : 1;
+  ctx.fillStyle = '#e8eef4'; ctx.fillRect(18, 58, 150, 22);
+  ctx.fillStyle = '#0d1a26'; ctx.fillRect(20, 60, 146, 18);
+  ctx.fillStyle = '#e8eef4'; ctx.fillRect(168, 63, 5, 12);          // the + terminal
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = low ? '#ff6b5e' : frac < 0.55 ? '#ffd24a' : '#7dff9a';
+  ctx.fillRect(22, 62, Math.max(3, Math.floor(142 * frac)), 14);
+  ctx.globalAlpha = 1;
+  const mm = Math.floor(Math.max(0, exped.timer) / 60), ss = Math.floor(Math.max(0, exped.timer) % 60);
+  otxt(mm + ':' + (ss < 10 ? '0' : '') + ss, 216, 76, 16, low ? '#ff9a8a' : '#fff');
+  txt('BATTERY', 18, 92, 9, low ? '#ff9a8a' : '#9fd8ff');
+  /* crate meter */
+  ctx.drawImage(SPR.crate, 268, 56, 22, 19);
+  const full = cargoTotal() >= bargeSlots();
+  txt(cargoTotal() + '/' + bargeSlots(), 296, 74, 15, full ? '#ffd24a' : '#fff');
+  txt('CRATES', 268, 92, 9, '#d8c49a');
+  /* what kind of trip is this? */
+  const hz = { pebbles: 'PEBBLE SHOWER', crumble: 'CRUMBLE EDGE', flare: 'SOLAR FLARES',
+               drift: 'DRIFT FIELD', sparky: 'SPARKY TECH' }[exped.hazard] || '';
+  txt('★'.repeat(exped.stars), 366, 68, 13, '#ffd24a');
+  txt(hz, 366, 84, 9, exped.rare ? '#7dffe0' : '#8fc4e0');
+  if (low) txt('HEAD BACK TO THE SHIP!', 460, 76, 12, '#ff9a8a');
+}
+
 /* v4d: slim dark pill behind the build-menu detail block — text/costs were
    drawn straight over terrain and washed out on bright grass. ONE drawImage,
    sized to the content, style-matched to the HUD chrome. */
@@ -7351,7 +9014,7 @@ function drawMenu(p, yBase) {
       ctx.globalAlpha = 1;
       txt(D[it.k].name, cx0 + 46, yBase + 86, 8.5, afford ? '#cfe8f4' : '#7a8b98', 'center');
     } else {
-      const afford = canAfford(B[it.k].cost);
+      const afford = it.mission ? missionAfford(MB[it.k]) : canAfford(B[it.k].cost);   // v7
       ctx.globalAlpha = afford ? 1 : 0.42;
       drawFit(SPR.b[it.k], cx0 + 46, yBase + 44, 48, 50);
       ctx.globalAlpha = 1;
@@ -7382,14 +9045,21 @@ function drawMenu(p, yBase) {
     else desc = 'just for pretty — make it YOURS!';
   }
   else {
-    label = B[it.k].name; cost = B[it.k].cost;
+    label = B[it.k].name; cost = it.mission ? MB[it.k] : B[it.k].cost;   // v7: chunk prices
     const d = B[it.k];
     if (it.k === 'stargate') desc = 'opens the gate to the stars!';
+    else if (it.mission && it.k === 'popcannon') desc = 'pop! cracks the BIG deposits!';
     else if (it.k === 'popcannon') desc = 'pop! fix, harvest & stop meteors!';
     else if (it.k === 'moonport' || it.k === 'marsport') desc = 'a landing pad — your way home!';
     else if (it.k === 'dustcatcher') desc = 'drinks the wind — +6 power!';
     else if (it.k === 'marsgarage') desc = 'a red rover that mines for you! (max 3)';
-    else if (it.k === 'marsyard') desc = 'the BELT awaits... someday!';
+    else if (it.k === 'marsyard') desc = bargeStage >= 3 ? 'home port of THE SURVEY BARGE!' : 'the BELT awaits... someday!';
+    else if (it.k === 'minidrill') desc = 'auto-cracks the deposit beside it!';
+    else if (it.k === 'boostbattery') desc = '+' + BOOST_SECS + 's ship battery! (max ' + BOOST_MAX + ')';
+    else if (it.k === 'refinery') desc = 'asteroid ore → shiny STARSTEEL!';
+    else if (it.k === 'arcology') desc = 'a whole city in one tower! feed it starsteel!';
+    else if (it.k === 'crystalspire') desc = 'a glowing needle of science! (+6/s done)';
+    else if (it.k === 'starharbor') desc = 'drones fetch your cargo — forever!';
     else if (it.k === 'pole') desc = 'carries power to nearby buildings!';
     else if (it.k === 'observatory') desc = 'peer into the deep black...';
     else if (it.k === 'rovergarage') desc = 'a rover that mines for you! (max 3)';
@@ -7412,9 +9082,11 @@ function drawMenu(p, yBase) {
     let cx1 = W / 2 - cw / 2 + 240;
     for (const r of entries) {
       ctx.drawImage(SPR.icon[r], cx1, yBase - 54);
-      txt(fmt(cost[r]), cx1 + 24, yBase - 37, 14, (res[r] || 0) >= cost[r] ? RES_COL[r] : '#ff6b6b');
+      const have = it.mission ? cargoAvail(r) : (res[r] || 0);   // v7: crates pay out here
+      txt(fmt(cost[r]), cx1 + 24, yBase - 37, 14, have >= cost[r] ? RES_COL[r] : '#ff6b6b');
       cx1 += 86;
     }
+    if (it.mission) txt('PAID IN CARGO CHUNKS!', W / 2 + 240, yBase - 20, 9, '#d8c49a', 'center');
   }
 }
 
@@ -7501,7 +9173,7 @@ function drawGhost(p) {
   } else if (p.mode === 'place') {
     const k = p.placeK, isDec = !!D[k], s = isDec ? 1 : (B[k].size || 1), g = ghostTile(p);
     const ok = (isDec ? decorValidAt(g.gx, g.gy) : validAt(k, g.gx, g.gy)) &&
-               canAfford((B[k] || D[k]).cost);
+               (world === 'mission' && MB[k] ? missionAfford(MB[k]) : canAfford((B[k] || D[k]).cost));
     for (let dy = 0; dy < s; dy++) for (let dx = 0; dx < s; dx++)
       ctx.drawImage(ok ? SPR.tileOK : SPR.tileNO, tX(g.gx + dx), tY(g.gy + dy));
     ctx.globalAlpha = 0.62;
@@ -7571,8 +9243,9 @@ function drawStats() {
              : 'Build a LAUNCH PAD, then the ROCKET!', x + 40, y + 110, 12, '#ffd24a');
   let ry = y + 170;
   const statRes = RES_LIST.filter(r => RES_AGE[r] <= age &&
-    !(r === 'fuel' && !fuelSeen()) && !(MARTIAN[r] && !marsSeen()));   // v6a/v6b gating
-  const rStep = statRes.length > 12 ? 28 : 34;   // v6b: 14 rows still fit the panel
+    !(r === 'fuel' && !fuelSeen()) && !(MARTIAN[r] && !marsSeen()) &&
+    !(ASTRO[r] && !astroSeen()));                // v6a/v6b/v7 gating
+  const rStep = statRes.length > 15 ? 24 : statRes.length > 12 ? 28 : 34;   // v7: 18 rows still fit
   for (const r of statRes) {
     ctx.drawImage(SPR.icon[r], x + 40, ry - 15);
     if (r === 'power') {
@@ -7606,6 +9279,15 @@ function drawStats() {
   if (rocketsLaunched > 0) { txt('ROCKETS: ' + rocketsLaunched, x + 380, iy, 12, '#9fd4f0'); iy += 30; }
   if (meteorsBlocked > 0 || cnt('popcannon') > 0) { txt('METEORS BLOCKED: ' + meteorsBlocked, x + 380, iy, 12, '#7dffe0'); iy += 30; }
   if (devilsTamed > 0) { txt('DUST DEVILS TAMED: ' + devilsTamed, x + 380, iy, 12, '#ff8a66'); iy += 30; }   // v6b
+  /* v7: the asteroid ledger (compact — the right column is a busy place) */
+  if (expeditionsDone > 0) {
+    txt('EXPEDITIONS: ' + expeditionsDone + (beaconsFound > 0 ? ' · BEACONS: ' + beaconsFound + '/3' + (mapAssembled ? ' ★' : '') : ''),
+        x + 380, iy, 12, '#d8c49a'); iy += 30;
+  }
+  if (megaCompleteTotal() > 0) {
+    txt('MEGASTRUCTURES: ' + megaCompleteTotal() + (megaCompleteCnt('starharbor') > 0 ? ' · STAR HARBOR ★ AUTO-CARGO' : ''),
+        x + 380, iy, 12, '#b7e3ff'); iy += 30;
+  }
   const mins = Math.floor(playtime / 60);
   txt('PLAY TIME: ' + mins + 'm', x + 380, iy, 12, '#9fd4f0');
   iy += 30;
@@ -7678,9 +9360,52 @@ function drawModal() {
   otxt('✕ OK!', W / 2, y + 344, 18, '#7dff9a');
 }
 
+/* v7: THE SCAN — full-screen card picker over the rock warp. Previews are
+   baked at scan time; this draws images + text only. */
+function drawScanScreen() {
+  const sc = scanScr;
+  if (!sc) return;
+  ctx.globalAlpha = 1;
+  otxt('SCAN COMPLETE — CHOOSE AN ASTEROID!', W / 2, 148, 30, '#9fd8ff');
+  const HAZ_NAMES = { pebbles: 'PEBBLE SHOWER', crumble: 'CRUMBLE EDGE', flare: 'SOLAR FLARES',
+                      drift: 'DRIFT FIELD', sparky: 'SPARKY TECH' };
+  const RES_NAMES2 = { astroiron: 'ASTRO IRON', crystal: 'CRYSTAL', alloy: 'ALIEN TECH' };
+  for (let i = 0; i < 3; i++) {
+    const card = sc.cards[i], sel = i === sc.sel;
+    const cx2 = W / 2 + (i - 1) * 330, cy2 = 380;
+    const lift = sel ? Math.sin(sc.t * 3) * 4 - 8 : 0;
+    /* card chrome: reuse the name-entry cell panels (selected = gold rim) */
+    ctx.drawImage(sel ? SPR.cellSel : SPR.cell, cx2 - 140, cy2 - 190 + lift, 280, 372);
+    if (card.rare) {                             // purple-teal rare glow rim
+      ctx.globalAlpha = 0.55 + 0.45 * Math.sin(T * 4);
+      ctx.strokeStyle = '#7dffe0'; ctx.lineWidth = 3;
+      ctx.strokeRect(cx2 - 136, cy2 - 186 + lift, 272, 364);
+      ctx.globalAlpha = 1;
+    }
+    ctx.drawImage(card.prev, cx2 - 120, cy2 - 172 + lift, 240, 154);
+    otxt(card.rare ? 'STRANGE SIGNAL!' : ['', 'CALM ROCK', 'BUSY ROCK', 'WILD ROCK'][card.stars],
+         cx2, cy2 + 12 + lift, 18, card.rare ? '#7dffe0' : '#fff');
+    /* main resource line */
+    ctx.drawImage(SPR.icon[card.type === 'alloy' ? 'alloy' : card.type], cx2 - 76, cy2 + 26 + lift);
+    txt(RES_NAMES2[card.type], cx2 - 48, cy2 + 42 + lift, 14, RES_COL[card.type]);
+    /* difficulty stars */
+    otxt('★'.repeat(card.stars) + '☆'.repeat(3 - card.stars), cx2, cy2 + 78 + lift, 20, '#ffd24a');
+    txt('BATTERY ' + Math.floor(EXP_BATT[card.stars] / 60) + ':' +
+        ('0' + (EXP_BATT[card.stars] % 60)).slice(-2), cx2, cy2 + 102 + lift, 11, '#9fd8ff', 'center');
+    /* hazard line */
+    txt('⚠ ' + HAZ_NAMES[card.hazard], cx2, cy2 + 128 + lift, 12, card.rare ? '#7dffe0' : '#ffb46a', 'center');
+    txt(card.stars === 3 ? 'RICH · SHORT TIMER' : card.stars === 2 ? 'GOOD HAUL · FAIR TIMER' : 'EASY DOES IT',
+        cx2, cy2 + 152 + lift, 10, '#8fc4e0', 'center');
+    if (sel) drawFit(SPR.mark, cx2, cy2 - 210, 22, 20);
+  }
+  if (players.length > 1) txt('P1 IS CHOOSING!', W / 2, 620, 14, '#ff9a8a', 'center');
+  otxt('◀ ▶ CHOOSE · ✕ LAND THERE · ○ FLY BACK', W / 2, 664, 16, '#fff');
+}
+
 /* v6a: the Observatory telescope vignette — dim + panel + baked Mars view
    + one twinkling spark. Pure drawImage/text in the hot path. */
 function drawVignette() {
+  if (vignette && vignette.map) { drawMapVignette(); return; }   // v7: the star map
   ctx.drawImage(SPR.dim, 0, 0);
   const x = W / 2 - 310, y = H / 2 - 255;
   ctx.drawImage(SPR.modalP, x, y, 620, 510);
@@ -7692,6 +9417,43 @@ function drawVignette() {
   ctx.globalAlpha = 1;
   txt('A twinkling RED PLANET hangs in the black...', W / 2, y + 456, 14, '#ffd1a1', 'center');
   otxt('✕ OK!', W / 2, y + 488, 16, '#7dff9a');
+}
+
+/* v7: THE STAR MAP — three beacons hum, and fragments slide together into
+   a chart of nine little worlds. Sets nothing but wonder (and v8's hook). */
+function drawMapVignette() {
+  vignette.t += 1 / 60;                          // render-clocked — the world holds its breath
+  const tt = vignette.t;
+  ctx.drawImage(SPR.dim, 0, 0);
+  const x = W / 2 - 310, y = H / 2 - 255;
+  ctx.drawImage(SPR.modalP, x, y, 620, 510);
+  otxt('THE BEACONS SING TOGETHER', W / 2, y + 52, 24, '#7dffe0');
+  const mx0 = W / 2 - 260, my0 = y + 76, mw = 520, mh = 360;
+  /* four map quarters fly in from the corners over ~1.6s */
+  const qs = [[0, 0, -1, -1], [1, 0, 1, -1], [0, 1, -1, 1], [1, 1, 1, 1]];
+  for (let i = 0; i < 4; i++) {
+    const f = clamp((tt - i * 0.25) / 0.9, 0, 1);
+    const e = 1 - (1 - f) * (1 - f);             // ease-out
+    const [qx, qy, dx2, dy2] = qs[i];
+    const off = (1 - e) * 260;
+    ctx.globalAlpha = e;
+    ctx.drawImage(SPR.starMap, qx * 260, qy * 180, 260, 180,
+                  mx0 + qx * 260 + dx2 * off, my0 + qy * 180 + dy2 * off * 0.6, 260, 180);
+  }
+  ctx.globalAlpha = 1;
+  if (tt > 1.8) {                                // the nine worlds twinkle hello
+    for (let i = 0; i < 5; i++) {
+      const a = 0.3 + 0.7 * Math.abs(Math.sin(T * 2.4 + i * 1.9));
+      ctx.globalAlpha = a;
+      ctx.drawImage(SPR.spark[((T * 5 + i) | 0) % 2], mx0 + 80 + ((i * 173) % 400), my0 + 60 + ((i * 97) % 240));
+    }
+    ctx.globalAlpha = 1;
+  }
+  if (tt > 2.2) {
+    txt('THE FRAGMENTS FORM A MAP...', W / 2, y + 462, 15, '#cfe8f4', 'center');
+    otxt('THE NINE PLANETS AWAIT!', W / 2, y + 486, 18, '#ffd24a');
+  }
+  if (tt > 2.6) otxt('✕ OK!', W / 2 + 250, y + 490, 14, '#7dff9a');
 }
 
 function drawPrestige() {
@@ -7909,6 +9671,15 @@ function renderPlay() {
         ctx.drawImage(SPR.greenGlow, a.x - 16, a.y - 20);
         ctx.globalAlpha = 1;
         break;
+      case 'droneHome': {                        // v7: STAR HARBOR drone on its rounds
+        const ph2 = (T * 0.14 + a.ph) % 1;
+        if (ph2 < 0.45) {                        // out on a loop, back to the pad
+          const aa = ph2 / 0.45 * 6.283;
+          const dxx = a.x + Math.sin(aa) * 90, dyy = a.y - 36 - Math.sin(aa * 0.5) * 46;
+          ctx.drawImage(SPR.drone[((T * 6) | 0) % 2], dxx - 16, dyy - 9);
+        }
+        break;
+      }
     }
   }
 
@@ -7990,12 +9761,32 @@ function renderPlay() {
         if (mpP) otxt('✕ FUEL THE CRUISER!', tX(mpP.gx) + 32, tY(mpP.gy) - 14, 14, '#7dffe0');
       }
       const myP = nearKindB(p, 'marsyard', 88);
-      if (myP) otxt('✕ THE BELT AWAITS — SOMEDAY!', tX(myP.gx) + 32, tY(myP.gy) - 24 + bob, 13, '#7dffe0');
+      if (myP) otxt(!marsBaseDone ? '✕ THE BELT AWAITS — SOMEDAY!'
+                  : bargeStage === 0 ? '✕ FUND THE SURVEY BARGE!'
+                  : bargeStage < 3 ? '✕ FUND STAGE ' + (bargeStage + 1) + '/3!'
+                  : (expeditionsDone >= 1 && !bargeUpgraded) ? '✕ UPGRADE THE HOLD (+4 CRATES)!'
+                  : '✕ SCAN THE BELT AT THE BARGE! →',
+                  tX(myP.gx) + 32, tY(myP.gy) - 24 + bob, 13, bargeStage < 3 && marsBaseDone ? '#ffd24a' : '#7dffe0');
       const f = nearFlora(p);
       if (f) {
         drawFit(SPR.mark, tX(f.gx) + 16, tY(f.gy) - 12 + bob, 16, 14);
         otxt(f.type === 'frost' ? '✕ CHIP THE FROST!' : '✕ MINE RED IRON!', tX(f.gx) + 16, tY(f.gy) - 24, 12,
              f.type === 'frost' ? '#dff2ff' : '#ff8a66');
+      }
+    } else if (world === 'mission') {
+      /* v7: deposit prompts — smalls whack, bigs want the cannon/drill */
+      const f = nearFlora(p);
+      if (f && (f.type === 'dep' || f.type === 'vault')) {
+        drawFit(SPR.mark, tX(f.gx) + 16, tY(f.gy) - 12 + bob, 16, 14);
+        otxt(f.type === 'vault' ? 'CANNON ONLY — 3 SHOTS!'
+           : f.big ? 'CANNON OR DRILL!' : '✕ CRACK IT!',
+             tX(f.gx) + 16, tY(f.gy) - 26, 12,
+             f.type === 'vault' ? '#7dffe0' : f.res === 'crystal' ? '#c99bff' : '#d8c49a');
+      }
+      if ((p.carry || []).length) {
+        const cl2 = buildings.find(b2 => b2.k === 'cargoloader');
+        if (cl2 && Math.hypot(tX(cl2.gx) + 32 - p.x, tY(cl2.gy) + 32 - p.y) > 90)
+          otxt('BANK CHUNKS AT THE LOADER!', p.x, p.y - 56, 11, '#ffd24a');
       }
     } else {
       const sp = nearSeaport(p);
@@ -8004,6 +9795,15 @@ function renderPlay() {
         otxt('✕ SAIL!', p.moor.x, p.moor.y - 26, 13, '#8fd4ff');
       const f = nearFlora(p);
       if (f) drawFit(SPR.mark, tX(f.gx) + 16, tY(f.gy) - 12 + bob, 16, 14);
+      /* v7: a rising megastructure asks for its next load */
+      const mgB = nearMega(p);
+      if (mgB) {
+        const ms2 = B[mgB.k].size || 1;
+        const fc = MEGA[mgB.k].feeds[mgB.stage || 0];
+        otxt('✕ DELIVER ' + Object.keys(fc).map(r2 => fc[r2] + ' ' + r2.toUpperCase()).join(' + ') +
+             ' (' + ((mgB.stage || 0) + 1) + '/' + megaMax(mgB.k) + ')',
+             tX(mgB.gx) + ms2 * 16, tY(mgB.gy) - 16 + bob, 13, '#9fd8ff');
+      }
     }
     const cnn = nearCannon(p);                   // v4c: manning prompt (both worlds)
     if (cnn) otxt('✕ MAN THE CANNON!', tX(cnn.gx) + 16, tY(cnn.gy) - 28 + bob, 13, '#ffd24a');
@@ -8016,8 +9816,13 @@ function renderPlay() {
       otxt('✕ OPEN!', tX(crate.gx) + 16, tY(crate.gy) - 24, 13, '#ffd24a');
     if (!p.aboard) for (const bz of bZones)
       if (Math.hypot(bz.cx - p.x, bz.cy - p.y) < 78)
-        otxt(bz.ship === 'cruiser' ? '✕ BOARD THE MARS CRUISER!' : '✕ BOARD THE ROCKET!',
-             bz.cx, bz.cy - 96, 15, '#7dffe0');
+        otxt(bz.ship === 'barge' ? (bz.to === 'earth' ? '✕ EXPRESS HOME TO EARTH!'
+                                  : bz.to === 'mars' ? '✕ ALL ABOARD — HOME TO MARS!'
+                                  : '✕ BOARD THE SURVEY BARGE!')
+           : bz.ship === 'cruiser' ? '✕ BOARD THE MARS CRUISER!' : '✕ BOARD THE ROCKET!',
+             bz.cx, world === 'mission' ? bz.cy + 62 : bz.cy - 96, 15, '#7dffe0');
+             /* v7: on missions the prompt sits BELOW the barge — deposit
+                'CHUNKS!' floats own the sky above it */
   }
 
   /* ghosts under everything mobile (hidden during cinematics) */
@@ -8057,13 +9862,19 @@ function renderPlay() {
     if (p.moor && !p.boat && onCam(p.moor.x, p.moor.y, 48))     // the waiting dinghy
       ctx.drawImage(SPR.boat, p.moor.x - 19, p.moor.y - 12 + Math.sin(T * 3.2 + p.pi * 2) * 1.6);
     const bob2 = p.boat ? Math.sin(T * 3.2 + p.pi * 2) * 1.6 : 0;
+    const hopH = p.hopH || 0;                    // v7: mid-jet-hop arc height
     const frames = SPR.av[p.pi][p.boat ? 0 : p.dir];
-    const spr2 = p.moving && !p.boat ? frames[1 + ((p.frame | 0) % 2)] : frames[0];
+    const spr2 = (p.moving || p.hop) && !p.boat ? frames[1 + ((p.frame | 0) % 2)] : frames[0];
+    if (hopH > 1) {                              // little landing shadow while airborne
+      ctx.globalAlpha = 0.3;
+      ctx.drawImage(SPR.ballShad, p.x - 7, p.y - 4);
+      ctx.globalAlpha = 1;
+    }
     if (p.flip && !p.boat) {
       ctx.translate(p.x, 0); ctx.scale(-1, 1);
-      ctx.drawImage(spr2, -12, p.y - 30);
+      ctx.drawImage(spr2, -12, p.y - 30 - hopH);
       reTx();
-    } else ctx.drawImage(spr2, p.x - 12, p.y - (p.boat ? 34 : 30) + bob2);
+    } else ctx.drawImage(spr2, p.x - 12, p.y - (p.boat ? 34 : 30) + bob2 - hopH);
     if (p.boat) {                                // hull drawn over the legs = sitting sailor
       if (p.flip) {
         ctx.translate(p.x, 0); ctx.scale(-1, 1);
@@ -8072,6 +9883,54 @@ function renderPlay() {
       } else ctx.drawImage(SPR.boat, p.x - 19, p.y - 12 + bob2);
     }
     if (players.length > 1) otxt('P' + (p.pi + 1), p.x, p.y - (p.boat ? 42 : 36), 10, p.pi ? '#ff9a8a' : '#8fd4ff');
+  }
+
+  /* ═══ v7: mission-world live layer — chunks, pebbles, beacon, hazards ═══ */
+  if (world === 'mission' && exped) {
+    /* cracked-edge markers (crumble hazard): idle cracks / angry red shake */
+    for (const cr of exped.crumbles) {
+      if (cr.goneT > 0) continue;                // fallen — the terrain bake shows space
+      const wobX = cr.t >= 0 ? Math.sin(T * 30) * 2 : 0;
+      if (onCam(tX(cr.gx), tY(cr.gy), 40))
+        ctx.drawImage(SPR.crackTile[cr.t >= 0 ? 1 : 0], tX(cr.gx) + wobX, tY(cr.gy));
+    }
+    /* drifting cargo chunks (pooled) */
+    for (const ch of exped.chunks) {
+      if (!ch.on || !onCam(ch.x, ch.y, 24)) continue;
+      const cb = Math.sin(T * 3 + ch.x * 0.1) * 2;
+      ctx.drawImage(SPR.chunkSpr[ch.res], ch.x - 6, ch.y - 8 + cb);
+    }
+    /* the alien beacon, glowing where the vault stood */
+    if (exped.beacon && onCam(exped.beacon.x, exped.beacon.y, 40)) {
+      const bb2 = Math.sin(T * 3) * 3;
+      ctx.drawImage(SPR.beaconPick, exped.beacon.x - 17, exped.beacon.y - 22 + bb2);
+    }
+    /* pebble shower: telegraph shadows, then the rocks drop in */
+    for (const pb of exped.pebbles) {
+      if (!pb.on || !onCam(pb.x, pb.y, 60)) continue;
+      if (pb.warnT > 0) {
+        ctx.globalAlpha = 0.5 + 0.5 * Math.abs(Math.sin(T * 8));
+        ctx.drawImage(SPR.pebShadow, pb.x - 20, pb.y - 12);
+        ctx.globalAlpha = 1;
+      } else {
+        ctx.drawImage(SPR.pebShadow, pb.x - 20, pb.y - 12);
+        const fall = clamp(pb.fallT / 0.35, 0, 1);
+        ctx.drawImage(SPR.pebble, pb.x - 7, pb.y - 6 - fall * 320);
+      }
+    }
+  }
+  /* v7: carried chunks bob overhead + dizzy stars + hop height offset is
+     applied at the player draw below (players everywhere can be stunned) */
+  for (const p of players) {
+    if (p.aboard || p.inside) continue;
+    if ((p.carry || []).length) {
+      for (let ci = 0; ci < p.carry.length; ci++) {
+        const cb = Math.sin(T * 4 + ci * 2) * 1.5;
+        ctx.drawImage(SPR.chunkSpr[p.carry[ci]], p.x - 12 + ci * 13, p.y - 48 - (p.hopH || 0) + cb);
+      }
+    }
+    if (p.stunT > 0)
+      ctx.drawImage(SPR.dizzy[((T * 8) | 0) % 2], p.x - 14, p.y - 44);
   }
 
   /* v4c: bouncing energy balls (shadow on the ground, glow ball in the air) */
@@ -8103,10 +9962,19 @@ function renderPlay() {
   if (!travel || travel.phase === 'board') for (const bz of bZones) {
     if (!onCam(bz.cx, bz.cy, 160)) continue;
     const s3 = B[bz.b.k].size || 1;
-    const bx0 = tX(bz.b.gx) + s3 * 16;
+    let bx0 = tX(bz.b.gx) + s3 * 16;
     let ry2 = tY(bz.b.gy) + 46 - 92;
     if (bz.ship === 'rocket') {
       ctx.drawImage(SPR.rocket, bx0 - 20, ry2);
+    } else if (bz.ship === 'barge') {            // v7: the barge waits at her zone
+      const bs = SPR.bargeStg[2];
+      bx0 = bz.cx;
+      ry2 = bz.cy - 36 - bs.height;
+      ctx.drawImage(bs, bx0 - bs.width / 2, ry2);
+      /* visible crates stacked on deck — the haul rides in plain sight */
+      const nCr = Math.min(cargoTotal(), 12);
+      for (let ci = 0; ci < nCr; ci++)
+        ctx.drawImage(SPR.crate, bx0 - 44 + (ci % 6) * 15, ry2 + 6 - ((ci / 6) | 0) * 11, 14, 12);
     } else if (bz.b.k !== 'shipyard') {          // the moon gantry block draws her there
       const cs = SPR.cruiserStg[2];
       ry2 = tY(bz.b.gy) + 40 - cs.height;
@@ -8171,13 +10039,52 @@ function renderPlay() {
       }
     }
   }
+  /* v7: THE SURVEY BARGE under construction beside the Mars Shipyard —
+     staged hull + funding pips (once flight-ready she renders via her zone) */
+  if (world === 'mars' && bargeStage > 0 && bargeStage < 3) {
+    const myB = buildings.find(b2 => b2.k === 'marsyard' && !b2.rubble);
+    if (myB && onCam(tX(myB.gx) + 118, tY(myB.gy) + 40, 200)) {
+      const bs = SPR.bargeStg[bargeStage - 1];
+      ctx.drawImage(bs, tX(myB.gx) + 118 - bs.width / 2, tY(myB.gy) + 38 - bs.height);
+      for (let i = 0; i < 3; i++)
+        ctx.drawImage(i < bargeStage ? SPR.pipOn : SPR.pipOff, tX(myB.gx) + 96 + i * 15, tY(myB.gy) - 30);
+    }
+  }
+  /* v7: the Earth UNLOAD BEAT — crates thunk down at the pad, coins ring */
+  if (world === 'earth' && unloadFx > 0) {
+    const pad = buildings.find(b2 => b2.k === 'launchpad');
+    if (pad) {
+      const px0 = tX(pad.gx) + 32, py0 = tY(pad.gy) + 40;
+      const n = Math.min(6, Math.ceil((1.6 - unloadFx) * 5));
+      for (let ci = 0; ci < n; ci++) {
+        const drop = Math.max(0, unloadFx - 0.35 - ci * 0.16) * 140;
+        ctx.drawImage(SPR.crate, px0 - 52 + ci * 18, py0 - 4 - (ci % 2) * 8 - drop, 16, 14);
+      }
+      ctx.drawImage(SPR.spark[((T * 6) | 0) % 2], px0 + 20, py0 - 30);
+    }
+  }
 
   /* travel cinematic: countdown / lift-off / landing */
-  if (travelCin() && travel.phase !== 'stars') {
+  if (travelCin() && travel.phase !== 'stars' && travel.phase !== 'scan') {
     const st = travel.phase === 'land' ? travel.site : travel.srcSite;
     if (st) {
-      const cx4 = tX(st.gx) + st.s * 16;
-      if (travel.ship === 'cruiser') {           // v6b: the red-winged beauty VTOLs
+      let cx4 = tX(st.gx) + st.s * 16;
+      if (travel.ship === 'barge') {             // v7: the boxy workhorse VTOLs too
+        const bs = SPR.bargeStg[2];
+        if (travel.pad && travel.pad.k === 'marsyard' && travel.phase !== 'land') cx4 = tX(travel.pad.gx) + 118;
+        else if (travel.phase === 'land' && travel.destPad && travel.destPad.k === 'marsyard') cx4 = tX(travel.destPad.gx) + 118;
+        const cy4 = tY(st.gy) + 40 - bs.height - travel.ry;
+        ctx.drawImage(bs, cx4 - bs.width / 2, cy4);
+        const nCr = Math.min(cargoTotal(), 12);
+        for (let ci = 0; ci < nCr; ci++)
+          ctx.drawImage(SPR.crate, cx4 - 44 + (ci % 6) * 15, cy4 + 6 - ((ci / 6) | 0) * 11, 14, 12);
+        if (travel.phase !== 'count' && travel.ry > 3) {
+          const fl = SPR.rflame[((T * 14) | 0) % 2];
+          ctx.drawImage(fl, cx4 - 52, cy4 + bs.height - 10, 16, 26);
+          ctx.drawImage(fl, cx4 + 36, cy4 + bs.height - 10, 16, 26);
+        }
+        for (const p2 of players) ctx.drawImage(SPR.headAv[p2.pi], cx4 + 44 + p2.pi * 8, cy4 + 30);
+      } else if (travel.ship === 'cruiser') {    // v6b: the red-winged beauty VTOLs
         const cs = SPR.cruiserStg[2];
         const cy4 = tY(st.gy) + 40 - cs.height - travel.ry;
         ctx.drawImage(cs, cx4 - cs.width / 2, cy4);
@@ -8304,40 +10211,90 @@ function renderPlay() {
   ctx.globalAlpha = 1;
   ctx.restore();
 
+  /* v7: SOLAR FLARE wash — one screen-space drawImage of a baked gradient */
+  if (world === 'mission' && exped) {
+    if (exped.flareA > 0) {
+      ctx.globalAlpha = clamp(exped.flareA, 0, 1) * (0.75 + 0.25 * Math.sin(T * 5));
+      ctx.drawImage(SPR.flareWash, 0, 0);
+      ctx.globalAlpha = 1;
+    } else if (exped.flareWarnT > 0) {
+      ctx.globalAlpha = 0.25 * Math.abs(Math.sin(T * 8));
+      ctx.drawImage(SPR.flareWash, 0, 0);
+      ctx.globalAlpha = 1;
+    }
+  }
+
   /* v4b: star-field warp between the worlds (screen-space, all baked).
-     v6b: cruiser flights get a RED warp — dust streaks instead of stars. */
-  if (travel && (travel.phase === 'stars' ||
+     v6b: cruiser flights get a RED warp — dust streaks instead of stars.
+     v7: barge flights get a ROCK warp — silver streaks + tumbling rocks. */
+  if (travel && (travel.phase === 'stars' || travel.phase === 'scan' ||
       (travel.phase === 'lift' && travel.t > 2.0) ||
       (travel.phase === 'land' && travel.t < 0.5))) {
     let al = 1;
     if (travel.phase === 'lift') al = (travel.t - 2.0) / 0.6;
     else if (travel.phase === 'land') al = 1 - travel.t * 2;
     ctx.globalAlpha = clamp(al, 0, 1);
-    const red = travel.ship === 'cruiser';
-    ctx.drawImage(red ? SPR.warpRed : SPR.warpBG, 0, 0);
+    const red = travel.ship === 'cruiser', rock = travel.ship === 'barge';
+    ctx.drawImage(rock ? SPR.warpRock : red ? SPR.warpRed : SPR.warpBG, 0, 0);
     for (let i = 0; i < 16; i++) {               // rushing streaks
       const sx2 = (i * 173 + 47) % W;
       const sy2 = ((i * 97 + T * (380 + i * 26)) % (H + 90)) - 45;
-      ctx.drawImage(red ? SPR.streakDust : SPR.streak, sx2, sy2);
+      ctx.drawImage(rock ? SPR.streakSilver : red ? SPR.streakDust : SPR.streak, sx2, sy2);
+    }
+    if (rock) for (let i = 0; i < 5; i++) {      // tumbling rock silhouettes drift past
+      const rx3 = (i * 311 + 90 + T * 30 * (i + 1)) % (W + 80) - 40;
+      const ry3 = (i * 173 + 60 + T * (120 + i * 40)) % (H + 80) - 40;
+      ctx.translate(rx3, ry3);
+      ctx.rotate(T * (0.8 + i * 0.3));
+      const rb2 = SPR.warpRockBit[i % 2];
+      ctx.drawImage(rb2, -rb2.width / 2, -rb2.height / 2);
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
     }
     const wob = Math.sin(T * 3) * 6;
-    if (red) {                                   // nose-up cruiser, engines blazing behind
-      ctx.translate(W / 2, H / 2 + wob);
-      ctx.rotate(-0.9);
-      ctx.drawImage(SPR.cruiserStg[2], -105, -43, 210, 87);
-      ctx.rotate(Math.PI / 2);                   // exhaust runs straight off the tail
-      ctx.drawImage(SPR.rflame[((T * 14) | 0) % 2], -34, 92, 30, 50);
-      ctx.drawImage(SPR.rflame[((T * 14 + 1) | 0) % 2], -2, 92, 30, 50);
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
-    } else {
-      ctx.drawImage(SPR.rocket, W / 2 - 30, H / 2 - 80 + wob, 60, 138);
-      ctx.drawImage(SPR.rflame[((T * 14) | 0) % 2], W / 2 - 18 + 6.5, H / 2 + 52 + wob, 36, 60);
+    if (travel.phase !== 'scan') {               // the scan panel replaces the hero ship
+      if (rock) {                                // nose-up barge, pods glowing behind
+        ctx.translate(W / 2, H / 2 + wob);
+        ctx.rotate(-0.9);
+        ctx.drawImage(SPR.bargeStg[2], -98, -46, 196, 92);
+        ctx.rotate(Math.PI / 2);
+        ctx.drawImage(SPR.rflame[((T * 14) | 0) % 2], -36, 88, 28, 46);
+        ctx.drawImage(SPR.rflame[((T * 14 + 1) | 0) % 2], 4, 88, 28, 46);
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+      } else if (red) {                          // nose-up cruiser, engines blazing behind
+        ctx.translate(W / 2, H / 2 + wob);
+        ctx.rotate(-0.9);
+        ctx.drawImage(SPR.cruiserStg[2], -105, -43, 210, 87);
+        ctx.rotate(Math.PI / 2);                 // exhaust runs straight off the tail
+        ctx.drawImage(SPR.rflame[((T * 14) | 0) % 2], -34, 92, 30, 50);
+        ctx.drawImage(SPR.rflame[((T * 14 + 1) | 0) % 2], -2, 92, 30, 50);
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+      } else {
+        ctx.drawImage(SPR.rocket, W / 2 - 30, H / 2 - 80 + wob, 60, 138);
+        ctx.drawImage(SPR.rflame[((T * 14) | 0) % 2], W / 2 - 18 + 6.5, H / 2 + 52 + wob, 36, 60);
+      }
+    }
+    /* v7 EXPRESS: Mars, then the Moon, sail past the window */
+    if (travel.express && travel.phase === 'stars') {
+      const et = travel.t;
+      if (et > 0.4 && et < 1.5) {
+        const f2 = (et - 0.4) / 1.1;
+        ctx.drawImage(SPR.ballMars, W * (0.9 - f2 * 0.85), H * 0.3 + f2 * 60, 52, 52);
+        if (f2 > 0.2 && f2 < 0.8) otxt('PASSING MARS!', W / 2, H - 150, 22, '#ff8a66');
+      } else if (et > 1.7 && et < 2.9) {
+        const f2 = (et - 1.7) / 1.2;
+        ctx.drawImage(SPR.ballMoon, W * (0.9 - f2 * 0.85), H * 0.36 + f2 * 40, 40, 40);
+        if (f2 > 0.2 && f2 < 0.8) otxt('PASSING THE MOON!', W / 2, H - 150, 22, '#9fe8ff');
+      }
     }
     if (travel.phase === 'stars')
-      otxt(travel.to === 'mars' ? 'TO MARS!'
+      otxt(travel.to === 'scan' ? 'TO THE ASTEROIDS!'
+         : travel.express ? 'EXPRESS HOME!'
+         : travel.from === 'mission' ? 'HOME TO MARS!'
+         : travel.to === 'mars' ? 'TO MARS!'
          : travel.to === 'earth' ? 'HOMEWARD!'
          : travel.from === 'mars' ? 'HOME TO THE MOON!' : 'TO THE MOON!',
-         W / 2, 160, 44, red ? '#ff8a66' : '#7dffe0');
+         W / 2, 160, 44, rock ? '#9fd8ff' : red ? '#ff8a66' : '#7dffe0');
+    if (travel.phase === 'scan') drawScanScreen();   // v7: CHOOSE AN ASTEROID
     ctx.globalAlpha = 1;
   }
 
@@ -8373,7 +10330,7 @@ function renderPlay() {
   if (paused) drawPause();
   if (modal) drawModal();
   if (confirmPrestige) drawPrestige();
-  if (banners.length) drawBanner(banners[0]);
+  if (banners.length && !vignette && !(travel && travel.phase === 'scan')) drawBanner(banners[0]);   // v7: the scan + vignettes own their screens
 }
 
 function render() {
@@ -8386,7 +10343,7 @@ function render() {
    UPDATE + MAIN LOOP
    ═══════════════════════════════════════════════════════════════════════ */
 function updatePlay(dt) {
-  if (banners.length) {
+  if (banners.length && !vignette) {               // v7: vignettes hold banners too
     banners[0].t += dt * (banners.length > 1 ? 2.4 : 1);   // queued banners drain fast
     if (banners[0].t > banners[0].dur) banners.shift();
   }
@@ -8406,6 +10363,8 @@ function updatePlay(dt) {
     if (disasterT <= 0) startDisaster();
   }
   if (travel) updateTravel(dt);
+  if (world === 'mission') updateMission(dt);    // v7: timer, hazards, chunks, drills
+  if (unloadFx > 0) unloadFx -= dt;              // v7: Earth unload beat decays
   if (!rocketSeq && !gateSeq && !travelCin())
     for (const p of players) if (!p.aboard) updatePlayer(p, dt);
   if (interior) updateInterior(dt);              // v5b: residents wander, hearts float, elevators ding
@@ -8928,8 +10887,35 @@ window.__test = {
       hudVis: (() => {
         const lunarSeen2 = moonArrived || res.regolith > 0 || res.ice > 0 || res.he3 > 0;
         return RES_LIST.filter(r => RES_AGE[r] <= age && !(LUNAR[r] && !lunarSeen2) &&
-          !(MARTIAN[r] && !marsSeen()) && !(r === 'fuel' && !fuelSeen()));
+          !(MARTIAN[r] && !marsSeen()) && !(ASTRO[r] && !astroSeen()) &&
+          !(r === 'alloy' && !((res.alloy || 0) > 0 || (life.alloy || 0) > 0)) &&
+          !(r === 'fuel' && !fuelSeen()));
       })(),
+      /* ── v7 ── */
+      bargeStage, bargeUpgraded,
+      expedition: exped ? { active: world === 'mission', timer: exped.timer, timerMax: exped.timerMax,
+        cargo: Object.assign({}, cargo), slots: bargeSlots(), hazard: exped.hazard,
+        type: exped.type, stars: exped.stars, template: exped.tmpl, rare: exped.rare,
+        boosts: exped.boosts, warned: exped.warned,
+        chunks: exped.chunks.filter(c => c.on).length,
+        deposits: flora.filter(f => (f.type === 'dep' || f.type === 'vault') && !f.gone).length,
+        beacon: !!exped.beacon } : null,
+      scanScreen: scanScr ? { open: true, sel: scanScr.sel,
+        cards: scanScr.cards.map(c => ({ type: c.type, stars: c.stars, hazard: c.hazard, rare: !!c.rare, tmpl: c.tmpl })) } : null,
+      cargoGlobal: Object.assign({}, cargo),
+      cargoTotal: cargoTotal(),
+      firstHaulDone,
+      expressReady: firstHaulDone && cargoTotal() > 0,
+      expedCounter, lastRareAt, expeditionsDone,
+      beaconsFound, mapAssembled,
+      megastructures: allB().filter(b => B[b.k].mega).map(b => ({ k: b.k, gx: b.gx, gy: b.gy,
+        stage: b.stage || 0, max: megaMax(b.k), complete: megaDone(b) })),
+      hop: players.map(p => !!p.hop),
+      hopH: players.map(p => p.hopH || 0),
+      carry: players.map(p => (p.carry || []).slice()),
+      stun: players.map(p => (p.stunT || 0) > 0),
+      missionStrip: world === 'mission' ? menuItems().map(it => it.k) : null,
+      unloadFx: unloadFx > 0,
     };
   },
   /* ── v5a hooks ── */
@@ -9060,6 +11046,77 @@ window.__test = {
              chip: RES_POOLS.chip.filter(l => /mars|dust devil/i.test(l)).length,
              marsonaut: RES_POOLS.marsonaut.length,
              context: /MARS/.test(CONTEXT_LINES.marstrip) };
+  },
+  /* ── v7 hooks — THE ASTEROID RUSH. Fast-forward time/cinematics, but the
+     actions themselves always walk the REAL code paths. ── */
+  forceScanRare() { forceRare = true; },
+  grantCargo(o) {                                // stock the hold (capped at the slots)
+    for (const k in o) cargo[k] = (cargo[k] || 0) + o[k];
+    return Object.assign({}, cargo);
+  },
+  bestShotFrom(gx, gy, x, y) {                   // can a cannon HERE reach THERE?
+    let bestD = 1e9;
+    for (let ang = 15; ang <= 165; ang += 15) for (let pow = 0; pow < 3; pow++) {
+      const e = simShot({ gx, gy }, ang, pow);
+      const d = Math.hypot(e.x - x, e.y - y);
+      if (d < bestD) bestD = d;
+    }
+    return bestD;
+  },
+  startExpedition(cardIndex) {                   // real board → scan → choose → land
+    const z = boardingPads().find(z2 => z2.ship === 'barge' && z2.to === 'scan');
+    if (!z) return false;
+    for (const p of players) { p.x = z.cx; p.y = z.cy; p.target = null; p.boat = false; }
+    for (const p of players) doAction(p);        // the true boarding path
+    for (let k = 0; k < 200 && travel && travel.phase !== 'scan'; k++) updateTravel(0.1);
+    if (!travel || travel.phase !== 'scan' || !scanScr) return false;
+    if (cardIndex !== undefined) { scanScr.sel = clamp(cardIndex, 0, 2); confirmScan(); }
+    else return 'scan';                          // leave the screen open for input tests
+    for (let k = 0; k < 200 && travel; k++) updateTravel(0.1);
+    return world === 'mission';
+  },
+  fastMission(sec) {                             // drain the battery — rescue fires naturally
+    if (!exped) return false;
+    exped.timer -= sec;
+    return exped.timer;
+  },
+  fastChunks() {                                 // settle all drifting chunks (skip the drift)
+    if (!exped) return 0;
+    for (const ch of exped.chunks) if (ch.on) { ch.vx = 0; ch.vy = 0; }
+    return exped.chunks.filter(c => c.on).length;
+  },
+  depositsInfo() {
+    return flora.filter(f => f.type === 'dep' || f.type === 'vault').map(f => ({
+      type: f.type, res: f.res || 'alloy', big: !!f.big, gx: f.gx, gy: f.gy,
+      x: tX(f.gx) + 16, y: tY(f.gy) + 20, hits: f.hits, gone: !!f.gone }));
+  },
+  chunksInfo() {
+    if (!exped) return [];
+    return exped.chunks.filter(c => c.on).map(c => ({ res: c.res, x: Math.round(c.x), y: Math.round(c.y) }));
+  },
+  beaconInfo() { return exped && exped.beacon ? { x: exped.beacon.x, y: exped.beacon.y } : null; },
+  crumblesInfo() { return exped ? exped.crumbles.map(c => ({ gx: c.gx, gy: c.gy, t: c.t, gone: c.goneT > 0 })) : []; },
+  pebblesInfo() { return exped ? exped.pebbles.filter(p => p.on).map(p => ({ x: p.x, y: p.y, warnT: p.warnT })) : []; },
+  endMissionBoard() {                            // teleport everyone to the barge + board
+    if (world !== 'mission') return false;
+    const z = boardingPads().find(z2 => z2.ship === 'barge');
+    if (!z) return false;
+    for (const p of players) { p.x = z.cx; p.y = z.cy; p.target = null; p.hop = null; p.hopH = 0; p.stunT = 0; }
+    for (const p of players) doAction(p);
+    return players.every(p => p.aboard);
+  },
+  fastVignette() { if (vignette) vignette.t = 99; return !!vignette; },
+  updateMissionN(n) { for (let i = 0; i < (n || 1); i++) updateMission(0.1); },
+  bargeCosts() { return { stages: BARGE_STAGES, upgrade: BARGE_UPGRADE_COST, mb: MB }; },
+  megaInfo(k) { return { found: B[k].cost, feeds: MEGA[k].feeds }; },
+  feedMegaAt(gx, gy) {                           // stand at the site + real feed path
+    const b = occ[gy] && occ[gy][gx];
+    if (!b || !B[b.k].mega || !players[0]) return false;
+    const s = B[b.k].size || 1;
+    players[0].x = tX(b.gx) + s * 16; players[0].y = tY(b.gy) + s * 32 + 12;
+    players[0].target = null;
+    doAction(players[0]);
+    return b.stage || 0;
   },
 };
 
