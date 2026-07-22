@@ -97,6 +97,8 @@ let WORLD_W = GW * TILE, WORLD_H = GY0 + GH * TILE;   // 2560 x 1416 (Earth)
 const CX = 24, CYG = 13;                       // home island centre in grid coords
 const MCX = 20, MCY = 13;                      // moon landmass centre
 const RCX = 22, RCY = 14;                      // mars landmass centre
+const PGW = 44, PGH = 28;                      // v8a: Mercury/Jupiter grids (Mars-sized)
+const PCX = 22, PCY = 14;                      // v8a: planet landmass centre (both new worlds)
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
 ctx.imageSmoothingEnabled = false;
@@ -221,6 +223,12 @@ const SFX = {
   /* v7.2: come upstairs */
   liftding: () => { blip(1040, 0.14, 'triangle', 0.06); setTimeout(() => blip(1560, 0.28, 'triangle', 0.05), 100); },
   bloop:    () => { blip(340, 0.09, 'sine', 0.07, 620); setTimeout(() => blip(560, 0.12, 'sine', 0.06, 340), 80); },
+  /* v8a: the nine planets */
+  hum:      () => { blip(70, 1.4, 'sawtooth', 0.05, 110); blip(140, 1.2, 'sine', 0.05, 220);
+                    setTimeout(() => blip(880, 0.3, 'triangle', 0.05, 1320), 500); },
+  mapblip:  () => blip(740, 0.06, 'sine', 0.05, 1100),
+  planet:   () => { [392, 523, 659, 784, 1047].forEach((f, i) => setTimeout(() => blip(f, 0.2, 'triangle', 0.08), i * 110));
+                    setTimeout(() => noiseBurst(0.3, 0.06, 2600, 400), 550); },
 };
 /* cozy ambient loop — soft pad chords + pentatonic plucks, scheduled ahead */
 const CHORDS = [[130.8, 196, 329.6], [110, 164.8, 261.6], [87.3, 130.8, 220], [98, 146.8, 246.9]];
@@ -257,15 +265,18 @@ function musicTick() {
 /* ───── resources & buildings data (ALL balance lives here) ───── */
 const RES_LIST = ['wood', 'stone', 'food', 'ore', 'metal', 'parts', 'power', 'science',
                   'regolith', 'ice', 'he3', 'fuel', 'rediron', 'frost',
-                  'astroiron', 'crystal', 'alloy', 'starsteel'];   // v7: the asteroid haul
+                  'astroiron', 'crystal', 'alloy', 'starsteel',
+                  'sunstone', 'stormcore'];      // v8a: the nine planets
 const RES_AGE  = { wood: 1, stone: 1, food: 2, ore: 3, metal: 3, parts: 3, power: 4, science: 5,
                    regolith: 7, ice: 7, he3: 7, fuel: 7, rediron: 7, frost: 7,
-                   astroiron: 7, crystal: 7, alloy: 7, starsteel: 7 };
+                   astroiron: 7, crystal: 7, alloy: 7, starsteel: 7,
+                   sunstone: 7, stormcore: 7 };
 const RES_COL  = { wood: '#e0a35c', stone: '#c2cbd4', food: '#ff8f6b', ore: '#a99bf0',
                    metal: '#e8eef4', parts: '#ffd24a', power: '#59e0ff', science: '#7dff9a', pop: '#ffd1a1',
                    regolith: '#c2c9d6', ice: '#9fe8ff', he3: '#7dffe0', fuel: '#ff9a4a',
                    rediron: '#ff8a66', frost: '#dff2ff',
-                   astroiron: '#d8c49a', crystal: '#c99bff', alloy: '#7dffe0', starsteel: '#9fd8ff' };
+                   astroiron: '#d8c49a', crystal: '#c99bff', alloy: '#7dffe0', starsteel: '#9fd8ff',
+                   sunstone: '#ffc061', stormcore: '#57e8d4' };
 /* v6a: FUEL joins the HUD only once it exists somewhere (refined or granted) */
 const fuelSeen = () => (res.fuel || 0) > 0 || (life.fuel || 0) > 0 || cruiserStage > 0;
 const LUNAR = { regolith: 1, ice: 1, he3: 1 };  // shown in the HUD only once discovered
@@ -278,6 +289,9 @@ const ASTRO = { astroiron: 1, crystal: 1, alloy: 1, starsteel: 1 };
 const astroSeen = () => ['astroiron', 'crystal', 'alloy', 'starsteel']
   .some(r => (res[r] || 0) > 0 || (life[r] || 0) > 0);
 const starsteelSeen = () => (res.starsteel || 0) > 0 || (life.starsteel || 0) > 0;
+/* ── v8a: planet resources hide in the HUD until first mined ── */
+const PLANET_RES = { sunstone: 1, stormcore: 1 };
+const planetResSeen = r => (res[r] || 0) > 0 || (life[r] || 0) > 0;
 const cargoTotal = () => (cargo.astroiron || 0) + (cargo.crystal || 0) + (cargo.alloy || 0);
 const bargeSlots = () => bargeUpgraded ? 12 : 8;
 const AGE_NAMES = [null, 'CAMPFIRE', 'FARMING', 'INDUSTRY', 'ELECTRICITY', 'SCIENCE', 'CYBERPUNK', 'MOON COLONY'];
@@ -366,6 +380,27 @@ const B = {
                  prod: { science: 6 }, needPower: 6, mega: true, grp: 'mega' },
   starharbor:  { name: 'STAR HARBOR', age: 7, size: 3, cost: { starsteel: 5, alloy: 2 },
                  pop: 40, mega: true, once: true, noremove: true, grp: 'mega' },
+  /* ═══ v8a — THE NINE PLANETS: Mercury + Jupiter, four staged-feed
+     structures each (the MEGA machinery, planet-scoped via `planet`).
+     Costs mix imported endgame resources with the LOCAL resource. ═══ */
+  sunport:     { name: 'SUN PORT', age: 7, size: 2, cost: { starsteel: 4, sunstone: 10 },
+                 prod: { power: 6 }, planet: 'mercury', mega: true, once: true, noremove: true, grp: 'tools' },
+  solarforge:  { name: 'SOLAR FORGE', age: 7, size: 2, cost: { starsteel: 4, sunstone: 15 },
+                 cons: { sunstone: 0.4 }, prod: { alloy: 0.15, starsteel: 0.15 },
+                 planet: 'mercury', mega: true, once: true, grp: 'industry' },
+  craterdome:  { name: 'CRATER DOME', age: 7, size: 2, cost: { starsteel: 3, sunstone: 12 },
+                 pop: 30, planet: 'mercury', mega: true, once: true, grp: 'homes' },
+  sundialspire:{ name: 'SUNDIAL SPIRE', age: 7, size: 2, cost: { starsteel: 5, sunstone: 20 },
+                 prod: { science: 3 }, planet: 'mercury', mega: true, once: true, grp: 'tools' },
+  stormport:   { name: 'STORM PORT', age: 7, size: 2, cost: { starsteel: 4, stormcore: 10 },
+                 prod: { power: 6 }, planet: 'jupiter', mega: true, once: true, noremove: true, grp: 'tools' },
+  stormtap:    { name: 'STORM TAP', age: 7, size: 2, cost: { starsteel: 4, stormcore: 15 },
+                 cons: { stormcore: 0.2 }, prod: { power: 10, science: 1 },
+                 planet: 'jupiter', mega: true, once: true, grp: 'industry' },
+  cloudlodge:  { name: 'CLOUD LODGE', age: 7, size: 2, cost: { starsteel: 3, stormcore: 12 },
+                 pop: 30, planet: 'jupiter', mega: true, once: true, grp: 'homes' },
+  greateye:    { name: 'GREAT EYE OBSERVATORY', age: 7, size: 2, cost: { starsteel: 5, stormcore: 20 },
+                 prod: { science: 4 }, planet: 'jupiter', mega: true, once: true, grp: 'tools' },
   giantmill: { name: 'GIANT WINDMILL', age: 4, size: 1, cost: {}, prod: { power: 12 }, special: true },
   statue:    { name: 'GOLD STATUE', age: 5, size: 1, cost: {}, special: true },
 };
@@ -377,6 +412,23 @@ const MEGA = {
                   done: 'THE CRYSTAL SPIRE SHINES!', sub: 'Violet light touches the clouds — science +6/s!' },
   starharbor:   { feeds: [{ starsteel: 12, alloy: 1 }, { starsteel: 12, alloy: 1 }, { starsteel: 12, alloy: 1 }],
                   done: 'THE STAR HARBOR OPENS!', sub: 'Drone freighters will fetch your cargo — automatically!' },
+  /* ── v8a: planet structures feed on local stone + imported staples ── */
+  sunport:      { feeds: [{ sunstone: 15, metal: 40 }, { sunstone: 15, metal: 40 }],
+                  done: 'THE SUN PORT SHINES!', sub: 'Mercury has a front door — and a very sunny porch!' },
+  solarforge:   { feeds: [{ sunstone: 20, parts: 30 }, { sunstone: 20, parts: 30 }],
+                  done: 'THE SOLAR FORGE ROARS!', sub: 'Sunstone melts into ALLOY and STARSTEEL — sun-powered!' },
+  craterdome:   { feeds: [{ sunstone: 15, metal: 30 }, { sunstone: 15, metal: 30 }],
+                  done: 'THE CRATER DOME GLOWS!', sub: 'Mercurians move in — +30 pop under the big shade!' },
+  sundialspire: { feeds: [{ sunstone: 15, crystal: 2 }, { sunstone: 15, crystal: 2 }, { sunstone: 15, crystal: 2 }],
+                  done: 'THE SUNDIAL SPIRE STANDS!', sub: 'Its shadow tells the time across the whole crater — science!' },
+  stormport:    { feeds: [{ stormcore: 15, metal: 40 }, { stormcore: 15, metal: 40 }],
+                  done: 'THE STORM PORT HUMS!', sub: 'A safe harbor above the endless storm!' },
+  stormtap:     { feeds: [{ stormcore: 20, parts: 30 }, { stormcore: 20, parts: 30 }],
+                  done: 'THE STORM TAP CRACKLES!', sub: 'Jupiter lightning, bottled — power + science forever!' },
+  cloudlodge:   { feeds: [{ stormcore: 15, metal: 30 }, { stormcore: 15, metal: 30 }],
+                  done: 'THE CLOUD LODGE OPENS!', sub: 'Cloudfolk move in — +30 pop on the fluffiest floor ever!' },
+  greateye:     { feeds: [{ stormcore: 15, crystal: 2 }, { stormcore: 15, crystal: 2 }, { stormcore: 15, crystal: 2 }],
+                  done: 'THE GREAT EYE OPENS!', sub: 'A telescope that looks DOWN — into the storm of storms!' },
 };
 const megaMax = k => MEGA[k].feeds.length;
 const megaDone = b => B[b.k].mega && (b.stage || 0) >= megaMax(b.k);
@@ -388,6 +440,12 @@ function megaCompleteCnt(k) {
 function megaCompleteTotal() {
   let n = 0;
   for (const b of allB()) if (B[b.k].mega && megaDone(b)) n++;
+  return n;
+}
+/* v8a: completed structures on a given planet (the SETTLE goals) */
+function planetMegaCnt(pk) {
+  let n = 0;
+  for (const b of allB()) if (B[b.k].planet === pk && megaDone(b)) n++;
   return n;
 }
 /* ── v7: mission structures cost CARGO CHUNKS (banked crates first, then
@@ -446,6 +504,39 @@ const BARGE_STAGES = [
 ];
 const BARGE_STAGE_NAMES = ['KEEL LAID!', 'SCANNER UP!', 'THE SURVEY BARGE IS READY!'];
 const BARGE_UPGRADE_COST = { rediron: 60, parts: 30 };   // +4 crate slots, once
+/* ═══ v8a — THE STAR CLIPPER: funded at the completed STAR HARBOR in 3
+   installments (fundBarge, verbatim shape; endgame resources only).
+   Gate: the nine-planets map must be assembled first (3 beacons). ═══ */
+const CLIPPER_STAGES = [
+  { starsteel: 20, alloy: 2 },
+  { starsteel: 20, crystal: 4 },
+  { starsteel: 15, alloy: 2, crystal: 3 },
+];
+const CLIPPER_STAGE_NAMES = ['KEEL LAID!', 'NACELLES LIT!', 'STARDRIVE HUMMING — THE STAR CLIPPER IS READY!'];
+/* the nine planets, sun-outward — the solar map + whiz-by routes read this.
+   `fly` = flyable in v8a (earth/mars = shortcut rows); the rest tag SOON! */
+const PLANETS = [
+  { k: 'mercury', name: 'MERCURY', sub: 'THE SUNSCORCH',  fly: true,
+    fact: 'A year here lasts just 88 days!' },
+  { k: 'venus',   name: 'VENUS',   sub: 'THE CLOUD OVEN',
+    fact: 'Hot enough to melt a lead crayon!' },
+  { k: 'earth',   name: 'EARTH',   sub: 'HOME SWEET HOME', fly: true, home: true,
+    fact: 'The only planet with pizza. So far.' },
+  { k: 'mars',    name: 'MARS',    sub: 'THE RED FRONTIER', fly: true, home: true,
+    fact: 'Sunsets on Mars are BLUE!' },
+  { k: 'jupiter', name: 'JUPITER', sub: 'THE CLOUDTOP',   fly: true,
+    fact: '1,300 Earths could fit inside!' },
+  { k: 'saturn',  name: 'SATURN',  sub: 'THE RING WORLD',
+    fact: 'Its rings are made of ice and snowballs!' },
+  { k: 'uranus',  name: 'URANUS',  sub: 'THE SIDEWAYS ONE',
+    fact: 'It rolls around the sun on its side!' },
+  { k: 'neptune', name: 'NEPTUNE', sub: 'THE BIG BLUE',
+    fact: 'The windiest place in the whole system!' },
+  { k: 'pluto',   name: 'PLUTO',   sub: 'THE LITTLE ONE',
+    fact: 'Smaller than our moon — but big of heart!' },
+];
+const PLANET_ORD = { mercury: 0, venus: 1, earth: 2, mars: 3, jupiter: 4,
+                     saturn: 5, uranus: 6, neptune: 7, pluto: 8 };
 /* mission battery (seconds) by asteroid difficulty stars 1..3 */
 const EXP_BATT = [0, 240, 200, 170];
 const MISSION_GW = 42, MISSION_GH = 24;         // ≥ one screen — the camera insists
@@ -557,6 +648,20 @@ const GOALS = [
   { t: 'VISIT THE STAR DECK',     ok: () => starDeckSeen,
     live: () => megaCompleteCnt('starharbor') > 0 ? 'VISIT THE STAR DECK: RIDE THE STAR HARBOR LIFT TO THE TOP!'
                                                   : 'VISIT THE STAR DECK: COMPLETE THE STAR HARBOR!' },
+  /* ── v8a: THE NINE PLANETS — first light (appended — goalI stays aligned) ── */
+  { t: 'BUILD THE STAR CLIPPER',  ok: () => clipperStage >= 3,
+    live: () => !mapAssembled ? 'STAR CLIPPER: ASSEMBLE THE NINE-PLANETS MAP FIRST (3 BEACONS)!'
+              : clipperStage > 0 ? 'STAR CLIPPER: STAGE ' + clipperStage + '/3 — FUND AT THE STAR HARBOR!'
+              : 'BUILD THE STAR CLIPPER: FUND HER AT THE STAR HARBOR!' },
+  { t: 'FIRST FLIGHT',            ok: () => planetsVisited.mercury || planetsVisited.jupiter,
+    live: () => 'FIRST FLIGHT: PRESS ✕ AT THE STAR CLIPPER — PICK A PLANET!' },
+  { t: 'SETTLE THE SUNSCORCH',    ok: () => planetMegaCnt('mercury') >= 2,
+    live: () => 'SETTLE THE SUNSCORCH: COMPLETE 2 MERCURY STRUCTURES (' + planetMegaCnt('mercury') + '/2)' },
+  { t: 'SETTLE THE CLOUDTOP',     ok: () => planetMegaCnt('jupiter') >= 2,
+    live: () => 'SETTLE THE CLOUDTOP: COMPLETE 2 JUPITER STRUCTURES (' + planetMegaCnt('jupiter') + '/2)' },
+  /* the v8a horizon line — v8b picks it up from here */
+  { t: 'FIVE MORE WORLDS AWAIT',  ok: () => false,
+    live: () => 'FIVE MORE WORLDS AWAIT — SOON!' },
 ];
 
 /* ───── gentle disasters (age 3+, kid-visible warning, nothing lost) ───── */
@@ -626,6 +731,11 @@ let exped = null;                             // live mission { timer, timerMax,
 let scanScr = null;                           // the CHOOSE-AN-ASTEROID screen { cards, sel, t }
 let forceRare = false;                        // test hook: next scan deals a rare card
 let unloadFx = 0;                             // Earth unload beat timer (crates + coins)
+/* ── v8a: THE NINE PLANETS — first light ── */
+let clipperStage = 0;                         // STAR CLIPPER installments (0-3; 3 = flight-ready)
+let clipperAt = 'earth';                      // where she's parked (earth | mars | mercury | jupiter)
+let planetsVisited = { mercury: false, jupiter: false };   // first-landing flags (persisted)
+let solarMap = null;                          // { sel, cx, cy, from, t } — the full-screen planet chooser
 let forcedSeed = 0;                           // test hook: pin the next new game's seed
 const DEF_NAMES = ['ISLE', 'ATOLL', 'CAY', 'REEF', 'KEY', 'SHOAL'];   // skipped-name variety
 let res = {}, life = { metal: 0, parts: 0, science: 0, regolith: 0, ice: 0, fuel: 0 };
@@ -2146,6 +2256,517 @@ function initSprites() {
     return c;
   })();
 
+  /* ═══════════════════════════════════════════════════════════════════
+     v8a — THE NINE PLANETS: tiles, flora, structures, the STAR CLIPPER
+     ═══════════════════════════════════════════════════════════════════ */
+  /* MERCURY — bronze/copper cratered ground, 4 variants */
+  SPR.merctile = [0, 1, 2, 3].map(v => S(16, 16, (g, P) => {
+    P(0, 0, 16, 16, ['#8a5a34', '#96613a', '#7d5230', '#6e4a2c'][v]);
+    for (let i = 0; i < 11; i++) {
+      const x = (i * 7 + v * 5) % 16, y = (i * 11 + v * 3 + 2) % 16;
+      P(x, y, 1, 1, i % 3 ? '#6e4a2c' : '#c98a4a');
+    }
+    /* a sun-baked crater bowl on SOME tiles only (busy ground reads noisy) */
+    if (v >= 2) {
+      const cx3 = (v * 5 + 4) % 10 + 3, cy3 = (v * 7 + 5) % 10 + 3;
+      g.fillStyle = '#5c3c20'; g.beginPath(); g.ellipse(cx3 * 2, cy3 * 2 + 1, 5.4, 3.4, 0, 0, 6.3); g.fill();
+      g.fillStyle = '#4a2f18'; g.beginPath(); g.ellipse(cx3 * 2, cy3 * 2 + 2, 3.8, 2.2, 0, 0, 6.3); g.fill();
+      g.fillStyle = '#e0a35c'; g.fillRect(cx3 * 2 - 5, cy3 * 2 - 4, 8, 1.6);
+    }
+    if (v === 1) P(11, 3, 1.4, 1.4, '#f0c078');   // a copper glint
+  }));
+  /* JUPITER — cream/rust banded cloud-shelf, 4 variants (soft, no craters) */
+  SPR.jovtile = [0, 1, 2, 3].map(v => S(16, 16, (g, P) => {
+    P(0, 0, 16, 16, ['#e0c9a4', '#d8bd94', '#cead82', '#c9a172'][v]);
+    P(0, 3 + (v % 2) * 2, 16, 2.4, v % 2 ? '#c98a5c' : '#e8d8b8');    // rust / cream streaks
+    P(0, 9 + (v % 3), 16, 1.8, v % 2 ? '#f0e2c8' : '#b8825c');
+    P(2 + v * 3, 6 + v, 5, 1.2, 'rgba(255,255,255,0.5)');             // cloud curl highlights
+    P((v * 5 + 8) % 12, 12.6, 6, 1.2, 'rgba(255,255,255,0.35)');
+    if (v % 2) {                                                      // a soft rust swirl
+      g.strokeStyle = 'rgba(184,122,74,0.35)'; g.lineWidth = 2;
+      g.beginPath(); g.ellipse((4 + v * 7) % 14 * 2 + 4, (v * 5 + 6) % 12 * 2 + 4, 7, 3.4, 0.4, 0, 5); g.stroke();
+    }
+  }));
+  /* SUNSTONE node — glowing amber crystals, 3 damage stages */
+  SPR.fsun = [0, 1, 2].map(st => S(16, 14, (g, P) => {
+    const glow = g.createRadialGradient(16, 18, 2, 16, 18, 15 - st * 3);
+    glow.addColorStop(0, 'rgba(255,192,97,0.55)'); glow.addColorStop(1, 'rgba(255,192,97,0)');
+    g.fillStyle = glow; g.fillRect(0, 0, 32, 28);
+    g.fillStyle = 'rgba(40,20,8,0.4)';
+    g.beginPath(); g.ellipse(16, 25, 11 - st * 2, 3, 0, 0, 6.3); g.fill();
+    const gem = (gx3, gy3, gw2, gh2, hot) => {
+      g.fillStyle = hot ? '#ffd88a' : '#e8963a'; g.beginPath();
+      g.moveTo((gx3 + gw2 / 2) * 2, (gy3 - gh2) * 2);
+      g.lineTo((gx3 + gw2) * 2, (gy3 + 1) * 2); g.lineTo(gx3 * 2, (gy3 + 1) * 2);
+      g.closePath(); g.fill();
+      P(gx3 + gw2 * 0.32, gy3 - gh2 * 0.7, gw2 * 0.24, gh2 * 0.55, '#fff0c0');
+    };
+    if (st < 2) gem(2.4, 11, 4.4, 4.4, false);
+    gem(9, 11.4, 5.4, st === 0 ? 7 : 5, true);
+    if (st < 1) gem(6, 11.6, 3.6, 3.2, false);
+    P(4 + st * 2, 12.2, 9 - st * 2, 1.2, '#8a5a34');    // host rock lip
+  }));
+  /* metal-rich CRATER NODE — dark bowl with ore glints, 3 stages */
+  SPR.forenode = [0, 1, 2].map(st => S(16, 12, (g, P) => {
+    g.fillStyle = 'rgba(40,20,8,0.4)';
+    g.beginPath(); g.ellipse(16, 21, 11 - st * 2, 3, 0, 0, 6.3); g.fill();
+    const w = 12 - st * 1.6, x0 = 8 - (12 - w) / 2 + 2;
+    P(x0, 4, w, 6.6, '#5c4030'); P(x0 + 1, 3.2, w - 2, 2, '#6e4a34');
+    g.fillStyle = '#3a2818'; g.beginPath();
+    g.ellipse((x0 + w / 2) * 2, 13, (w - 3) * 0.9, 3.4, 0, 0, 6.3); g.fill();
+    P(x0 + w * 0.2, 5.4, 2, 1.6, '#c9d2da'); P(x0 + w * 0.62, 6.6, 1.8, 1.4, '#a99bf0');
+    P(x0 + w * 0.42, 4.6, 1.4, 1.2, '#e8eef4');
+    if (st >= 1) { g.strokeStyle = '#211408'; g.lineWidth = 1.4;
+      g.beginPath(); g.moveTo(x0 * 2 + 5, 8); g.lineTo(x0 * 2 + w, 18); g.stroke(); }
+  }));
+  /* STORMCORE node — crackling teal orb, 3 stages */
+  SPR.fstorm = [0, 1, 2].map(st => S(16, 14, (g, P) => {
+    const glow = g.createRadialGradient(16, 15, 2, 16, 15, 14 - st * 3);
+    glow.addColorStop(0, 'rgba(87,232,212,0.5)'); glow.addColorStop(1, 'rgba(87,232,212,0)');
+    g.fillStyle = glow; g.fillRect(0, 0, 32, 28);
+    g.fillStyle = 'rgba(60,40,20,0.3)';
+    g.beginPath(); g.ellipse(16, 25, 10 - st * 2, 2.8, 0, 0, 6.3); g.fill();
+    const r = 6.4 - st * 1.3;
+    g.fillStyle = '#1e6a5c'; g.beginPath(); g.arc(16, 15, r * 2, 0, 6.3); g.fill();
+    g.fillStyle = '#3ac9ae'; g.beginPath(); g.arc(15, 14, r * 1.5, 0, 6.3); g.fill();
+    g.fillStyle = '#a8ffe8'; g.beginPath(); g.arc(14, 12.6, r * 0.7, 0, 6.3); g.fill();
+    g.strokeStyle = '#d0fff4'; g.lineWidth = 1.4;                    // the crackle
+    g.beginPath(); g.moveTo(10, 8); g.lineTo(15, 13); g.lineTo(12, 16); g.stroke();
+    g.beginPath(); g.moveTo(22, 10); g.lineTo(18, 15); g.lineTo(21, 19); g.stroke();
+    if (st >= 1) { g.strokeStyle = '#0c352c'; g.lineWidth = 1.6;
+      g.beginPath(); g.moveTo(12, 10); g.lineTo(17, 17); g.lineTo(14, 22); g.stroke(); }
+    P(5 + st, 12.4, 6 - st, 1, '#c9a172');                           // cloud tuft under it
+  }));
+  /* HYDROGEN WISP — a pale curl of sky, 3 stages */
+  SPR.fwisp = [0, 1, 2].map(st => S(16, 12, (g, P) => {
+    g.globalAlpha = 1 - st * 0.22;
+    g.strokeStyle = '#f0f6ff'; g.lineWidth = 4.6 - st;
+    g.beginPath(); g.moveTo(6, 20); g.quadraticCurveTo(10, 4, 18, 9);
+    g.quadraticCurveTo(25, 13, 21, 18); g.stroke();
+    g.strokeStyle = '#c0d8f0'; g.lineWidth = 2;
+    g.beginPath(); g.moveTo(8, 19); g.quadraticCurveTo(12, 7, 18, 11); g.stroke();
+    g.globalAlpha = 1;
+    P(11, 10.6 - st, 1.6, 1.6, '#ffffff');
+    P(4, 10, 1.2, 1.2, '#dfe9ff');
+  }));
+  /* ── the four MERCURY structures (staged-feed, mkMega machinery) ── */
+  mkMega('sunport', 32, 52, 2, (g, P, st, lit) => {
+    const GND = 48;
+    g.fillStyle = 'rgba(40,20,8,0.4)';
+    g.beginPath(); g.ellipse(32, GND * 2 + 4, 30, 6, 0, 0, 6.3); g.fill();
+    P(3, GND - 5, 26, 5, '#8a6a44'); P(3, GND - 5, 26, 1.2, '#b08a54');
+    if (st === 0) {
+      for (let i = 0; i < 5; i++) P(6 + i * 4.6, GND - 8.6, 1, 4, '#8a7444');
+      scaffold(g, P, 4, GND - 12, 24); crane(g, P, 24, GND - 34, 30);
+      return;
+    }
+    /* the landing pad ring on squat bronze legs */
+    P(5, GND - 15, 3.4, 10, '#6e4a2c'); P(23.6, GND - 15, 3.4, 10, '#6e4a2c');
+    P(1, GND - 21, 30, 7, '#b8823f'); P(1, GND - 21, 30, 2, '#e0a35c');
+    g.strokeStyle = lit ? '#ffc061' : '#8a5a20'; g.lineWidth = 3;
+    g.beginPath(); g.ellipse(32, (GND - 17.5) * 2, 26, 6.4, 0, 0, 6.3); g.stroke();
+    P(14, GND - 20.2, 4, 1.2, lit ? '#ffc061' : '#8a5a20');
+    for (let i = 0; i < 6; i++) P(3.4 + i * 5, GND - 20.6, 1.4, 1, i % 2 ? '#ffd24a' : '#6e4a2c');
+    if (st === 1) { scaffold(g, P, 2, GND - 25, 28); crane(g, P, 26, GND - 44, 22); return; }
+    /* complete: the grand shade canopy + comms mast + gold trim */
+    P(3, GND - 35, 2.4, 14, '#8a93a0'); P(26.6, GND - 35, 2.4, 14, '#8a93a0');
+    g.fillStyle = '#d9a520';
+    g.beginPath(); g.moveTo(2, (GND - 35) * 2); g.lineTo(62, (GND - 35) * 2);
+    g.lineTo(54, (GND - 41) * 2); g.lineTo(10, (GND - 41) * 2); g.closePath(); g.fill();
+    g.fillStyle = '#f0c542';
+    g.beginPath(); g.moveTo(2, (GND - 35) * 2); g.lineTo(62, (GND - 35) * 2);
+    g.lineTo(60, (GND - 36.6) * 2); g.lineTo(4, (GND - 36.6) * 2); g.closePath(); g.fill();
+    P(6, GND - 40.4, 19, 1.2, '#fff3b0');
+    P(15.2, GND - 50, 1.6, 9, '#c9d2da');
+    P(13.4, GND - 51.6, 5.2, 2.2, lit ? '#ffc061' : '#8a5a20');
+    P(11.6, GND - 46, 2.4, 1.4, lit ? '#ff8a8a' : '#8a3a3a');
+  });
+  mkMega('solarforge', 32, 64, 2, (g, P, st, lit) => {
+    const GND = 60;
+    g.fillStyle = 'rgba(40,20,8,0.4)';
+    g.beginPath(); g.ellipse(32, GND * 2 + 4, 30, 6, 0, 0, 6.3); g.fill();
+    P(3, GND - 5, 26, 5, '#8a6a44'); P(3, GND - 5, 26, 1.2, '#b08a54');
+    if (st === 0) {
+      for (let i = 0; i < 5; i++) P(6 + i * 4.6, GND - 8.6, 1, 4, '#8a7444');
+      scaffold(g, P, 4, GND - 12, 24); crane(g, P, 24, GND - 36, 32);
+      return;
+    }
+    /* crucible tower — the melt glows through the vents */
+    P(9, GND - 28, 14, 23, '#6d5040'); P(9, GND - 28, 14, 1.8, '#8a6a54');
+    P(9, GND - 28, 2, 23, '#7d5e4c');
+    P(11.4, GND - 23, 9.2, 3.4, lit ? '#ff9a3a' : '#8a4a20');
+    P(11.4, GND - 16, 9.2, 3.4, lit ? '#ffb45e' : '#8a4a20');
+    P(13.2, GND - 22.2, 5.6, 1.6, lit ? '#ffd75e' : '#a86030');
+    if (st === 1) { scaffold(g, P, 8, GND - 32, 16); crane(g, P, 24, GND - 50, 26); return; }
+    /* complete: twin mirror dishes aimed at the crown melt bowl */
+    const dish = (dx, flip2) => {
+      P(dx - 1.2, GND - 36, 2.4, 12, '#8a93a0');
+      g.fillStyle = '#e8eef4';
+      g.save(); g.translate(dx * 2, (GND - 38) * 2); g.rotate(flip2 ? 0.5 : -0.5);
+      g.fillRect(-15, -4, 30, 8); g.restore();
+      g.fillStyle = '#fff3b0';
+      g.save(); g.translate(dx * 2, (GND - 38) * 2); g.rotate(flip2 ? 0.5 : -0.5);
+      g.fillRect(-11, -2, 22, 3.4); g.restore();
+    };
+    dish(5, false); dish(27, true);
+    P(12.6, GND - 50, 6.8, 22, '#6d5040'); P(12.6, GND - 50, 6.8, 1.6, '#8a6a54');
+    P(12.6, GND - 50, 1.2, 22, '#7d5e4c');
+    const bowlGlow = g.createRadialGradient(32, (GND - 51) * 2, 2, 32, (GND - 51) * 2, 26);
+    bowlGlow.addColorStop(0, 'rgba(255,216,138,0.85)'); bowlGlow.addColorStop(1, 'rgba(255,192,97,0)');
+    g.fillStyle = bowlGlow; g.fillRect(6, (GND - 63) * 2, 52, 50);
+    g.fillStyle = lit ? '#ffd75e' : '#c98a2a';
+    g.beginPath(); g.ellipse(32, (GND - 51) * 2, 15, 6, 0, 0, 6.3); g.fill();
+    g.fillStyle = lit ? '#fff3b0' : '#e0aa4a';
+    g.beginPath(); g.ellipse(29, (GND - 51.8) * 2, 6, 2.4, 0, 0, 6.3); g.fill();
+    if (lit) {                                    // baked sunbeam lines into the bowl
+      g.strokeStyle = 'rgba(255,243,176,0.55)'; g.lineWidth = 2;
+      g.beginPath(); g.moveTo(12, (GND - 39) * 2); g.lineTo(29, (GND - 51) * 2); g.stroke();
+      g.beginPath(); g.moveTo(52, (GND - 39) * 2); g.lineTo(35, (GND - 51) * 2); g.stroke();
+    }
+  });
+  mkMega('craterdome', 32, 56, 2, (g, P, st, lit) => {
+    const GND = 52;
+    g.fillStyle = 'rgba(40,20,8,0.4)';
+    g.beginPath(); g.ellipse(32, GND * 2 + 4, 30, 6, 0, 0, 6.3); g.fill();
+    P(3, GND - 5, 26, 5, '#8a6a44'); P(3, GND - 5, 26, 1.2, '#b08a54');
+    if (st === 0) {
+      for (let i = 0; i < 5; i++) P(6 + i * 4.6, GND - 8.6, 1, 4, '#8a7444');
+      scaffold(g, P, 4, GND - 12, 24); crane(g, P, 24, GND - 34, 30);
+      return;
+    }
+    /* the dome base ring + entry */
+    P(3, GND - 13, 26, 8, '#b8865c'); P(3, GND - 13, 26, 1.6, '#d9a878');
+    P(13.6, GND - 11, 4.8, 6, lit ? '#ffd75e' : '#4a3020');
+    if (st === 1) { scaffold(g, P, 4, GND - 17, 24); crane(g, P, 25, GND - 36, 24); return; }
+    /* complete: the BIG amber glass dome + shade fins */
+    g.fillStyle = lit ? 'rgba(255,192,97,0.8)' : 'rgba(224,163,92,0.7)';
+    g.beginPath(); g.ellipse(32, (GND - 13) * 2, 27, 44, 0, 3.14, 6.3); g.fill();
+    g.strokeStyle = '#f0d0a0'; g.lineWidth = 2.4;
+    g.beginPath(); g.ellipse(32, (GND - 13) * 2, 27, 44, 0, 3.14, 6.3); g.stroke();
+    g.strokeStyle = 'rgba(255,255,255,0.55)'; g.lineWidth = 2;
+    g.beginPath(); g.ellipse(32, (GND - 13) * 2, 19, 38, 0, 3.6, 4.6); g.stroke();
+    g.strokeStyle = 'rgba(138,90,52,0.5)'; g.lineWidth = 1.6;   // dome ribs
+    for (let i = 1; i < 4; i++) {
+      g.beginPath(); g.ellipse(32, (GND - 13) * 2, 27 - i * 7.4, 44 - i * 8, 0, 3.5, 5.9); g.stroke();
+    }
+    g.fillStyle = 'rgba(90,50,20,0.55)';          // cozy bunk shadows inside the glass
+    g.beginPath(); g.ellipse(24, (GND - 15) * 2, 5, 4, 0, 0, 6.3); g.fill();
+    g.beginPath(); g.ellipse(40, (GND - 17) * 2, 5, 4, 0, 0, 6.3); g.fill();
+    P(1, GND - 26, 3, 14, '#8a5a34'); P(28, GND - 26, 3, 14, '#8a5a34');   // shade fins
+    P(1, GND - 26, 3, 1.6, '#b8825c'); P(28, GND - 26, 3, 1.6, '#b8825c');
+    P(15, GND - 36.4, 2, 2.6, lit ? '#ffc061' : '#8a5a20');    // dome-top lantern
+  });
+  mkMega('sundialspire', 32, 100, 3, (g, P, st, lit) => {
+    const GND = 96;
+    /* the LONG baked shadow — Mercury's sun never snoozes */
+    g.fillStyle = 'rgba(40,20,8,0.42)';
+    g.beginPath(); g.moveTo(30, (GND - 1) * 2); g.lineTo(2, (GND + 1.4) * 2);
+    g.lineTo(34, (GND + 1.6) * 2); g.closePath(); g.fill();
+    g.beginPath(); g.ellipse(36, GND * 2 + 3, 22, 5, 0, 0, 6.3); g.fill();
+    P(6, GND - 5, 20, 5, '#8a6a44'); P(6, GND - 5, 20, 1.2, '#b08a54');
+    if (st === 0) {
+      for (let i = 0; i < 4; i++) P(9 + i * 4.4, GND - 8.6, 1, 4, '#8a7444');
+      scaffold(g, P, 6, GND - 12, 20); crane(g, P, 24, GND - 40, 36);
+      return;
+    }
+    /* the dial plate — hour studs around the base */
+    g.fillStyle = '#b8823f'; g.beginPath(); g.ellipse(32, (GND - 5) * 2, 30, 9, 0, 0, 6.3); g.fill();
+    g.fillStyle = '#e0a35c'; g.beginPath(); g.ellipse(32, (GND - 6.5) * 2, 30, 9, 0, 0, 6.3); g.fill();
+    for (let i = 0; i < 9; i++) {
+      const a = 0.25 + i * 0.32;
+      P(15.4 + Math.cos(a) * 13.2, GND - 6.5 + Math.sin(a) * 3.8, 1.6, 1.6, '#6e4a2c');
+    }
+    if (st === 1) { scaffold(g, P, 10, GND - 16, 12); crane(g, P, 26, GND - 52, 40); return; }
+    /* the gnomon rises — a broad bronze blade */
+    g.fillStyle = '#c98a4a';
+    g.beginPath(); g.moveTo(22, (GND - 7) * 2); g.lineTo(42, (GND - 7) * 2);
+    g.lineTo(37, (GND - 52) * 2); g.lineTo(27, (GND - 52) * 2); g.closePath(); g.fill();
+    g.fillStyle = '#f0c078';
+    g.beginPath(); g.moveTo(25, (GND - 7) * 2); g.lineTo(31, (GND - 7) * 2);
+    g.lineTo(30, (GND - 52) * 2); g.lineTo(28, (GND - 52) * 2); g.closePath(); g.fill();
+    g.fillStyle = '#8a5a34';
+    g.beginPath(); g.moveTo(38, (GND - 7) * 2); g.lineTo(42, (GND - 7) * 2);
+    g.lineTo(37, (GND - 52) * 2); g.lineTo(35, (GND - 52) * 2); g.closePath(); g.fill();
+    if (st === 2) { scaffold(g, P, 12, GND - 56, 9); crane(g, P, 25, GND - 78, 26); return; }
+    /* complete: the full spire + captured-sun finial */
+    g.fillStyle = '#c98a4a';
+    g.beginPath(); g.moveTo(27, (GND - 52) * 2); g.lineTo(37, (GND - 52) * 2);
+    g.lineTo(34, (GND - 88) * 2); g.lineTo(30, (GND - 88) * 2); g.closePath(); g.fill();
+    g.fillStyle = '#f0c078';
+    g.beginPath(); g.moveTo(28, (GND - 52) * 2); g.lineTo(31, (GND - 52) * 2);
+    g.lineTo(31.4, (GND - 88) * 2); g.lineTo(30.4, (GND - 88) * 2); g.closePath(); g.fill();
+    const fin = g.createRadialGradient(32, (GND - 92) * 2, 2, 32, (GND - 92) * 2, 22);
+    fin.addColorStop(0, lit ? 'rgba(255,240,180,1)' : 'rgba(255,216,138,0.95)');
+    fin.addColorStop(1, 'rgba(255,192,97,0)');
+    g.fillStyle = fin; g.fillRect(10, (GND - 103) * 2, 44, 44);
+    g.fillStyle = lit ? '#fff3b0' : '#ffd88a';
+    g.beginPath(); g.arc(32, (GND - 92) * 2, 8, 0, 6.3); g.fill();
+    g.fillStyle = '#fffdf0';
+    g.beginPath(); g.arc(30, (GND - 92.6) * 2, 3, 0, 6.3); g.fill();
+  });
+  /* ── the four JUPITER structures ── */
+  mkMega('stormport', 32, 52, 2, (g, P, st, lit) => {
+    const GND = 48;
+    g.fillStyle = 'rgba(60,40,20,0.32)';
+    g.beginPath(); g.ellipse(32, GND * 2 + 4, 30, 6, 0, 0, 6.3); g.fill();
+    P(3, GND - 5, 26, 5, '#a88a64'); P(3, GND - 5, 26, 1.2, '#c9ad84');
+    if (st === 0) {
+      for (let i = 0; i < 5; i++) P(6 + i * 4.6, GND - 8.6, 1, 4, '#8a7444');
+      scaffold(g, P, 4, GND - 12, 24); crane(g, P, 24, GND - 34, 30);
+      return;
+    }
+    /* pad deck on cloud-anchor stilts */
+    P(5, GND - 15, 3.4, 10, '#7d6a54'); P(23.6, GND - 15, 3.4, 10, '#7d6a54');
+    P(1, GND - 21, 30, 7, '#9aa2b8'); P(1, GND - 21, 30, 2, '#c2c9da');
+    g.strokeStyle = lit ? '#57e8d4' : '#2a6655'; g.lineWidth = 3;
+    g.beginPath(); g.ellipse(32, (GND - 17.5) * 2, 26, 6.4, 0, 0, 6.3); g.stroke();
+    P(14, GND - 20.2, 4, 1.2, lit ? '#57e8d4' : '#2a6655');
+    for (let i = 0; i < 6; i++) P(3.4 + i * 5, GND - 20.6, 1.4, 1, i % 2 ? '#ffd24a' : '#333d42');
+    if (st === 1) { scaffold(g, P, 2, GND - 25, 28); crane(g, P, 26, GND - 44, 22); return; }
+    /* complete: control hut + a happy windsock in the endless breeze */
+    P(2, GND - 32, 11, 11, '#8a94a4'); P(2, GND - 32, 11, 1.8, '#b8c2cc');
+    P(4, GND - 29, 7, 4.4, lit ? '#9fe8ff' : '#2a5a6a');
+    P(2, GND - 32, 1.4, 11, '#a4aeb8');
+    P(24, GND - 40, 1.6, 21, '#c9d2da');
+    g.fillStyle = '#e8543a';
+    g.beginPath(); g.moveTo(51, (GND - 40) * 2); g.lineTo(63, (GND - 38.2) * 2);
+    g.lineTo(51, (GND - 36.6) * 2); g.closePath(); g.fill();
+    g.fillStyle = '#ffb49a';
+    g.beginPath(); g.moveTo(51, (GND - 39.6) * 2); g.lineTo(58, (GND - 38.4) * 2);
+    g.lineTo(51, (GND - 37.6) * 2); g.closePath(); g.fill();
+    P(22.6, GND - 41.6, 4.4, 1.8, lit ? '#57e8d4' : '#2a6655');
+  });
+  mkMega('stormtap', 32, 80, 2, (g, P, st, lit) => {
+    const GND = 76;
+    g.fillStyle = 'rgba(60,40,20,0.32)';
+    g.beginPath(); g.ellipse(32, GND * 2 + 4, 30, 6, 0, 0, 6.3); g.fill();
+    P(3, GND - 5, 26, 5, '#a88a64'); P(3, GND - 5, 26, 1.2, '#c9ad84');
+    if (st === 0) {
+      for (let i = 0; i < 5; i++) P(6 + i * 4.6, GND - 8.6, 1, 4, '#8a7444');
+      scaffold(g, P, 4, GND - 12, 24); crane(g, P, 24, GND - 38, 34);
+      return;
+    }
+    /* the catch-jar hall — bottled lightning on shelves */
+    P(6, GND - 20, 20, 15, '#6a7080'); P(6, GND - 20, 20, 1.6, '#8a92a4');
+    for (let i = 0; i < 3; i++) {
+      P(9 + i * 6, GND - 15, 4, 7, '#22303c');
+      P(10 + i * 6, GND - 13.6, 2, 4.4, lit ? '#57e8d4' : '#1e5a4c');
+      P(10.6 + i * 6, GND - 12.8, 0.8, 2.8, lit ? '#d0fff4' : '#2a7a68');
+    }
+    if (st === 1) { scaffold(g, P, 6, GND - 24, 20); crane(g, P, 25, GND - 52, 30); return; }
+    /* complete: the tall tap rod, fat coils + a crackling crown orb */
+    P(14, GND - 58, 4, 38, '#8a94a4'); P(14, GND - 58, 1.4, 38, '#b8c2cc');
+    for (let i = 0; i < 5; i++) {
+      g.strokeStyle = '#3ac9ae'; g.lineWidth = 4;
+      g.beginPath(); g.ellipse(32, (GND - 26 - i * 6.5) * 2, 17, 5.4, 0, 0, 6.3); g.stroke();
+      g.strokeStyle = '#a8ffe8'; g.lineWidth = 1.4;
+      g.beginPath(); g.ellipse(32, (GND - 26.4 - i * 6.5) * 2, 17, 5.4, 0, 3.4, 6); g.stroke();
+    }
+    const orb = g.createRadialGradient(32, (GND - 62) * 2, 2, 32, (GND - 62) * 2, 26);
+    orb.addColorStop(0, lit ? 'rgba(208,255,244,1)' : 'rgba(87,232,212,0.85)');
+    orb.addColorStop(1, 'rgba(87,232,212,0)');
+    g.fillStyle = orb; g.fillRect(6, (GND - 75) * 2, 52, 52);
+    g.fillStyle = lit ? '#d0fff4' : '#57e8d4';
+    g.beginPath(); g.arc(32, (GND - 62) * 2, 11, 0, 6.3); g.fill();
+    g.fillStyle = '#1e6a5c';
+    g.beginPath(); g.arc(35, (GND - 61) * 2, 5, 0, 6.3); g.fill();
+    g.strokeStyle = lit ? '#d0fff4' : '#3ac9ae'; g.lineWidth = 2;   // baked crackle
+    g.beginPath(); g.moveTo(30, (GND - 58) * 2); g.lineTo(22, (GND - 50) * 2); g.lineTo(28, (GND - 44) * 2); g.stroke();
+    g.beginPath(); g.moveTo(36, (GND - 58) * 2); g.lineTo(44, (GND - 49) * 2); g.stroke();
+  });
+  mkMega('cloudlodge', 32, 56, 2, (g, P, st, lit) => {
+    const GND = 52;
+    g.fillStyle = 'rgba(60,40,20,0.32)';
+    g.beginPath(); g.ellipse(32, GND * 2 + 4, 30, 6, 0, 0, 6.3); g.fill();
+    P(3, GND - 5, 26, 5, '#a88a64'); P(3, GND - 5, 26, 1.2, '#c9ad84');
+    if (st === 0) {
+      for (let i = 0; i < 5; i++) P(6 + i * 4.6, GND - 8.6, 1, 4, '#8a7444');
+      scaffold(g, P, 4, GND - 12, 24); crane(g, P, 24, GND - 34, 30);
+      return;
+    }
+    /* the lodge floor + cloud porch */
+    P(4, GND - 14, 24, 9, '#e8e2d4'); P(4, GND - 14, 24, 1.8, '#fff8ec');
+    P(13.6, GND - 12, 4.8, 7, lit ? '#ffd75e' : '#5a5040');
+    g.fillStyle = 'rgba(255,255,255,0.85)';
+    g.beginPath(); g.ellipse(10, (GND - 5) * 2, 9, 4, 0, 0, 6.3); g.fill();
+    g.beginPath(); g.ellipse(56, (GND - 5) * 2, 8, 3.6, 0, 0, 6.3); g.fill();
+    if (st === 1) { scaffold(g, P, 4, GND - 18, 24); crane(g, P, 25, GND - 36, 24); return; }
+    /* complete: the puffy upper storey — a house that is 90% pillow */
+    g.fillStyle = '#f4efe2';
+    g.beginPath(); g.ellipse(32, (GND - 22) * 2, 30, 21, 0, 0, 6.3); g.fill();
+    g.fillStyle = '#fffdf6';
+    g.beginPath(); g.ellipse(21, (GND - 29) * 2, 17, 13, 0, 0, 6.3); g.fill();
+    g.beginPath(); g.ellipse(44, (GND - 27) * 2, 15, 11, 0, 0, 6.3); g.fill();
+    g.beginPath(); g.ellipse(33, (GND - 32) * 2, 12, 9, 0, 0, 6.3); g.fill();
+    g.fillStyle = 'rgba(138,130,114,0.25)';       // gentle underside shading
+    g.beginPath(); g.ellipse(32, (GND - 16) * 2, 27, 8, 0, 0, 6.3); g.fill();
+    for (let i = 0; i < 3; i++) {                 // round bullseye windows
+      g.fillStyle = '#7d6a54'; g.beginPath(); g.arc(16 + i * 16, (GND - 22) * 2, 6.4, 0, 6.3); g.fill();
+      g.fillStyle = lit ? '#ffd75e' : '#59c9f0'; g.beginPath(); g.arc(16 + i * 16, (GND - 22) * 2, 4.2, 0, 6.3); g.fill();
+      g.fillStyle = 'rgba(255,255,255,0.8)'; g.beginPath(); g.arc(15 + i * 16, (GND - 22.6) * 2, 1.6, 0, 6.3); g.fill();
+    }
+    P(13, GND - 38, 4.4, 4, '#c98a5c'); P(13.6, GND - 39.6, 3.2, 1.8, '#e8b48a');   // chimney pot
+    P(14.2, GND - 41.6, 1.8, 1.8, 'rgba(255,255,255,0.85)');
+  });
+  mkMega('greateye', 32, 76, 3, (g, P, st, lit) => {
+    const GND = 72;
+    g.fillStyle = 'rgba(60,40,20,0.32)';
+    g.beginPath(); g.ellipse(32, GND * 2 + 4, 30, 6, 0, 0, 6.3); g.fill();
+    P(3, GND - 5, 26, 5, '#a88a64'); P(3, GND - 5, 26, 1.2, '#c9ad84');
+    if (st === 0) {
+      for (let i = 0; i < 5; i++) P(6 + i * 4.6, GND - 8.6, 1, 4, '#8a7444');
+      scaffold(g, P, 4, GND - 12, 24); crane(g, P, 24, GND - 38, 34);
+      return;
+    }
+    /* the gallery drum */
+    P(5, GND - 22, 22, 17, '#8a7a98'); P(5, GND - 22, 22, 1.8, '#aa9ab8');
+    for (let i = 0; i < 3; i++) P(8.4 + i * 6.6, GND - 17, 3.6, 5, lit ? '#ffd75e' : '#2c3540');
+    if (st === 1) { scaffold(g, P, 5, GND - 26, 22); crane(g, P, 25, GND - 48, 28); return; }
+    /* the observatory ball — big as the drum it sits on */
+    g.fillStyle = '#6a5c88'; g.beginPath(); g.arc(32, (GND - 37) * 2, 30, 0, 6.3); g.fill();
+    g.fillStyle = '#8a7aa8'; g.beginPath(); g.arc(27, (GND - 39) * 2, 22, 0, 6.3); g.fill();
+    g.fillStyle = '#4a3f66'; g.beginPath(); g.arc(40, (GND - 34) * 2, 22, 0, 6.3); g.fill();
+    g.fillStyle = '#6a5c88'; g.beginPath(); g.arc(31, (GND - 37.6) * 2, 24, 0, 6.3); g.fill();
+    if (st === 2) { scaffold(g, P, 8, GND - 50, 16); crane(g, P, 25, GND - 68, 22); return; }
+    /* complete: the GREAT EYE — iris window + the DOWN-scope under the drum */
+    g.fillStyle = '#241c3a'; g.beginPath(); g.arc(32, (GND - 37) * 2, 17, 0, 6.3); g.fill();
+    g.fillStyle = lit ? '#57e8d4' : '#3ac9ae'; g.beginPath(); g.arc(32, (GND - 37) * 2, 12.6, 0, 6.3); g.fill();
+    g.fillStyle = '#141022'; g.beginPath(); g.arc(32, (GND - 37) * 2, 6, 0, 6.3); g.fill();
+    g.fillStyle = 'rgba(255,255,255,0.9)'; g.beginPath(); g.arc(27.6, (GND - 39) * 2, 3.2, 0, 6.3); g.fill();
+    /* the down-scope pokes THROUGH the deck toward the storm below */
+    P(29, GND - 5.4, 4, 5.4, '#524a6a'); P(30, GND - 5.4, 1.2, 5.4, '#7a6f96');
+    P(28, GND - 0.8, 6, 1.8, '#3ac9ae');
+    P(6, GND - 47, 2, 2, lit ? '#ff8a8a' : '#8a3a3a');     // wink light
+    g.strokeStyle = 'rgba(87,232,212,0.5)'; g.lineWidth = 2;   // antenna lash
+    g.beginPath(); g.moveTo(32, (GND - 52) * 2); g.lineTo(32, (GND - 57) * 2); g.stroke();
+    g.fillStyle = lit ? '#57e8d4' : '#3ac9ae';
+    g.beginPath(); g.arc(32, (GND - 58) * 2, 3, 0, 6.3); g.fill();
+  });
+  /* ═══ THE STAR CLIPPER — biggest, sleekest ship in the fleet. Staged
+     bakes: keel/hull → +nacelles → complete; 2-frame nacelle shimmer. ═══ */
+  const mkClipper = stage => {
+    const [c, g] = C(190, 64);
+    const P = (x, y, w, h, col) => { g.fillStyle = col; g.fillRect(x, y, w, h); };
+    g.fillStyle = 'rgba(30,34,44,0.35)';
+    g.beginPath(); g.ellipse(96, 59, 78, 4.6, 0, 0, 6.3); g.fill();
+    /* landing skids */
+    P(52, 46, 4, 9, '#6d747c'); P(126, 46, 4, 9, '#6d747c');
+    P(46, 54, 16, 2.6, '#8a93a0'); P(120, 54, 16, 2.6, '#8a93a0');
+    /* swept main hull — a long low wedge, nose to the right */
+    g.fillStyle = '#dfe7f2';
+    g.beginPath(); g.moveTo(22, 30); g.lineTo(150, 24); g.lineTo(186, 34);
+    g.lineTo(150, 46); g.lineTo(28, 48); g.closePath(); g.fill();
+    g.fillStyle = '#ffffff';
+    g.beginPath(); g.moveTo(22, 30); g.lineTo(150, 24); g.lineTo(178, 32);
+    g.lineTo(30, 36); g.closePath(); g.fill();
+    g.fillStyle = '#b8c4d6';
+    g.beginPath(); g.moveTo(30, 43); g.lineTo(160, 40); g.lineTo(150, 46);
+    g.lineTo(28, 48); g.closePath(); g.fill();
+    /* the golden star-stripe */
+    g.fillStyle = '#ffd24a';
+    g.beginPath(); g.moveTo(26, 37); g.lineTo(180, 32.4); g.lineTo(180, 35.4);
+    g.lineTo(26, 40); g.closePath(); g.fill();
+    /* cockpit canopy */
+    g.fillStyle = '#59c9f0';
+    g.beginPath(); g.moveTo(140, 26.4); g.lineTo(166, 30); g.lineTo(160, 35); g.lineTo(138, 34); g.closePath(); g.fill();
+    P(146, 28, 8, 2.4, '#c9f0ff');
+    /* portholes down the flank */
+    for (let i = 0; i < 5; i++) P(48 + i * 18, 38.4, 7, 3.2, '#7d8892');
+    if (stage >= 2) {                             // twin swept NACELLES on pylons
+      const nac = ny => {
+        g.fillStyle = '#8a93a0';
+        g.beginPath(); g.moveTo(70, ny + 5); g.lineTo(96, 32); g.lineTo(104, 32); g.lineTo(84, ny + 5); g.closePath(); g.fill();
+        g.fillStyle = '#5460a8';
+        g.beginPath(); g.moveTo(28, ny); g.lineTo(118, ny - 2); g.lineTo(128, ny + 3.4);
+        g.lineTo(118, ny + 8); g.lineTo(28, ny + 8); g.closePath(); g.fill();
+        g.fillStyle = '#7a88d8';
+        g.beginPath(); g.moveTo(28, ny); g.lineTo(118, ny - 2); g.lineTo(124, ny + 1);
+        g.lineTo(30, ny + 3); g.closePath(); g.fill();
+        P(20, ny + 0.5, 9, 7, '#59e0ff'); P(22, ny + 2, 5, 4, '#c9f6ff');   // the glowing mouth
+        P(116, ny + 1.4, 8, 4.6, '#fff3b0');                                // gilded tip
+      };
+      nac(6); nac(52);
+    }
+    if (stage >= 3) {                             // tail fin + stardrive gleam — she's DONE
+      g.fillStyle = '#5460a8';
+      g.beginPath(); g.moveTo(40, 30); g.lineTo(48, 8); g.lineTo(58, 8); g.lineTo(56, 30); g.closePath(); g.fill();
+      g.fillStyle = '#7a88d8';
+      g.beginPath(); g.moveTo(42, 30); g.lineTo(49, 10); g.lineTo(52, 10); g.lineTo(50, 30); g.closePath(); g.fill();
+      P(47, 8, 12, 3, '#ffd24a'); P(47, 8, 12, 1.2, '#fff3b0');
+      P(166, 30, 6, 4, '#fff3b0');                // nose gleam
+      P(12, 32, 10, 8, '#8a93a0'); P(10, 34, 4, 4, '#59e0ff');   // core thruster
+    }
+    return c;
+  };
+  SPR.clipperStg = [1, 2, 3].map(mkClipper);
+  /* nacelle shimmer — 2 overlay frames drawn on the parked complete ship */
+  SPR.clipperGlow = [0, 1].map(v => (() => {
+    const [c, g] = C(190, 64);
+    for (const ny of [6, 52]) {
+      const gl = g.createRadialGradient(22, ny + 4, 1, 22, ny + 4, v ? 13 : 9);
+      gl.addColorStop(0, 'rgba(89,224,255,0.8)'); gl.addColorStop(1, 'rgba(89,224,255,0)');
+      g.fillStyle = gl; g.fillRect(4, ny - 12, 40, 32);
+      g.fillStyle = v ? 'rgba(201,246,255,0.9)' : 'rgba(89,224,255,0.7)';
+      g.fillRect(14 - (v ? 4 : 0), ny + 2.4, v ? 8 : 5, 2.6);
+    }
+    return c;
+  })());
+  /* whiz-by planet sprites for the clipper routes */
+  SPR.ballVenus = (() => {
+    const [c, g] = C(30, 30);
+    g.fillStyle = '#e8c894'; g.beginPath(); g.arc(15, 15, 14, 0, 6.3); g.fill();
+    g.fillStyle = '#f4e0b8'; g.beginPath(); g.arc(12, 12, 10, 0, 6.3); g.fill();
+    g.fillStyle = '#d8ab6c';
+    g.beginPath(); g.ellipse(14, 10, 9, 2.4, 0.3, 0, 6.3); g.fill();
+    g.beginPath(); g.ellipse(13, 19, 10, 2.8, -0.2, 0, 6.3); g.fill();
+    g.fillStyle = 'rgba(60,40,16,0.45)'; g.beginPath(); g.arc(22, 19, 13, 0, 6.3); g.fill();
+    return c;
+  })();
+  SPR.ballJupiter = (() => {
+    const [c, g] = C(46, 46);
+    g.fillStyle = '#d8b890'; g.beginPath(); g.arc(23, 23, 22, 0, 6.3); g.fill();
+    g.save(); g.beginPath(); g.arc(23, 23, 22, 0, 6.3); g.clip();
+    const bands = ['#e8d4b0', '#c9915c', '#f0e2c8', '#b87a4a', '#e0c9a4', '#c98a5c', '#e8d8b8'];
+    for (let i = 0; i < 7; i++) { g.fillStyle = bands[i]; g.fillRect(0, i * 6.6, 46, 4.4); }
+    g.fillStyle = '#c05a3a'; g.beginPath(); g.ellipse(30, 29, 6.4, 4, 0, 0, 6.3); g.fill();
+    g.fillStyle = '#e07a52'; g.beginPath(); g.ellipse(29, 28, 3.6, 2.2, 0, 0, 6.3); g.fill();
+    g.restore();
+    g.fillStyle = 'rgba(40,24,10,0.4)'; g.beginPath(); g.arc(34, 30, 21, 0, 6.3); g.fill();
+    return c;
+  })();
+  SPR.ballMercury = (() => {
+    const [c, g] = C(22, 22);
+    g.fillStyle = '#8a5a34'; g.beginPath(); g.arc(11, 11, 10, 0, 6.3); g.fill();
+    g.fillStyle = '#b8825c'; g.beginPath(); g.arc(9, 9, 7, 0, 6.3); g.fill();
+    g.fillStyle = '#6e4a2c';
+    g.beginPath(); g.arc(8, 12, 2.2, 0, 6.3); g.fill();
+    g.beginPath(); g.arc(13, 7, 1.6, 0, 6.3); g.fill();
+    g.fillStyle = 'rgba(30,14,6,0.45)'; g.beginPath(); g.arc(16, 14, 10, 0, 6.3); g.fill();
+    return c;
+  })();
+  /* deep-storm flash for Jupiter's depths (live alpha, baked sprite) */
+  SPR.stormFlash = (() => {
+    const [c, g] = C(140, 90);
+    const gl = g.createRadialGradient(70, 45, 4, 70, 45, 66);
+    gl.addColorStop(0, 'rgba(220,255,246,0.85)'); gl.addColorStop(0.35, 'rgba(87,232,212,0.4)'); gl.addColorStop(1, 'rgba(87,232,212,0)');
+    g.fillStyle = gl; g.fillRect(0, 0, 140, 90);
+    g.strokeStyle = 'rgba(240,255,252,0.8)'; g.lineWidth = 2;
+    g.beginPath(); g.moveTo(62, 18); g.lineTo(72, 42); g.lineTo(64, 50); g.lineTo(74, 72); g.stroke();
+    return c;
+  })();
+  /* the comet cursor for the solar map — glowing head, jaunty tail */
+  SPR.comet = [0, 1].map(v => (() => {
+    const [c, g] = C(56, 26);
+    const tail = g.createLinearGradient(0, 0, 44, 0);
+    tail.addColorStop(0, 'rgba(159,232,255,0)'); tail.addColorStop(1, 'rgba(159,232,255,0.75)');
+    g.fillStyle = tail;
+    g.beginPath(); g.moveTo(2, 13); g.lineTo(44, 7 - (v ? 1 : 0)); g.lineTo(44, 19 + (v ? 1 : 0)); g.closePath(); g.fill();
+    const hd = g.createRadialGradient(45, 13, 1, 45, 13, v ? 11 : 9);
+    hd.addColorStop(0, 'rgba(255,255,255,1)'); hd.addColorStop(0.4, 'rgba(159,232,255,0.9)'); hd.addColorStop(1, 'rgba(159,232,255,0)');
+    g.fillStyle = hd; g.fillRect(32, 0, 24, 26);
+    return c;
+  })());
+
   /* boarding-zone ring (pulsing, baked) + tiny aboard heads for the window */
   SPR.zoneRing = (() => {
     const [c, g] = C(96, 96);
@@ -2523,6 +3144,15 @@ function initSprites() {
     crystal: mkIcon((g, P) => { P(3.6, 1.6, 2.8, 6.4, '#8a5cc9'); P(4.4, 2.4, 1.2, 4.4, '#c99bff'); P(1.8, 4, 1.6, 3.6, '#6a44a0'); P(6.8, 3.6, 1.4, 4, '#6a44a0'); P(2.6, 8, 5, 1, '#4a2c78'); }),
     alloy: mkIcon((g, P) => { P(2, 3.4, 6, 4.4, '#2a6655'); P(2.8, 2.6, 4.4, 3, '#3aa890'); P(3.6, 3.4, 2.2, 1.6, '#7dffe0'); P(4.2, 4, 1, 0.8, '#d8fff4'); P(2, 7.2, 6, 0.7, '#1a4438'); }),
     starsteel: mkIcon((g, P) => { P(1.6, 3, 6.8, 2, '#9fd8ff'); P(1.6, 5.4, 6.8, 2, '#6da8d8'); P(2.2, 3.4, 2.4, 0.8, '#e8f6ff'); P(2.2, 5.8, 2.4, 0.8, '#cfe8ff'); P(6.6, 1.6, 1.6, 1.6, '#fff3b0'); P(7.1, 1, 0.6, 2.8, '#fff3b0'); P(6.4, 2.1, 2, 0.6, '#fff3b0'); }),
+    /* v8a: the planet resources */
+    sunstone: mkIcon((g, P) => { g.fillStyle = '#e8963a'; g.beginPath(); g.moveTo(10, 3); g.lineTo(16, 17); g.lineTo(4, 17); g.closePath(); g.fill();
+                                 P(4.2, 2.6, 1.4, 3.4, '#ffd88a'); P(3.4, 3.6, 3, 1.2, '#ffd88a');
+                                 P(4.4, 5.2, 1.6, 3.6, '#fff0c0'); P(3.6, 8.4, 2.8, 0.6, '#a85a1e'); }),
+    stormcore: mkIcon((g, P) => { g.fillStyle = '#1e6a5c'; g.beginPath(); g.arc(10, 10, 8, 0, 6.3); g.fill();
+                                  g.fillStyle = '#3ac9ae'; g.beginPath(); g.arc(9, 9, 6, 0, 6.3); g.fill();
+                                  g.fillStyle = '#a8ffe8'; g.beginPath(); g.arc(8, 7.6, 2.6, 0, 6.3); g.fill();
+                                  g.strokeStyle = '#d0fff4'; g.lineWidth = 1.4;
+                                  g.beginPath(); g.moveTo(6, 5); g.lineTo(10, 10); g.lineTo(7, 13); g.stroke(); }),
   };
 
   /* UI chrome panels */
@@ -3384,6 +4014,111 @@ function genMars(sd, bare) {
   while (frosts < 6 && fi >= 0) { const t = free[fi--]; if (!spare(t)) continue; flora.push({ type: 'frost', gx: t.gx, gy: t.gy, hits: 0, gone: false, regrowT: 0, shakeT: 0, golden: false }); frosts++; }
 }
 
+/* ═══ v8a: THE NINE PLANETS — Mercury + Jupiter world gen. Both are
+   generated LAZILY on the first visit (Pi memory: no bundles at boot).
+   The clearing near (PCX-6, PCY) stays free — the STAR CLIPPER parks there. ═══ */
+function genMercury(sd, bare) {
+  const rng = mulberry((sd * 37 + 19) >>> 0);
+  const s0 = rng() * 6.28, s1 = rng() * 6.28, s2 = rng() * 6.28;
+  landAge = []; occ = [];
+  for (let gy = 0; gy < GH; gy++) {
+    landAge[gy] = []; occ[gy] = [];
+    for (let gx = 0; gx < GW; gx++) {
+      occ[gy][gx] = null;
+      let a = 0;
+      if (gx >= 2 && gx < GW - 2 && gy >= 2 && gy < GH - 2) {
+        const dx = (gx - PCX) / 16.2, dy = (gy - PCY) / 10.2;
+        const r = Math.hypot(dx, dy), ang = Math.atan2(dy, dx);
+        const wob = 1 + 0.12 * Math.sin(ang * 3 + s0) + 0.08 * Math.sin(ang * 5 + s1) + 0.05 * Math.sin(ang * 7 + s2);
+        if (r < wob * 0.84 || Math.hypot(gx - PCX, gy - PCY) < 2.2) a = 1;
+      }
+      landAge[gy][gx] = a;
+    }
+  }
+  recomputeIsleIds();
+  buildings = []; flora = []; wires = []; anims = []; robots = []; ferries = [];
+  decor = []; decorMap = new Map();
+  terrainDirty = true; bgDirty = true;
+  if (bare) return;
+  /* SUNSTONE nodes + metal-rich crater nodes (kid-proof minimums) */
+  const free = [];
+  for (let gy = 0; gy < GH; gy++) for (let gx = 0; gx < GW; gx++) {
+    if (!isLand(gx, gy) || occ[gy][gx]) continue;
+    if (Math.hypot(gx - (PCX - 6), gy - PCY) < 3.5) continue;
+    free.push({ gx, gy });
+  }
+  for (let i = free.length - 1; i > 0; i--) {
+    const j = (rng() * (i + 1)) | 0;
+    const t = free[i]; free[i] = free[j]; free[j] = t;
+  }
+  let suns = 0, ores = 0;
+  for (const t of free) {
+    const r = rng();
+    if (r < 0.11 && suns < 16) { flora.push({ type: 'sunstone', gx: t.gx, gy: t.gy, hits: 0, gone: false, regrowT: 0, shakeT: 0, golden: false }); suns++; }
+    else if (r < 0.17 && ores < 10) { flora.push({ type: 'orenode', gx: t.gx, gy: t.gy, hits: 0, gone: false, regrowT: 0, shakeT: 0, golden: false }); ores++; }
+  }
+  let fi = free.length - 1;
+  const spare = t => !flora.some(f => f.gx === t.gx && f.gy === t.gy);
+  while (suns < 9 && fi >= 0) { const t = free[fi--]; if (!spare(t)) continue; flora.push({ type: 'sunstone', gx: t.gx, gy: t.gy, hits: 0, gone: false, regrowT: 0, shakeT: 0, golden: false }); suns++; }
+  while (ores < 5 && fi >= 0) { const t = free[fi--]; if (!spare(t)) continue; flora.push({ type: 'orenode', gx: t.gx, gy: t.gy, hits: 0, gone: false, regrowT: 0, shakeT: 0, golden: false }); ores++; }
+}
+/* JUPITER — one connected shelf of cloud plateaus (three merged lobes) */
+function genJupiter(sd, bare) {
+  const rng = mulberry((sd * 43 + 23) >>> 0);
+  const s0 = rng() * 6.28, s1 = rng() * 6.28;
+  landAge = []; occ = [];
+  for (let gy = 0; gy < GH; gy++) {
+    landAge[gy] = []; occ[gy] = [];
+    for (let gx = 0; gx < GW; gx++) { occ[gy][gx] = null; landAge[gy][gx] = 0; }
+  }
+  /* three overlapping cloud lobes — always merged into one walkable shelf */
+  const lobes = [[PCX - 7, PCY - 3, 9.4, 6.2], [PCX + 6, PCY + 1, 9.8, 6.6], [PCX - 2, PCY + 5, 8.2, 5]];
+  for (const [bcx, bcy, brx, bry] of lobes) {
+    for (let gy = 2; gy < GH - 2; gy++) for (let gx = 2; gx < GW - 2; gx++) {
+      const dx = (gx - bcx) / brx, dy = (gy - bcy) / bry;
+      const r = Math.hypot(dx, dy), ang = Math.atan2(dy, dx);
+      const wob = 1 + 0.12 * Math.sin(ang * 3 + s0) + 0.08 * Math.sin(ang * 5 + s1);
+      if (r < wob * 0.86) landAge[gy][gx] = 1;
+    }
+  }
+  recomputeIsleIds();
+  buildings = []; flora = []; wires = []; anims = []; robots = []; ferries = [];
+  decor = []; decorMap = new Map();
+  terrainDirty = true; bgDirty = true;
+  if (bare) return;
+  /* STORMCORE orbs + hydrogen wisps */
+  const free = [];
+  for (let gy = 0; gy < GH; gy++) for (let gx = 0; gx < GW; gx++) {
+    if (!isLand(gx, gy) || occ[gy][gx]) continue;
+    if (Math.hypot(gx - (PCX - 6), gy - PCY) < 3.5) continue;
+    free.push({ gx, gy });
+  }
+  for (let i = free.length - 1; i > 0; i--) {
+    const j = (rng() * (i + 1)) | 0;
+    const t = free[i]; free[i] = free[j]; free[j] = t;
+  }
+  let cores = 0, wisps = 0;
+  for (const t of free) {
+    const r = rng();
+    if (r < 0.11 && cores < 16) { flora.push({ type: 'stormcore', gx: t.gx, gy: t.gy, hits: 0, gone: false, regrowT: 0, shakeT: 0, golden: false }); cores++; }
+    else if (r < 0.17 && wisps < 10) { flora.push({ type: 'wisp', gx: t.gx, gy: t.gy, hits: 0, gone: false, regrowT: 0, shakeT: 0, golden: false }); wisps++; }
+  }
+  let fi = free.length - 1;
+  const spare = t => !flora.some(f => f.gx === t.gx && f.gy === t.gy);
+  while (cores < 9 && fi >= 0) { const t = free[fi--]; if (!spare(t)) continue; flora.push({ type: 'stormcore', gx: t.gx, gy: t.gy, hits: 0, gone: false, regrowT: 0, shakeT: 0, golden: false }); cores++; }
+  while (wisps < 5 && fi >= 0) { const t = free[fi--]; if (!spare(t)) continue; flora.push({ type: 'wisp', gx: t.gx, gy: t.gy, hits: 0, gone: false, regrowT: 0, shakeT: 0, golden: false }); wisps++; }
+}
+/* create-if-missing — called just before the clipper flies there */
+function ensurePlanetWorld(name) {
+  if (name !== 'mercury' && name !== 'jupiter') return;
+  if (world === name || parked.has(name)) return;
+  parked.set(name, mkWorldBundle(name, PGW, PGH));
+  inWorld(name, () => {
+    if (name === 'mercury') genMercury(seed); else genJupiter(seed);
+    recomputePower(); recomputeAnims();
+  });
+}
+
 /* ═══ v7: MISSION WORLDS — ephemeral asteroid maps. NEVER saved: built at
    scan-confirm, discarded at departure. 7 handcrafted chunk-silhouette
    templates × seeded variation (mirror/flip, node placement, hazard). ═══ */
@@ -3937,6 +4672,112 @@ function rebuildMarsTerrain() {
   drawDecorTerrain(tg);
   drawWires(tg);
 }
+/* ── v8a: the MERCURY bake — the sun HUGE on the horizon, black sky above,
+   bronze cratered ground with baked heat-glints. All one bake. ── */
+function rebuildMercuryTerrain() {
+  const gr = tg.createLinearGradient(0, 0, 0, WORLD_H);
+  gr.addColorStop(0, '#050308'); gr.addColorStop(0.35, '#1c0e08');
+  gr.addColorStop(0.7, '#4a2410'); gr.addColorStop(1, '#7d3c14');
+  tg.fillStyle = gr; tg.fillRect(0, 0, WORLD_W, WORLD_H);
+  /* stars survive only high up — the sun owns the rest */
+  for (let i = 0; i < 60; i++) {
+    const x = (i * 223 + 61) % WORLD_W, y = (i * 131 + 11) % (WORLD_H * 0.22);
+    tg.fillStyle = i % 5 ? 'rgba(255,245,230,0.6)' : 'rgba(255,220,190,0.8)';
+    tg.fillRect(x, y, 2, 2);
+  }
+  /* THE SUN — an enormous half-disc glaring over the west horizon */
+  const sunX = WORLD_W * 0.22, sunY = WORLD_H * 0.34;
+  const halo = tg.createRadialGradient(sunX, sunY, 40, sunX, sunY, 560);
+  halo.addColorStop(0, 'rgba(255,240,180,0.9)'); halo.addColorStop(0.25, 'rgba(255,200,90,0.45)');
+  halo.addColorStop(0.6, 'rgba(255,150,60,0.16)'); halo.addColorStop(1, 'rgba(255,150,60,0)');
+  tg.fillStyle = halo; tg.fillRect(sunX - 560, sunY - 560, 1120, 1120);
+  tg.fillStyle = '#fff3b0'; tg.beginPath(); tg.arc(sunX, sunY, 130, 0, 6.3); tg.fill();
+  tg.fillStyle = '#ffe27a'; tg.beginPath(); tg.arc(sunX, sunY, 118, 0, 6.3); tg.fill();
+  tg.fillStyle = '#ffd24a';                      // a few sun-spot freckles
+  tg.beginPath(); tg.arc(sunX - 34, sunY + 22, 12, 0, 6.3); tg.fill();
+  tg.beginPath(); tg.arc(sunX + 40, sunY - 30, 8, 0, 6.3); tg.fill();
+  /* tiny Earth, far and safe on the east rim */
+  tg.drawImage(SPR.earthBall, WORLD_W - 80, 90, 18, 18);
+  coast = [];                                    // no surf on the sunscorch
+  /* copper tiles + hot rim edging */
+  for (let gy = 0; gy < GH; gy++) for (let gx = 0; gx < GW; gx++) {
+    if (!isLand(gx, gy)) continue;
+    const x = tX(gx), y = tY(gy);
+    const hv = hash2(gx * 3 + 7, gy * 5 + 9);
+    tg.drawImage(SPR.merctile[hv < 0.08 ? 3 : (gx * 7 + gy * 13) % 3], x, y);
+    tg.fillStyle = 'rgba(255,216,138,0.4)';
+    if (!isLand(gx, gy - 1)) tg.fillRect(x, y, 32, 3);
+    if (!isLand(gx - 1, gy)) tg.fillRect(x, y, 3, 32);
+    if (!isLand(gx + 1, gy)) tg.fillRect(x + 29, y, 3, 32);
+  }
+  /* baked heat-glints — bright flecks shimmering on the sun side */
+  for (let i = 0; i < 46; i++) {
+    const gx = 3 + ((i * 13 + 5) % (GW - 6)), gy = 3 + ((i * 7 + 2) % (GH - 6));
+    if (!isLand(gx, gy)) continue;
+    tg.fillStyle = i % 3 ? 'rgba(255,240,180,0.5)' : 'rgba(255,192,97,0.7)';
+    tg.fillRect(tX(gx) + (i * 11) % 26, tY(gy) + (i * 7) % 26, 3, 3);
+  }
+  /* south cliff lip — scorched bronze */
+  for (let gy = 0; gy < GH; gy++) for (let gx = 0; gx < GW; gx++) {
+    if (!isLand(gx, gy) || isLand(gx, gy + 1)) continue;
+    const x = tX(gx), y = tY(gy);
+    tg.fillStyle = '#8a5a34'; tg.fillRect(x, y + 26, 32, 4);
+    tg.fillStyle = '#4a2f18'; tg.fillRect(x, y + 30, 32, 2);
+  }
+  drawDecorTerrain(tg);
+  drawWires(tg);
+}
+/* ── v8a: the JUPITER bake — cream/rust cloud shelf floating over a
+   swirling storm depth; edges fluffy, undersides pure cloud. ── */
+const JUP_FLICKS = [                             // fixed deep-storm flash spots (world px)
+  { x: 190, y: 700 }, { x: 760, y: 830 }, { x: 1180, y: 640 }];
+function rebuildJupiterTerrain() {
+  const gr = tg.createLinearGradient(0, 0, 0, WORLD_H);
+  gr.addColorStop(0, '#e8cfa4'); gr.addColorStop(0.3, '#c98a5c');
+  gr.addColorStop(0.62, '#8a4a30'); gr.addColorStop(1, '#3a1c14');
+  tg.fillStyle = gr; tg.fillRect(0, 0, WORLD_W, WORLD_H);
+  /* wide wind bands sweeping the sky + depths */
+  for (let i = 0; i < 9; i++) {
+    const by = 40 + i * (WORLD_H / 9), warm = i % 2;
+    tg.fillStyle = warm ? 'rgba(255,240,214,0.18)' : 'rgba(122,58,36,0.22)';
+    tg.beginPath(); tg.ellipse(WORLD_W / 2 + (i % 3 - 1) * 200, by, WORLD_W * 0.7, 26 + (i % 3) * 10, 0, 0, 6.3); tg.fill();
+  }
+  /* the deep storm churns below — dark swirls + a great pale eye */
+  tg.strokeStyle = 'rgba(30,12,8,0.35)'; tg.lineWidth = 10;
+  for (let i = 0; i < 4; i++) {
+    tg.beginPath();
+    tg.ellipse(240 + i * 330, WORLD_H * 0.78 + (i % 2) * 60, 90 + i * 18, 34, 0.3 - i * 0.2, 0, 5);
+    tg.stroke();
+  }
+  tg.fillStyle = 'rgba(232,207,164,0.25)';
+  tg.beginPath(); tg.ellipse(WORLD_W * 0.62, WORLD_H * 0.86, 130, 44, -0.2, 0, 6.3); tg.fill();
+  /* tiny Earth — a pale blue crumb VERY far from home */
+  tg.drawImage(SPR.earthBall, WORLD_W - 70, 60, 12, 12);
+  coast = [];                                    // no surf a thousand miles up
+  /* banded cloud tiles + soft fluffy rims */
+  for (let gy = 0; gy < GH; gy++) for (let gx = 0; gx < GW; gx++) {
+    if (!isLand(gx, gy)) continue;
+    const x = tX(gx), y = tY(gy);
+    const hv = hash2(gx * 3 + 2, gy * 5 + 8);
+    tg.drawImage(SPR.jovtile[hv < 0.08 ? 3 : (gx * 7 + gy * 13) % 3], x, y);
+    tg.fillStyle = 'rgba(255,253,246,0.55)';     // soft cloud edge, not a hard rim
+    if (!isLand(gx, gy - 1)) { tg.fillRect(x, y, 32, 4); tg.fillRect(x + 4, y + 4, 24, 2); }
+    if (!isLand(gx - 1, gy)) { tg.fillRect(x, y, 4, 32); tg.fillRect(x + 4, y + 6, 2, 20); }
+    if (!isLand(gx + 1, gy)) { tg.fillRect(x + 28, y, 4, 32); tg.fillRect(x + 26, y + 6, 2, 20); }
+  }
+  /* the underside is pure rolling cloud — puffs, not cliffs */
+  for (let gy = 0; gy < GH; gy++) for (let gx = 0; gx < GW; gx++) {
+    if (!isLand(gx, gy) || isLand(gx, gy + 1)) continue;
+    const x = tX(gx), y = tY(gy);
+    tg.fillStyle = '#fffdf6';
+    tg.beginPath(); tg.ellipse(x + 8, y + 30, 11, 6, 0, 0, 6.3); tg.fill();
+    tg.beginPath(); tg.ellipse(x + 24, y + 31, 10, 5, 0, 0, 6.3); tg.fill();
+    tg.fillStyle = 'rgba(201,145,92,0.4)';
+    tg.beginPath(); tg.ellipse(x + 16, y + 36, 13, 4, 0, 0, 6.3); tg.fill();
+  }
+  drawDecorTerrain(tg);
+  drawWires(tg);
+}
 /* ── v7: the MISSION bake — deep-space starfield (near-black indigo, a warm
    sun-glow corner, tiny Earth/Moon/Mars dots) under cratered rock chunks.
    ALL of it lives in this one bake — zero per-frame cost. ── */
@@ -3986,6 +4827,8 @@ function rebuildTerrain() {
   if (world === 'moon') { rebuildMoonTerrain(); bgDirty = true; return; }
   if (world === 'mars') { rebuildMarsTerrain(); bgDirty = true; return; }
   if (world === 'mission') { rebuildMissionTerrain(); bgDirty = true; return; }   // v7
+  if (world === 'mercury') { rebuildMercuryTerrain(); bgDirty = true; return; }   // v8a
+  if (world === 'jupiter') { rebuildJupiterTerrain(); bgDirty = true; return; }   // v8a
   const gr = tg.createLinearGradient(0, 0, 0, WORLD_H);
   gr.addColorStop(0, '#2b7db8'); gr.addColorStop(1, '#175a92');
   tg.fillStyle = gr; tg.fillRect(0, 0, WORLD_W, WORLD_H);
@@ -4105,6 +4948,10 @@ function floraSprite(f) {
     return (f.big ? SPR.depIronBig : SPR.depIron)[st];
   }
   if (f.type === 'vault') return SPR.vault[Math.min(f.hits, 2)];     // v7: the alien vault
+  if (f.type === 'sunstone') return SPR.fsun[Math.min(f.hits, 2)];   // v8a: Mercury
+  if (f.type === 'orenode') return SPR.forenode[Math.min(f.hits, 2)];
+  if (f.type === 'stormcore') return SPR.fstorm[Math.min(f.hits, 2)];// v8a: Jupiter
+  if (f.type === 'wisp') return SPR.fwisp[Math.min(f.hits, 2)];
   return SPR.rock[Math.min(f.hits, 2)];
 }
 function drawFlora(g, f, shake) {
@@ -4197,6 +5044,15 @@ function recomputeAnims() {
       case 'crystalspire': if (megaDone(b)) anims.push({ t: 'aura', x: x + 32, y: y - 200, b, cool: Math.random() }); break;
       case 'starharbor': if (megaDone(b)) { anims.push({ t: 'beacon', x: x + 63, y: y - 36, b, m: true });
                                             anims.push({ t: 'droneHome', x: x + 48, y: y + 20, b, ph: Math.random() * 20 }); } break;
+      /* v8a — the planet structures (complete ones only) */
+      case 'sunport':    if (megaDone(b)) anims.push({ t: 'beacon', x: x + 27, y: y - 24, b }); break;
+      case 'solarforge': if (megaDone(b)) anims.push({ t: 'smoke', x: x + 30, y: y - 56, b, cool: Math.random(), soft: true }); break;
+      case 'craterdome': if (megaDone(b)) anims.push({ t: 'glint', x: x + 6, y: y + 6, b, cool: Math.random() * 4 }); break;
+      case 'sundialspire': if (megaDone(b)) anims.push({ t: 'aura', x: x + 32, y: y - 112, b, cool: Math.random(), gold: true }); break;
+      case 'stormport':  if (megaDone(b)) anims.push({ t: 'beacon', x: x + 27, y: y - 24, b }); break;
+      case 'stormtap':   if (megaDone(b)) anims.push({ t: 'aura', x: x + 32, y: y - 92, b, cool: Math.random() }); break;
+      case 'cloudlodge': if (megaDone(b)) anims.push({ t: 'smoke', x: x + 17, y: y - 42, b, cool: Math.random(), soft: true }); break;
+      case 'greateye':   if (megaDone(b)) anims.push({ t: 'beacon', x: x + 8, y: y - 60, b, m: true }); break;
     }
   }
   /* v5a: decoration overlays — fountain sparkle, waving flags, warm lamps,
@@ -4356,6 +5212,7 @@ function economyTick() {
       if (r === 'ice') life.ice += amt;
       if (r === 'fuel') life.fuel += amt;        // v6a: REFINE 20 FUEL goal
       if (r === 'starsteel') life.starsteel += amt;   // v7: FORGE 20 STARSTEEL goal
+      if (r === 'alloy') life.alloy = (life.alloy || 0) + amt;   // v8a: the SOLAR FORGE makes alloy too
     }
   }
   /* population eats (age 2+); never dies — growth just pauses */
@@ -4465,7 +5322,8 @@ function ageUp() {
 
 /* ── building placement ── */
 /* each building kind has a HOME world; `both` = buildable anywhere (v4c) */
-const bHome = k => B[k].moon ? 'moon' : B[k].mars ? 'mars' : B[k].mission ? 'mission' : 'earth';   // v7
+const bHome = k => B[k].moon ? 'moon' : B[k].mars ? 'mars' : B[k].mission ? 'mission'
+                 : B[k].planet ? B[k].planet : 'earth';   // v7 / v8a
 function validAt(k, gx, gy) {
   const s = B[k].size || 1, coastal = !!B[k].coastal;
   if (!B[k].both && bHome(k) !== world) return false;   // each world builds its own kinds
@@ -4476,8 +5334,11 @@ function validAt(k, gx, gy) {
        sand — except POWER POLES, which march across any land (v5a) */
     if (!B[k].pole && sandAt(gx + dx, gy + dy) !== coastal) return false;
     /* v7: megastructures rise on the MAIN island only (kid-legible skyline),
-       and never so far north the tower would poke out of the world bake */
-    if (B[k].mega && (gy < 7 || isleIdAt(gx + dx, gy + dy) !== isleIdAt(CX, CYG))) return false;
+       and never so far north the tower would poke out of the world bake.
+       v8a: on the planets they're the ONLY buildings — just keep them south
+       enough that the tall bakes stay inside the world canvas. */
+    if (B[k].mega && !B[k].planet && (gy < 7 || isleIdAt(gx + dx, gy + dy) !== isleIdAt(CX, CYG))) return false;
+    if (B[k].mega && B[k].planet && gy < 4) return false;
   }
   return true;
 }
@@ -4498,7 +5359,9 @@ function placeBuilding(k, gx, gy) {
   const b = addBuilding(k, gx, gy);
   if (B[k].mega) {                               // v7: a FOUNDATION rises — feed it starsteel!
     b.stage = 0;
-    banners.push({ title: 'FOUNDATION LAID!', sub: '✕ at the site delivers starsteel — ' + megaMax(k) + ' loads to go!', t: 0, dur: 3 });
+    banners.push({ title: 'FOUNDATION LAID!',
+                   sub: B[k].planet ? '✕ at the site delivers materials — ' + megaMax(k) + ' loads to go!'
+                                    : '✕ at the site delivers starsteel — ' + megaMax(k) + ' loads to go!', t: 0, dur: 3 });
   }
   if (B[k].robot) spawnRobot(tX(gx) + 16, tY(gy) + 40);
   if (B[k].rover) spawnRover(tX(gx) + 16, tY(gy) + 40);      // v6a: garage rolls out a rover
@@ -4812,6 +5675,26 @@ function harvestFlora(f, px2, py2) {
     addFloat(tX(f.gx) + 16, tY(f.gy) - 4, '+2', RES_COL.frost, 'frost');
     for (let i = 0; i < 4; i++) spawnP(tX(f.gx) + 16, tY(f.gy) + 12, SPR.iceChip, { life: 0.5 });
     SFX.mine(); SFX.pop();
+  } else if (f.type === 'sunstone') {           // v8a: Mercury's glowing amber crystal
+    res.sunstone += 2; life.sunstone = (life.sunstone || 0) + 2;
+    addFloat(tX(f.gx) + 16, tY(f.gy) - 4, '+2', RES_COL.sunstone, 'sunstone');
+    for (let i = 0; i < 4; i++) spawnP(tX(f.gx) + 16, tY(f.gy) + 12, SPR.spark[i % 2], { life: 0.5 });
+    SFX.mine();
+  } else if (f.type === 'orenode') {            // v8a: metal-rich crater
+    res.ore += 3;
+    addFloat(tX(f.gx) + 16, tY(f.gy) - 4, '+3', RES_COL.ore, 'ore');
+    for (let i = 0; i < 4; i++) spawnP(tX(f.gx) + 16, tY(f.gy) + 12, SPR.chip, { life: 0.5 });
+    SFX.mine();
+  } else if (f.type === 'stormcore') {          // v8a: Jupiter's crackling orb
+    res.stormcore += 2; life.stormcore = (life.stormcore || 0) + 2;
+    addFloat(tX(f.gx) + 16, tY(f.gy) - 4, '+2', RES_COL.stormcore, 'stormcore');
+    for (let i = 0; i < 4; i++) spawnP(tX(f.gx) + 16, tY(f.gy) + 12, SPR.sparkB[i % 2], { life: 0.5 });
+    SFX.mine(); SFX.zap();
+  } else if (f.type === 'wisp') {               // v8a: hydrogen wisp → a puff of FUEL
+    res.fuel += 1; life.fuel += 1;
+    addFloat(tX(f.gx) + 16, tY(f.gy) - 4, '+1', RES_COL.fuel, 'fuel');
+    for (let i = 0; i < 3; i++) spawnP(tX(f.gx) + 16, tY(f.gy) + 8, SPR.puff[i % 2], { vy: -20, g: -6, life: 0.6 });
+    SFX.pop();
   } else if (f.type === 'dep') {                // v7: asteroid deposit — whacks crack it
     if (f.big) {                                 // big ones laugh at pickaxes
       addFloat(tX(f.gx) + 16, tY(f.gy) - 14, 'TOO TOUGH! CANNON OR DRILL!', '#ffd24a');
@@ -4940,6 +5823,14 @@ function boardingPads() {
     const s = B[b.k].size || 1;
     out.push({ b, ship, to, cx: tX(b.gx) + s * 16, cy: tY(b.gy) + s * 32 + 20 });
   };
+  /* v8a: a forming clipper trip keeps its berth zone so hop-outs re-board */
+  if (travel && travel.ship === 'clipper') {
+    if (world === travel.from) {
+      const cb = clipperBerth();
+      if (cb) out.push({ b: travel.pad, ship: 'clipper', to: travel.to, cx: cb.x, cy: cb.y });
+    }
+    return out;
+  }
   if (world === 'earth') {
     if (moonRocketBought) {
       const pad = buildings.find(b => b.k === 'launchpad' && !b.rubble);
@@ -5172,8 +6063,12 @@ function updateTravel(dt) {
       if (q.t > 1.2) { q.phase = 'scan'; q.t = 0; scanScr = genScanCards(); SFX.ding(); }
       return;
     }
-    const starsDur = q.express ? 3.4 : 2.4;      // express: time to wave at Mars + the Moon
-    if (!q.sw && q.t > (q.express ? 2.1 : 1.1)) { q.sw = true; arriveOtherWorld(q); }
+    /* v8a: clipper flights stretch to fit their whiz-by route */
+    const starsDur = q.ship === 'clipper' ? q.whizDur
+                   : q.express ? 3.4 : 2.4;      // express: time to wave at Mars + the Moon
+    const swAt = q.ship === 'clipper' ? Math.max(1.1, starsDur - 1.3)
+               : q.express ? 2.1 : 1.1;
+    if (!q.sw && q.t > swAt) { q.sw = true; arriveOtherWorld(q); }
     if (q.t > starsDur) { q.phase = 'land'; q.t = 0; q.ry = 430; }
   } else if (q.phase === 'land') {
     const f = clamp(q.t / 2.2, 0, 1);
@@ -5202,11 +6097,22 @@ function arriveOtherWorld(q) {
   for (const b of buildings) if (b.wobT > 0) { b.wobT = 0; bgDirty = true; }
   wobbleN = 0;
   for (const p of players) if (p.mode === 'cannon') unmanCannon(p);
+  if (q.ship === 'clipper') ensurePlanetWorld(q.to);   // v8a: planets are born on first approach
   swapTo(q.to);
   if (q.from === 'mission') { parked.delete('mission'); exped = null; }   // v7: asteroid maps evaporate
   for (const pp of parts) pp.on = false;        // no stale debris across worlds
   for (const ff of floats) ff.on = false;
   if (q.ship === 'cruiser') cruiserAt = q.to === 'mars' ? 'mars' : 'moon';
+  if (q.ship === 'clipper') clipperAt = q.to;   // v8a: she travels WITH the crew
+  /* v8a: the clipper never waits alone off-Earth — when the crew lands
+     somewhere she isn't (missions excepted: that crew comes back), she
+     flies herself home to the STAR HARBOR berth. */
+  if (clipperAt !== 'earth' && q.ship !== 'clipper' &&
+      q.to !== clipperAt && q.to !== 'mission') {
+    clipperAt = 'earth';
+    banners.push({ title: 'THE STAR CLIPPER FLEW HERSELF HOME!',
+                   sub: 'She waits at the STAR HARBOR, ready for the planets!', t: 0, dur: 3.4 });
+  }
   /* v7.1: the EXPRESS line must never strand the cruiser — when the crew
      lands somewhere she isn't (and isn't coming back to), she flies herself
      to her moon berth. Missions don't count: that crew returns to Mars. */
@@ -5226,6 +6132,23 @@ function arriveOtherWorld(q) {
     if (ls) addBuilding('marslander', ls.gx, ls.gy);
   }
   let dp = null;
+  /* v8a: the clipper lands at her destination berth (port / harbor / clearing) */
+  if (q.ship === 'clipper') {
+    const cb = clipperBerth();
+    dp = cb ? cb.pad : null;
+    q.destPad = dp || null;
+    q.dBerthX = cb ? cb.x : tX(PCX - 6) + 32;
+    q.site = cb ? cb.site : { gx: PCX - 7, gy: PCY - 1, s: 2 };
+    for (const p of players) {
+      p.x = tX(q.site.gx) + q.site.s * 16; p.y = tY(q.site.gy) + q.site.s * 32 + 20;
+      p.boat = false; p.target = null;
+      if (q.to === 'earth') { p.moor = p.moorE || null; p.moorE = null; }
+    }
+    landGrowthSanity(true);
+    camPan = null;
+    updateCamera(0, true);
+    return;
+  }
   if (q.to === 'moon') dp = q.ship === 'cruiser'
       ? (buildings.find(b => b.k === 'shipyard') ||
          buildings.find(b => b.k === 'moonport') || buildings.find(b => b.k === 'lander'))
@@ -5291,6 +6214,33 @@ function finishTravel(q) {
   } else if (q.to === 'moon' && q.from === 'mars' && cargoTotal() > 0 && !firstHaulDone) {
     banners.push({ title: 'CARGO TRANSFERRED!', sub: 'The crates ride with you — next stop: EARTH!', t: 0, dur: 3, legendary: true });
     SFX.thunk();
+  }
+  /* v8a: planet landings — first light gets the full fanfare */
+  if (q.to === 'mercury' || q.to === 'jupiter') {
+    if (!planetsVisited[q.to]) {
+      planetsVisited[q.to] = true;
+      pushEvent(q.to);
+      banners.push(q.to === 'mercury'
+        ? { title: 'WELCOME TO THE SUNSCORCH!', sub: 'Mercury! Mine glowing SUNSTONE — and mind the big, big sun!', t: 0, dur: 4.4, legendary: true }
+        : { title: 'WELCOME TO THE CLOUDTOP!', sub: 'Jupiter! The floor is clouds — mine crackling STORMCORE!', t: 0, dur: 4.4, legendary: true });
+      SFX.planet();
+      fwShow = Math.max(fwShow, 4); fwT = 0;
+    } else {
+      banners.push(q.to === 'mercury'
+        ? { title: 'BACK ON THE SUNSCORCH!', sub: 'The sun never even blinked.', t: 0, dur: 2.6 }
+        : { title: 'BACK ON THE CLOUDTOP!', sub: 'The clouds kept your footprints. Somehow.', t: 0, dur: 2.6 });
+      SFX.fanfare();
+    }
+    updateCamera(0, true);
+    saveGame();
+    return;
+  }
+  if (q.ship === 'clipper' && q.to === 'earth') {
+    banners.push({ title: 'THE STAR CLIPPER IS HOME!', sub: 'She hums happily beside the STAR HARBOR.', t: 0, dur: 2.6 });
+    SFX.fanfare();
+    updateCamera(0, true);
+    saveGame();
+    return;
   }
   if (q.to === 'mars') {
     if (!marsArrived) {
@@ -5381,6 +6331,215 @@ function tryBargeUpgrade(p) {
   SFX.legendary();
   saveGame();
   return true;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   V8a — THE NINE PLANETS: the STAR CLIPPER + the full-screen solar map.
+   Fund her at the completed STAR HARBOR (fundBarge shape), open the map at
+   her berth or the star-deck wall chart, fly Mercury/Jupiter (+ Earth/Mars
+   shortcuts). She travels WITH the crew — and flies herself home if they
+   ever land somewhere she isn't (the v7.1 stranding lesson).
+   ═══════════════════════════════════════════════════════════════════════ */
+/* this world's clipper berth: anchor point + landing site (+ host pad) */
+function clipperBerth() {
+  if (world === 'earth') {
+    const sh = buildings.find(b => b.k === 'starharbor' && megaDone(b));
+    if (!sh) return null;
+    return { x: tX(sh.gx) + 150, y: tY(sh.gy) + 88, pad: sh, site: { gx: sh.gx, gy: sh.gy, s: 3 } };
+  }
+  if (world === 'mars') {
+    const at = buildings.find(b => b.k === 'marsport') || buildings.find(b => b.k === 'marslander');
+    if (!at) return null;
+    return { x: tX(at.gx) + 150, y: tY(at.gy) + 78, pad: at, site: { gx: at.gx, gy: at.gy, s: 2 } };
+  }
+  if (world === 'mercury' || world === 'jupiter') {
+    const port = buildings.find(b => b.k === (world === 'mercury' ? 'sunport' : 'stormport') && megaDone(b));
+    if (port) return { x: tX(port.gx) + 118, y: tY(port.gy) + 74, pad: port, site: { gx: port.gx, gy: port.gy, s: 2 } };
+    return { x: tX(PCX - 6) + 32, y: tY(PCY) + 56, pad: null, site: { gx: PCX - 7, gy: PCY - 1, s: 2 } };
+  }
+  return null;
+}
+/* fund THE STAR CLIPPER at the harbor gantry — fundBarge, verbatim shape */
+function fundClipper(p, sh) {
+  if (!mapAssembled) {                           // the pre-gate: finish the chart first
+    addFloat(p.x, p.y - 44, 'THE NINE PLANETS AWAIT — ASSEMBLE THE MAP!', '#ffd24a');
+    SFX.ding();
+    return false;
+  }
+  if (clipperStage >= 3) return false;
+  const cost = CLIPPER_STAGES[clipperStage];
+  if (!canAfford(cost)) {
+    SFX.cancel();
+    const need = Object.keys(cost).filter(r2 => (res[r2] || 0) < cost[r2])
+      .map(r2 => cost[r2] + ' ' + r2.toUpperCase()).join(' + ');
+    addFloat(p.x, p.y - 44, 'NEED ' + need + '!', '#ff9a8a');
+    return false;
+  }
+  payCost(cost);
+  clipperStage++;
+  const done = clipperStage >= 3;
+  banners.push({ title: CLIPPER_STAGE_NAMES[clipperStage - 1],
+                 sub: done ? 'Press ✕ at the STAR CLIPPER — nine planets on the chart!'
+                           : 'Stage ' + clipperStage + '/3 — keep funding at the STAR HARBOR!',
+                 t: 0, dur: done ? 4.4 : 3, legendary: done });
+  if (done) { SFX.legendary(); SFX.hum(); clipperAt = 'earth'; pushEvent('clipper'); }
+  else SFX.place();
+  const cx2 = tX(sh.gx) + 150, cy2 = tY(sh.gy) + 44;
+  for (let i = 0; i < (done ? 14 : 8); i++)
+    spawnP(cx2 + (Math.random() - 0.5) * 90, cy2 - 10 - Math.random() * 24, SPR.spark[i % 2], { life: 0.9 });
+  saveGame();
+  return true;
+}
+
+/* ── THE SOLAR MAP — full-screen chooser: sun left, nine worlds on arcs,
+   a comet cursor gliding between them. Baked once, lazily. ── */
+let SOLAR_POS = null;
+function bakeSolarBG() {
+  if (SPR.solarBG) return;
+  const [c, g] = C(W, H);
+  const gr = g.createLinearGradient(0, 0, 0, H);
+  gr.addColorStop(0, '#04060f'); gr.addColorStop(0.55, '#080b1c'); gr.addColorStop(1, '#0d1226');
+  g.fillStyle = gr; g.fillRect(0, 0, W, H);
+  for (let i = 0; i < 240; i++) {                // starfield (same language as the chart)
+    g.fillStyle = i % 7 ? 'rgba(200,220,255,0.5)' : 'rgba(159,216,255,0.85)';
+    g.fillRect((i * 211 + 43) % W, (i * 149 + 17) % H, i % 4 ? 2 : 3, i % 4 ? 2 : 3);
+  }
+  const neb = g.createRadialGradient(W * 0.72, 130, 20, W * 0.72, 130, 340);
+  neb.addColorStop(0, 'rgba(120,80,220,0.12)'); neb.addColorStop(1, 'rgba(120,80,220,0)');
+  g.fillStyle = neb; g.fillRect(W * 0.72 - 340, 0, 680, 480);
+  /* THE SUN — huge at the left edge */
+  const sy = H / 2 - 40;
+  const halo = g.createRadialGradient(-30, sy, 30, -30, sy, 380);
+  halo.addColorStop(0, 'rgba(255,240,180,0.95)'); halo.addColorStop(0.35, 'rgba(255,200,90,0.4)'); halo.addColorStop(1, 'rgba(255,200,90,0)');
+  g.fillStyle = halo; g.fillRect(0, sy - 380, 400, 760);
+  g.fillStyle = '#fff3b0'; g.beginPath(); g.arc(-30, sy, 118, 0, 6.3); g.fill();
+  g.fillStyle = '#ffe27a'; g.beginPath(); g.arc(-30, sy, 104, 0, 6.3); g.fill();
+  /* nine gentle orbit arcs + the worlds themselves */
+  SOLAR_POS = [];
+  const PBALL = [
+    ['#b8825c', 17], ['#e8c894', 19], ['#4aa8c9', 20], ['#d05a36', 19],
+    ['#d8b890', 28], ['#e0c088', 24], ['#9fe8ff', 21], ['#3a7bd5', 21], ['#c9b0a0', 12]];
+  for (let i = 0; i < 9; i++) {
+    const px = 140 + i * 127, py = sy + 26 + Math.sin(i * 1.1) * 128;
+    const r = PBALL[i][1];
+    g.strokeStyle = 'rgba(159,216,255,0.14)'; g.lineWidth = 2;
+    g.beginPath(); g.ellipse(-30, sy, px + 30, (px + 30) * 0.52, 0, -0.85, 0.85); g.stroke();
+    SOLAR_POS.push({ x: px, y: py, r });
+  }
+  for (let i = 0; i < 9; i++) {
+    const { x: px, y: py, r } = SOLAR_POS[i];
+    const gl = g.createRadialGradient(px, py, 2, px, py, r * 2.1);
+    gl.addColorStop(0, PBALL[i][0]); gl.addColorStop(1, 'rgba(255,255,255,0)');
+    g.globalAlpha = 0.4; g.fillStyle = gl; g.fillRect(px - r * 2.1, py - r * 2.1, r * 4.2, r * 4.2);
+    g.globalAlpha = 1;
+    if (i === 0) g.drawImage(SPR.ballMercury, px - r, py - r, r * 2, r * 2);
+    else if (i === 1) g.drawImage(SPR.ballVenus, px - r, py - r, r * 2, r * 2);
+    else if (i === 2) g.drawImage(SPR.earthBall, px - r, py - r, r * 2, r * 2);
+    else if (i === 3) g.drawImage(SPR.ballMars, px - r, py - r, r * 2, r * 2);
+    else if (i === 4) g.drawImage(SPR.ballJupiter, px - r, py - r, r * 2, r * 2);
+    else {
+      g.fillStyle = PBALL[i][0]; g.beginPath(); g.arc(px, py, r, 0, 6.3); g.fill();
+      g.fillStyle = 'rgba(255,255,255,0.35)'; g.beginPath(); g.arc(px - r * 0.3, py - r * 0.3, r * 0.62, 0, 6.3); g.fill();
+      g.fillStyle = 'rgba(20,16,30,0.4)'; g.beginPath(); g.arc(px + r * 0.45, py + r * 0.35, r * 0.9, 0, 6.3); g.fill();
+      if (i === 5) {                             // Saturn's rings, of course
+        g.strokeStyle = '#e8d8b0'; g.lineWidth = 4;
+        g.beginPath(); g.ellipse(px, py, r * 1.8, r * 0.55, -0.3, 0, 6.3); g.stroke();
+        g.strokeStyle = 'rgba(160,140,100,0.8)'; g.lineWidth = 1.6;
+        g.beginPath(); g.ellipse(px, py, r * 1.45, r * 0.42, -0.3, 0, 6.3); g.stroke();
+      }
+      if (i === 6) {                             // Uranus rolls sideways
+        g.strokeStyle = 'rgba(200,240,255,0.7)'; g.lineWidth = 2.4;
+        g.beginPath(); g.ellipse(px, py, r * 0.5, r * 1.5, 0.3, 0, 6.3); g.stroke();
+      }
+      if (i === 7) {                             // Neptune's wind streak
+        g.fillStyle = 'rgba(255,255,255,0.5)'; g.fillRect(px - r * 0.7, py - 3, r * 1.2, 3);
+      }
+      if (i === 8) {                             // Pluto's heart. Obviously.
+        g.fillStyle = '#e8d8c8';
+        g.beginPath(); g.arc(px - 2.6, py + 2, 3, 0, 6.3); g.arc(px + 2.6, py + 2, 3, 0, 6.3); g.fill();
+        g.beginPath(); g.moveTo(px - 5.4, py + 3); g.lineTo(px, py + 9.4); g.lineTo(px + 5.4, py + 3); g.fill();
+      }
+    }
+    /* the asteroid belt shimmer between Mars and Jupiter */
+    if (i === 3) {
+      g.fillStyle = 'rgba(216,196,154,0.8)';
+      for (let k = 0; k < 26; k++) {
+        const ba = -0.7 + (k / 26) * 1.4, br = px + 66 + (k * 37) % 22;
+        g.fillRect(-30 + Math.cos(ba) * br, sy + Math.sin(ba) * br * 0.52, 2, 2);
+      }
+    }
+  }
+  otxtInto(g, 'THE NINE PLANETS', W / 2, 62, 34, '#ffd24a');
+  SPR.solarBG = c;
+}
+/* baked-title helper (outlined text into an offscreen bake) */
+function otxtInto(g, s, x, y, size, color) {
+  g.font = '900 ' + size + 'px Verdana, sans-serif';
+  g.textAlign = 'center';
+  g.lineWidth = Math.max(3, size / 7); g.strokeStyle = '#0a1622';
+  g.strokeText(s, x, y);
+  g.fillStyle = color; g.fillText(s, x, y);
+}
+function openSolarMap(src) {
+  if (travel || rocketSeq || gateSeq || solarMap) { SFX.cancel(); return false; }
+  bakeSolarBG();
+  const cur = PLANET_ORD[world] !== undefined ? PLANET_ORD[world] : 2;
+  solarMap = { sel: cur, from: world, src, t: 0,
+               cx: SOLAR_POS[cur].x, cy: SOLAR_POS[cur].y, refuseT: 0, hereT: 0 };
+  SFX.confirm(); SFX.mapblip();
+  return true;
+}
+function solarMapBtn(pi, b) {
+  const m = solarMap;
+  if (b === 'left')  { m.sel = (m.sel + 8) % 9; SFX.mapblip(); }
+  else if (b === 'right') { m.sel = (m.sel + 1) % 9; SFX.mapblip(); }
+  else if (b === 'south') solarMapFly();
+  else if (b === 'east') { solarMap = null; SFX.cancel(); }
+}
+function solarMapFly() {
+  const m = solarMap, pl = PLANETS[m.sel];
+  if (!pl.fly) { m.refuseT = 1.5; SFX.cancel(); return; }   // v8b's worlds wave hello
+  if (pl.k === world) { m.hereT = 1.5; SFX.cancel(); return; }
+  solarMap = null;
+  startClipperTravel(pl.k);
+}
+/* board-and-go: choosing a world on the map IS the boarding call — the
+   whole crew hops aboard and the countdown starts at the berth */
+function startClipperTravel(dest) {
+  closeInterior();
+  const cb = clipperBerth();
+  const site = cb ? cb.site : { gx: CX, gy: CYG, s: 1 };
+  for (const p of players) {
+    if (p.mode === 'cannon') unmanCannon(p);
+    p.aboard = true; p.target = null; p.ghost = null; p.mode = 'walk'; p.boat = false; p.hop = null;
+  }
+  const wz = whizRoute(world, dest);
+  travel = { phase: 'count', ship: 'clipper', from: world, to: dest, dir: 'clip',
+             pad: cb ? cb.pad : null, srcSite: site, destPad: null, site: null,
+             sBerthX: cb ? cb.x : tX(site.gx) + 32, dBerthX: 0,
+             whiz: wz.bodies, whizDur: wz.dur,
+             t: 0, n: 3, ry: 0 };
+  camPan = null;
+  updateCamera(0, true);
+  SFX.count(); SFX.hum();
+}
+/* the bodies between two worlds, in fly-by order (+ the belt's sparkle) */
+function whizRoute(from, to) {
+  const a = PLANET_ORD[from], b2 = PLANET_ORD[to];
+  const lo = Math.min(a, b2), hi = Math.max(a, b2);
+  const NAME = { venus: 'VENUS', earth: 'EARTH', mars: 'MARS', mercury: 'MERCURY', belt: 'THE ASTEROID BELT' };
+  const COL = { venus: '#e8c894', earth: '#59a0e0', mars: '#ff8a66', mercury: '#c98a4a', belt: '#d8c49a' };
+  const mid = [];
+  for (const pk in PLANET_ORD) {
+    const o = PLANET_ORD[pk];
+    if (o > lo && o < hi) mid.push({ k: pk, o });
+  }
+  if (lo < 3.5 && hi > 3.5) mid.push({ k: 'belt', o: 3.5 });
+  mid.sort((p2, q2) => p2.o - q2.o);
+  if (b2 < a) mid.reverse();                     // inward: pass them sun-ward
+  const bodies = mid.map((p2, i) => ({ k: p2.k, name: NAME[p2.k], col: COL[p2.k],
+                                       t0: 0.5 + i * 1.15, t1: 1.6 + i * 1.15, i }));
+  return { bodies, dur: Math.max(2.4, 1.6 + mid.length * 1.15 + 1.0) };
 }
 
 /* ── THE SCAN — three seeded asteroid cards, one rare in ~6 (pity at 8) ── */
@@ -6798,6 +7957,9 @@ function saveGame() {
        marks rescueMe and resolves as a rescue on the next load */
     bargeStage, bargeUpgraded, expedCounter, lastRareAt, expeditionsDone,
     firstHaulDone, beaconsFound, mapAssembled, cargo,
+    /* v8a (additive) — the clipper + first-landing flags */
+    clipperStage, clipperAt,
+    pv: [planetsVisited.mercury ? 1 : 0, planetsVisited.jupiter ? 1 : 0],
     rescueMe: world === 'mission' ? 1 : 0,
     stars, goalI, cratesOpened, rubbleFixed, mb: meteorsBlocked,
     rocketsLaunched, lastGift, battCharge,
@@ -6830,6 +7992,18 @@ function saveGame() {
                          players[0].moorE ? [Math.round(players[0].moorE.x), Math.round(players[0].moorE.y)] : 0] : 0,
     thumb: thumbURL(eD.bgC, eD.WORLD_W || EGW * TILE, eD.WORLD_H || GY0 + EGH * TILE),
   };
+  /* v8a: the lazily-born planet worlds save only once they exist */
+  const mercD = worldData('mercury'), jupD = worldData('jupiter');
+  if (mercD) {
+    s.mercBuildings = mercD.buildings.map(b => [b.k, b.gx, b.gy, 0, b.stage || 0]);
+    s.mercFlora = mercD.flora.map(f => [f.type, f.gx, f.gy, f.hits, f.gone ? Math.ceil(f.regrowT) : 0]);
+    s.mercDecor = mercD.decor.map(t => [t.k, t.gx, t.gy]);
+  }
+  if (jupD) {
+    s.jupBuildings = jupD.buildings.map(b => [b.k, b.gx, b.gy, 0, b.stage || 0]);
+    s.jupFlora = jupD.flora.map(f => [f.type, f.gx, f.gy, f.hits, f.gone ? Math.ceil(f.regrowT) : 0]);
+    s.jupDecor = jupD.decor.map(t => [t.k, t.gx, t.gy]);
+  }
   lsSet(SLOT_KEY(curSlot), JSON.stringify(s));
   loadSlotSummaries();
 }
@@ -6854,9 +8028,9 @@ function resetWorldState() {
   parked.delete('mission');
   swapTo('earth');                              // Earth is always the reset baseline
   res = { wood: 0, stone: 0, food: 0, ore: 0, metal: 0, parts: 0, science: 0, regolith: 0, ice: 0, he3: 0, fuel: 0, rediron: 0, frost: 0,
-          astroiron: 0, crystal: 0, alloy: 0, starsteel: 0 };
+          astroiron: 0, crystal: 0, alloy: 0, starsteel: 0, sunstone: 0, stormcore: 0 };
   life = { metal: 0, parts: 0, science: 0, regolith: 0, ice: 0, fuel: 0, rediron: 0, frost: 0,
-           astroiron: 0, crystal: 0, alloy: 0, starsteel: 0 };
+           astroiron: 0, crystal: 0, alloy: 0, starsteel: 0, sunstone: 0, stormcore: 0 };
   pop = 2; popF = 2; hungry = false; firstPowerDone = false;
   powerInc = 0; powerDem = 0; islandPowered = false;
   buildings = []; seqN = 1; flora = []; wires = []; anims = [];
@@ -6883,6 +8057,10 @@ function resetWorldState() {
   expeditionsDone = 0; firstHaulDone = false; beaconsFound = 0; mapAssembled = false;
   cargo = { astroiron: 0, crystal: 0, alloy: 0 };
   exped = null; scanScr = null; forceRare = false; unloadFx = 0;
+  /* v8a: REFORGE folds the nine planets back into the chart (stars persist) */
+  clipperStage = 0; clipperAt = 'earth'; solarMap = null;
+  planetsVisited = { mercury: false, jupiter: false };
+  parked.delete('mercury'); parked.delete('jupiter');   // lazily reborn on the next visit
   for (const m of parked.values()) {
     m.landAge = []; m.occ = []; m.isleId = []; m.coast = [];
     m.buildings = []; m.flora = []; m.wires = []; m.anims = []; m.robots = []; m.ferries = [];
@@ -6969,6 +8147,15 @@ function loadGame(slot) {
   expeditionsDone = s.expeditionsDone || 0; firstHaulDone = !!s.firstHaulDone;
   beaconsFound = s.beaconsFound || 0; mapAssembled = !!s.mapAssembled;
   cargo = Object.assign({ astroiron: 0, crystal: 0, alloy: 0 }, s.cargo);
+  /* v8a (additive — a v7 save loads with all of this at zero) */
+  clipperStage = s.clipperStage || 0;
+  clipperAt = s.clipperAt || 'earth';
+  planetsVisited = { mercury: !!(s.pv && s.pv[0]), jupiter: !!(s.pv && s.pv[1]) };
+  /* v8a heals: she is wherever the crew NEEDS her — planets have no other
+     ride home — and home at the harbor whenever the crew is elsewhere */
+  if (s.wld === 'mercury' || s.wld === 'jupiter') clipperAt = s.wld;
+  else if (clipperAt !== 'earth' && clipperAt !== s.wld) clipperAt = 'earth';
+  if (clipperStage < 3) clipperAt = 'earth';
   age = 1;
   genIsland(s.seed || 1);
   age = s.age || 1;
@@ -6991,9 +8178,9 @@ function loadGame(slot) {
   growNextPop = s.growNextPop || 0;
   islandFull = old ? false : !!s.islandFull;     // the v3 sea has room again!
   res = Object.assign({ wood: 0, stone: 0, food: 0, ore: 0, metal: 0, parts: 0, science: 0, regolith: 0, ice: 0, he3: 0, fuel: 0, rediron: 0, frost: 0,
-                        astroiron: 0, crystal: 0, alloy: 0, starsteel: 0 }, s.res);
+                        astroiron: 0, crystal: 0, alloy: 0, starsteel: 0, sunstone: 0, stormcore: 0 }, s.res);
   life = Object.assign({ metal: 0, parts: 0, science: 0, regolith: 0, ice: 0, fuel: 0, rediron: 0, frost: 0,
-                         astroiron: 0, crystal: 0, alloy: 0, starsteel: 0 }, s.life);
+                         astroiron: 0, crystal: 0, alloy: 0, starsteel: 0, sunstone: 0, stormcore: 0 }, s.life);
   popF = s.popF || 2; pop = Math.floor(popF);
   playtime = s.playtime || 0; crateT = s.crateT || 280;
   if (!s.campfireGone) addBuilding('campfire', CX, CYG);  // retired campfires stay gone
@@ -7123,19 +8310,51 @@ function loadGame(slot) {
     }
     recomputePower(); recomputeAnims();
   });
+  /* ── v8a: rebuild the LAZY planet worlds — only the ones the save knows
+     (or the one the crew is standing on; corrupt-save-proof fresh gen) ── */
+  for (const pw of [{ k: 'mercury', b: 'mercBuildings', f: 'mercFlora', d: 'mercDecor' },
+                    { k: 'jupiter', b: 'jupBuildings', f: 'jupFlora', d: 'jupDecor' }]) {
+    const known = Array.isArray(s[pw.b]);
+    if (!known && s.wld !== pw.k) continue;
+    parked.set(pw.k, mkWorldBundle(pw.k, PGW, PGH));
+    inWorld(pw.k, () => {
+      if (pw.k === 'mercury') genMercury(seed, known); else genJupiter(seed, known);
+      if (known) {
+        for (const bb of s[pw.b]) {
+          if (!B[bb[0]]) continue;
+          const b = addBuilding(bb[0], bb[1], bb[2]);
+          if (B[bb[0]].mega) b.stage = clamp(bb[4] || 0, 0, megaMax(bb[0]));
+        }
+        flora = (s[pw.f] || []).map(ff => ({ type: ff[0], gx: ff[1], gy: ff[2],
+          golden: false, hits: ff[3] || 0, gone: ff[4] > 0, regrowT: ff[4] || 0, shakeT: 0 }));
+        decor = []; decorMap = new Map();
+        for (const dd of (s[pw.d] || [])) {
+          if (!D[dd[0]]) continue;
+          const it = { k: dd[0], gx: dd[1], gy: dd[2] };
+          decor.push(it); decorMap.set(DKEY(it.gx, it.gy), it);
+        }
+      }
+      recomputePower(); recomputeAnims();
+    });
+  }
   /* ── v5a migration: pre-v6 saves know nothing about wiring — auto-grant
      REAL power poles (removable/refundable) along sensible routes so every
      building that WAS powered STAYS powered. Both worlds. Silent. ── */
   if ((s.v || 1) < 6) { autoWirePoles(); inWorld('moon', autoWirePoles); }
   startPlay();
-  /* v5 saves remember which world you were in (v6b: mars too) */
-  if (!preV5 && (s.wld === 'moon' || s.wld === 'mars')) {
+  /* v5 saves remember which world you were in (v6b: mars · v8a: planets) */
+  if (!preV5 && (s.wld === 'moon' || s.wld === 'mars' || s.wld === 'mercury' || s.wld === 'jupiter')) {
     swapTo(s.wld);
-    const pad = s.wld === 'mars'
-      ? (s.rescueMe && buildings.find(b => b.k === 'marsyard')) ||
-        (buildings.find(b => b.k === 'marsport') || buildings.find(b => b.k === 'marslander'))
-      : (buildings.find(b => b.k === 'moonport') || buildings.find(b => b.k === 'lander'));
-    if (pad) placePlayersAt({ gx: pad.gx, gy: pad.gy, s: B[pad.k].size || 1 });
+    if (s.wld === 'mercury' || s.wld === 'jupiter') {
+      const cb = clipperBerth();
+      placePlayersAt(cb ? cb.site : { gx: PCX, gy: PCY, s: 1 });
+    } else {
+      const pad = s.wld === 'mars'
+        ? (s.rescueMe && buildings.find(b => b.k === 'marsyard')) ||
+          (buildings.find(b => b.k === 'marsport') || buildings.find(b => b.k === 'marslander'))
+        : (buildings.find(b => b.k === 'moonport') || buildings.find(b => b.k === 'lander'));
+      if (pad) placePlayersAt({ gx: pad.gx, gy: pad.gy, s: B[pad.k].size || 1 });
+    }
     updateCamera(0, true);
   }
   /* v7: a save taken mid-mission resolves as a RESCUE — home at the barge,
@@ -7220,11 +8439,17 @@ const LFX = IPW - 250, LFW = 104;              // v7.2: the sky-lift alcove (sam
 const ENTERABLE = { cabin: 1, bakery: 1, lab: 1, factory: 1, moondome: 1, neontower: 1, habdome: 1,
                     refinery: 1, greendome: 1,                       // v7.2: bonus rooms
                     mine: 1, windmill: 1, smelter: 1,                // v7.2: Ben's workshop rooms
-                    arcology: 1, crystalspire: 1, starharbor: 1 };   // v7.2: megas — complete ones only (see nearDoorB)
+                    arcology: 1, crystalspire: 1, starharbor: 1,     // v7.2: megas — complete ones only (see nearDoorB)
+                    sunport: 1, solarforge: 1, craterdome: 1, sundialspire: 1,   // v8a: Mercury
+                    stormport: 1, stormtap: 1, cloudlodge: 1, greateye: 1 };     // v8a: Jupiter
 const KIND_POOL = { cabin: 'cabin', bakery: 'baker', lab: 'scientist', factory: 'worker',
                     moondome: 'astronaut', neontower: 'lobby', habdome: 'marsonaut',
                     refinery: 'refiner', greendome: 'marsgardener',     // v7.2
-                    mine: 'miner', windmill: 'miller', smelter: 'smith' };   // v7.2: Ben's rooms
+                    mine: 'miner', windmill: 'miller', smelter: 'smith',    // v7.2: Ben's rooms
+                    sunport: 'mercurian', solarforge: 'mercurian', craterdome: 'mercurian',   // v8a
+                    sundialspire: 'scientist',
+                    stormport: 'cloudfolk', stormtap: 'cloudfolk', cloudlodge: 'cloudfolk',
+                    greateye: 'scientist' };
 /* ── v7.2: megastructure floor plans — listed bottom-first; each floor names
    its bake case, its door sign, and who lives there (pool + headcount).
    `kid` = that resident index is kid-sized (SPR.kidAv). ── */
@@ -7264,7 +8489,15 @@ const CONTEXT_LINES = {
   marsbase:"A whole base on MARS! We're a SPACE family!",       // v6b
   haul:    'Rocks from SPACE landed at the pad! Real space rocks!',   // v7
   megadone:'Have you SEEN the skyline?! We live in the future!',      // v7
+  clipper: 'The STAR CLIPPER! Have you SEEN her nacelles glow?!',     // v8a
+  mercury: 'A town on MERCURY! Closest to the sun. The SUN!',         // v8a
+  jupiter: 'You built on JUPITER?! On the CLOUDS?!',                  // v8a
 };
+/* v8a: MILO & CHIP get starry-eyed once the clipper is flight-ready */
+const MILO_V8 = ['The STAR CLIPPER is red-ish. So basically mine.',
+                 'Nine planets. I will race you to ALL of them.'];
+const CHIP_V8 = ['My hat could fit a whole planet. A small one. Pluto.',
+                 'Jupiter is one giant cookie swirl. I checked twice.'];
 const RES_POOLS = {
   milo: [
     "I'm MILO! This is the best cabin ever.",
@@ -7545,6 +8778,30 @@ const RES_POOLS = {
     'I made a horseshoe once. Still looking for the horse.',
     'The crucible burps sometimes. Excuse it.',
     'Tongs first, fingers never. Smith rule number one.'],
+  mercurian: [                                   // v8a: MERCURY — the sunscorch crowd
+    'The sun is my alarm clock. It never snoozes.',
+    'Birthdays every 88 days here. MORE CAKE.',
+    'Shade is my favorite place. I collect shades.',
+    'My boots are sun-proof. My nose? Working on it.',
+    'Sunstone glows all night. Night lasts forever. Handy!',
+    'I fried an egg on a rock. The rock apologized.',
+    'Sunscreen comes in buckets here. This is bucket nine.',
+    'The craters are cozy. The sun cannot peek in.',
+    'I waved at Earth last night. Tiny blue wave back. Probably.',
+    'Hot side HOT, dark side BRRR. We live in the middle.',
+    'My shadow is the tallest person I know.'],
+  cloudfolk: [                                   // v8a: JUPITER — the cloudtop crowd
+    'The floor is clouds. The walls are clouds. My bed? Clouds.',
+    'I dropped my spoon yesterday. It is still dropping.',
+    'The storm below sings at night. Very loud lullabies.',
+    'Jumping here is dangerous fun. We bounce. Mostly.',
+    'Stormcore tastes like sparks. Do not ask how I know.',
+    'The Great Red Spot? We call it Big Blushy.',
+    'No rocks on Jupiter. I miss rocks. I kept one.',
+    'The wind combs my hair. Backwards. Every day.',
+    'A cloud walked through the kitchen this morning. Polite fellow.',
+    'Lightning counts as a nightlight. House rules.',
+    'Fluffiest town in the solar system. It is official.'],
 };
 
 /* ── recent-events ring buffer (persisted) ── */
@@ -7711,6 +8968,15 @@ function bakeRoom(kind, rng, resN, mf) {
     mine:     { wall: '#6a6058', wallD: '#544b44', floor: '#7d7268', floorD: '#6e645a', trim: '#2e2822' },
     windmill: { wall: '#8a6a42', wallD: '#6f5433', floor: '#b08a58', floorD: '#9e7a4a', trim: '#4a3418' },
     smelter:  { wall: '#5f5550', wallD: '#4c433e', floor: '#6e6058', floorD: '#60534b', trim: '#2c2420' },
+    /* v8a — the planet rooms */
+    sunport:     { wall: '#8a5a34', wallD: '#6e4a2c', floor: '#b8825c', floorD: '#a5714e', trim: '#3a2410' },
+    solarforge:  { wall: '#7d5230', wallD: '#5c3c20', floor: '#96613a', floorD: '#875532', trim: '#38200c' },
+    craterdome:  { wall: '#b8865c', wallD: '#96693e', floor: '#d9a878', floorD: '#c69465', trim: '#5c3a1c' },
+    sundialspire:{ wall: '#9c7846', wallD: '#7d5e33', floor: '#b89258', floorD: '#a5804a', trim: '#4a3418' },
+    stormport:   { wall: '#5c6a70', wallD: '#4a565c', floor: '#7a8890', floorD: '#6a7880', trim: '#1e3a36' },
+    stormtap:    { wall: '#2c4a45', wallD: '#223a36', floor: '#3c5a54', floorD: '#334f49', trim: '#122622' },
+    cloudlodge:  { wall: '#e8e2d4', wallD: '#c9c2b0', floor: '#f4efe2', floorD: '#e0dbc9', trim: '#8a8272' },
+    greateye:    { wall: '#2c2248', wallD: '#221a38', floor: '#3a3055', floorD: '#312848', trim: '#141022' },
   }[rm];
   /* shell: frame, back wall, floor, baseboard */
   g.fillStyle = TH.trim; g.fillRect(0, 0, IPW, IPH);
@@ -7726,16 +8992,27 @@ function bakeRoom(kind, rng, resN, mf) {
       const fx2 = 30 + ((i * 211 + 17) % (IPW - 70)), fy2 = IWALL + 20 + ((i * 131 + 41) % (IPH - IWALL - 44));
       g.fillStyle = i % 3 ? '#e8f4d8' : '#ffd24a'; g.fillRect(fx2, fy2, 4, 4);
     }
-  } else if (rm === 'stardeck' || rm === 'crown' || rm === 'resonance') {   // v7.2: hushed dark decks
+  } else if (rm === 'stardeck' || rm === 'crown' || rm === 'resonance' || rm === 'greateye') {   // v7.2: hushed dark decks
     g.fillStyle = 'rgba(255,255,255,0.06)';
     for (let y = IWALL + 40; y < IPH - 12; y += 40) g.fillRect(12, y, IPW - 24, 2);
     if (rm === 'stardeck') { g.fillStyle = '#59e0ff'; g.fillRect(10, IWALL - 4, IPW - 20, 3); }
+    if (rm === 'greateye') { g.fillStyle = '#3ac9ae'; g.fillRect(10, IWALL - 4, IPW - 20, 3); }
+  } else if (rm === 'cloudlodge') {              // v8a: the floor is clouds (obviously)
+    g.fillStyle = 'rgba(255,255,255,0.55)';
+    for (let i = 0; i < 26; i++) {
+      const cx4 = 40 + ((i * 197 + 43) % (IPW - 90)), cy4 = IWALL + 14 + ((i * 113 + 29) % (IPH - IWALL - 40));
+      g.beginPath(); g.ellipse(cx4, cy4, 26 + (i % 3) * 9, 10 + (i % 2) * 4, 0, 0, 6.3); g.fill();
+    }
+    g.fillStyle = 'rgba(201,161,114,0.18)';
+    for (let i = 0; i < 8; i++)
+      g.fillRect(30 + ((i * 233 + 61) % (IPW - 120)), IWALL + 26 + ((i * 149 + 19) % (IPH - IWALL - 70)), 40, 4);
   } else if (rm === 'atrium' || rm === 'homes' || rm === 'lookout' || rm === 'crystlab' ||
-             rm === 'flightctl' || rm === 'greendome') {                    // v7.2: clean tile grid
+             rm === 'flightctl' || rm === 'greendome' ||
+             rm === 'craterdome' || rm === 'solarforge' || rm === 'sundialspire') {   // v7.2/v8a: clean tile grid
     g.fillStyle = 'rgba(0,0,0,0.1)';
     for (let y = IWALL + 48; y < IPH - 12; y += 48) g.fillRect(12, y, IPW - 24, 2);
     for (let x = 58; x < IPW - 12; x += 48) g.fillRect(x, IWALL + 2, 2, IPH - IWALL - 14);
-  } else if (rm === 'cargodeck' || rm === 'refinery') {                     // v7.2: work-deck plating
+  } else if (rm === 'cargodeck' || rm === 'refinery' || rm === 'sunport' || rm === 'stormport') {   // v7.2/v8a: work-deck plating
     g.fillStyle = 'rgba(0,0,0,0.14)';
     for (let y = IWALL + 78; y < IPH - 12; y += 78) g.fillRect(12, y, IPW - 24, 3);
     for (let x = 90; x < IPW - 12; x += 96) g.fillRect(x, IWALL + 2, 3, IPH - IWALL - 14);
@@ -8530,6 +9807,256 @@ function bakeRoom(kind, rng, resN, mf) {
       g.fillStyle = '#b8c2cc'; g.fillRect(bx4, by4, 26, 4);
     }
     sol(igx - 8, 446, 102, 34);
+  } else if (rm === 'sunport' || rm === 'stormport') {   // ═ v8a PORTS — the dais rooms ═
+    const merc = rm === 'sunport';
+    /* one long viewport onto the planet outside */
+    if (merc) {                                  // Mercury: black sky, HUGE sun on the sill
+      g.fillStyle = TH.trim; g.fillRect(46, 10, IPW - 260, 106);
+      g.fillStyle = '#0a0510'; g.fillRect(54, 18, IPW - 276, 90);
+      const sg = g.createRadialGradient(240, 108, 10, 240, 108, 130);
+      sg.addColorStop(0, 'rgba(255,240,180,1)'); sg.addColorStop(0.5, 'rgba(255,200,90,0.55)'); sg.addColorStop(1, 'rgba(255,200,90,0)');
+      g.fillStyle = sg; g.fillRect(110, 18, 260, 90);
+      g.fillStyle = '#ffe27a'; g.beginPath(); g.arc(240, 118, 52, 3.14, 6.3); g.fill();
+      g.fillStyle = '#8a5a34'; g.fillRect(54, 100, IPW - 276, 8);
+      g.fillStyle = '#fff';
+      for (let i = 0; i < 6; i++) g.fillRect(430 + ((i * 47) % 160), 26 + ((i * 31) % 60), 2, 2);
+    } else {                                     // Jupiter: rolling cream/rust cloud bands
+      g.fillStyle = TH.trim; g.fillRect(46, 10, IPW - 260, 106);
+      const jb = g.createLinearGradient(0, 18, 0, 108);
+      jb.addColorStop(0, '#e8cfa4'); jb.addColorStop(0.6, '#c98a5c'); jb.addColorStop(1, '#8a4a30');
+      g.fillStyle = jb; g.fillRect(54, 18, IPW - 276, 90);
+      g.fillStyle = 'rgba(255,240,214,0.5)';
+      g.beginPath(); g.ellipse(220, 46, 110, 12, 0, 0, 6.3); g.fill();
+      g.beginPath(); g.ellipse(460, 74, 130, 13, 0, 0, 6.3); g.fill();
+      g.fillStyle = 'rgba(240,255,252,0.85)';    // a far lightning stitch
+      g.fillRect(360, 84, 2, 14); g.fillRect(358, 96, 2, 8);
+    }
+    for (let x = 200; x < IPW - 260; x += 150) { g.fillStyle = TH.trim; g.fillRect(x, 10, 8, 106); }
+    /* control console under the window */
+    g.fillStyle = '#39424a'; g.fillRect(IPW - 190, 40, 120, 76);
+    g.fillStyle = merc ? '#ffc061' : '#57e8d4'; g.fillRect(IPW - 180, 50, 44, 26);
+    g.fillStyle = '#22303c'; g.fillRect(IPW - 128, 50, 30, 26);
+    g.fillStyle = '#ffd24a'; g.fillRect(IPW - 176, 84, 8, 8); g.fillRect(IPW - 160, 84, 8, 8);
+    /* THE DAIS — a soft-glowing round platform, saved for something wonderful */
+    const dxx = IPW / 2, dyy = 330;
+    const dg = g.createRadialGradient(dxx, dyy, 8, dxx, dyy, 120);
+    dg.addColorStop(0, merc ? 'rgba(255,192,97,0.4)' : 'rgba(87,232,212,0.35)');
+    dg.addColorStop(1, 'rgba(255,255,255,0)');
+    g.fillStyle = dg; g.fillRect(dxx - 120, dyy - 80, 240, 160);
+    g.fillStyle = TH.floorD; g.beginPath(); g.ellipse(dxx, dyy + 8, 96, 34, 0, 0, 6.3); g.fill();
+    g.fillStyle = merc ? '#c9915c' : '#8a98a8'; g.beginPath(); g.ellipse(dxx, dyy + 2, 88, 30, 0, 0, 6.3); g.fill();
+    g.fillStyle = merc ? '#e0b184' : '#aab6c4'; g.beginPath(); g.ellipse(dxx, dyy - 2, 74, 25, 0, 0, 6.3); g.fill();
+    g.strokeStyle = merc ? 'rgba(255,216,138,0.8)' : 'rgba(168,255,232,0.8)'; g.lineWidth = 3;
+    g.beginPath(); g.ellipse(dxx, dyy - 2, 52, 17, 0, 0, 6.3); g.stroke();
+    for (let i = 0; i < 6; i++) {                // faint waiting runes around the ring
+      const a = i * 1.05;
+      g.fillStyle = merc ? 'rgba(255,216,138,0.65)' : 'rgba(168,255,232,0.65)';
+      g.fillRect(dxx + Math.cos(a) * 62 - 2, dyy - 2 + Math.sin(a) * 20 - 2, 5, 5);
+    }
+    /* cargo crates fresh off the clipper */
+    const ccx2 = 90 + ((rng() * 40) | 0);
+    for (let i = 0; i < 3; i++) {
+      const bx4 = ccx2 + (i % 2) * 54, by4 = 420 + ((i / 2) | 0) * -34 + (i % 2) * 10;
+      g.fillStyle = '#c2a86a'; g.fillRect(bx4, by4, 48, 40);
+      g.fillStyle = '#e0c88a'; g.fillRect(bx4, by4, 48, 9);
+      g.fillStyle = '#8a6a34'; g.fillRect(bx4 + 20, by4, 8, 40);
+    }
+    sol(ccx2 - 8, 412, 118, 56);
+  } else if (rm === 'solarforge') {              // ═ SOLAR FORGE — sun soup ═
+    /* wall: mirror array panels catching the glare */
+    for (let i = 0; i < 4; i++) {
+      const mx2 = 70 + i * 180;
+      g.fillStyle = '#39424a'; g.fillRect(mx2, 24, 130, 80);
+      g.fillStyle = '#e8eef4'; g.fillRect(mx2 + 6, 30, 118, 68);
+      g.fillStyle = '#fff3b0'; g.fillRect(mx2 + 14, 38, 40, 24);
+      g.fillStyle = '#c9d2da'; g.fillRect(mx2 + 62, 62, 52, 28);
+    }
+    /* the melt bowl — a crucible of liquid sunshine */
+    const mbx = 240 + ((rng() * 120) | 0);
+    const mg2 = g.createRadialGradient(mbx + 70, 280, 6, mbx + 70, 280, 120);
+    mg2.addColorStop(0, 'rgba(255,192,97,0.6)'); mg2.addColorStop(1, 'rgba(255,192,97,0)');
+    g.fillStyle = mg2; g.fillRect(mbx - 50, 190, 240, 200);
+    g.fillStyle = '#57473a'; g.fillRect(mbx, 290, 140, 60);
+    g.fillStyle = '#6d5a4a'; g.fillRect(mbx - 10, 280, 160, 16);
+    g.fillStyle = '#ffc061'; g.beginPath(); g.ellipse(mbx + 70, 284, 62, 18, 0, 0, 6.3); g.fill();
+    g.fillStyle = '#fff0c0'; g.beginPath(); g.ellipse(mbx + 52, 280, 22, 7, 0, 0, 6.3); g.fill();
+    sol(mbx - 12, 288, 166, 66);
+    out.flame = { x: mbx + 60, y: 246 };
+    /* ingot rack — alloy teal + starsteel blue, cooling politely */
+    g.fillStyle = '#39424a'; g.fillRect(IPW - 250, 420, 150, 44);
+    for (let i = 0; i < 4; i++)
+      { g.fillStyle = i % 2 ? '#7dffe0' : '#9fd8ff'; g.fillRect(IPW - 240 + i * 34, 406, 26, 14); }
+    sol(IPW - 256, 424, 162, 44);
+    /* sunstone feed bin */
+    g.fillStyle = '#6e4a2c'; g.fillRect(80, 300, 90, 54);
+    g.fillStyle = '#ffc061'; g.beginPath();
+    g.moveTo(96, 300); g.lineTo(108, 282); g.lineTo(120, 300); g.fill();
+    g.beginPath(); g.moveTo(120, 300); g.lineTo(134, 278); g.lineTo(148, 300); g.fill();
+    sol(74, 302, 102, 54);
+  } else if (rm === 'craterdome') {              // ═ CRATER DOME — home under the big shade ═
+    /* amber dome glass sweeping overhead */
+    const dgl = g.createLinearGradient(0, 10, 0, IWALL);
+    dgl.addColorStop(0, 'rgba(255,192,97,0.85)'); dgl.addColorStop(1, 'rgba(184,130,92,0.6)');
+    g.fillStyle = dgl; g.fillRect(10, 10, IPW - 20, IWALL - 34);
+    g.fillStyle = TH.trim;
+    for (let x = 130; x < IPW - 20; x += 150) g.fillRect(x, 10, 8, IWALL - 34);
+    g.fillStyle = 'rgba(255,255,255,0.3)'; g.fillRect(60, 16, 30, IWALL - 44);
+    g.fillStyle = '#ffe27a'; g.beginPath(); g.arc(IPW - 160, 40, 22, 0, 6.3); g.fill();   // the sun, filtered
+    /* bunk beds with sun-shade canopies */
+    for (const bx3 of [90, 260]) {
+      g.fillStyle = '#8a5c33'; g.fillRect(bx3, 300, 120, 46);
+      g.fillStyle = '#e8543a'; g.fillRect(bx3 + 4, 292, 112, 16);
+      g.fillStyle = '#ffd1a1'; g.fillRect(bx3 + 8, 288, 30, 12);
+      g.fillStyle = '#d9a520'; g.fillRect(bx3 - 6, 270, 132, 10);   // shade canopy
+      g.fillStyle = '#8a6a12'; g.fillRect(bx3 - 6, 270, 132, 3);
+      sol(bx3 - 8, 296, 136, 52);
+    }
+    /* the family table + sunstone lamp */
+    const tbx = IPW - 330 + ((rng() * 60) | 0);
+    g.fillStyle = '#8a5c33'; g.fillRect(tbx, 330, 130, 52);
+    g.fillStyle = '#9c6b3d'; g.fillRect(tbx, 330, 130, 10);
+    const lg2 = g.createRadialGradient(tbx + 65, 322, 2, tbx + 65, 322, 40);
+    lg2.addColorStop(0, 'rgba(255,216,138,0.8)'); lg2.addColorStop(1, 'rgba(255,216,138,0)');
+    g.fillStyle = lg2; g.fillRect(tbx + 25, 282, 80, 80);
+    g.fillStyle = '#ffc061'; g.beginPath();
+    g.moveTo(tbx + 58, 330); g.lineTo(tbx + 65, 312); g.lineTo(tbx + 72, 330); g.fill();
+    sol(tbx - 6, 334, 142, 54);
+    /* pet cactus. it loves it here. */
+    g.fillStyle = '#4cae5c'; g.fillRect(150, 440, 14, 34); g.fillRect(140, 450, 10, 8); g.fillRect(164, 446, 10, 8);
+    g.fillStyle = '#39424a'; g.fillRect(144, 470, 26, 12);
+  } else if (rm === 'sundialspire') {            // ═ SUNDIAL SPIRE — the time machine ═
+    /* wall: hour chart + a slot window where the beam falls through */
+    g.fillStyle = TH.trim; g.fillRect(60, 20, 210, 90);
+    g.fillStyle = '#0a0510'; g.fillRect(68, 28, 194, 74);
+    g.fillStyle = '#ffd88a';
+    for (let i = 0; i < 7; i++) {
+      const a2 = 0.5 + i * 0.35;
+      g.fillRect(165 + Math.cos(a2) * 74 - 2, 96 - Math.sin(a2) * 58, 5, 5);
+    }
+    g.fillStyle = '#e0a35c'; g.beginPath(); g.arc(165, 96, 12, 3.14, 6.3); g.fill();
+    /* the beam slot */
+    g.fillStyle = TH.trim; g.fillRect(IPW / 2 - 30, 10, 60, IWALL - 34);
+    g.fillStyle = '#fff3b0'; g.fillRect(IPW / 2 - 8, 10, 16, IWALL - 34);
+    /* the gnomon pillar dead centre, its beam-shadow striping the floor */
+    const gnx = IPW / 2;
+    const bg2 = g.createLinearGradient(0, IWALL, 0, IPH - 40);
+    bg2.addColorStop(0, 'rgba(255,240,180,0.4)'); bg2.addColorStop(1, 'rgba(255,240,180,0.06)');
+    g.fillStyle = bg2; g.fillRect(gnx - 24, IWALL, 48, IPH - IWALL - 60);
+    g.fillStyle = 'rgba(58,36,16,0.5)';          // the famous long shadow
+    g.beginPath(); g.moveTo(gnx - 8, 320); g.lineTo(gnx - 260, 470); g.lineTo(gnx - 190, 480); g.lineTo(gnx + 8, 330); g.fill();
+    g.fillStyle = '#c98a4a'; g.fillRect(gnx - 14, 220, 28, 100);
+    g.fillStyle = '#f0c078'; g.fillRect(gnx - 14, 220, 9, 100);
+    g.fillStyle = '#8a5a34'; g.beginPath(); g.ellipse(gnx, 326, 46, 15, 0, 0, 6.3); g.fill();
+    sol(gnx - 48, 306, 96, 34);
+    /* hour studs ring the room floor */
+    g.fillStyle = '#ffd88a';
+    for (let i = 0; i < 8; i++) {
+      const a2 = i * 0.785;
+      g.fillRect(gnx + Math.cos(a2) * 180 - 3, 330 + Math.sin(a2) * 90 - 3, 7, 7);
+    }
+    /* the astronomer's desk */
+    g.fillStyle = '#8a5c33'; g.fillRect(110, 400, 140, 52);
+    g.fillStyle = '#e8dcc4'; g.fillRect(122, 392, 60, 12);
+    g.fillStyle = '#39424a'; g.fillRect(196, 388, 30, 16);
+    sol(104, 404, 152, 54);
+  } else if (rm === 'stormtap') {                // ═ STORM TAP — bottled lightning ═
+    /* wall shelves of jarred lightning */
+    for (let s3 = 0; s3 < 2; s3++) {
+      g.fillStyle = '#39424a'; g.fillRect(70, 40 + s3 * 44, IPW - 320, 10);
+      for (let i = 0; i < 8; i++) {
+        const jx = 90 + i * 68;
+        g.fillStyle = '#22303c'; g.fillRect(jx, 14 + s3 * 44, 20, 28);
+        g.fillStyle = (i + s3) % 3 ? '#57e8d4' : '#1e5a4c'; g.fillRect(jx + 4, 20 + s3 * 44, 12, 18);
+        g.fillStyle = '#d0fff4'; g.fillRect(jx + 8, 24 + s3 * 44, 3, 10);
+      }
+    }
+    /* the tap coil — floor to ceiling */
+    const tcx = 200 + ((rng() * 80) | 0);
+    const cg3 = g.createRadialGradient(tcx, 250, 6, tcx, 250, 110);
+    cg3.addColorStop(0, 'rgba(87,232,212,0.4)'); cg3.addColorStop(1, 'rgba(87,232,212,0)');
+    g.fillStyle = cg3; g.fillRect(tcx - 110, 140, 220, 220);
+    g.fillStyle = '#8a94a4'; g.fillRect(tcx - 8, 150, 16, 200);
+    g.strokeStyle = '#3ac9ae'; g.lineWidth = 6;
+    for (let i = 0; i < 5; i++) { g.beginPath(); g.ellipse(tcx, 180 + i * 38, 34, 12, 0, 0, 6.3); g.stroke(); }
+    g.fillStyle = '#d0fff4'; g.beginPath(); g.arc(tcx, 150, 14, 0, 6.3); g.fill();
+    sol(tcx - 30, 330, 60, 34);
+    /* capacitor chest + gauges */
+    g.fillStyle = '#39424a'; g.fillRect(IPW - 280, 300, 160, 70);
+    g.fillStyle = '#57e8d4'; g.fillRect(IPW - 268, 312, 40, 26);
+    g.fillStyle = '#ffd24a'; g.fillRect(IPW - 218, 312, 14, 26); g.fillRect(IPW - 198, 312, 14, 26);
+    g.fillStyle = '#22303c'; g.fillRect(IPW - 268, 346, 136, 14);
+    sol(IPW - 286, 304, 172, 72);
+    /* warning stripes — politely electric */
+    for (let i = 0; i < 14; i++) { g.fillStyle = i % 2 ? '#57e8d4' : '#22303c'; g.fillRect(120 + i * 46, 420, 46, 8); }
+  } else if (rm === 'cloudlodge') {              // ═ CLOUD LODGE — 90% pillow ═
+    /* wall: big round windows onto the cloudscape */
+    for (const wx3 of [130, 400]) {
+      g.fillStyle = TH.trim; g.beginPath(); g.arc(wx3, 62, 44, 0, 6.3); g.fill();
+      const cw2 = g.createLinearGradient(0, 26, 0, 100);
+      cw2.addColorStop(0, '#e8cfa4'); cw2.addColorStop(1, '#c98a5c');
+      g.fillStyle = cw2; g.beginPath(); g.arc(wx3, 62, 36, 0, 6.3); g.fill();
+      g.fillStyle = 'rgba(255,253,246,0.85)';
+      g.beginPath(); g.ellipse(wx3 - 8, 56, 20, 7, 0, 0, 6.3); g.fill();
+      g.beginPath(); g.ellipse(wx3 + 12, 74, 16, 6, 0, 0, 6.3); g.fill();
+    }
+    /* cloud sofa — sit IN it, not on it */
+    const sfx = 120 + ((rng() * 60) | 0);
+    g.fillStyle = '#fffdf6';
+    g.beginPath(); g.ellipse(sfx + 80, 330, 95, 34, 0, 0, 6.3); g.fill();
+    g.beginPath(); g.ellipse(sfx + 20, 310, 34, 26, 0, 0, 6.3); g.fill();
+    g.beginPath(); g.ellipse(sfx + 145, 312, 32, 24, 0, 0, 6.3); g.fill();
+    g.fillStyle = 'rgba(201,161,114,0.25)';
+    g.beginPath(); g.ellipse(sfx + 80, 344, 88, 18, 0, 0, 6.3); g.fill();
+    sol(sfx - 16, 312, 196, 48);
+    /* cloud bunks, stacked fluff */
+    const cbx = IPW - 330 + ((rng() * 50) | 0);
+    for (let i = 0; i < 2; i++) {
+      g.fillStyle = '#fffdf6';
+      g.beginPath(); g.ellipse(cbx + 70, 300 + i * 74, 84, 26, 0, 0, 6.3); g.fill();
+      g.fillStyle = '#e8543a'; g.fillRect(cbx + 10, 284 + i * 74, 34, 12);
+      g.fillStyle = 'rgba(138,130,114,0.3)';
+      g.beginPath(); g.ellipse(cbx + 70, 312 + i * 74, 80, 12, 0, 0, 6.3); g.fill();
+    }
+    sol(cbx - 16, 288, 172, 108);
+    /* the kept rock, on a tiny pedestal of honor */
+    g.fillStyle = '#8a8272'; g.fillRect(90, 448, 34, 22);
+    g.fillStyle = '#6d747c'; g.beginPath(); g.arc(107, 442, 9, 0, 6.3); g.fill();
+    g.fillStyle = '#9aa2ab'; g.beginPath(); g.arc(104, 439, 4, 0, 6.3); g.fill();
+  } else if (rm === 'greateye') {                // ═ GREAT EYE — the telescope points DOWN ═
+    /* wall: storm charts + a small up-porthole (for contrast) */
+    g.fillStyle = TH.trim; g.fillRect(70, 20, 240, 92);
+    g.fillStyle = '#0e1428'; g.fillRect(78, 28, 224, 76);
+    g.strokeStyle = 'rgba(87,232,212,0.5)'; g.lineWidth = 2;
+    g.beginPath(); g.ellipse(190, 66, 80, 24, 0.2, 0, 5.2); g.stroke();
+    g.beginPath(); g.ellipse(190, 66, 46, 13, 0.2, 0, 5.6); g.stroke();
+    g.fillStyle = '#e07a52'; g.beginPath(); g.ellipse(212, 72, 14, 8, 0.2, 0, 6.3); g.fill();
+    g.fillStyle = TH.trim; g.beginPath(); g.arc(560, 64, 34, 0, 6.3); g.fill();
+    g.fillStyle = '#060a18'; g.beginPath(); g.arc(560, 64, 27, 0, 6.3); g.fill();
+    g.fillStyle = '#fff';
+    for (let i = 0; i < 6; i++) g.fillRect(544 + ((i * 17) % 34), 48 + ((i * 11) % 30), 2, 2);
+    /* THE FLOOR PORTHOLE — the storm swirls right under your boots */
+    const phx = IPW / 2 + 60, phy = 360;
+    g.fillStyle = '#141022'; g.beginPath(); g.ellipse(phx, phy, 110, 44, 0, 0, 6.3); g.fill();
+    const st2 = g.createRadialGradient(phx, phy, 8, phx, phy, 100);
+    st2.addColorStop(0, '#c98a5c'); st2.addColorStop(0.55, '#8a4a30'); st2.addColorStop(1, '#3a1c14');
+    g.fillStyle = st2; g.beginPath(); g.ellipse(phx, phy, 98, 38, 0, 0, 6.3); g.fill();
+    g.strokeStyle = 'rgba(232,207,164,0.6)'; g.lineWidth = 4;
+    g.beginPath(); g.ellipse(phx - 14, phy - 4, 48, 16, 0.4, 0, 5); g.stroke();
+    g.fillStyle = 'rgba(240,255,252,0.9)'; g.fillRect(phx + 30, phy + 6, 3, 12);   // a flash below
+    g.strokeStyle = '#3ac9ae'; g.lineWidth = 5;
+    g.beginPath(); g.ellipse(phx, phy, 104, 41, 0, 0, 6.3); g.stroke();
+    sol(phx - 112, phy - 30, 224, 74);           // nobody falls into Jupiter on our watch
+    /* the DOWN-scope — a proud brass tube aimed into the porthole */
+    const tlx2 = phx - 190;
+    g.fillStyle = '#39424a'; g.beginPath(); g.ellipse(tlx2, 300, 46, 16, 0, 0, 6.3); g.fill();
+    g.fillStyle = '#525d6a'; g.fillRect(tlx2 - 9, 240, 18, 60);
+    g.fillStyle = '#c98a4a'; g.save(); g.translate(tlx2, 250); g.rotate(0.8); g.fillRect(-12, -18, 104, 24); g.restore();
+    g.fillStyle = '#3ac9ae'; g.save(); g.translate(tlx2, 250); g.rotate(0.8); g.fillRect(80, -14, 12, 16); g.restore();
+    g.fillStyle = '#22303c'; g.save(); g.translate(tlx2, 250); g.rotate(0.8); g.fillRect(-24, -12, 14, 12); g.restore();
+    sol(tlx2 - 52, 282, 104, 38);
+    /* stargazing (stormgazing) cushions */
+    g.fillStyle = '#3a7bd5'; g.beginPath(); g.ellipse(160, 452, 28, 13, 0, 0, 6.3); g.fill();
+    g.fillStyle = '#b0483a'; g.beginPath(); g.ellipse(IPW - 150, 448, 28, 13, 0, 0, 6.3); g.fill();
   } else {                                       // neontower lobby
     /* elevator doors — they ding. they never open. */
     const ex = IPW / 2 - 80;
@@ -8660,8 +10187,14 @@ function buildInterior(b) {
       spr = SPR.resAv[(rng() * SPR.resAv.length) | 0];
     }
     const sp0 = room.spots.length ? room.spots[(rng() * room.spots.length) | 0] : { x: IPW / 2, y: 300 };
-    const pool = name === 'MILO' ? RES_POOLS.milo : name === 'CHIP' ? RES_POOLS.chip
-               : RES_POOLS[KIND_POOL[kind]] || RES_POOLS.cabin;
+    let pool = name === 'MILO' ? RES_POOLS.milo : name === 'CHIP' ? RES_POOLS.chip
+             : RES_POOLS[KIND_POOL[kind]] || RES_POOLS.cabin;
+    /* v8a: the clipper sets tongues wagging + the ports keep their secret */
+    if (name === 'MILO' && clipperStage >= 3) pool = pool.concat(MILO_V8);
+    if (name === 'CHIP' && clipperStage >= 3) pool = pool.concat(CHIP_V8);
+    if (kind === 'sunport' || kind === 'stormport')
+      pool = pool.concat(['See that round dais? Reserved for something wonderful.',
+                          'The glowing circle is NOT a dance floor. Yet.']);
     residents.push({ name, spr, small, pool, x: sp0.x, y: sp0.y, tx: sp0.x, ty: sp0.y,
                      wt: 1 + rng() * 3, frame: 0, moving: false, side: false, flip: false,
                      sayT: 0, say: null, sayLines: null, last: null, greeted: false,
@@ -9002,6 +10535,12 @@ function interactInside(p) {
   const I = interior;
   if (!I) return;
   if (I.cat && Math.hypot(I.cat.x - p.ix, I.cat.y - p.iy) < 52) { petCatDo(p); return; }
+  /* v8a: ✕ at the star-deck wall chart = THE SOLAR MAP (clipper-ready) */
+  if (I.chart && I.kind === 'starharbor' && p.iy < IWALL + 100 &&
+      Math.abs(p.ix - (I.chart.x + I.chart.w / 2)) < I.chart.w / 2 + 30) {
+    if (clipperStage >= 3) { openSolarMap('chart'); return; }
+    if (mapAssembled) { iHint('BUILD THE STAR CLIPPER FIRST!'); SFX.ding(); return; }
+  }
   let bst = null, bd = 58;
   for (const r of I.residents) {
     const d = Math.hypot(r.x - p.ix, r.y - p.iy);
@@ -9028,7 +10567,11 @@ function roomTitle(I) {
            moondome: 'MOON DOME', neontower: 'NEON TOWER LOBBY',
            habdome: 'HAB DOME', refinery: 'THE REFINERY',
            greendome: 'GREENHOUSE DOME', mine: 'THE MINE',
-           windmill: 'THE WINDMILL', smelter: 'THE SMELTER' }[I.kind] || 'INSIDE';
+           windmill: 'THE WINDMILL', smelter: 'THE SMELTER',
+           sunport: 'THE SUN PORT', solarforge: 'THE SOLAR FORGE',
+           craterdome: 'CRATER DOME', sundialspire: 'SUNDIAL SPIRE',
+           stormport: 'THE STORM PORT', stormtap: 'THE STORM TAP',
+           cloudlodge: 'CLOUD LODGE', greateye: 'GREAT EYE OBSERVATORY' }[I.kind] || 'INSIDE';
 }
 function drawInterior() {
   const I = interior;
@@ -9205,10 +10748,28 @@ function doAction(p) {
     if (f2) harvestFlora(f2, p.x, p.y);
     return;
   }
+  if (world === 'mercury' || world === 'jupiter') {   // v8a — the new planets
+    const cb8 = clipperBerth();
+    if (cb8 && Math.hypot(cb8.x - p.x, cb8.y - p.y) < 84) { openSolarMap('clipper'); return; }
+    const mg8 = nearMega(p);                     // ✕ at a rising structure = deliver
+    if (mg8) { feedMega(p, mg8); return; }
+    const cn8 = nearCannon(p);
+    if (cn8) { manCannon(p, cn8); SFX.confirm(); return; }
+    const dr8 = nearDoorB(p);                    // completed structures welcome visitors
+    if (dr8) { enterInterior(p, dr8); return; }
+    const f8 = nearFlora(p);
+    if (f8) harvestFlora(f8, p.x, p.y);
+    return;
+  }
   if (world === 'mars') {                        // v6b — the red planet
     if (marsStage() === 3 && nearKindB(p, 'marsport', 84)) { tryMarsFuel(p); return; }
     const rb3 = nearRubble(p);
     if (rb3) { repairWhack(rb3); return; }
+    /* v8a: the clipper parks beside the port when she followed you here */
+    if (clipperStage >= 3 && clipperAt === 'mars') {
+      const cbM = clipperBerth();
+      if (cbM && Math.hypot(cbM.x - p.x, cbM.y - p.y) < 80) { openSolarMap('clipper'); return; }
+    }
     const my = nearKindB(p, 'marsyard', 88);     // v7: tease → barge funding → hold upgrade
     if (my) {
       if (!marsBaseDone) { addFloat(p.x, p.y - 44, 'THE BELT AWAITS — SOMEDAY!', '#ffd24a'); SFX.ding(); return; }
@@ -9235,6 +10796,15 @@ function doAction(p) {
   if (crate && Math.hypot(tX(crate.gx) + 16 - p.x, tY(crate.gy) + 12 - p.y) < 52) { openCrate(); return; }
   const rb = nearRubble(p);
   if (rb) { repairWhack(rb); return; }
+  /* v8a: the harbor-side gantry — fund the STAR CLIPPER, then ✕ = the map */
+  const cbE = clipperBerth();
+  if (cbE && Math.hypot(cbE.x - p.x, cbE.y - p.y) < 84) {
+    if (clipperStage < 3) { fundClipper(p, cbE.pad); return; }
+    if (clipperAt === 'earth') { openSolarMap('clipper'); return; }
+    addFloat(p.x, p.y - 44, "SHE'S AT " + clipperAt.toUpperCase() + '!', '#ffd24a');
+    SFX.ding();
+    return;
+  }
   const mg = nearMega(p);                        // v7: ✕ at a rising megastructure = deliver
   if (mg) { feedMega(p, mg); return; }
   const cn = nearCannon(p);                      // v4c: ✕ mans a pop cannon
@@ -9254,7 +10824,6 @@ function menuItems() {
             { k: 'boostbattery', mission: true, grp: 'power' }];
   }
   const pool = [];
-  const onMoon = world === 'moon';
   for (const k in B) {
     const d = B[k];
     if (d.special || d.age > age) continue;
@@ -9272,8 +10841,8 @@ function menuItems() {
   /* v5a: the strip is grouped by section (divider posts; L1/R1 hop) */
   const items = [];
   for (const g of BUILD_GRPS) for (const it of pool) if (it.grp === g) items.push(it);
-  if (!onMoon && age >= 5 && cnt('launchpad') > 0 && !rocketSeq && !travel) items.push({ rocket: true, grp: 'tools' });
-  if (!onMoon && age >= 7 && cnt('launchpad') > 0 && !moonRocketBought && !travel) items.push({ moonrocket: true, grp: 'tools' });
+  if (world === 'earth' && age >= 5 && cnt('launchpad') > 0 && !rocketSeq && !travel) items.push({ rocket: true, grp: 'tools' });
+  if (world === 'earth' && age >= 7 && cnt('launchpad') > 0 && !moonRocketBought && !travel) items.push({ moonrocket: true, grp: 'tools' });
   items.push({ remove: true, grp: 'tools' });
   return items;
 }
@@ -9383,7 +10952,7 @@ function updatePlayer(p, dt) {
       if (p.dustT <= 0) {
         p.dustT = 0.16;
         spawnP(p.x - mx * 8 + (Math.random() - 0.5) * 6, p.y + 2,
-               (world === 'mars' ? SPR.puffRed : SPR.puffDark)[1],
+               (world === 'mars' ? SPR.puffRed : world === 'jupiter' ? SPR.puff : SPR.puffDark)[1],
                { vx: -mx * 18, vy: -8 - Math.random() * 8, g: -6, life: 0.5 });
       }
     }
@@ -9438,11 +11007,13 @@ function onBtn(pi, b) {
   if (travel && travel.phase === 'scan') { scanBtn(pi, b); return; }   // v7: the scan screen
   if (travel && travel.phase !== 'board' && travel.phase !== 'count') return;   // mid-flight
   if (paused) { pauseBtn(pi, b); return; }
+  if (solarMap && b !== 'start') { solarMapBtn(pi, b); return; }   // v8a: START still pauses
   if (b === 'start') {
     if (pi === 1 && !players[1]) { joinP2(); return; }
     paused = true; pauseOwner = pi; pauseIdx = 0; SFX.ui();
     return;
   }
+  if (solarMap) return;
   if (pi === 1 && !players[1]) {
     if (b === 'south') joinP2();
     return;
@@ -9703,6 +11274,18 @@ function tapAt(x, y) {
   /* play */
   if (modal) { onBtn(0, 'south'); return; }
   if (vignette) { closeVignette(); return; }     // v6a: tap anywhere closes the telescope
+  if (solarMap && !paused) {                     // v8a: tap a planet / tap again = fly / bottom row = close
+    for (let i = 0; i < 9; i++) {
+      const pp = SOLAR_POS[i];
+      if (Math.hypot(x - pp.x, y - pp.y) < Math.max(36, pp.r + 20)) {
+        if (solarMap.sel === i) solarMapFly();
+        else { solarMap.sel = i; SFX.mapblip(); }
+        return;
+      }
+    }
+    if (y > 640) { solarMap = null; SFX.cancel(); }
+    return;
+  }
   if (confirmPrestige) {
     if (y > 380 && y < 460) { confirmPrestige.yes = x < W / 2; onBtn(0, 'south'); }
     else { confirmPrestige = null; SFX.cancel(); }
@@ -9752,6 +11335,16 @@ function tapAt(x, y) {
           return;
         }
       }
+    }
+    /* v8a: tap the wall chart — open the map if close, else walk to it */
+    if (interior.chart && interior.kind === 'starharbor' && clipperStage >= 3 &&
+        rx > interior.chart.x - 10 && rx < interior.chart.x + interior.chart.w + 10 && ry < IWALL + 24) {
+      if (p.iy < IWALL + 100 && Math.abs(p.ix - (interior.chart.x + interior.chart.w / 2)) < interior.chart.w / 2 + 30) {
+        openSolarMap('chart');
+      } else {
+        p.itarget = { x: clamp(interior.chart.x + interior.chart.w / 2, 42, IPW - 42), y: IWALL + 56 };
+      }
+      return;
     }
     const dm = interior.door;
     if (dm && rx > dm.x && rx < dm.x + dm.w && ry > dm.y - 10) { exitInterior(p); return; }
@@ -9957,16 +11550,18 @@ function drawHUD() {
     if (ASTRO[r] && !astroSeen()) continue;      // v7: belt resources appear after the first haul
     if (r === 'alloy' && !((res.alloy || 0) > 0 || (life.alloy || 0) > 0)) continue;   // v7: rare — earns its slot
     if (r === 'fuel' && !fuelSeen()) continue;   // v6a: FUEL appears once discovered
+    if (PLANET_RES[r] && !planetResSeen(r)) continue;   // v8a: planet stones appear once mined
     vis.push(r);
   }
   /* v6b: a fourth, ultra-tight tier absorbs the 14-icon Mars row.
-     v7: a fifth, heroic tier squeezes the 17-18 icon endgame in. */
+     v7: a fifth, heroic tier squeezes the 17-18 icon endgame in.
+     v8a: a sixth, cosmic tier for the full 19-20 planet ledger. */
   const tight = vis.length > 8, extraTight = vis.length > 11, ultraTight = vis.length > 12,
-        heroTight = vis.length > 14;
-  let x = heroTight ? 272 : extraTight ? 284 : tight ? 292 : 306;
-  const sp2 = heroTight ? 47 : ultraTight ? 56 : extraTight ? 67 : tight ? 72 : 88,
-        spPow = heroTight ? 60 : ultraTight ? 70 : extraTight ? 78 : tight ? 86 : 96,
-        fs = heroTight ? 9 : ultraTight ? 10 : extraTight ? 11 : tight ? 11.5 : 13;
+        heroTight = vis.length > 14, cosmicTight = vis.length > 17;
+  let x = cosmicTight ? 258 : heroTight ? 272 : extraTight ? 284 : tight ? 292 : 306;
+  const sp2 = cosmicTight ? 43 : heroTight ? 47 : ultraTight ? 56 : extraTight ? 67 : tight ? 72 : 88,
+        spPow = cosmicTight ? 54 : heroTight ? 60 : ultraTight ? 70 : extraTight ? 78 : tight ? 86 : 96,
+        fs = cosmicTight ? 8.5 : heroTight ? 9 : ultraTight ? 10 : extraTight ? 11 : tight ? 11.5 : 13;
   for (const r of vis) {
     ctx.drawImage(SPR.icon[r], x, 8);
     if (r === 'power') {
@@ -10198,6 +11793,15 @@ function drawMenu(p, yBase) {
     else if (it.k === 'starharbor') desc = 'drones fetch your cargo — forever!';
     else if (it.k === 'pole') desc = 'carries power to nearby buildings!';
     else if (it.k === 'observatory') desc = 'peer into the deep black...';
+    /* v8a: the planet structures */
+    else if (it.k === 'sunport') desc = "Mercury's front door — feed it to finish!";
+    else if (it.k === 'solarforge') desc = 'sunstone → ALLOY + STARSTEEL!';
+    else if (it.k === 'craterdome') desc = '+30 pop under the big shade!';
+    else if (it.k === 'sundialspire') desc = 'the sun tells the time — science!';
+    else if (it.k === 'stormport') desc = "Jupiter's safe harbor — feed it to finish!";
+    else if (it.k === 'stormtap') desc = 'bottled lightning — power + science!';
+    else if (it.k === 'cloudlodge') desc = '+30 pop on the fluffiest floor ever!';
+    else if (it.k === 'greateye') desc = 'a telescope that looks DOWN!';
     else if (it.k === 'rovergarage') desc = 'a rover that mines for you! (max 3)';
     else if (it.k === 'he3refinery') desc = 'he-3 + ice → rocket FUEL!';
     else if (it.k === 'shipyard') desc = 'build THE MARS CRUISER here!';
@@ -10380,8 +11984,9 @@ function drawStats() {
   let ry = y + 170;
   const statRes = RES_LIST.filter(r => RES_AGE[r] <= age &&
     !(r === 'fuel' && !fuelSeen()) && !(MARTIAN[r] && !marsSeen()) &&
-    !(ASTRO[r] && !astroSeen()));                // v6a/v6b/v7 gating
-  const rStep = statRes.length > 15 ? 24 : statRes.length > 12 ? 28 : 34;   // v7: 18 rows still fit
+    !(ASTRO[r] && !astroSeen()) &&
+    !(PLANET_RES[r] && !planetResSeen(r)));      // v6a/v6b/v7/v8a gating
+  const rStep = statRes.length > 18 ? 22 : statRes.length > 15 ? 24 : statRes.length > 12 ? 28 : 34;   // v8a: 20 rows squeeze in
   for (const r of statRes) {
     ctx.drawImage(SPR.icon[r], x + 40, ry - 15);
     if (r === 'power') {
@@ -10404,7 +12009,9 @@ function drawStats() {
   txt('BUILDINGS', x + 380, iy, 13, '#cfe8f4');
   txt('' + (buildings.length - cnt('campfire')), x + 380, iy + 20, 13, '#ffd24a');
   iy += 54;
-  txt('ISLANDS: ' + (1 + settled.length) + (moonArrived ? ' + MOON' : '') + (marsArrived ? ' + MARS' : ''), x + 380, iy, 13, '#7dffd4');
+  txt('ISLANDS: ' + (1 + settled.length) + (moonArrived ? ' + MOON' : '') + (marsArrived ? ' + MARS' : '')
+      + (planetsVisited.mercury ? ' + MERCURY' : '') + (planetsVisited.jupiter ? ' + JUPITER' : ''),
+      x + 380, iy, 13, '#7dffd4');
   iy += 30;
   txt('GOALS: ' + Math.min(goalI, GOALS.length) + '/' + GOALS.length, x + 380, iy, 13, '#ffe9a8');
   iy += 30;
@@ -10424,6 +12031,13 @@ function drawStats() {
     txt('MEGASTRUCTURES: ' + megaCompleteTotal() + (megaCompleteCnt('starharbor') > 0 ? ' · STAR HARBOR ★ AUTO-CARGO' : ''),
         x + 380, iy, 12, '#b7e3ff'); iy += 30;
   }
+  /* v8a: the planet ledger — compact, like everything on this column */
+  if (clipperStage > 0) {
+    const pb = planetMegaCnt('mercury') + planetMegaCnt('jupiter');
+    txt('STAR CLIPPER: ' + (clipperStage >= 3 ? '★ READY' : clipperStage + '/3')
+        + (pb > 0 ? ' · PLANET BUILDS: ' + pb + '/8' : ''),
+        x + 380, iy, 12, '#9fd8ff'); iy += 30;
+  }
   const mins = Math.floor(playtime / 60);
   txt('PLAY TIME: ' + mins + 'm', x + 380, iy, 12, '#9fd4f0');
   iy += 30;
@@ -10431,7 +12045,8 @@ function drawStats() {
   /* minimap god-view — one scaled blit of the ACTIVE world's bake + dots.
      v4b: 🌍/🌙 tab hint shows which world you're looking at. */
   const mx0 = x + 636, my0 = y + 150;
-  txt(world === 'moon' ? 'MOON MAP' : world === 'mars' ? 'MARS MAP' : 'WORLD MAP',
+  txt(world === 'moon' ? 'MOON MAP' : world === 'mars' ? 'MARS MAP'
+      : world === 'mercury' ? 'MERCURY MAP' : world === 'jupiter' ? 'JUPITER MAP' : 'WORLD MAP',
       mx0 + 138, my0 - 10, 12, '#8fc4e0', 'center');
   if (moonArrived || world !== 'earth') {
     const showMars = marsArrived || world === 'mars';
@@ -10592,6 +12207,68 @@ function drawMapVignette() {
   if (tt > 2.6) otxt('✕ OK!', W / 2 + 250, y + 490, 14, '#7dff9a');
 }
 
+/* ═══ v8a: THE SOLAR MAP — one baked blit + a comet + a name plate.
+   Render-clocked like the beacons vignette: the world holds its breath. ═══ */
+function drawSolarMap() {
+  const m = solarMap;
+  m.t += 1 / 60;
+  /* pad stick nav — polled here (the controller's press stream is buttons-
+     only; held-stick is state, per the house input rules). Render-clocked
+     like the rest of the map, with a gentle repeat gate. */
+  if (PADS && !paused) {
+    let sdx = 0;
+    for (const pd of PADS) if (pd && pd.connected) sdx += pd.axis('lx');
+    const nowMs = performance.now();
+    if (Math.abs(sdx) > 0.55 && nowMs > (m.stickAt || 0)) {
+      m.sel = (m.sel + (sdx > 0 ? 1 : 8)) % 9;
+      m.stickAt = nowMs + 300;                   // gentle repeat while held
+      SFX.mapblip();
+    } else if (Math.abs(sdx) < 0.3) m.stickAt = 0;   // release re-arms instantly
+  }
+  ctx.drawImage(SPR.solarBG, 0, 0);
+  /* comet cursor glides between worlds (eased, render-clocked) */
+  const tp = SOLAR_POS[m.sel];
+  m.cx += (tp.x - m.cx) * 0.16;
+  m.cy += (tp.y - m.cy) * 0.16;
+  ctx.globalAlpha = 0.7 + 0.3 * Math.sin(T * 4);
+  const zr = (tp.r + 22) / 40;
+  ctx.translate(tp.x, tp.y); ctx.scale(zr, zr);
+  ctx.drawImage(SPR.zoneRing, -48, -48);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha = 1;
+  ctx.drawImage(SPR.comet[((T * 6) | 0) % 2], m.cx - 58 - tp.r * 0.5, m.cy - 34 - tp.r * 0.5);
+  /* names + status tags for all nine */
+  for (let i = 0; i < 9; i++) {
+    const pl = PLANETS[i], pp = SOLAR_POS[i];
+    otxt(pl.name, pp.x, pp.y + pp.r + 24, 12, i === m.sel ? '#ffd24a' : 'rgba(207,232,244,0.8)');
+    if (pl.k === world) txt('YOU ARE HERE', pp.x, pp.y - pp.r - 12, 9, '#7dff9a', 'center');
+    else if (!pl.fly) txt('SOON!', pp.x, pp.y + pp.r + 38, 9, 'rgba(159,216,255,0.6)', 'center');
+    else if (pl.home) txt('HOME', pp.x, pp.y + pp.r + 38, 9, 'rgba(125,255,154,0.7)', 'center');
+    else if (planetsVisited[pl.k]) txt('★ VISITED', pp.x, pp.y + pp.r + 38, 9, '#ffd24a', 'center');
+    else {                                       // NEW! starburst — impossible to miss
+      ctx.globalAlpha = 0.7 + 0.3 * Math.sin(T * 5 + i);
+      otxt('NEW!', pp.x + pp.r + 20, pp.y - pp.r - 4, 14, '#ffd24a');
+      ctx.drawImage(SPR.spark[((T * 5) | 0) % 2], pp.x + pp.r + 2, pp.y - pp.r - 26);
+      ctx.globalAlpha = 1;
+    }
+  }
+  /* the name plate — big name, kid-fact, status */
+  const pl = PLANETS[m.sel];
+  ctx.drawImage(SPR.pillP, W / 2 - 377, 556, 754, 54);
+  otxt(pl.name + (pl.sub ? ' — ' + pl.sub : ''), W / 2, 582, 20, pl.fly ? '#ffd24a' : '#9fd8ff');
+  txt(pl.fact, W / 2, 602, 12, '#cfe8f4', 'center');
+  if (m.refuseT > 0) {                           // v8b's worlds politely decline
+    m.refuseT -= 1 / 60;
+    const wob = Math.sin(m.refuseT * 18) * 5;
+    otxt('NOT YET — SOON!', W / 2 + wob, 530, 24, '#ff9a8a');
+  }
+  if (m.hereT > 0) {
+    m.hereT -= 1 / 60;
+    otxt('YOU ARE ALREADY HERE!', W / 2, 530, 22, '#7dff9a');
+  }
+  otxt(pl.fly ? '◀ ▶ CHOOSE · ✕ FLY THERE · ○ BACK' : '◀ ▶ CHOOSE · ○ BACK', W / 2, 664, 16, '#fff');
+}
+
 function drawPrestige() {
   ctx.drawImage(SPR.dim, 0, 0);
   ctx.drawImage(SPR.modalP, W / 2 - 310, 240, 620, 250);
@@ -10647,6 +12324,19 @@ function renderPlay() {
     ctx.globalAlpha = 0.6 + 0.2 * Math.sin(T * 3.2);
     ctx.drawImage(powGlowC, camRX / 4, camRY / 4, W / 4, H / 4, camRX, camRY, W, H);
     ctx.globalAlpha = 1;
+  }
+
+  /* v8a: Jupiter's deep storm flickers far below the shelf (3 draws max) */
+  if (world === 'jupiter') {
+    for (let i = 0; i < JUP_FLICKS.length; i++) {
+      const fl2 = JUP_FLICKS[i];
+      const ph = (T * 0.5 + i * 0.41) % 1;
+      if (ph < 0.12 && onCam(fl2.x, fl2.y, 160)) {
+        ctx.globalAlpha = Math.sin(ph / 0.12 * Math.PI) * 0.7;
+        ctx.drawImage(SPR.stormFlash, fl2.x - 70, fl2.y - 45);
+        ctx.globalAlpha = 1;
+      }
+    }
   }
 
   /* ocean sparkles along the coast (culled to the window) */
@@ -11111,6 +12801,12 @@ function renderPlay() {
       const nCr = Math.min(cargoTotal(), 12);
       for (let ci = 0; ci < nCr; ci++)
         ctx.drawImage(SPR.crate, bx0 - 44 + (ci % 6) * 15, ry2 + 6 - ((ci / 6) | 0) * 11, 14, 12);
+    } else if (bz.ship === 'clipper') {          // v8a: the forming clipper trip
+      const cs8 = SPR.clipperStg[2];
+      bx0 = bz.cx;
+      ry2 = bz.cy - 30 - cs8.height;
+      ctx.drawImage(cs8, bx0 - cs8.width / 2, ry2);
+      ctx.drawImage(SPR.clipperGlow[((T * 3) | 0) % 2], bx0 - cs8.width / 2, ry2);
     } else if (bz.b.k !== 'shipyard') {          // the moon gantry block draws her there
       const cs = SPR.cruiserStg[2];
       ry2 = tY(bz.b.gy) + 40 - cs.height;
@@ -11186,6 +12882,26 @@ function renderPlay() {
         ctx.drawImage(i < bargeStage ? SPR.pipOn : SPR.pipOff, tX(myB.gx) + 96 + i * 15, tY(myB.gy) - 30);
     }
   }
+  /* v8a: THE STAR CLIPPER — staged hull + funding pips at the harbor
+     gantry; parked + nacelle-shimmering wherever she's home */
+  if (!(travel && travel.ship === 'clipper')) {
+    const cbR = clipperBerth();
+    if (cbR && onCam(cbR.x, cbR.y, 200)) {
+      if (world === 'earth' && clipperStage < 3) {
+        if (clipperStage > 0) {
+          const cs8 = SPR.clipperStg[clipperStage - 1];
+          ctx.drawImage(cs8, cbR.x - cs8.width / 2, cbR.y - 30 - cs8.height);
+        }
+        if (mapAssembled)
+          for (let i = 0; i < 3; i++)
+            ctx.drawImage(i < clipperStage ? SPR.pipOn : SPR.pipOff, cbR.x - 22 + i * 15, cbR.y - 108);
+      } else if (clipperStage >= 3 && clipperAt === world) {
+        const cs8 = SPR.clipperStg[2];
+        ctx.drawImage(cs8, cbR.x - cs8.width / 2, cbR.y - 30 - cs8.height);
+        ctx.drawImage(SPR.clipperGlow[((T * 3) | 0) % 2], cbR.x - cs8.width / 2, cbR.y - 30 - cs8.height);
+      }
+    }
+  }
   /* v7: the Earth UNLOAD BEAT — crates thunk down at the pad, coins ring */
   if (world === 'earth' && unloadFx > 0) {
     const pad = buildings.find(b2 => b2.k === 'launchpad');
@@ -11220,6 +12936,19 @@ function renderPlay() {
           ctx.drawImage(fl, cx4 + 36, cy4 + bs.height - 10, 16, 26);
         }
         for (const p2 of players) ctx.drawImage(SPR.headAv[p2.pi], cx4 + 44 + p2.pi * 8, cy4 + 30);
+      } else if (travel.ship === 'clipper') {    // v8a: the sleekest VTOL of all
+        const cs = SPR.clipperStg[2];
+        cx4 = (travel.phase === 'land' ? travel.dBerthX : travel.sBerthX) || cx4;
+        const cy4 = tY(st.gy) + 40 - cs.height - travel.ry;
+        ctx.drawImage(cs, cx4 - cs.width / 2, cy4);
+        ctx.drawImage(SPR.clipperGlow[((T * 8) | 0) % 2], cx4 - cs.width / 2, cy4);
+        if (travel.phase !== 'count' && travel.ry > 3) {
+          const fl = SPR.rflame[((T * 14) | 0) % 2];
+          ctx.drawImage(fl, cx4 - 60, cy4 + cs.height - 12, 16, 26);
+          ctx.drawImage(fl, cx4 + 44, cy4 + cs.height - 12, 16, 26);
+          ctx.drawImage(fl, cx4 - 8, cy4 + cs.height - 8, 16, 26);
+        }
+        for (const p2 of players) ctx.drawImage(SPR.headAv[p2.pi], cx4 + 30 + p2.pi * 8, cy4 + 26);
       } else if (travel.ship === 'cruiser') {    // v6b: the red-winged beauty VTOLs
         const cs = SPR.cruiserStg[2];
         const cy4 = tY(st.gy) + 40 - cs.height - travel.ry;
@@ -11370,12 +13099,42 @@ function renderPlay() {
     if (travel.phase === 'lift') al = (travel.t - 2.0) / 0.6;
     else if (travel.phase === 'land') al = 1 - travel.t * 2;
     ctx.globalAlpha = clamp(al, 0, 1);
-    const red = travel.ship === 'cruiser', rock = travel.ship === 'barge';
+    const red = travel.ship === 'cruiser', rock = travel.ship === 'barge',
+          clip = travel.ship === 'clipper';      // v8a
     ctx.drawImage(rock ? SPR.warpRock : red ? SPR.warpRed : SPR.warpBG, 0, 0);
     for (let i = 0; i < 16; i++) {               // rushing streaks
       const sx2 = (i * 173 + 47) % W;
       const sy2 = ((i * 97 + T * (380 + i * 26)) % (H + 90)) - 45;
       ctx.drawImage(rock ? SPR.streakSilver : red ? SPR.streakDust : SPR.streak, sx2, sy2);
+    }
+    /* v8a: the route whizzes past — planets in true order, belt included */
+    if (clip && travel.phase === 'stars' && travel.whiz) {
+      for (const wb of travel.whiz) {
+        const f2 = (travel.t - wb.t0) / (wb.t1 - wb.t0);
+        if (f2 <= 0 || f2 >= 1) continue;
+        if (wb.k === 'belt') {
+          for (let i = 0; i < 4; i++) {
+            const rb2 = SPR.warpRockBit[i % 2];
+            ctx.translate(W * (0.95 - f2 * 0.9) + i * 120 - 160, H * 0.26 + ((i * 97) % 160) + f2 * 70);
+            ctx.rotate(T * (0.7 + i * 0.4));
+            ctx.drawImage(rb2, -rb2.width, -rb2.height, rb2.width * 2, rb2.height * 2);
+            ctx.setTransform(1, 0, 0, 1, 0, 0);
+          }
+          if (f2 > 0.2 && f2 < 0.8) otxt('THE ASTEROID BELT!', W / 2, H - 150, 22, '#d8c49a');
+        } else {
+          const spr8 = wb.k === 'venus' ? SPR.ballVenus : wb.k === 'earth' ? SPR.earthBall
+                     : wb.k === 'mars' ? SPR.ballMars : SPR.ballMercury;
+          const sz8 = wb.k === 'earth' ? 58 : 52;
+          ctx.drawImage(spr8, W * (0.9 - f2 * 0.85), H * 0.28 + f2 * 60 + (wb.i % 2) * 70, sz8, sz8);
+          if (f2 > 0.2 && f2 < 0.8) otxt('PASSING ' + wb.name + '!', W / 2, H - 150, 22, wb.col);
+        }
+      }
+      if (travel.to === 'mercury') {             // the sun swells dead ahead
+        const aSave = ctx.globalAlpha;
+        ctx.globalAlpha = clamp(travel.t / travel.whizDur, 0, 1) * 0.5 * aSave;
+        ctx.drawImage(SPR.flareWash, 0, 0);
+        ctx.globalAlpha = aSave;
+      }
     }
     if (rock) for (let i = 0; i < 5; i++) {      // tumbling rock silhouettes drift past
       const rx3 = (i * 311 + 90 + T * 30 * (i + 1)) % (W + 80) - 40;
@@ -11404,6 +13163,15 @@ function renderPlay() {
         ctx.drawImage(SPR.rflame[((T * 14) | 0) % 2], -34, 92, 30, 50);
         ctx.drawImage(SPR.rflame[((T * 14 + 1) | 0) % 2], -2, 92, 30, 50);
         ctx.setTransform(1, 0, 0, 1, 0, 0);
+      } else if (clip) {                         // v8a: the clipper cuts across the stars
+        ctx.translate(W / 2, H / 2 + wob);
+        ctx.rotate(-0.9);
+        ctx.drawImage(SPR.clipperStg[2], -124, -42, 248, 84);
+        ctx.drawImage(SPR.clipperGlow[((T * 10) | 0) % 2], -124, -42, 248, 84);
+        ctx.rotate(Math.PI / 2);
+        ctx.drawImage(SPR.rflame[((T * 14) | 0) % 2], -52, 96, 26, 44);
+        ctx.drawImage(SPR.rflame[((T * 14 + 1) | 0) % 2], 22, 96, 26, 44);
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
       } else {
         ctx.drawImage(SPR.rocket, W / 2 - 30, H / 2 - 80 + wob, 60, 138);
         ctx.drawImage(SPR.rflame[((T * 14) | 0) % 2], W / 2 - 18 + 6.5, H / 2 + 52 + wob, 36, 60);
@@ -11426,10 +13194,14 @@ function renderPlay() {
       otxt(travel.to === 'scan' ? 'TO THE ASTEROIDS!'
          : travel.express ? 'EXPRESS HOME!'
          : travel.from === 'mission' ? 'HOME TO MARS!'
+         : travel.to === 'mercury' ? 'TO MERCURY — THE SUNSCORCH!'
+         : travel.to === 'jupiter' ? 'TO JUPITER — THE CLOUDTOP!'
          : travel.to === 'mars' ? 'TO MARS!'
          : travel.to === 'earth' ? 'HOMEWARD!'
          : travel.from === 'mars' ? 'HOME TO THE MOON!' : 'TO THE MOON!',
-         W / 2, 160, 44, rock ? '#9fd8ff' : red ? '#ff8a66' : '#7dffe0');
+         W / 2, 160, clip ? 38 : 44,
+         clip ? (travel.to === 'mercury' ? '#ffc061' : travel.to === 'jupiter' ? '#57e8d4' : '#ffd24a')
+              : rock ? '#9fd8ff' : red ? '#ff8a66' : '#7dffe0');
     if (travel.phase === 'scan') drawScanScreen();   // v7: CHOOSE AN ASTEROID
     ctx.globalAlpha = 1;
   }
@@ -11462,11 +13234,12 @@ function renderPlay() {
     txt(hint, 12, H - 12, 11, 'rgba(220,240,255,0.75)');
   }
   if (vignette) drawVignette();                  // v6a: the telescope panel
+  if (solarMap) drawSolarMap();                  // v8a: the nine planets
   if (statsOpen) drawStats();
   if (paused) drawPause();
   if (modal) drawModal();
   if (confirmPrestige) drawPrestige();
-  if (banners.length && !vignette && !(travel && travel.phase === 'scan')) drawBanner(banners[0]);   // v7: the scan + vignettes own their screens
+  if (banners.length && !vignette && !solarMap && !(travel && travel.phase === 'scan')) drawBanner(banners[0]);   // v7: the scan + vignettes own their screens
 }
 
 function render() {
@@ -11479,11 +13252,11 @@ function render() {
    UPDATE + MAIN LOOP
    ═══════════════════════════════════════════════════════════════════════ */
 function updatePlay(dt) {
-  if (banners.length && !vignette) {               // v7: vignettes hold banners too
+  if (banners.length && !vignette && !solarMap) {  // v7/v8a: vignettes + the map hold banners
     banners[0].t += dt * (banners.length > 1 ? 2.4 : 1);   // queued banners drain fast
     if (banners[0].t > banners[0].dur) banners.shift();
   }
-  if (paused || modal || confirmPrestige || vignette) return;
+  if (paused || modal || confirmPrestige || vignette || solarMap) return;
   playtime += dt;
   sessionT += dt;
   simAcc += dt;
@@ -11500,6 +13273,13 @@ function updatePlay(dt) {
   }
   if (travel) updateTravel(dt);
   if (world === 'mission') updateMission(dt);    // v7: timer, hazards, chunks, drills
+  /* v8a: Mercury heat-shimmer — pooled sparkle flecks rising off the rock */
+  if (world === 'mercury' && Math.random() < dt * 3.2) {
+    const ax = camX + Math.random() * W, ay = camY + Math.random() * H;
+    if (isLandPx(ax, ay))
+      spawnP(ax, ay, SPR.spark[(Math.random() * 2) | 0],
+             { vy: -12 - Math.random() * 12, vx: (Math.random() - 0.5) * 8, g: -4, life: 0.7 });
+  }
   if (unloadFx > 0) unloadFx -= dt;              // v7: Earth unload beat decays
   if (!rocketSeq && !gateSeq && !travelCin())
     for (const p of players) if (!p.aboard) updatePlayer(p, dt);
@@ -11810,8 +13590,18 @@ window.__test = {
     clearBalls(); wobbleN = 0; closeInterior();
     for (const b of buildings) if (b.wobT > 0) { b.wobT = 0; bgDirty = true; }
     for (const p of players) if (p.mode === 'cannon') unmanCannon(p);
+    ensurePlanetWorld(w);                        // v8a: planets are born on demand
     swapTo(w);
-    if (cruiserStage >= 3) cruiserAt = world === 'mars' ? 'mars' : 'moon';   // the ship warps along
+    if (cruiserStage >= 3 && (world === 'mars' || world === 'moon')) cruiserAt = world;   // the ship warps along
+    if (clipperStage >= 3) clipperAt = (world === 'mercury' || world === 'jupiter' || world === 'mars') ? world : 'earth';   // v8a
+    if (world === 'mercury' || world === 'jupiter') {
+      const cb = clipperBerth();
+      placePlayersAt(cb ? cb.site : { gx: PCX, gy: PCY, s: 1 });
+      for (const p of players) p.aboard = false;
+      travel = null;
+      updateCamera(0, true);
+      return world;
+    }
     const pad = world === 'moon'
       ? (buildings.find(b => b.k === 'moonport') || buildings.find(b => b.k === 'lander'))
       : world === 'mars'
@@ -11824,6 +13614,38 @@ window.__test = {
     travel = null;
     updateCamera(0, true);
     return world;
+  },
+  /* ── v8a hooks — the nine planets ── */
+  clipperInfo() {
+    const cb = clipperBerth();
+    return { stage: clipperStage, at: clipperAt, mapAssembled,
+             berth: cb ? { x: Math.round(cb.x), y: Math.round(cb.y), pad: cb.pad ? cb.pad.k : null } : null,
+             visited: Object.assign({}, planetsVisited),
+             stages: CLIPPER_STAGES };
+  },
+  mapInfo() {
+    return solarMap ? { open: true, sel: solarMap.sel, selK: PLANETS[solarMap.sel].k,
+                        from: solarMap.from, src: solarMap.src,
+                        planets: PLANETS.map(p2 => ({ k: p2.k, fly: !!p2.fly })),
+                        refusing: solarMap.refuseT > 0, cx: Math.round(solarMap.cx), cy: Math.round(solarMap.cy) }
+                    : { open: false };
+  },
+  mapPos() { bakeSolarBG(); return SOLAR_POS.map(p2 => ({ x: p2.x, y: p2.y, r: p2.r })); },
+  planetInfo(k) {
+    const o = worldData(k);
+    if (!o) return null;
+    const inW = w2 => world === k ? w2() : inWorld(k, w2);
+    return inW(() => ({
+      land: (() => { let n = 0; for (let gy = 0; gy < GH; gy++) for (let gx = 0; gx < GW; gx++) if (isLand(gx, gy)) n++; return n; })(),
+      buildings: buildings.map(b => ({ k: b.k, gx: b.gx, gy: b.gy, stage: b.stage || 0, done: megaDone(b) })),
+      flora: flora.filter(f => !f.gone).map(f => ({ type: f.type, gx: f.gx, gy: f.gy })),
+      complete: planetMegaCnt(k) }));
+  },
+  whizInfo() { return travel && travel.whiz ? { dur: travel.whizDur, bodies: travel.whiz.map(w2 => w2.k) } : null; },
+  planetSpot(k2) {                               // first valid placement spot on the active planet
+    for (let r = 1; r < 20; r++) for (let gy = PCY - r; gy <= PCY + r; gy++) for (let gx = PCX - r; gx <= PCX + r; gx++)
+      if (validAt(k2, gx, gy)) return { gx, gy };
+    return null;
   },
   fastTravel() { for (let i = 0; i < 600 && travel; i++) updateTravel(0.1); return world; },
   travelInfo() { return travel ? { phase: travel.phase, dir: travel.dir, n: travel.n } : null; },
@@ -12027,7 +13849,8 @@ window.__test = {
         return RES_LIST.filter(r => RES_AGE[r] <= age && !(LUNAR[r] && !lunarSeen2) &&
           !(MARTIAN[r] && !marsSeen()) && !(ASTRO[r] && !astroSeen()) &&
           !(r === 'alloy' && !((res.alloy || 0) > 0 || (life.alloy || 0) > 0)) &&
-          !(r === 'fuel' && !fuelSeen()));
+          !(r === 'fuel' && !fuelSeen()) &&
+          !(PLANET_RES[r] && !planetResSeen(r)));
       })(),
       /* ── v7 ── */
       bargeStage, bargeUpgraded,
@@ -12048,6 +13871,14 @@ window.__test = {
       beaconsFound, mapAssembled,
       megastructures: allB().filter(b => B[b.k].mega).map(b => ({ k: b.k, gx: b.gx, gy: b.gy,
         stage: b.stage || 0, max: megaMax(b.k), complete: megaDone(b) })),
+      /* v8a */
+      clipperStage, clipperAt,
+      planetsVisited: Object.assign({}, planetsVisited),
+      solarMapOpen: !!solarMap,
+      solarSel: solarMap ? solarMap.sel : -1,
+      planetWorlds: ['mercury', 'jupiter'].filter(pk => world === pk || parked.has(pk)),
+      travelWhiz: travel && travel.whiz ? travel.whiz.map(w2 => w2.k) : null,
+      mercMegas: planetMegaCnt('mercury'), jupMegas: planetMegaCnt('jupiter'),
       hop: players.map(p => !!p.hop),
       hopH: players.map(p => p.hopH || 0),
       carry: players.map(p => (p.carry || []).slice()),
@@ -12146,6 +13977,14 @@ window.__test = {
              residents: interior.residents.map(r => ({ name: r.name, alien: !!r.alien, kid: !!r.kid,
                                                        say: r.sayT > 0 ? r.say : null })),
              inZone: players.map(q => q.inside ? inLiftZone(q) : null) };
+  },
+  roomInfo() {                                   // v8a: which room + who says what
+    if (!interior) return null;
+    return { kind: interior.kind, title: roomTitle(interior),
+             chart: interior.chart ? Object.assign({}, interior.chart) : null,
+             residents: interior.residents.map(r => ({ name: r.name, poolN: r.pool.length,
+               hasDais: r.pool.some(l => /Reserved for something wonderful/.test(l)),
+               sample: r.pool[0] })) };
   },
   liftPush(dir, pi) {                            // the real push path, from wherever P stands
     const p = players[pi || 0];
