@@ -136,6 +136,16 @@ const tX = gx => gx * TILE, tY = gy => GY0 + gy * TILE;
 
 /* ───── storage ───── */
 const SLOT_KEY = i => 'islandforge_slot' + i;
+const TRASH_KEY = i => 'islandforge_trash' + i;
+const SLOT_RE = /^islandforge_slot(\d+)$/, TRASH_RE = /^islandforge_trash(\d+)$/;
+const MAX_WORLDS = 24;                          // the island shelf's soft cap
+function lsAllKeys() {
+  try {
+    const a = [];
+    for (let i = 0; i < localStorage.length; i++) a.push(localStorage.key(i));
+    return a;
+  } catch (e) { return []; }
+}
 function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
 function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
 function lsDel(k) { try { localStorage.removeItem(k); } catch (e) {} }
@@ -676,7 +686,12 @@ const DIS_DEFS = {
 /* ───── global game state ───── */
 let T = 0;                                    // global animation clock (s)
 let scene = 'title';                          // title | name | play
-let slotSel = 0, slots = [null, null, null], curSlot = 0;
+let slotSel = 0, slots = [], curSlot = 0;     // slots = save summaries, savedAt desc (Minecraft-style shelf)
+let trashInfo = null;                         // newest islandforge_trash<n> → the UNDO DELETE row
+const thumbCache = new Map();                 // slot idx → { url, img, ok } (thumbs decode lazily, on-screen only)
+let tScroll = 0, tScrollTgt = 0, tVel = 0;    // world-list scroll (eased) + flick velocity
+let tHeldDir = 0, tHeldNext = 0, tFullT = 0;  // held-repeat state + full-shelf wobble timer
+let tDrag = null;                             // active touch drag { x0, y0, y, v, moved }
 let nameSt = null;                            // { slot, name, r, c }
 let confirmErase = null;                      // { slot, yes }
 let modal = null;                             // { title, lines[] }
@@ -3192,6 +3207,13 @@ function initSprites() {
     const [c, g] = C(640, 100);
     g.drawImage(SPR.card, 0, 0);
     g.strokeStyle = '#ffd24a'; g.lineWidth = 4; rr(g, 3, 3, 628, 88, 13); g.stroke();
+    return c;
+  })();
+  SPR.rowCard    = panel(640, 62);             // world-shelf rows (compact cards)
+  SPR.rowCardSel = (() => {
+    const [c, g] = C(640, 62);
+    g.drawImage(SPR.rowCard, 0, 0);
+    g.strokeStyle = '#ffd24a'; g.lineWidth = 3; rr(g, 2, 2, 630, 52, 12); g.stroke();
     return c;
   })();
   SPR.pbar = (() => {
@@ -6341,20 +6363,34 @@ function tryBargeUpgrade(p) {
    ever land somewhere she isn't (the v7.1 stranding lesson).
    ═══════════════════════════════════════════════════════════════════════ */
 /* this world's clipper berth: anchor point + landing site (+ host pad) */
+/* v8a.1: the clipper docks on LAND — try right of the host building, then
+   the mirrored left spot, then below it. A coastal Star Harbor was floating
+   her funding pips (and eventually the ship) out on the ocean. */
+function berthAnchor(b, w, dx, dy) {
+  for (const [cx2, cy2] of [[dx, dy], [w - dx, dy], [w / 2, w + 56]]) {
+    const x = tX(b.gx) + cx2, y = tY(b.gy) + cy2;
+    const gx = (x / TILE) | 0, gy = ((y - GY0) / TILE) | 0;
+    if (isLand(gx - 1, gy) && isLand(gx, gy) && isLand(gx + 1, gy)) return { x, y };
+  }
+  return { x: tX(b.gx) + dx, y: tY(b.gy) + dy };
+}
 function clipperBerth() {
   if (world === 'earth') {
     const sh = buildings.find(b => b.k === 'starharbor' && megaDone(b));
     if (!sh) return null;
-    return { x: tX(sh.gx) + 150, y: tY(sh.gy) + 88, pad: sh, site: { gx: sh.gx, gy: sh.gy, s: 3 } };
+    const a = berthAnchor(sh, 96, 150, 88);
+    return { x: a.x, y: a.y, pad: sh, site: { gx: sh.gx, gy: sh.gy, s: 3 } };
   }
   if (world === 'mars') {
     const at = buildings.find(b => b.k === 'marsport') || buildings.find(b => b.k === 'marslander');
     if (!at) return null;
-    return { x: tX(at.gx) + 150, y: tY(at.gy) + 78, pad: at, site: { gx: at.gx, gy: at.gy, s: 2 } };
+    const a = berthAnchor(at, 64, 150, 78);
+    return { x: a.x, y: a.y, pad: at, site: { gx: at.gx, gy: at.gy, s: 2 } };
   }
   if (world === 'mercury' || world === 'jupiter') {
     const port = buildings.find(b => b.k === (world === 'mercury' ? 'sunport' : 'stormport') && megaDone(b));
-    if (port) return { x: tX(port.gx) + 118, y: tY(port.gy) + 74, pad: port, site: { gx: port.gx, gy: port.gy, s: 2 } };
+    if (port) { const a = berthAnchor(port, 64, 118, 74);
+                return { x: a.x, y: a.y, pad: port, site: { gx: port.gx, gy: port.gy, s: 2 } }; }
     return { x: tX(PCX - 6) + 32, y: tY(PCY) + 56, pad: null, site: { gx: PCX - 7, gy: PCY - 1, s: 2 } };
   }
   return null;
@@ -8005,23 +8041,71 @@ function saveGame() {
     s.jupDecor = jupD.decor.map(t => [t.k, t.gx, t.gy]);
   }
   lsSet(SLOT_KEY(curSlot), JSON.stringify(s));
-  loadSlotSummaries();
+  /* (summaries rebuild on return to title — parsing every shelf save each
+     autosave would hitch with a full 24-world shelf) */
 }
+/* "how long ago" + "how long played" — precomputed once per summary build,
+   never in the render loop */
+function fmtWhen(at) {
+  if (!at) return '';
+  const d = Math.max(0, Date.now() - at);
+  if (d < 90e3) return 'JUST NOW';
+  if (d < 3600e3) return Math.round(d / 60e3) + ' MIN AGO';
+  if (d < 24 * 3600e3) { const h = Math.round(d / 3600e3); return h + (h === 1 ? ' HOUR AGO' : ' HOURS AGO'); }
+  if (d < 48 * 3600e3) return 'YESTERDAY';
+  const days = Math.floor(d / (24 * 3600e3));
+  if (days < 14) return days + ' DAYS AGO';
+  return Math.floor(days / 7) + ' WEEKS AGO';
+}
+function fmtPlay(sec) {
+  const m = Math.floor((sec || 0) / 60);
+  if (m < 1) return 'NEW-ISH';
+  if (m < 60) return m + 'M PLAYED';
+  return Math.floor(m / 60) + 'H ' + (m % 60) + 'M PLAYED';
+}
+/* enumerate EVERY islandforge_slot<n> key (indices need not be contiguous),
+   newest first — the Minecraft-style world shelf */
 function loadSlotSummaries() {
-  for (let i = 0; i < 3; i++) {
-    const raw = lsGet(SLOT_KEY(i));
-    if (!raw) { slots[i] = null; continue; }
-    try {
-      const s = JSON.parse(raw);
-      slots[i] = { name: s.name, age: s.age, pop: Math.floor(s.popF), legends: s.legends,
-                   stars: s.stars || 0, thumb: null, thumbURL: s.thumb };
-      if (s.thumb) {
-        const img = new Image();
-        img.onload = (function (slot) { return function () { slot.thumb = img; }; })(slots[i]);
-        img.src = s.thumb;
-      }
-    } catch (e) { slots[i] = null; }
+  const list = [];
+  let bestTrash = null;
+  for (const k of lsAllKeys()) {
+    let m = SLOT_RE.exec(k);
+    if (m) {
+      const raw = lsGet(k);
+      if (!raw) continue;
+      try {
+        const s = JSON.parse(raw);
+        const age = clamp(s.age || 1, 1, AGE_NAMES.length - 1);
+        list.push({ idx: +m[1], nm: s.name || 'ISLE', age, pop: Math.floor(s.popF || 0),
+                    legends: !!s.legends, stars: s.stars || 0, savedAt: s.savedAt || 0,
+                    thumb: null, thumbURL: s.thumb || null,
+                    metaStr: 'AGE ' + age + ' — ' + AGE_NAMES[age] + ' · POP ' + Math.floor(s.popF || 0) + ' · ' + fmtPlay(s.playtime),
+                    starStr: (s.stars || 0) > 0 ? ((s.stars <= 5 ? '★'.repeat(s.stars) : '★x' + s.stars)) : '',
+                    whenStr: fmtWhen(s.savedAt) });
+      } catch (e) {}
+    } else if ((m = TRASH_RE.exec(k))) {
+      try {
+        const s = JSON.parse(lsGet(k));
+        const at = s.savedAt || 0;
+        if (!bestTrash || at > bestTrash.savedAt) bestTrash = { idx: +m[1], name: s.name || 'ISLE', savedAt: at };
+      } catch (e) {}
+    }
   }
+  list.sort((a, b) => (b.savedAt - a.savedAt) || (a.idx - b.idx));
+  slots = list;
+  if (bestTrash) bestTrash.whenStr = fmtWhen(bestTrash.savedAt);
+  trashInfo = bestTrash;
+  slotSel = clamp(slotSel, 0, tRowCount() - 1);
+  const smax = tScrollMax();
+  tScrollTgt = clamp(tScrollTgt, 0, smax);
+  tScroll = clamp(tScroll, 0, smax);
+}
+function lowestFreeIdx() {
+  const used = new Set();
+  for (const k of lsAllKeys()) { const m = SLOT_RE.exec(k); if (m) used.add(+m[1]); }
+  let n = 0;
+  while (used.has(n)) n++;
+  return n;
 }
 function resetWorldState() {
   if (world === 'mission') swapTo('mars');      // v7: never reset FROM an asteroid
@@ -8420,8 +8504,23 @@ function eraseSlot(i) {
   /* never truly destroy an island — stash a recovery copy (one per slot,
      survives until the next erase of the same slot) */
   const old = lsGet(SLOT_KEY(i));
-  if (old) lsSet('islandforge_trash' + i, old);
+  if (old) lsSet(TRASH_KEY(i), old);
   lsDel(SLOT_KEY(i)); loadSlotSummaries();
+}
+/* the UNDO DELETE row — the newest trashed island sails back onto the shelf
+   (at the lowest free index, wherever that is) */
+function restoreTrash() {
+  if (!trashInfo) { SFX.cancel(); return; }
+  const raw = lsGet(TRASH_KEY(trashInfo.idx));
+  if (!raw) { trashInfo = null; SFX.cancel(); return; }
+  const free = lowestFreeIdx();
+  lsSet(SLOT_KEY(free), raw);
+  lsDel(TRASH_KEY(trashInfo.idx));
+  loadSlotSummaries();
+  const r = slots.findIndex(s2 => s2.idx === free);
+  slotSel = r >= 0 ? r + 1 : 0;
+  snapSel();
+  SFX.confirm();
 }
 
 /* ═══════════════════════════════════════════════════════════════════════
@@ -11142,28 +11241,64 @@ function pauseBtn(pi, b) {
       abortExpeditionState();                    // v7: live missions resolve as a rescue
       saveGame(); paused = false; players = [];
       scene = 'title'; document.body.classList.remove('in-play');
-      loadSlotSummaries(); SFX.confirm();
+      loadSlotSummaries();
+      const qr = slots.findIndex(s2 => s2.idx === curSlot);   // land on the island we just left
+      slotSel = qr >= 0 ? qr + 1 : 0;
+      snapSel(); SFX.confirm();
     }
   }
+}
+/* ── the world shelf: row 0 = NEW ISLAND, then saves (newest first),
+      then UNDO DELETE while the trash holds an island ── */
+const TL_X = W / 2 - 320, TL_Y = 252, TL_RP = 68, TL_RH = 62, TL_VH = 340;   // 5-row window
+function tRowCount() { return 1 + slots.length + (trashInfo ? 1 : 0); }
+function tScrollMax() { return Math.max(0, (tRowCount() - 1) * TL_RP + TL_RH - TL_VH); }
+function rowSave(r) { return r >= 1 && r <= slots.length ? slots[r - 1] : null; }
+function snapSel() {                            // keep the selected row inside the window
+  const y = slotSel * TL_RP;
+  if (y < tScrollTgt) tScrollTgt = y;
+  else if (y + TL_RH > tScrollTgt + TL_VH) tScrollTgt = y + TL_RH - TL_VH;
+  tScrollTgt = clamp(tScrollTgt, 0, tScrollMax());
+  tVel = 0;
+}
+function titleMove(d) {
+  const n = tRowCount();
+  slotSel = (slotSel + d + n) % n;
+  snapSel();
+  SFX.ui();
+}
+function titleActivate() {
+  const s = rowSave(slotSel);
+  if (s) { SFX.confirm(); loadGame(s.idx); return; }
+  if (slotSel === 0) {                          // ⊕ NEW ISLAND (pinned top)
+    if (slots.length >= MAX_WORLDS) { tFullT = 0.9; SFX.cancel(); return; }   // THE ISLAND SHELF IS FULL!
+    SFX.confirm();
+    scene = 'name';
+    nameSt = { slot: lowestFreeIdx(), name: '', r: 0, c: 0 };
+  } else restoreTrash();                        // ↩ UNDO DELETE (bottom row)
 }
 function titleBtn(pi, b) {
   if (confirmErase) {
     if (b === 'left' || b === 'right') { confirmErase.yes = !confirmErase.yes; SFX.ui(); }
     else if (b === 'south') {
-      if (confirmErase.yes) { eraseSlot(confirmErase.slot); SFX.remove(); } else SFX.cancel();
+      if (confirmErase.yes) {
+        eraseSlot(confirmErase.idx);
+        slotSel = clamp(slotSel, 0, tRowCount() - 1);
+        snapSel();
+        SFX.remove();
+      } else SFX.cancel();
       confirmErase = null;
     }
     else if (b === 'east') { confirmErase = null; SFX.cancel(); }
     return;
   }
-  if (b === 'up') { slotSel = (slotSel + 2) % 3; SFX.ui(); }
-  else if (b === 'down') { slotSel = (slotSel + 1) % 3; SFX.ui(); }
-  else if (b === 'south' || b === 'start') {
-    SFX.confirm();
-    if (slots[slotSel]) loadGame(slotSel);
-    else { scene = 'name'; nameSt = { slot: slotSel, name: '', r: 0, c: 0 }; }
+  if (b === 'up') titleMove(-1);
+  else if (b === 'down') titleMove(1);
+  else if (b === 'south' || b === 'start') titleActivate();
+  else if (b === 'east') {
+    const s = rowSave(slotSel);
+    if (s) { confirmErase = { idx: s.idx, name: s.nm, yes: false }; SFX.ui(); }
   }
-  else if (b === 'east' && slots[slotSel]) { confirmErase = { slot: slotSel, yes: false }; SFX.ui(); }
 }
 const NAME_ROWS = ['ABCDEFGHIJ', 'KLMNOPQRST', 'UVWXYZ.-★♥'];
 function nameBtn(b) {
@@ -11242,13 +11377,19 @@ function tapAt(x, y) {
       else confirmErase = null;
       return;
     }
-    for (let i = 0; i < 3; i++) {
-      const cy2 = 268 + i * 116;
-      if (x > W / 2 - 320 && x < W / 2 + 320 && y > cy2 && y < cy2 + 100) {
-        if (slotSel === i) {
-          if (slots[i] && x > W / 2 + 240) { confirmErase = { slot: i, yes: false }; SFX.ui(); }
-          else onBtn(0, 'south');
-        } else { slotSel = i; SFX.ui(); }
+    if (x > TL_X && x < TL_X + 640) {
+      /* ▲ ▼ affordances above/below the shelf */
+      if (y > TL_Y - 36 && y < TL_Y - 2) { onBtn(0, 'up'); return; }
+      if (y > TL_Y + TL_VH + 2 && y < TL_Y + TL_VH + 36) { onBtn(0, 'down'); return; }
+      if (y > TL_Y && y < TL_Y + TL_VH) {
+        const ry = y - TL_Y + tScroll, r = Math.floor(ry / TL_RP);
+        if (r >= 0 && r < tRowCount() && ry - r * TL_RP < TL_RH) {
+          if (slotSel === r) {                   // tap-again = confirm (or the ○ zone = erase)
+            const s = rowSave(r);
+            if (s && x > TL_X + 566) { confirmErase = { idx: s.idx, name: s.nm, yes: false }; SFX.ui(); }
+            else onBtn(0, 'south');
+          } else { slotSel = r; snapSel(); SFX.ui(); }
+        }
         return;
       }
     }
@@ -11403,8 +11544,42 @@ function tapAt(x, y) {
     p.target = { x: clamp(wx, 8, WORLD_W - 8), y: clamp(wy, GY0 + 8, WORLD_H - 8) };
   }
 }
-canvas.addEventListener('touchstart', ev => { ev.preventDefault(); ensureAudio(); const q = canvasPoint(ev); tapAt(q.x, q.y); }, { passive: false });
+canvas.addEventListener('touchstart', ev => {
+  ev.preventDefault(); ensureAudio();
+  const q = canvasPoint(ev);
+  /* title shelf: defer the tap — a moving finger is a scroll, not a pick */
+  if (scene === 'title' && !confirmErase) { tDrag = { x0: q.x, y0: q.y, y: q.y, v: 0, moved: false }; tVel = 0; return; }
+  tapAt(q.x, q.y);
+}, { passive: false });
+canvas.addEventListener('touchmove', ev => {
+  if (!tDrag) return;
+  ev.preventDefault();
+  const q = canvasPoint(ev);
+  const dy = q.y - tDrag.y;
+  tDrag.y = q.y;
+  if (!tDrag.moved && Math.abs(q.y - tDrag.y0) > 14) tDrag.moved = true;
+  if (tDrag.moved && scene === 'title') {
+    tScrollTgt = clamp(tScrollTgt - dy, 0, tScrollMax());
+    tScroll = tScrollTgt;                        // the shelf sticks to the finger
+    tDrag.v = tDrag.v * 0.6 + (-dy * 60) * 0.4;  // smoothed flick velocity (px/s)
+  }
+}, { passive: false });
+canvas.addEventListener('touchend', ev => {
+  if (!tDrag) return;
+  ev.preventDefault();
+  const d = tDrag;
+  tDrag = null;
+  if (!d.moved) { tapAt(d.x0, d.y0); return; }   // a still finger was a tap after all
+  if (scene === 'title') tVel = d.v;             // let the flick glide
+}, { passive: false });
+canvas.addEventListener('touchcancel', () => { tDrag = null; });
 canvas.addEventListener('mousedown', ev => { ensureAudio(); const q = canvasPoint(ev); tapAt(q.x, q.y); });
+canvas.addEventListener('wheel', ev => {
+  if (scene !== 'title' || confirmErase) return;
+  ev.preventDefault();
+  tScrollTgt = clamp(tScrollTgt + ev.deltaY * 0.6, 0, tScrollMax());
+  tVel = 0;
+}, { passive: false });
 
 /* ═══════════════════════════════════════════════════════════════════════
    RENDER — per-frame hot path is drawImage + transforms + fillText only.
@@ -11437,6 +11612,81 @@ function extraSprites() {
   });
 }
 
+/* held-repeat scroll — polled render-clocked like the solar map (press events
+   give the crisp first step; a beat later the shelf glides). The stick has no
+   press event, so a fresh stick push steps immediately. */
+function titlePollScroll() {
+  if (confirmErase) { tHeldDir = 0; return; }
+  let db = 0, ds = 0;
+  if (keys.ArrowUp || keys.KeyW) db--;
+  if (keys.ArrowDown || keys.KeyS) db++;
+  if (PADS) for (const pd of PADS) {
+    if (!pd || !pd.connected) continue;
+    if (pd.button('up')) db--;
+    if (pd.button('down')) db++;
+    const ly = pd.axis('ly');
+    if (ly < -0.55) ds--; else if (ly > 0.55) ds++;
+  }
+  const dir = db ? (db < 0 ? -1 : 1) : ds ? (ds < 0 ? -1 : 1) : 0;
+  const now = performance.now();
+  if (dir !== tHeldDir) {
+    tHeldDir = dir;
+    if (dir) {
+      if (!db) titleMove(dir);                   // stick-only engage: press stream stays silent
+      tHeldNext = now + 280;
+    }
+  } else if (dir && now >= tHeldNext) { titleMove(dir); tHeldNext = now + 115; }
+}
+/* lazy thumbnails — an Image is born the first time its row scrolls into
+   view, then cached; 24 worlds never decode 24 thumbs at boot */
+function rowThumb(s) {
+  if (s.thumb || !s.thumbURL) return s.thumb;
+  let tc = thumbCache.get(s.idx);
+  if (!tc || tc.url !== s.thumbURL) {
+    tc = { url: s.thumbURL, img: new Image(), ok: false };
+    tc.img.onload = () => { tc.ok = true; };
+    tc.img.src = s.thumbURL;
+    thumbCache.set(s.idx, tc);
+  }
+  if (tc.ok) s.thumb = tc.img;
+  return s.thumb;
+}
+function drawTitleRow(r, x, y) {
+  ctx.drawImage(r === slotSel ? SPR.rowCardSel : SPR.rowCard, x, y);
+  if (r === 0) {                                 // ⊕ NEW ISLAND (pinned top)
+    const full = slots.length >= MAX_WORLDS;
+    const wob = tFullT > 0 ? Math.sin(tFullT * 20) * 5 : 0;
+    drawFit(SPR.tree[0], x + 52 + wob, y + 29, 30, 40);
+    if (full) {
+      otxt('THE ISLAND SHELF IS FULL!', x + 106 + wob, y + 29, 16, '#ff9a8a', 'left');
+      txt('delete an island to make room', x + 106, y + 48, 12, '#9fd4f0');
+    } else {
+      otxt('⊕ NEW ISLAND', x + 106, y + 29, 17, '#7dff9a', 'left');
+      txt('press ✕ to start building!', x + 106, y + 48, 12, '#9fd4f0');
+    }
+    if (slots.length > 0) txt(slots.length + ' / ' + MAX_WORLDS + ' ISLANDS', x + 626, y + 36, 10, full ? '#ff9a8a' : '#8fc4e0', 'right');
+    return;
+  }
+  const s = rowSave(r);
+  if (s) {                                       // a saved world (newest first)
+    const th = rowThumb(s);
+    if (th) ctx.drawImage(th, x + 12, y + 8, 80, 45);
+    else drawFit(SPR.b.cabin, x + 52, y + 30, 40, 40);
+    otxt(s.nm + "'S ISLAND", x + 106, y + 29, 17, '#fff', 'left');
+    if (s.legends) drawFit(SPR.star, x + 97, y + 15, 14, 14);
+    if (s.starStr) txt(s.starStr, x + 388, y + 29, 12, '#ffd24a');
+    txt(s.metaStr, x + 106, y + 48, 12, '#9fd4f0');
+    txt(s.whenStr, x + 626, y + 25, 10, '#8fc4e0', 'right');
+    if (r === slotSel) txt('○ ERASE', x + 626, y + 47, 10, '#ff9a8a', 'right');
+    else if (s.legends) txt('LEGEND ★', x + 626, y + 47, 10, '#ffd24a', 'right');
+    return;
+  }
+  /* ↩ UNDO DELETE — the trash still holds an island */
+  drawFit(SPR.iconRemove, x + 52, y + 29, 24, 24);
+  otxt('↩ UNDO DELETE', x + 106, y + 29, 16, '#ffd24a', 'left');
+  txt('bring back ' + trashInfo.name + "'S ISLAND", x + 106, y + 48, 12, '#9fd4f0');
+  txt(trashInfo.whenStr || '', x + 626, y + 36, 10, '#8fc4e0', 'right');
+}
 function renderTitle() {
   ctx.drawImage(SPR.titleBG, 0, 0);
   for (let i = 0; i < 7; i++) {
@@ -11446,37 +11696,38 @@ function renderTitle() {
   }
   ctx.globalAlpha = 1;
   ctx.drawImage(SPR.logo, W / 2 - 410, 42);
-  for (let i = 0; i < 3; i++) {
-    const x = W / 2 - 320, y = 268 + i * 116;
-    ctx.drawImage(i === slotSel ? SPR.cardSel : SPR.card, x, y);
-    const s = slots[i];
-    if (s) {
-      if (s.thumb) ctx.drawImage(s.thumb, x + 18, y + 22, 96, 54);
-      else drawFit(SPR.b.cabin, x + 66, y + 48, 52, 52);
-      otxt(s.name + "'S ISLAND", x + 134, y + 46, 21, '#fff', 'left');
-      txt('AGE ' + s.age + ' — ' + AGE_NAMES[s.age] + ' · POP ' + s.pop, x + 134, y + 76, 14, '#9fd4f0');
-      if (s.stars > 0) {
-        const label = s.stars <= 5 ? '★'.repeat(s.stars) : '★x' + s.stars;
-        txt(label, x + 134, y + 92, 13, '#ffd24a');
-      }
-      if (s.legends) { ctx.drawImage(SPR.star, x + 560, y + 26); txt('LEGEND', x + 546, y + 66, 11, '#ffd24a'); }
-      if (i === slotSel) txt('○ ERASE', x + 548, y + 88, 10, '#ff9a8a');
-    } else {
-      otxt('NEW ISLAND', x + 134, y + 52, 20, '#7dff9a', 'left');
-      txt('press ✕ to start building!', x + 134, y + 78, 13, '#9fd4f0');
-      drawFit(SPR.tree[0], x + 66, y + 50, 46, 60);
-    }
+  titlePollScroll();
+  /* flick glide + eased scroll (render-clocked) */
+  const smax = tScrollMax();
+  if (tVel) {
+    tScrollTgt = clamp(tScrollTgt + tVel / 60, 0, smax);
+    tVel *= 0.93;
+    if (Math.abs(tVel) < 6 || tScrollTgt <= 0 || tScrollTgt >= smax) tVel = 0;
   }
+  tScrollTgt = clamp(tScrollTgt, 0, smax);
+  tScroll += (tScrollTgt - tScroll) * 0.28;
+  if (Math.abs(tScroll - tScrollTgt) < 0.4) tScroll = tScrollTgt;
+  if (tFullT > 0) tFullT -= 1 / 60;
+  const n = tRowCount(), x = TL_X;
+  ctx.save();
+  ctx.beginPath(); ctx.rect(x - 44, TL_Y - 4, 692, TL_VH + 8); ctx.clip();
+  const r0 = Math.max(0, Math.floor(tScroll / TL_RP));
+  const r1 = Math.min(n - 1, Math.ceil((tScroll + TL_VH) / TL_RP));
+  for (let r = r0; r <= r1; r++) drawTitleRow(r, x, Math.round(TL_Y + r * TL_RP - tScroll));
   const bob = Math.sin(T * 2.5) * 3;
-  drawFit(SPR.mark, W / 2 - 344, 318 + slotSel * 116 + bob, 20, 18);
-  otxt('✕ CHOOSE ISLAND', W / 2, 664, 16, '#fff');
+  drawFit(SPR.mark, x - 24, TL_Y + slotSel * TL_RP - tScroll + 29 + bob, 20, 18);
+  ctx.restore();
+  /* ▲ ▼ — more shelf that way (tap zones too) */
+  if (tScroll > 2) { ctx.globalAlpha = 0.5 + 0.4 * Math.sin(T * 3); otxt('▲', W / 2, TL_Y - 12, 15, '#9fd4f0'); ctx.globalAlpha = 1; }
+  if (tScroll < smax - 2) { ctx.globalAlpha = 0.5 + 0.4 * Math.sin(T * 3); otxt('▼', W / 2, TL_Y + TL_VH + 26, 15, '#9fd4f0'); ctx.globalAlpha = 1; }
+  const hint = rowSave(slotSel) ? '✕ PLAY · ○ ERASE' : slotSel === 0 ? '✕ NEW ISLAND' : '✕ UNDO DELETE';
+  otxt(hint, W / 2, 664, 16, '#fff');
   txt('P2: PRESS ✕ ON PAD 2 DURING PLAY TO JOIN!', W / 2, 690, 12, '#8fc4e0', 'center');
   if (best > 0) txt('BEST POPULATION: ' + best, W / 2, 710, 12, '#ffd24a', 'center');
   if (confirmErase) {
     ctx.drawImage(SPR.dim, 0, 0);
-    const s = slots[confirmErase.slot];
     ctx.drawImage(SPR.modalP, W / 2 - 310, 240, 620, 250);
-    otxt('ERASE ' + (s ? s.name + "'S" : 'THIS') + ' ISLAND?', W / 2, 310, 24, '#ff9a8a');
+    otxt('ERASE ' + (confirmErase.name ? confirmErase.name + "'S" : 'THIS') + ' ISLAND?', W / 2, 310, 24, '#ff9a8a');
     txt('It will be gone forever!', W / 2, 345, 14, '#9fd4f0', 'center');
     otxt('YES', W / 2 - 90, 420, 26, confirmErase.yes ? '#ffd24a' : '#5a7a90');
     otxt('NO', W / 2 + 90, 420, 26, confirmErase.yes ? '#5a7a90' : '#ffd24a');
@@ -14140,6 +14391,7 @@ extraSprites();
 parked.set('moon', mkWorldBundle('moon', MGW, MGH));   // the worlds wait in the wings
 parked.set('mars', mkWorldBundle('mars', RGW, RGH));   // v6b: the Planet Pattern
 loadSlotSummaries();
+slotSel = slots.length ? 1 : 0;                 // boot lands on the freshest island (NEW stays one tap up)
 document.addEventListener('visibilitychange', () => { if (document.hidden) saveGame(); });
 addEventListener('pagehide', () => saveGame());
 requestAnimationFrame(loop);
