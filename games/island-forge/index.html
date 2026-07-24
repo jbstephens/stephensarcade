@@ -1050,6 +1050,159 @@ const GOALS = [
     live: () => 'ZIPZORP HAS MORE TO SHOW YOU — SOMEDAY!' },
 ];
 
+/* ═══ THE CLARITY PASS — derived per-world staple resources, goal needs,
+   and the contextual HUD bar's bookkeeping. Every table below is computed
+   ONCE at load from the building/mining/travel data above, so new
+   buildings and worlds keep the HUD honest without hand-lists. ═══ */
+/* what each world's ground gives when whacked by hand (mirrors the
+   harvest/vault yields — the only resource source that isn't a building) */
+const WORLD_MINE = {
+  earth: ['wood', 'stone'], moon: ['regolith', 'ice'], mars: ['rediron', 'frost'],
+  belt: ['astroiron', 'crystal', 'alloy', 'alientech'],
+  mercury: ['sunstone'], venus: ['veilglass'], jupiter: ['stormcore'], saturn: ['ringstone'],
+  uranus: ['tiltice'], neptune: ['galefrost'], pluto: ['heartice'], zipzorp: ['songcrystal'],
+};
+const WORLD_ORDER = ['earth', 'moon', 'mars', 'belt', 'mercury', 'venus', 'jupiter',
+                     'saturn', 'uranus', 'neptune', 'pluto', 'zipzorp'];
+const WORLD_LABEL = { earth: 'EARTH', moon: 'MOON', mars: 'MARS', belt: 'THE BELT',
+                     mercury: 'MERCURY', venus: 'VENUS', jupiter: 'JUPITER', saturn: 'SATURN',
+                     uranus: 'URANUS', neptune: 'NEPTUNE', pluto: 'PLUTO', zipzorp: 'ZIPZORP' };
+/* worlds a building can stand on (matches validAt's flag rules) */
+function bWorlds(d) {
+  if (d.mission) return [];
+  if (d.zip) return ['zipzorp'];
+  if (d.planet) return [d.planet];
+  if (d.gate) return GATE_WORLDS;
+  if (d.moon) return ['moon'];
+  if (d.mars) return ['mars'];
+  if (d.both) return ['earth', 'moon'];
+  return ['earth'];
+}
+/* staples: score every resource per world by how that world touches it —
+   made there +3, eaten there +2, building costs +1, mega feeds +1,
+   hand-mined there +4, travel fuel +3 — keep the top 9, RES_LIST order */
+const STAPLES = (() => {
+  const sc = {};
+  const add = (w, r, n) => {
+    if (r === 'power' || !RES_COL[r]) return;   // POWER always earns its own slot
+    if (!sc[w]) sc[w] = {};
+    sc[w][r] = (sc[w][r] || 0) + n;
+  };
+  for (const k in B) {
+    const d = B[k];
+    for (const w of bWorlds(d)) {
+      if (d.prod) for (const r in d.prod) add(w, r, 3);
+      if (d.cons) for (const r in d.cons) add(w, r, 2);
+      for (const r in d.cost) add(w, r, 1);
+      const fed = {};                            // each feed ladder counts a resource once
+      if (MEGA[k] && !d.gate) for (const f of MEGA[k].feeds) for (const r in f) fed[r] = 1;
+      if (d.gate) for (const f of (GATE_FEEDS[w] || [])) for (const r in f) fed[r] = 2;
+      for (const r in fed) add(w, r, fed[r]);
+    }
+  }
+  for (const w in WORLD_MINE) for (const r of WORLD_MINE[w]) add(w, r, 4);
+  for (const r in FUEL_COST) add('moon', r, 3);
+  for (const r in MARS_FUEL_COST) add('mars', r, 3);
+  const out = {};
+  for (const w of WORLD_ORDER) {
+    let list = RES_LIST.filter(r => sc[w] && sc[w][r]);
+    if (list.length > 9)                         // ties go to the older resource
+      list = list.sort((a, b2) => (sc[w][b2] - sc[w][a]) || (RES_LIST.indexOf(a) - RES_LIST.indexOf(b2)))
+                 .slice(0, 9)
+                 .sort((a, b2) => RES_LIST.indexOf(a) - RES_LIST.indexOf(b2));
+    out[w] = list;
+  }
+  /* thin worlds (Zipzorp: songcrystal alone) borrow Earth's headliners */
+  for (const w of WORLD_ORDER) {
+    if (out[w].length >= 6) continue;
+    for (const r of out.earth) {
+      if (out[w].length >= 6) break;
+      if (out[w].indexOf(r) < 0) out[w].push(r);
+    }
+    out[w].sort((a, b2) => RES_LIST.indexOf(a) - RES_LIST.indexOf(b2));
+  }
+  return out;
+})();
+/* which world each resource calls home (first producer/mine in world order) */
+const RES_ORIGIN = (() => {
+  const made = {};
+  const mk = (r, w) => { if (!made[r]) made[r] = {}; made[r][w] = 1; };
+  for (const k in B) {
+    const d = B[k];
+    if (d.prod) for (const w of bWorlds(d)) for (const r in d.prod) mk(r, w);
+  }
+  for (const w in WORLD_MINE) for (const r of WORLD_MINE[w]) mk(r, w);
+  const out = {};
+  for (const r of RES_LIST) {
+    out[r] = 'earth';
+    for (const w of WORLD_ORDER) if (made[r] && made[r][w]) { out[r] = w; break; }
+  }
+  return out;
+})();
+/* resources no building anywhere produces — you go get these yourself,
+   so a per-second rate would lie (John, 2026-07-24). If automation ever
+   arrives for one, its rate appears on its own. */
+const HAND_ONLY = (() => {
+  const auto = new Set();
+  for (const k in B) { const d = B[k]; if (d.prod) for (const r in d.prod) auto.add(r); }
+  return new Set(RES_LIST.filter(r => r !== 'power' && !auto.has(r)));
+})();
+/* resources the ACTIVE goal is asking for — parsed once from each goal's
+   ok()/live() source (res.X / life.X references) */
+const GOAL_NEEDS = GOALS.map(g => {
+  const src = String(g.ok) + (g.live ? String(g.live) : '');
+  return RES_LIST.filter(r => src.indexOf('res.' + r) >= 0 || src.indexOf('life.' + r) >= 0);
+});
+/* one shared unlock gate for a resource's HUD/stats visibility */
+function resUnlocked(r) {
+  if (RES_AGE[r] > age) return false;
+  if (LUNAR[r] && !(moonArrived || res.regolith > 0 || res.ice > 0 || res.he3 > 0)) return false;
+  if (MARTIAN[r] && !marsSeen()) return false;
+  if (ASTRO[r] && !astroSeen()) return false;
+  if (r === 'alloy' && !((res.alloy || 0) > 0 || (life.alloy || 0) > 0)) return false;
+  if (r === 'fuel' && !fuelSeen()) return false;
+  if (PLANET_RES[r] && !planetResSeen(r)) return false;
+  if (r === 'alientech' && !alienTechSeen()) return false;
+  if (r === 'songcrystal' && !songSeen()) return false;
+  return true;
+}
+/* contextual-bar bookkeeping (session-only, never saved) */
+const HUD_CAP = 12;                            // visible resource slots incl. POWER
+let hudSeen = null, hudPing = {};              // last known amounts + last-change clock
+let hudChipRect = null;                        // "+N △" chip hit-box (touch opens stats)
+function hudTrackPings() {                     // 27 numeric compares — negligible
+  if (!hudSeen) {                              // fresh game/load: learn amounts silently
+    hudSeen = {};
+    for (const r of RES_LIST) hudSeen[r] = res[r] || 0;
+    return;
+  }
+  for (const r of RES_LIST) {
+    const v = res[r] || 0;
+    if (v !== hudSeen[r]) { hudSeen[r] = v; hudPing[r] = T; }
+  }
+}
+/* the contextual bar: world staples + active-goal needs + fresh gains,
+   capped at HUD_CAP slots in stable RES_LIST order (extras retire only
+   once ~8s stale, so the row never reshuffles frame to frame) */
+function hudVisList() {
+  const stap = STAPLES[world] || STAPLES.earth;
+  const need = goalI < GOALS.length ? GOAL_NEEDS[goalI] : [];
+  const list = [], pri = [];
+  let unlocked = 0;
+  for (const r of RES_LIST) {
+    if (!resUnlocked(r)) continue;
+    unlocked++;
+    const p = (r === 'power' || need.indexOf(r) >= 0) ? 3
+            : stap.indexOf(r) >= 0 ? 2
+            : (hudPing[r] !== undefined && T - hudPing[r] < 8) ? 1 : 0;
+    if (p) { list.push(r); pri.push(p); }
+  }
+  for (let p = 1; p <= 2 && list.length > HUD_CAP; p++)   // trim gains first, then staples
+    for (let i = list.length - 1; i >= 0 && list.length > HUD_CAP; i--)
+      if (pri[i] === p) { list.splice(i, 1); pri.splice(i, 1); }
+  return { list, hid: unlocked - list.length };
+}
+
 /* ───── gentle disasters (age 3+, kid-visible warning, nothing lost) ───── */
 const DIS_FIRST = 480, DIS_MIN = 360, DIS_SPAN = 240;   // seconds
 const DIS_DEFS = {
@@ -1073,6 +1226,8 @@ let confirmErase = null;                      // { slot, yes }
 let modal = null;                             // { title, lines[] }
 let banners = [];                             // [{ title, sub, t, dur, legendary }]
 let paused = false, pauseOwner = 0, pauseIdx = 0, statsOpen = false;
+let statsTab = 0, statsScroll = [0, 0];       // △ menu: last tab + per-tab scroll (session-only)
+let sHeldDir = 0, sHeldNext = 0;              // held-repeat scroll state for the △ menu
 
 let age = 1, seed = 1, islandName = 'ISLE', legends = false, rocketDone = false;
 let rocketsLaunched = 0;                      // repeat launches → space cargo crates
@@ -4248,6 +4403,108 @@ function initSprites() {
     g.strokeStyle = 'rgba(255,210,74,0.55)'; g.lineWidth = 2; rr(g, 1, 1, 416, 26, 12); g.stroke();
     return c;
   })();
+  /* ── clarity-pass chrome: tab headers, the "+N △" chip, scroll arrows ── */
+  SPR.tabOn = (() => {
+    const [c, g] = C(220, 32);
+    g.fillStyle = 'rgba(255,210,74,0.18)'; rr(g, 0, 0, 220, 32, 10); g.fill();
+    g.strokeStyle = '#ffd24a'; g.lineWidth = 2.5; rr(g, 1.5, 1.5, 217, 29, 9); g.stroke();
+    return c;
+  })();
+  SPR.tabOff = (() => {
+    const [c, g] = C(220, 32);
+    g.fillStyle = 'rgba(9,26,40,0.6)'; rr(g, 0, 0, 220, 32, 10); g.fill();
+    g.strokeStyle = 'rgba(95,184,232,0.45)'; g.lineWidth = 2; rr(g, 1.5, 1.5, 217, 29, 9); g.stroke();
+    return c;
+  })();
+  SPR.chipP = (() => {
+    const [c, g] = C(52, 24);
+    g.fillStyle = 'rgba(9,26,40,0.85)'; rr(g, 0, 0, 52, 24, 11); g.fill();
+    g.strokeStyle = 'rgba(255,210,74,0.6)'; g.lineWidth = 2; rr(g, 1, 1, 50, 22, 10); g.stroke();
+    return c;
+  })();
+  SPR.scrUp = (() => {
+    const [c, g] = C(22, 14);
+    g.fillStyle = '#9fd8ff';
+    g.beginPath(); g.moveTo(2, 12); g.lineTo(20, 12); g.lineTo(11, 2); g.closePath(); g.fill();
+    return c;
+  })();
+  SPR.scrDn = (() => {
+    const [c, g] = C(22, 14);
+    g.fillStyle = '#9fd8ff';
+    g.beginPath(); g.moveTo(2, 2); g.lineTo(20, 2); g.lineTo(11, 12); g.closePath(); g.fill();
+    return c;
+  })();
+  /* tiny baked planet glyphs (14px) for the stats group headers — colors
+     match each world's established palette (solar-map PBALL + RES_COL) */
+  const glyph = (base, hi, fn) => (() => {
+    const [c, g] = C(14, 14);
+    g.fillStyle = base; g.beginPath(); g.arc(7, 7, 6.4, 0, 6.3); g.fill();
+    g.fillStyle = hi; g.beginPath(); g.arc(5.4, 5.2, 3.2, 0, 6.3); g.fill();
+    if (fn) fn(g);
+    return c;
+  })();
+  SPR.wglyph = {
+    earth: glyph('#4aa8c9', '#6fc4e0', g => {
+      g.fillStyle = '#58c96b';
+      g.beginPath(); g.arc(4.6, 6.4, 2.2, 0, 6.3); g.fill();
+      g.beginPath(); g.arc(9.4, 4.8, 1.7, 0, 6.3); g.fill();
+    }),
+    moon: glyph('#c2c9d6', '#dde3ec', g => {
+      g.fillStyle = '#8a919e';
+      g.beginPath(); g.arc(5, 8.4, 1.4, 0, 6.3); g.fill();
+      g.beginPath(); g.arc(9.2, 5.4, 1.1, 0, 6.3); g.fill();
+    }),
+    mars: glyph('#d05a36', '#e07a52', g => {
+      g.fillStyle = '#f0e2d8';
+      g.beginPath(); g.arc(7, 2.4, 1.6, 0, 6.3); g.fill();
+    }),
+    belt: (() => {                               // an asteroid, not a ball
+      const [c, g] = C(14, 14);
+      g.fillStyle = '#8a7a58';
+      g.beginPath(); g.moveTo(2, 8); g.lineTo(4, 3); g.lineTo(9, 2); g.lineTo(12.4, 6);
+      g.lineTo(11, 11.4); g.lineTo(5, 12.4); g.closePath(); g.fill();
+      g.fillStyle = '#b8a276';
+      g.beginPath(); g.moveTo(4, 7.4); g.lineTo(5.4, 4); g.lineTo(9.4, 3.4); g.lineTo(10.4, 7); g.closePath(); g.fill();
+      g.fillStyle = '#d8c49a'; g.fillRect(5.4, 5, 2.4, 1.8);
+      return c;
+    })(),
+    mercury: glyph('#b8825c', '#d09a70', g => {
+      g.fillStyle = '#8f5f40';
+      g.beginPath(); g.arc(8.8, 8.6, 1.5, 0, 6.3); g.fill();
+    }),
+    venus: glyph('#e8c894', '#f6e0b8', g => {
+      g.fillStyle = 'rgba(255,244,214,0.9)'; g.fillRect(2.4, 6.2, 9.2, 1.6);
+    }),
+    jupiter: glyph('#d8b890', '#e8cca8', g => {
+      g.fillStyle = '#b8825c'; g.fillRect(1.6, 4.2, 10.8, 1.6); g.fillRect(2, 8, 10, 1.4);
+      g.fillStyle = '#d05a36'; g.beginPath(); g.arc(9, 9, 1.5, 0, 6.3); g.fill();
+    }),
+    saturn: (() => {
+      const [c, g] = C(16, 14);
+      g.fillStyle = '#e0c088'; g.beginPath(); g.arc(8, 7, 4.8, 0, 6.3); g.fill();
+      g.fillStyle = '#f0d8a8'; g.beginPath(); g.arc(6.6, 5.6, 2.4, 0, 6.3); g.fill();
+      g.strokeStyle = '#e8d8b0'; g.lineWidth = 1.7;
+      g.beginPath(); g.ellipse(8, 7, 7.4, 2.4, -0.32, 0, 6.3); g.stroke();
+      return c;
+    })(),
+    uranus: glyph('#9fe8ff', '#c9f4ff', g => {
+      g.strokeStyle = 'rgba(255,255,255,0.75)'; g.lineWidth = 1.4;
+      g.beginPath(); g.ellipse(7, 7, 2.2, 6.2, 0.3, 0, 6.3); g.stroke();
+    }),
+    neptune: glyph('#3a7bd5', '#5c9ae8', g => {
+      g.fillStyle = 'rgba(255,255,255,0.7)'; g.fillRect(3, 6.4, 6.4, 1.4);
+    }),
+    pluto: glyph('#c9b0a0', '#dcc8ba', g => {
+      g.fillStyle = '#ffb4d0';
+      g.beginPath(); g.arc(5.9, 6.6, 1.5, 0, 6.3); g.arc(8.5, 6.6, 1.5, 0, 6.3); g.fill();
+      g.beginPath(); g.moveTo(4.6, 7.4); g.lineTo(7.2, 10.6); g.lineTo(9.8, 7.4); g.closePath(); g.fill();
+    }),
+    zipzorp: glyph('#2a6655', '#3aa890', g => {
+      g.fillStyle = '#7dffd4';
+      g.beginPath(); g.moveTo(4.4, 10); g.lineTo(5.4, 4.4); g.lineTo(6.6, 10); g.closePath(); g.fill();
+      g.beginPath(); g.moveTo(7.4, 10); g.lineTo(8.8, 3); g.lineTo(10.2, 10); g.closePath(); g.fill();
+    }),
+  };
   SPR.flashW = (() => {
     const [c, g] = C(W, H);
     g.fillStyle = '#f0f5ff'; g.fillRect(0, 0, W, H);
@@ -11576,6 +11833,8 @@ function resetWorldState() {
   meteorsBlocked = 0; lastImpact = null; wobbleN = 0; clearBalls();
   rates = {}; playtime = 0; simAcc = 0; autosaveT = 0;
   banners = []; modal = null; paused = false; statsOpen = false;
+  hudSeen = null; hudPing = {};                // contextual bar re-learns amounts silently
+  statsTab = 0; statsScroll = [0, 0];
   for (const p of parts) p.on = false;
   for (const f of floats) f.on = false;
   for (const d of sparks) d.on = false;
@@ -16148,6 +16407,7 @@ function updatePlayer(p, dt) {
 }
 function moveVec(pi) {
   let dx = 0, dy = 0;
+  if (statsOpen) return { dx, dy };             // △ menu owns the dpad while open
   if (PADS && PADS[pi] && PADS[pi].connected) {
     const pd = PADS[pi];
     dx += pd.axis('lx'); dy += pd.axis('ly');
@@ -16228,9 +16488,12 @@ function onBtn(pi, b) {
   }
   if (statsOpen) {
     if (b === 'north' || b === 'east' || b === 'south') { statsOpen = false; SFX.ui(); }
+    else if (b === 'left' || b === 'right') statsSetTab(statsTab ^ 1);
+    else if (b === 'up') statsScrollBy(-1);
+    else if (b === 'down') statsScrollBy(1);
     return;
   }
-  if (b === 'north') { statsOpen = true; SFX.ui(); return; }
+  if (b === 'north') { openStatsMenu(); return; }
   if (p.inside) {                                // v5b: inside a building
     if (b === 'south') interactInside(p);
     else if (b === 'east') {
@@ -16573,7 +16836,20 @@ function tapAt(x, y) {
     paused = false;
     return;
   }
-  if (statsOpen) { statsOpen = false; SFX.ui(); return; }
+  if (statsOpen) {                              // tabs + scroll arrows are tappable
+    const sx = W / 2 - 480, sy = 80;
+    if (y > sy + 74 && y < sy + 118) {
+      if (x > sx + 240 && x < sx + 480) { statsSetTab(0); return; }
+      if (x > sx + 480 && x < sx + 720) { statsSetTab(1); return; }
+    }
+    const acx = statsTab === 0 ? sx + 200 : sx + 480;
+    if (Math.abs(x - acx) < 110 && y > sy + 104 && y < sy + 144) { statsScrollBy(-1); return; }
+    if (Math.abs(x - acx) < 110 && y > sy + 496 && y < sy + 530) { statsScrollBy(1); return; }
+    statsOpen = false; SFX.ui(); return;
+  }
+  if (hudChipRect && players[0] && !players[0].aboard &&
+      x > hudChipRect.x - 6 && x < hudChipRect.x + hudChipRect.w + 6 &&
+      y < hudChipRect.y + hudChipRect.h + 6) { openStatsMenu(); return; }   // "+N △" chip
   const p = players[0];
   if (!p || p.aboard) return;                   // aboard: tbB (○) hops out
   if (p.mode === 'cannon') return;              // v4c: dedicated ◀ ▶ PWR FIRE buttons drive it
@@ -16875,6 +17151,36 @@ function renderName() {
   txt('D-PAD MOVE · ✕ PICK · ○ ERASE · START = DONE', W / 2, 640, 13, '#8fc4e0', 'center');
 }
 
+/* fit a line into maxW: step the font down first, then ellipsize with '…'.
+   (measureText only — cheap, and callers cache the result per string) */
+function fitLine(s, maxW, fs0, fsMin, weight) {
+  for (let fs = fs0; fs >= fsMin; fs -= 0.5) {
+    ctx.font = (weight || 700) + ' ' + fs + 'px Verdana, sans-serif';
+    const w = ctx.measureText(s).width;
+    if (w <= maxW) return { str: s, fs, w };
+  }
+  let t2 = s;
+  while (t2.length > 2 && ctx.measureText(t2 + '…').width > maxW) t2 = t2.slice(0, -1);
+  return { str: t2 + '…', fs: fsMin, w: ctx.measureText(t2 + '…').width };
+}
+/* the gold goal capsule — text is measured and the capsule grows to fit;
+   over-long lines step down a size, then ellipsize (cached per string) */
+let gsFit = { s: null, fs: 12, str: '', w: 200 };
+function drawGoalStrip() {
+  const done = goalI >= GOALS.length;
+  const s = done ? 'ALL GOALS DONE!'
+    : 'GOAL: ' + ((GOALS[goalI].live && GOALS[goalI].live()) || GOALS[goalI].t);
+  if (gsFit.s !== s) {
+    const f = fitLine(s, 660, 12, 10, 700);
+    gsFit = { s, fs: f.fs, str: f.str, w: f.w };
+  }
+  const cw = Math.max(250, Math.ceil(gsFit.w) + 52);   // star + comfy padding
+  ctx.drawImage(SPR.goalP, 0, 0, 16, 30, 8, 50, 16, 30);
+  ctx.drawImage(SPR.goalP, 16, 0, 388, 30, 24, 50, cw - 32, 30);
+  ctx.drawImage(SPR.goalP, 404, 0, 16, 30, cw - 8, 50, 16, 30);
+  ctx.drawImage(SPR.star, 20, 55);
+  txt(gsFit.str, 44, 69, gsFit.fs, done ? '#ffd24a' : '#ffe9a8');
+}
 function drawHUD() {
   ctx.drawImage(SPR.hudBar, 0, 0);
   otxt('AGE ' + age, 16, 28, 18, '#ffd24a', 'left');
@@ -16899,53 +17205,31 @@ function drawHUD() {
   else if (world === 'moon' && !moonReturnDone) drawMoonStrip();
   else if (world === 'mars' && !marsReturnDone) drawMarsStrip();   // v6b: the MARS MISSION
   else if (focusIl) drawColonyStrip(focusIl);
-  else if (goalI < GOALS.length) {
-    ctx.drawImage(SPR.goalP, 8, 50);
-    ctx.drawImage(SPR.star, 20, 55);
-    txt('GOAL: ' + ((GOALS[goalI].live && GOALS[goalI].live()) || GOALS[goalI].t), 44, 69, 12, '#ffe9a8');
-  } else {
-    ctx.drawImage(SPR.goalP, 8, 50, 250, 30);
-    ctx.drawImage(SPR.star, 20, 55);
-    txt('ALL GOALS DONE!', 44, 69, 12, '#ffd24a');
-  }
-  /* resources — lunar ones join once discovered; row tightens to fit */
-  const lunarSeen = moonArrived || res.regolith > 0 || res.ice > 0 || res.he3 > 0;
-  const vis = [];
-  for (const r of RES_LIST) {
-    if (RES_AGE[r] > age) continue;
-    if (LUNAR[r] && !lunarSeen) continue;
-    if (MARTIAN[r] && !marsSeen()) continue;     // v6b: Mars resources appear on discovery
-    if (ASTRO[r] && !astroSeen()) continue;      // v7: belt resources appear after the first haul
-    if (r === 'alloy' && !((res.alloy || 0) > 0 || (life.alloy || 0) > 0)) continue;   // v7: rare — earns its slot
-    if (r === 'fuel' && !fuelSeen()) continue;   // v6a: FUEL appears once discovered
-    if (PLANET_RES[r] && !planetResSeen(r)) continue;   // v8a: planet stones appear once mined
-    if (r === 'alientech' && !alienTechSeen()) continue;   // v8c: the gate fuel earns its slot
-    if (r === 'songcrystal' && !songSeen()) continue;   // v9a: waits for the cave's first song
-    vis.push(r);
-  }
-  /* v6b: a fourth, ultra-tight tier absorbs the 14-icon Mars row.
-     v7: a fifth, heroic tier squeezes the 17-18 icon endgame in.
-     v8a: a sixth, cosmic tier for the full 19-20 planet ledger.
-     v8b: a seventh, nine-planet tier (icons shrink to 16px) fits all 25.
-     v8c: an eighth, gate-network tier squeezes ALIEN TECH in — all 26. */
-  const tight = vis.length > 8, extraTight = vis.length > 11, ultraTight = vis.length > 12,
-        heroTight = vis.length > 14, cosmicTight = vis.length > 17, nineTight = vis.length > 20,
-        gateTight = vis.length > 25, zipTight = vis.length > 26;   // v9a: the 27-icon galaxy ledger
-  let x = zipTight ? 226 : gateTight ? 232 : nineTight ? 240 : cosmicTight ? 258 : heroTight ? 272 : extraTight ? 284 : tight ? 292 : 306;
-  const sp2 = zipTight ? 33 : gateTight ? 34 : nineTight ? 36 : cosmicTight ? 43 : heroTight ? 47 : ultraTight ? 56 : extraTight ? 67 : tight ? 72 : 88,
-        spPow = zipTight ? 41 : gateTight ? 42 : nineTight ? 45 : cosmicTight ? 54 : heroTight ? 60 : ultraTight ? 70 : extraTight ? 78 : tight ? 86 : 96,
-        fs = zipTight ? 7.2 : gateTight ? 7.5 : nineTight ? 8 : cosmicTight ? 8.5 : heroTight ? 9 : ultraTight ? 10 : extraTight ? 11 : tight ? 11.5 : 13;
-  for (const r of vis) {
-    if (nineTight) ctx.drawImage(SPR.icon[r], x, 10, 16, 16);
-    else ctx.drawImage(SPR.icon[r], x, 8);
+  else drawGoalStrip();
+  /* ── the CONTEXTUAL resource bar: this world's staples + what the goal
+     wants + anything that just changed — never the whole 27-icon ledger.
+     Hidden resources roll up into a "+N △" chip (△ opens the full list). */
+  hudTrackPings();
+  const hv = hudVisList();
+  let x = 258;
+  hudChipRect = null;
+  for (const r of hv.list) {
+    ctx.drawImage(SPR.icon[r], x, 8);
     if (r === 'power') {
-      txt('MAKE ' + powerInc, x + (nineTight ? 18 : 24), 19, nineTight ? 8.5 : 10, RES_COL.power);
-      txt('USE ' + powerDem, x + (nineTight ? 18 : 24), 31, nineTight ? 8.5 : 10, powerInc + battCharge >= powerDem ? '#cfe8f4' : '#ff9a8a');
-      x += spPow;
+      txt('MAKE ' + powerInc, x + 24, 19, 10, RES_COL.power);
+      txt('USE ' + powerDem, x + 24, 31, 10, powerInc + battCharge >= powerDem ? '#cfe8f4' : '#ff9a8a');
+      x += 68;
     } else {
-      txt(fmt(res[r]), x + (nineTight ? 18 : 24), 25, fs, RES_COL[r]);
-      x += sp2;
+      const s = fmt(res[r]);
+      txt(s, x + 23, 25, s.length > 4 ? 9 : 10.5, RES_COL[r]);
+      x += 56;
     }
+  }
+  if (hv.hid > 0) {
+    ctx.drawImage(SPR.chipP, x, 8);
+    txt('+' + hv.hid, x + 7, 24, 10.5, '#cfe8f4');
+    txt('△', x + (hv.hid > 9 ? 28 : 22), 24, 10, '#ffd24a');
+    hudChipRect = { x, y: 4, w: 56, h: 32 };
   }
   const cap = capPop();
   ctx.drawImage(SPR.icon.pop, W - 128, 8);
@@ -17368,93 +17652,203 @@ function drawCannonUI(p) {
   }
 }
 
+/* ═══ the △ menu — two tabs: RESOURCES (grouped by origin world) and
+   GOALS (the whole ladder). Everything scrolls; nothing ever overflows. ═══ */
+const ST_ROWS = 15, ST_STEP = 25;              // visible list rows + row pitch
+function statsResRows() {                      // tab 1: group headers + resources
+  const rows = [];
+  for (const w of WORLD_ORDER) {
+    const list = RES_LIST.filter(r => r !== 'power' && RES_ORIGIN[r] === w && resUnlocked(r));
+    const pow = w === 'earth' && age >= RES_AGE.power;   // POWER lives with EARTH (its own row)
+    if (!list.length && !pow) continue;
+    rows.push({ hdr: w });
+    if (pow) rows.push({ res: 'power' });
+    for (const r of list) rows.push({ res: r });
+  }
+  return rows;
+}
+function statsGoalRows() {                     // tab 2: the whole ladder
+  const rows = [];
+  for (let i = 0; i < GOALS.length; i++) {
+    const g = GOALS[i];
+    const cur = i === goalI;
+    const done = i < goalI || (g.side && !cur && g.ok());
+    rows.push({ i, g, done, cur });
+    if (cur && g.live && g.live()) rows.push({ hint: g.live() });
+  }
+  return rows;
+}
+function statsMaxScroll(tab) {
+  return Math.max(0, (tab === 0 ? statsResRows() : statsGoalRows()).length - ST_ROWS);
+}
+function statsScrollBy(d) {
+  const v = clamp(statsScroll[statsTab] + d, 0, statsMaxScroll(statsTab));
+  if (v !== statsScroll[statsTab]) { statsScroll[statsTab] = v; SFX.ui(); }
+}
+function statsSnapGoal() {                     // centre the current goal on open
+  const rows = statsGoalRows();
+  let at = 0;
+  for (let i = 0; i < rows.length; i++) if (rows[i].cur) { at = i; break; }
+  statsScroll[1] = clamp(at - 4, 0, Math.max(0, rows.length - ST_ROWS));
+}
+function statsSetTab(t2) {
+  statsTab = t2 ? 1 : 0;
+  if (statsTab === 1) statsSnapGoal();
+  statsScroll[statsTab] = clamp(statsScroll[statsTab], 0, statsMaxScroll(statsTab));
+  SFX.ui();
+}
+function openStatsMenu() {
+  statsOpen = true;
+  sHeldDir = 0;
+  if (statsTab === 1) statsSnapGoal();
+  SFX.ui();
+}
+/* held-repeat scroll — same recipe as the title shelf (press events give
+   the crisp first step; the stick has no press event so it steps itself) */
+function statsPollScroll() {
+  let db = 0, ds = 0;
+  if (keys.ArrowUp || keys.KeyW) db--;
+  if (keys.ArrowDown || keys.KeyS) db++;
+  if (PADS) for (const pd of PADS) {
+    if (!pd || !pd.connected) continue;
+    if (pd.button('up')) db--;
+    if (pd.button('down')) db++;
+    const ly = pd.axis('ly');
+    if (ly < -0.55) ds--; else if (ly > 0.55) ds++;
+  }
+  const dir = db ? (db < 0 ? -1 : 1) : ds ? (ds < 0 ? -1 : 1) : 0;
+  const now = performance.now();
+  if (dir !== sHeldDir) {
+    sHeldDir = dir;
+    if (dir) {
+      if (!db) statsScrollBy(dir);             // stick-only engage
+      sHeldNext = now + 280;
+    }
+  } else if (dir && now >= sHeldNext) { statsScrollBy(dir); sHeldNext = now + 115; }
+}
 function drawStats() {
+  statsPollScroll();
   ctx.drawImage(SPR.dim, 0, 0);
   const x = W / 2 - 480, y = 80;
   ctx.drawImage(SPR.statsP, x, y, 960, 560);
-  otxt(islandName + "'S ISLAND", W / 2, y + 46, 24, '#ffd24a');
-  txt('AGE ' + age + ' — ' + AGE_NAMES[age] + (legends ? ' ★ LEGENDS' : ''), W / 2, y + 72, 14, '#9fd4f0', 'center');
-  const rq = REQ_NEXT[age];
-  if (rq) {
-    txt('NEXT AGE: ' + rq.text, x + 40, y + 104, 12, '#8fc4e0');
-    ctx.drawImage(SPR.pbar, x + 40, y + 114);
-    const w = Math.max(2, Math.floor(clamp(rq.prog(), 0, 1) * 164));
-    ctx.drawImage(SPR.pfill, 0, 0, w, 8, x + 43, y + 117, w, 8);
-  } else txt(legends ? 'AGE OF LEGENDS — keep building!'
-             : age >= 7 ? 'Build the STAR GATE on the moon!'
-             : 'Build a LAUNCH PAD, then the ROCKET!', x + 40, y + 110, 12, '#ffd24a');
-  let ry = y + 170;
-  const statRes = RES_LIST.filter(r => RES_AGE[r] <= age &&
-    !(r === 'fuel' && !fuelSeen()) && !(MARTIAN[r] && !marsSeen()) &&
-    !(ASTRO[r] && !astroSeen()) &&
-    !(PLANET_RES[r] && !planetResSeen(r)) &&
-    !(r === 'alientech' && !alienTechSeen()));   // v6a/v6b/v7/v8a/v8c gating
-  const rStep = statRes.length > 24 ? 15 : statRes.length > 21 ? 16 : statRes.length > 18 ? 22 : statRes.length > 15 ? 24 : statRes.length > 12 ? 28 : 34;   // v8a/v8b/v8c: up to 26 rows squeeze in
-  const rFs = rStep < 20 ? 10.5 : 13;
-  for (const r of statRes) {
-    if (rStep < 20) ctx.drawImage(SPR.icon[r], x + 40, ry - 12, 14, 14);
-    else ctx.drawImage(SPR.icon[r], x + 40, ry - 15);
-    if (r === 'power') {
-      txt('POWER', x + 70, ry, rFs, '#cfe8f4');
-      txt(powerInc + ' made / ' + powerDem + ' used', x + 170, ry, rFs, powerInc >= powerDem ? RES_COL.power : '#ff9a8a');
+  otxt(islandName + "'S ISLAND", W / 2, y + 42, 22, '#ffd24a');
+  txt('AGE ' + age + ' — ' + AGE_NAMES[age] + (legends ? ' ★ LEGENDS' : ''), W / 2, y + 64, 13, '#9fd4f0', 'center');
+  /* tab headers — ◀ ▶ swap, and they're tappable */
+  const tl = ['RESOURCES', 'GOALS ' + Math.min(goalI, GOALS.length) + '/' + GOALS.length];
+  for (let i = 0; i < 2; i++) {
+    const tx0 = x + 250 + i * 240, sel = statsTab === i;
+    ctx.drawImage(sel ? SPR.tabOn : SPR.tabOff, tx0, y + 80);
+    txt(tl[i], tx0 + 110, y + 101, 13, sel ? '#ffd24a' : '#7a9cb8', 'center');
+  }
+  txt('◀', x + 226, y + 102, 13, '#8fc4e0', 'center');
+  txt('▶', x + 734, y + 102, 13, '#8fc4e0', 'center');
+  if (statsTab === 0) drawStatsRes(x, y);
+  else drawStatsGoals(x, y);
+  txt('◀ ▶ TABS · ▲ ▼ SCROLL · △ CLOSE', W / 2, y + 532, 12, '#8fc4e0', 'center');
+}
+/* scroll arrows over a list column (shown only when content continues) */
+function statsArrows(cx2, y, s0, smax) {
+  if (s0 > 0) ctx.drawImage(SPR.scrUp, cx2 - 11, y + 118);
+  if (s0 < smax) ctx.drawImage(SPR.scrDn, cx2 - 11, y + 506);
+}
+function drawStatsRes(x, y) {
+  const rows = statsResRows();
+  const smax = Math.max(0, rows.length - ST_ROWS);
+  const s0 = statsScroll[0] = clamp(statsScroll[0], 0, smax);
+  let ry = y + 150;
+  for (let i = s0; i < Math.min(rows.length, s0 + ST_ROWS); i++) {
+    const row = rows[i];
+    if (row.hdr) {
+      ctx.drawImage(SPR.wglyph[row.hdr], x + 40, ry - 12);
+      txt(WORLD_LABEL[row.hdr], x + 62, ry, 11, '#ffd24a');
+    } else if (row.res === 'power') {
+      ctx.drawImage(SPR.icon.power, x + 46, ry - 15);
+      txt('POWER', x + 74, ry, 12, '#cfe8f4');
+      txt(powerInc + ' made / ' + powerDem + ' used', x + 176, ry, 11, powerInc >= powerDem ? RES_COL.power : '#ff9a8a');
     } else {
-      txt(r.toUpperCase(), x + 70, ry, rFs, '#cfe8f4');
-      txt(fmt(res[r]), x + 170, ry, rFs, RES_COL[r]);
+      const r = row.res;
+      ctx.drawImage(SPR.icon[r], x + 46, ry - 15);
+      txt(r.toUpperCase(), x + 74, ry, 12, '#cfe8f4');
+      txt(fmt(res[r]), x + 200, ry, 12, RES_COL[r]);
       const rt = rates[r] || 0;
-      txt((rt >= 0 ? '+' : '') + rt.toFixed(1) + '/s', x + 250, ry, rFs, rt >= 0 ? '#7dff9a' : '#ff9a8a');
+      if (HAND_ONLY.has(r) && rt > -0.049)     // hand-gathered: no rate to promise
+        txt('BY HAND', x + 282, ry, 10, '#9fb4c4');
+      else if (rt > 0.049 || rt < -0.049)
+        txt((rt >= 0 ? '+' : '') + rt.toFixed(1) + '/s', x + 282, ry, 11, rt >= 0 ? '#7dff9a' : '#ff9a8a');
     }
-    ry += rStep;
+    ry += ST_STEP;
   }
+  statsArrows(x + 200, y, s0, smax);
+  /* right column — the island ledger (compact; GOALS moved to their tab).
+     Long lines fit to the column so nothing clips under the minimap. */
   const cap = capPop();
-  let iy = y + 170;
+  let iy = y + 150;
+  const rc = (s, fs, col, x2) => {               // fitted ledger line
+    const f = fitLine(s, 248 - ((x2 || 0)), fs, 9.5, 700);
+    txt(f.str, x + 380 + (x2 || 0), iy, f.fs, col);
+    iy += 24;
+  };
   ctx.drawImage(SPR.icon.pop, x + 380, iy - 15);
-  txt('POPULATION', x + 410, iy, 13, '#cfe8f4');
-  txt(pop + ' / ' + cap + (hungry ? '  (hungry!)' : ''), x + 410, iy + 20, 13, hungry ? '#ff9a8a' : RES_COL.pop);
-  iy += 54;
-  txt('BUILDINGS', x + 380, iy, 13, '#cfe8f4');
-  txt('' + (buildings.length - cnt('campfire')), x + 380, iy + 20, 13, '#ffd24a');
-  iy += 54;
+  rc('POPULATION ' + pop + '/' + cap + (hungry ? ' (hungry!)' : ''), 12, hungry ? '#ff9a8a' : RES_COL.pop, 28);
+  rc('BUILDINGS: ' + (buildings.length - cnt('campfire')), 12, '#ffd24a');
   const pvN = PV_KEYS.filter(k => planetsVisited[k]).length;   // v8b: the roll call got long
-  txt('ISLANDS: ' + (1 + settled.length) + (moonArrived ? ' + MOON' : '') + (marsArrived ? ' + MARS' : '')
-      + (pvN ? ' + ' + pvN + ' PLANET' + (pvN > 1 ? 'S' : '') : ''),
-      x + 380, iy, 13, '#7dffd4');
-  iy += 30;
-  txt('GOALS: ' + Math.min(goalI, GOALS.length) + '/' + GOALS.length, x + 380, iy, 13, '#ffe9a8');
-  iy += 30;
-  if (stars > 0) { txt('★ BONUS +' + (stars * 10) + '%', x + 380, iy, 13, '#ffd24a'); iy += 30; }
-  if (marsBaseDone) { txt('MARS ★ METAL +10%', x + 380, iy, 13, '#ff8a66'); iy += 30; }   // v6b
-  txt('ROBOTS: ' + robots.length + (drakes.length > 1 ? ' · 2 DRAKES!' : drakes.length ? ' · PET DRAKE!' : ''), x + 380, iy, 12, '#9fd4f0');
-  iy += 30;
-  if (rocketsLaunched > 0) { txt('ROCKETS: ' + rocketsLaunched, x + 380, iy, 12, '#9fd4f0'); iy += 30; }
-  if (meteorsBlocked > 0 || cnt('popcannon') > 0) { txt('METEORS BLOCKED: ' + meteorsBlocked, x + 380, iy, 12, '#7dffe0'); iy += 30; }
-  if (devilsTamed > 0) { txt('DUST DEVILS TAMED: ' + devilsTamed, x + 380, iy, 12, '#ff8a66'); iy += 30; }   // v6b
+  rc('ISLANDS: ' + (1 + settled.length) + (moonArrived ? ' + MOON' : '') + (marsArrived ? ' + MARS' : '')
+      + (pvN ? ' + ' + pvN + ' PLANET' + (pvN > 1 ? 'S' : '') : ''), 12, '#7dffd4');
+  if (stars > 0) rc('★ BONUS +' + (stars * 10) + '%', 12, '#ffd24a');
+  if (marsBaseDone) rc('MARS ★ METAL +10%', 12, '#ff8a66');    // v6b
+  rc('ROBOTS: ' + robots.length + (drakes.length > 1 ? ' · 2 DRAKES!' : drakes.length ? ' · PET DRAKE!' : ''), 12, '#9fd4f0');
+  if (rocketsLaunched > 0) rc('ROCKETS: ' + rocketsLaunched, 12, '#9fd4f0');
+  if (meteorsBlocked > 0 || cnt('popcannon') > 0) rc('METEORS BLOCKED: ' + meteorsBlocked, 12, '#7dffe0');
+  if (devilsTamed > 0) rc('DUST DEVILS TAMED: ' + devilsTamed, 12, '#ff8a66');   // v6b
   /* v7: the asteroid ledger (compact — the right column is a busy place) */
-  if (expeditionsDone > 0) {
-    txt('EXPEDITIONS: ' + expeditionsDone + (beaconsFound > 0 ? ' · BEACONS: ' + beaconsFound + '/3' + (mapAssembled ? ' ★' : '') : ''),
-        x + 380, iy, 12, '#d8c49a'); iy += 30;
-  }
-  if (megaCompleteTotal() > 0) {
-    txt('MEGASTRUCTURES: ' + megaCompleteTotal() + (megaCompleteCnt('starharbor') > 0 ? ' · STAR HARBOR ★ AUTO-CARGO' : ''),
-        x + 380, iy, 12, '#b7e3ff'); iy += 30;
-  }
-  if (gatesDone > 0) {                           // v8c: the gate ledger
-    txt('TELEPORT GATES: ' + gatesDone + '/9' + (networkDone ? ' ★ THE NINE ARE ONE!' : ''),
-        x + 380, iy, 12, '#c99bff'); iy += 30;
-  }
+  if (expeditionsDone > 0)
+    rc('EXPEDITIONS: ' + expeditionsDone + (beaconsFound > 0 ? ' · BEACONS: ' + beaconsFound + '/3' + (mapAssembled ? ' ★' : '') : ''),
+       11, '#d8c49a');
+  if (megaCompleteTotal() > 0)
+    rc('MEGASTRUCTURES: ' + megaCompleteTotal() + (megaCompleteCnt('starharbor') > 0 ? ' · STAR HARBOR ★' : ''),
+       11, '#b7e3ff');
+  if (gatesDone > 0)                             // v8c: the gate ledger
+    rc('TELEPORT GATES: ' + gatesDone + '/9' + (networkDone ? ' ★ THE NINE ARE ONE!' : ''), 11, '#c99bff');
   /* v8a/v8b: the planet ledger — compact, like everything on this column */
   if (clipperStage > 0) {
     let pb = 0;
     for (const pk of PV_KEYS) pb += planetMegaCnt(pk);
-    txt('STAR CLIPPER: ' + (clipperStage >= 3 ? '★ READY' : clipperStage + '/3')
-        + (pb > 0 ? ' · PLANET BUILDS: ' + pb + '/28' : ''),
-        x + 380, iy, 12, '#9fd8ff'); iy += 30;
+    rc('STAR CLIPPER: ' + (clipperStage >= 3 ? '★ READY' : clipperStage + '/3')
+       + (pb > 0 ? ' · PLANET BUILDS: ' + pb + '/28' : ''), 11, '#9fd8ff');
   }
-  const mins = Math.floor(playtime / 60);
-  txt('PLAY TIME: ' + mins + 'm', x + 380, iy, 12, '#9fd4f0');
-  iy += 30;
-  txt('BEST POP EVER: ' + best, x + 380, iy, 12, '#ffd24a');
-  /* minimap god-view — one scaled blit of the ACTIVE world's bake + dots.
-     v4b: 🌍/🌙 tab hint shows which world you're looking at. */
+  rc('PLAY TIME: ' + Math.floor(playtime / 60) + 'm', 12, '#9fd4f0');
+  rc('BEST POP EVER: ' + best, 12, '#ffd24a');
+  drawStatsMap(x, y);
+}
+function drawStatsGoals(x, y) {
+  const rows = statsGoalRows();
+  const smax = Math.max(0, rows.length - ST_ROWS);
+  const s1 = statsScroll[1] = clamp(statsScroll[1], 0, smax);
+  let ry = y + 150;
+  for (let i = s1; i < Math.min(rows.length, s1 + ST_ROWS); i++) {
+    const row = rows[i];
+    if (row.hint !== undefined) {                // the live hint under the current goal
+      const f = fitLine(row.hint, 800, 11.5, 10, 700);
+      txt(f.str, x + 92, ry, f.fs, '#ffe9a8');
+    } else if (row.cur) {
+      txt('►', x + 56, ry, 13, '#ffd24a', 'center');
+      txt(row.g.t, x + 74, ry, 13, '#ffd24a');
+      if (row.g.side) txt('ANYTIME', x + 900, ry, 9.5, '#7dffd4', 'right');
+    } else if (row.done) {
+      txt('✓', x + 56, ry, 13, '#7dff9a', 'center');
+      txt(row.g.t, x + 74, ry, 12.5, '#6f8fa5');
+      if (row.g.side) txt('ANYTIME', x + 900, ry, 9.5, 'rgba(125,255,212,0.5)', 'right');
+    } else {                                     // upcoming — title only, no spoilers
+      txt(row.g.t, x + 74, ry, 12.5, '#54748c');
+      if (row.g.side) txt('ANYTIME', x + 900, ry, 9.5, '#7dffd4', 'right');
+    }
+    ry += ST_STEP;
+  }
+  statsArrows(x + 480, y, s1, smax);
+}
+/* minimap god-view — one scaled blit of the ACTIVE world's bake + dots.
+   v4b: 🌍/🌙 tab hint shows which world you're looking at. */
+function drawStatsMap(x, y) {
   const mx0 = x + 636, my0 = y + 150;
   txt(world === 'moon' ? 'MOON MAP' : world === 'mars' ? 'MARS MAP'
       : PLANET_WORLDS[world] ? world.toUpperCase() + ' MAP' : 'WORLD MAP',
@@ -17490,7 +17884,6 @@ function drawStats() {
         mx0 + 214, cy2, 10, il.lvl >= 4 ? '#ffd24a' : '#8fc4e0');
     cy2 += 26;
   }
-  txt('△ / V — CLOSE', W / 2, y + 532, 13, '#8fc4e0', 'center');
 }
 
 function drawPause() {
@@ -17862,13 +18255,18 @@ function drawBanner(b) {
   const sc = Math.min(1, b.t * 4.5);
   let al = 1;
   if (b.t > b.dur - 0.4) al = Math.max(0, (b.dur - b.t) / 0.4);
+  if (!b.fit || b.fit.key !== b.title + '|' + (b.sub || '')) {   // measured once per banner
+    b.fit = { key: b.title + '|' + (b.sub || ''),
+              t: fitLine(b.title, 712, 34, 22, 900),
+              s: b.sub ? fitLine(b.sub, 712, 15, 11, 700) : null };
+  }
   ctx.save();
   ctx.globalAlpha = al;
   ctx.translate(W / 2, 170);
   ctx.scale(sc, sc);
   ctx.drawImage(SPR.bannerP, -390, -66, 780, 132);
-  otxt(b.title, 0, 0, 34, b.legendary ? '#ffd24a' : '#7dff9a');
-  if (b.sub) txt(b.sub, 0, 34, 15, '#cfe8f4', 'center');
+  otxt(b.fit.t.str, 0, 0, b.fit.t.fs, b.legendary ? '#ffd24a' : '#7dff9a');
+  if (b.fit.s) txt(b.fit.s.str, 0, 34, b.fit.s.fs, '#cfe8f4', 'center');
   if (b.legendary) {
     ctx.drawImage(SPR.spark[((T * 6) | 0) % 2], -360, -40);
     ctx.drawImage(SPR.spark[((T * 6 + 1) | 0) % 2], 344, -40);
@@ -19381,6 +19779,33 @@ function loop(t) {
 /* ───── test hooks (used by the CI harness; harmless to ship) ───── */
 window.__test = {
   _spr: SPR,
+  /* ── clarity-pass hooks ── */
+  hudInfo() {
+    const v = hudVisList();
+    return { slots: v.list.slice(), hidden: v.hid,
+             chip: hudChipRect ? Object.assign({}, hudChipRect) : null,
+             world, staples: (STAPLES[world] || STAPLES.earth).slice(),
+             goalNeeds: goalI < GOALS.length ? GOAL_NEEDS[goalI].slice() : [] };
+  },
+  openStats(tab) {
+    if (tab !== undefined) statsTab = tab ? 1 : 0;
+    openStatsMenu();
+    return statsTab;
+  },
+  statsInfo() {
+    const rows = statsTab === 0 ? statsResRows() : statsGoalRows();
+    return { open: statsOpen, tab: statsTab, scroll: statsScroll.slice(),
+             visRows: ST_ROWS, maxScroll: statsMaxScroll(statsTab),
+             rows: rows.map(r2 => r2.hdr ? { hdr: r2.hdr }
+                               : r2.res ? { res: r2.res }
+                               : r2.hint !== undefined ? { hint: r2.hint }
+                               : { i: r2.i, t: r2.g.t, done: r2.done, cur: r2.cur, side: !!r2.g.side }) };
+  },
+  staples() { return JSON.parse(JSON.stringify(STAPLES)); },
+  resOrigin() { return Object.assign({}, RES_ORIGIN); },
+  handOnly() { return [...HAND_ONLY]; },
+  goalNeedsAll() { return GOAL_NEEDS.map(a => a.slice()); },
+  pingRes(r) { hudPing[r] = T; },
   grant(o) { for (const k in o) res[k] = (res[k] || 0) + o[k]; },
   setAge(n) { while (age < n) ageUp(); },
   setPop(n) { popF = n; pop = n; },
