@@ -223,7 +223,64 @@
     levelClear: () => { [523, 659, 784, 1046].forEach((f, i) => setTimeout(() => blip(f, 0.16, 'triangle', 0.08), i * 130)); },
     ui:     () => blip(600, 0.05, 'square', 0.04, 800),
     confirm:() => { blip(700, 0.08, 'square', 0.05, 1100); setTimeout(() => blip(1050, 0.1, 'square', 0.05), 70); },
+    rumble: () => { noiseBurst(0.45, 0.14, 460, 50); blip(66, 0.45, 'sawtooth', 0.11, 40); },
   };
+
+  // ════════════════════════════════════════════════════════════════════════
+  // MUSIC — one driving, intense Contra-style synth loop (same track every
+  // level for now). WebAudio lookahead scheduler: minor-key galloping bass +
+  // heroic square lead + kick/hat. Light on the CPU (a few short nodes/step).
+  // ════════════════════════════════════════════════════════════════════════
+  let musicOn = false, _musTimer = null, _musStep = 0, _musNextT = 0, musicGain = null;
+  const MUS_STEP = 0.107;                                  // ~140 BPM sixteenths
+  const midiHz = n => 440 * Math.pow(2, (n - 69) / 12);
+  // 32 steps (2 bars). Progression Am – F – G – E (i-VI-VII-V). -1 = rest.
+  const MBASS = [45,-1,45,45,-1,45,45,-1, 41,-1,41,41,-1,41,41,-1, 43,-1,43,43,-1,43,43,-1, 40,-1,40,40,-1,40,40,-1];
+  const MLEAD = [69,-1,72,-1,76,-1,72,-1, 65,-1,69,-1,72,-1,69,-1, 67,-1,71,-1,74,-1,71,-1, 64,-1,68,-1,71,-1,76,-1];
+  function musVoice(freq, t, dur, type, vol) {
+    const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+    o.type = type; o.frequency.setValueAtTime(freq, t);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(vol, t + 0.008);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(g).connect(musicGain); o.start(t); o.stop(t + dur + 0.02);
+  }
+  function musKick(t) {
+    const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+    o.type = 'sine'; o.frequency.setValueAtTime(155, t); o.frequency.exponentialRampToValueAtTime(45, t + 0.12);
+    g.gain.setValueAtTime(0.24, t); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.15);
+    o.connect(g).connect(musicGain); o.start(t); o.stop(t + 0.17);
+  }
+  function musHat(t) {
+    const sr = audioCtx.sampleRate, buf = audioCtx.createBuffer(1, Math.floor(sr * 0.03), sr), d = buf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    const s = audioCtx.createBufferSource(); s.buffer = buf;
+    const f = audioCtx.createBiquadFilter(); f.type = 'highpass'; f.frequency.value = 7200;
+    const g = audioCtx.createGain(); g.gain.setValueAtTime(0.05, t); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.03);
+    s.connect(f).connect(g).connect(musicGain); s.start(t); s.stop(t + 0.04);
+  }
+  function scheduleMusic() {
+    if (!musicOn || !audioCtx) return;
+    // master level follows mute + ducks under the pause screen
+    musicGain.gain.value = muted ? 0 : (state === PAUSED ? 0.18 : 0.42);
+    while (_musNextT < audioCtx.currentTime + 0.18) {
+      const s = _musStep % 32, t = _musNextT;
+      const bn = MBASS[s]; if (bn >= 0) musVoice(midiHz(bn), t, 0.15, 'sawtooth', 0.16);
+      const ln = MLEAD[s]; if (ln >= 0) { musVoice(midiHz(ln), t, 0.12, 'square', 0.085); musVoice(midiHz(ln + 12), t, 0.10, 'square', 0.03); }
+      if (s % 4 === 0) musKick(t);
+      if (s % 2 === 0) musHat(t);
+      _musNextT += MUS_STEP; _musStep++;
+    }
+    _musTimer = setTimeout(scheduleMusic, 45);
+  }
+  function startMusic() {
+    ensureAudio();
+    if (!audioCtx || musicOn) return;
+    musicGain = audioCtx.createGain(); musicGain.gain.value = 0.42; musicGain.connect(audioCtx.destination);
+    musicOn = true; _musStep = 0; _musNextT = audioCtx.currentTime + 0.06;
+    scheduleMusic();
+  }
+  function stopMusic() { musicOn = false; if (_musTimer) { clearTimeout(_musTimer); _musTimer = null; } }
 
   // ════════════════════════════════════════════════════════════════════════
   // COLOR + BAKE KIT (techniques from meteorblaster.html)
@@ -1832,16 +1889,27 @@
       worldW: 4600, groundY: 232, boss: 'battleship', bossX: 4360, bossArenaX0: 4120, bossArenaX1: 4600,
       weather: 'ember', pits: [],
       hazards: [
-        { type: 'lava', cur: VH + 60, rise: 0.09, cap: 200 },
+        // Oscillating lava: sits LOW (ground walkable) → rises HIGH (submerges
+        // ground, forces platform-hopping) → holds → recedes → repeats. Never
+        // an instakill; touching = 1 segment + bump to the last safe platform.
+        { type: 'lava', low: 250, high: 188, riseSpd: 0.55, fallSpd: 0.9, holdHigh: 150, holdLow: 150 },
       ],
       // a continuous chain of climbable platforms (all tops <= 184) so the
       // rising lava is always escapable — you're never trapped below it.
+      // Dense climbable chain: centers ~130px apart (edge gaps ~34px, well
+      // within the ~100px jump range) with a gentle zigzag, so you can always
+      // hop platform-to-platform ahead of the rising lava. Aligned so the
+      // pickups (820/1340/2380/3160/3680) still sit over a platform.
       platforms: [
-        { x: 560, y: 182, w: 110 }, { x: 820, y: 160, w: 96 }, { x: 1080, y: 178, w: 96 },
-        { x: 1340, y: 156, w: 96 }, { x: 1600, y: 176, w: 110 }, { x: 1860, y: 152, w: 96 },
-        { x: 2120, y: 174, w: 96 }, { x: 2380, y: 150, w: 110 }, { x: 2640, y: 172, w: 96 },
-        { x: 2900, y: 150, w: 96 }, { x: 3160, y: 174, w: 110 }, { x: 3420, y: 152, w: 96 },
-        { x: 3680, y: 174, w: 110 }, { x: 3940, y: 160, w: 96 },
+        { x: 560, y: 178, w: 100 }, { x: 690, y: 156, w: 100 }, { x: 820, y: 178, w: 100 },
+        { x: 950, y: 156, w: 100 }, { x: 1080, y: 178, w: 100 }, { x: 1210, y: 156, w: 100 },
+        { x: 1340, y: 178, w: 100 }, { x: 1470, y: 156, w: 100 }, { x: 1600, y: 178, w: 100 },
+        { x: 1730, y: 156, w: 100 }, { x: 1860, y: 178, w: 100 }, { x: 1990, y: 156, w: 100 },
+        { x: 2120, y: 178, w: 100 }, { x: 2250, y: 156, w: 100 }, { x: 2380, y: 178, w: 100 },
+        { x: 2510, y: 156, w: 100 }, { x: 2640, y: 178, w: 100 }, { x: 2770, y: 156, w: 100 },
+        { x: 2900, y: 178, w: 100 }, { x: 3030, y: 156, w: 100 }, { x: 3160, y: 178, w: 100 },
+        { x: 3290, y: 156, w: 100 }, { x: 3420, y: 178, w: 100 }, { x: 3550, y: 156, w: 100 },
+        { x: 3680, y: 178, w: 100 }, { x: 3810, y: 156, w: 100 }, { x: 3940, y: 178, w: 100 },
       ],
       waves: [
         { x: 240, spawns: [{ type: 'scout', x: 520, y: 0 }, { type: 'suicide', x: 620, y: 0 }] },
@@ -2048,7 +2116,7 @@
         // phase escalation
         const hpr = b.hp / b.maxHp;
         b.phase = hpr > 0.66 ? 0 : hpr > 0.33 ? 1 : 2;
-        const aggro = 1 + b.phase * 0.5;
+        const aggro = 1 + b.phase * 0.3;
         if (b.mode === 'enter') {
           b.x -= 1.4;
           if (!b.roared && b.modeT === 40) { sfx.bossRoar(); b.roared = true; }
@@ -2084,11 +2152,11 @@
           if (--b.modeT <= 0) {
             const cx = b.x, cy = b.y - 74;
             const base = p ? Math.atan2((p.y - PLH * 0.5) - cy, p.x - cx) : Math.PI;
-            const n = 5 + b.phase;
+            const n = 4 + b.phase;
             for (let i = 0; i < n; i++) {
-              const a = base + (i - (n - 1) / 2) * 0.2;
+              const a = base + (i - (n - 1) / 2) * 0.22;
               const bb = ebullets[_ebI]; _ebI = (_ebI + 1) % EB_MAX;
-              bb.active = true; bb.x = cx; bb.y = cy; bb.vx = Math.cos(a) * 3.4 * aggro; bb.vy = Math.sin(a) * 3.4 * aggro; bb.life = 220; bb.color = '#ffce4d'; bb.r = 5; bb.spr = null; bb.homing = false; bb.arc = false; bb.grav = 0;
+              bb.active = true; bb.x = cx; bb.y = cy; bb.vx = Math.cos(a) * 2.8 * aggro; bb.vy = Math.sin(a) * 2.8 * aggro; bb.life = 220; bb.color = '#ffce4d'; bb.r = 5; bb.spr = null; bb.homing = false; bb.arc = false; bb.grav = 0;
             }
             sfx.enemyShot();
             b.mode = 'cannonRecover'; b.modeT = 40; b.coreT = 40;
@@ -2270,8 +2338,8 @@
             const cx = b.x - 70, cy = b.y + 2, tgt = nearestPlayer(b.x, b.y);
             const base = tgt ? Math.atan2((tgt.y - PLH * 0.5) - cy, tgt.x - cx) : Math.PI, n = 3 + b.phase;
             for (let i = 0; i < n; i++) {
-              const a = base + (i - (n - 1) / 2) * 0.16, bb = ebullets[_ebI]; _ebI = (_ebI + 1) % EB_MAX;
-              bb.active = true; bb.x = cx; bb.y = cy; bb.vx = Math.cos(a) * 3.6 * aggro; bb.vy = Math.sin(a) * 3.6 * aggro;
+              const a = base + (i - (n - 1) / 2) * 0.18, bb = ebullets[_ebI]; _ebI = (_ebI + 1) % EB_MAX;
+              bb.active = true; bb.x = cx; bb.y = cy; bb.vx = Math.cos(a) * 2.8 * aggro; bb.vy = Math.sin(a) * 2.8 * aggro;
               bb.life = 220; bb.color = '#ff5252'; bb.r = 5; bb.arc = false; bb.homing = false; bb.spr = null; bb.grav = 0;
             }
             sfx.enemyShot(); b.state = 'walk'; b.actCool = 48 - b.phase * 8;
@@ -2284,7 +2352,7 @@
             for (let i = 0; i < n; i++) {
               const bb = ebullets[_ebI]; _ebI = (_ebI + 1) % EB_MAX;
               bb.active = true; bb.x = mx; bb.y = my; bb.vx = 1.2; bb.vy = -3 - i * 0.7;
-              bb.life = 170; bb.color = 'missile'; bb.r = 6; bb.homing = true; bb.arc = false; bb.spr = SPR.missile; bb.turn = 0.045 + b.phase * 0.012; bb.grav = 0;
+              bb.life = 170; bb.color = 'missile'; bb.r = 6; bb.homing = true; bb.arc = false; bb.spr = SPR.missile; bb.turn = 0.028 + b.phase * 0.008; bb.grav = 0;
             }
             sfx.enemyShot(); b.state = 'walk'; b.actCool = 54 - b.phase * 8;
           }
@@ -2423,9 +2491,9 @@
             // downward sweeping fan from the belly cannon
             const cx = b.x, cy = b.y + 6, shots = 5 + b.phase;
             for (let i = 0; i < shots; i++) {
-              const a = Math.PI / 2 + (i - (shots - 1) / 2) * 0.16 * b.dir;
+              const a = Math.PI / 2 + (i - (shots - 1) / 2) * 0.17 * b.dir;
               const bb = ebullets[_ebI]; _ebI = (_ebI + 1) % EB_MAX;
-              bb.active = true; bb.x = cx; bb.y = cy; bb.vx = Math.cos(a) * 3.4 * aggro; bb.vy = Math.sin(a) * 3.4 * aggro;
+              bb.active = true; bb.x = cx; bb.y = cy; bb.vx = Math.cos(a) * 2.8 * aggro; bb.vy = Math.sin(a) * 2.8 * aggro;
               bb.life = 200; bb.color = '#ff7a2a'; bb.r = 5; bb.arc = false; bb.homing = false; bb.spr = null; bb.grav = 0;
             }
             sfx.enemyShot(); b.state = 'strafe'; b.actCool = 48 - b.phase * 8;
@@ -2632,7 +2700,7 @@
     for (const hz of LV.hazards) {
       hz.t = 0;
       if (hz.type === 'blizzard') { hz.gust = 0; }
-      else if (hz.type === 'lava') { if (hz._cur0 === undefined) hz._cur0 = hz.cur; hz.cur = hz._cur0; hz.recede = false; LV._lava = hz; }
+      else if (hz.type === 'lava') { hz.cur = hz.low; hz.phase = 'low'; hz.timer = hz.holdLow; hz.bossRecede = false; LV._lava = hz; }
       else if (hz.type === 'spawner') { if (hz._hp0 === undefined) hz._hp0 = hz.maxHp; hz.hp = hz._hp0; hz.maxHp = hz._hp0; hz.open = false; hz.st = 0; hz._open = 0; }
       else if (hz.type === 'destructible') { if (hz._hp0 === undefined) hz._hp0 = hz.hp; hz.hp = hz._hp0; }
     }
@@ -3220,7 +3288,7 @@
         if (tgt) {
           const desired = Math.atan2((tgt.y - PLH * 0.5) - b.y, tgt.x - b.x), cur = Math.atan2(b.vy, b.vx);
           let dA = desired - cur; while (dA > Math.PI) dA -= 2 * Math.PI; while (dA < -Math.PI) dA += 2 * Math.PI;
-          const turn = b.turn || 0.045, na = cur + Math.max(-turn, Math.min(turn, dA)), sp = Math.min(4.2, Math.hypot(b.vx, b.vy) + 0.09);
+          const turn = b.turn || 0.045, na = cur + Math.max(-turn, Math.min(turn, dA)), sp = Math.min(3.3, Math.hypot(b.vx, b.vy) + 0.06);
           b.vx = Math.cos(na) * sp; b.vy = Math.sin(na) * sp;
         }
         b.spin = Math.atan2(b.vy, b.vx);
@@ -3276,7 +3344,9 @@
     for (const p of players) {
       if (!p.alive || p.downed || p.invuln > 0 || p.respawnT > 0) continue;
       const ph = p.prone ? PRONE_H : PLH;
-      if (Math.abs(p.x - boss.x) < boss.w / 2 + p.w / 2 && p.y - ph < boss.y && p.y > boss.y - boss.h) hurtPlayer(p);
+      // contact hitbox is tighter than the visual body so you can stand at a
+      // boss's edges to shoot without being chip-damaged just for being close
+      if (Math.abs(p.x - boss.x) < boss.w * 0.34 + p.w / 2 && p.y - ph < boss.y && p.y > boss.y - boss.h) hurtPlayer(p);
     }
   }
 
@@ -3319,8 +3389,11 @@
         if (hz.gust === 2 && prev !== 2) { sfx.enemyShot(); shake = Math.max(shake, 4); }
       } else if (hz.type === 'lava') {
         hz.t = (hz.t || 0) + 1;
-        if (hz.recede) hz.cur += 3;
-        else hz.cur = Math.max(hz.cap, hz.cur - hz.rise);
+        if (hz.bossRecede) { hz.cur = Math.min(hz.low, hz.cur + hz.fallSpd); } // boss reached: drop & stay
+        else if (hz.phase === 'low') { if (--hz.timer <= 0) { hz.phase = 'rising'; shake = Math.max(shake, 4); sfx.rumble && sfx.rumble(); } }
+        else if (hz.phase === 'rising') { hz.cur -= hz.riseSpd; if (hz.cur <= hz.high) { hz.cur = hz.high; hz.phase = 'high'; hz.timer = hz.holdHigh; } }
+        else if (hz.phase === 'high') { if (--hz.timer <= 0) hz.phase = 'falling'; }
+        else if (hz.phase === 'falling') { hz.cur += hz.fallSpd; if (hz.cur >= hz.low) { hz.cur = hz.low; hz.phase = 'low'; hz.timer = hz.holdLow; } }
       } else if (hz.type === 'spawner') {
         if (hz.hp <= 0) { hz.open = true; continue; }
         hz.st = (hz.st || 0) + 1;
@@ -3380,8 +3453,8 @@
     arena.active = true;
     arena.x0 = LV.bossArenaX0; arena.x1 = LV.bossArenaX0 + VW;
     camLockX = Math.min(LV.worldW - VW, LV.bossArenaX0);
-    // volcano: escaping into the boss arena drops the rising lava back down
-    for (const hz of LV.hazards) if (hz.type === 'lava') hz.recede = true;
+    // volcano: reaching the boss arena drops the lava for good (stays low)
+    for (const hz of LV.hazards) if (hz.type === 'lava') hz.bossRecede = true;
     // clear stragglers
     for (const e of enemies) if (e.active) e.active = false;
     boss = { def: BOSS_DEFS[LV.boss], hp: BOSS_DEFS[LV.boss].maxHp, maxHp: BOSS_DEFS[LV.boss].maxHp, w: BOSS_DEFS[LV.boss].w, h: BOSS_DEFS[LV.boss].h, flash: 0, t: 0 };
@@ -3513,6 +3586,7 @@
     score = 0; combo = 0; shotsFired = 0; shotsHit = 0;
     loadLevel(0);
     state = STORY; storyT = 0;
+    startMusic();
   }
   function togglePause() {
     if (state === PLAYING) { state = PAUSED; }
@@ -3616,18 +3690,20 @@
   function drawGround() {
     applyWorldCam();
     // pit chasms: a dark depth fill so gaps read clearly (few, cheap fillRects)
-    for (const pit of LV.pits) {
-      if (pit.x1 < camX - 20 || pit.x0 > camX + VW + 20) continue;
-      ctx.fillStyle = '#0c0a08';
-      ctx.fillRect(pit.x0, LV.groundY, pit.x1 - pit.x0, VH - LV.groundY + 6);
-    }
+    // ground tiled straight across…
     const gTile = SPR[LV.ground], tw = gTile.w, gh = gTile.h;
     const startX = Math.floor(camX / tw) * tw;
-    for (let x = startX; x < camX + VW + tw; x += tw) {
-      // skip pit gaps
-      let inPit = false;
-      for (const pit of LV.pits) if (x + tw / 2 > pit.x0 && x + tw / 2 < pit.x1) inPit = true;
-      if (!inPit) ctx.drawImage(gTile.c, x, LV.groundY, tw, gh);
+    for (let x = startX; x < camX + VW + tw; x += tw) ctx.drawImage(gTile.c, x, LV.groundY, tw, gh);
+    // …then carve each pit OVER the ground so the visible hole exactly matches
+    // the fall-through gap. (The old tile-center skip missed pits narrower than
+    // a tile — e.g. 1600–1710 — so you fell through invisible holes.)
+    for (const pit of LV.pits) {
+      if (pit.x1 < camX - 20 || pit.x0 > camX + VW + 20) continue;
+      const px0 = pit.x0, pw = pit.x1 - pit.x0, py = LV.groundY - 2, depth = VH - LV.groundY + 8;
+      ctx.fillStyle = '#0c0a08'; ctx.fillRect(px0, py, pw, depth);
+      ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillRect(px0, py, pw, 6);            // shaded top lip
+      ctx.fillStyle = 'rgba(255,255,255,0.06)';                                    // faint side walls
+      ctx.fillRect(px0, py, 3, depth); ctx.fillRect(px0 + pw - 3, py, 3, depth);
     }
     // platforms
     const pl = SPR[LV.platform];
