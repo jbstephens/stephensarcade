@@ -79,5 +79,13 @@ window.GAMES_DATA = [
     "status": "PRESS START",
     "icon": "island",
     "source": "https://islandforge.onrender.com/"
+  },
+  {
+    "slug": "bro-force",
+    "title": "BRO FORCE",
+    "genre": "ACTION",
+    "status": "PRESS START",
+    "icon": "broforce",
+    "source": "https://broforce.onrender.com/"
   }
 ];
