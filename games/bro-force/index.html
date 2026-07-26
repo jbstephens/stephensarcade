@@ -3915,7 +3915,7 @@
   // ════════════════════════════════════════════════════════════════════════
   // GAME STATE
   // ════════════════════════════════════════════════════════════════════════
-  const TITLE = 'title', CHARSEL = 'charsel', STORY = 'story', PLAYING = 'playing',
+  const TITLE = 'title', CHARSEL = 'charsel', WORLDSEL = 'worldsel', STORY = 'story', PLAYING = 'playing',
     PAUSED = 'paused', CLEAR = 'clear', MORECOMING = 'more', VICTORY = 'victory';
   let state = TITLE;
   let players = [];
@@ -3925,6 +3925,18 @@
   let shake = 0;
   let score = 0, best = 0;
   try { best = parseInt(localStorage.getItem('broforce_best') || '0', 10) || 0; } catch {}
+  // ── World-select + difficulty (kid-friendly front-end additions) ──
+  // reached = number of worlds CLEARED so far (0..LEVELS.length); worlds with
+  // index < reached show a clear-star and the cursor defaults to `reached`.
+  let reached = 0;
+  try { reached = parseInt(localStorage.getItem('broforce_reached') || '0', 10) || 0; } catch {}
+  let worldSel = 0;                 // WORLDSEL cursor
+  let difficultyMode = 'classic';   // 'rookie' | 'classic'
+  try { const d = localStorage.getItem('broforce_diff'); if (d === 'rookie' || d === 'classic') difficultyMode = d; } catch {}
+  function isRookie() { return difficultyMode === 'rookie'; }
+  function ebSpeedMul() { return isRookie() ? 0.8 : 1; }   // rookie: slower enemy shots
+  function setDifficulty(d) { difficultyMode = (d === 'rookie') ? 'rookie' : 'classic'; try { localStorage.setItem('broforce_diff', difficultyMode); } catch {} }
+  function markCleared(idx) { if (idx + 1 > reached) { reached = idx + 1; try { localStorage.setItem('broforce_reached', String(reached)); } catch {} } }
   let combo = 0, comboTimer = 0, newBestFlash = 0;
   let shotsFired = 0, shotsHit = 0, deathsThisLevel = 0, secretsFound = 0;
   let bgScroll = 0;
@@ -3947,7 +3959,7 @@
       idx, broId, x: 60, y: LV.groundY, vx: 0, vy: 0, w: PLW, h: PLH,
       facing: 1, grounded: false, prone: false,
       weapon: 'rifle', cd: 0, aimx: 1, aimy: 0, muzzle: 0,
-      health: 3, maxHealth: 3, invuln: 0, flash: 0,
+      health: isRookie() ? 5 : 3, maxHealth: isRookie() ? 5 : 3, invuln: 0, flash: 0,
       downed: false, downTimer: 0, reviveProg: 0, alive: true, respawnT: 0,
       shieldTime: 0, ddmgTime: 0, specials: START_SPECIALS,
       kills: 0, walkT: 0, walkFrame: 0, jumpHeld: false, coyote: 0,
@@ -4043,6 +4055,56 @@
   });
   document.getElementById('pauseBtn').addEventListener('click', () => { if (state === PLAYING) togglePause(); else if (state === PAUSED) togglePause(); });
 
+  // ── Menu touch/mouse. The menus have no on-screen d-pad (it only shows
+  //    in-match), so a tap on the canvas drives them: tap a bro, tap a world,
+  //    tap the BACK chip, or tap anywhere to advance a prompt. Pads + keyboards
+  //    still use the edge stream unchanged — this only ADDS pointer support. ──
+  const BACK_CHIP = { x: 6, y: 6, w: 56, h: 20 };   // world-select on-screen BACK
+  function worldSelGeom() {
+    const N = LEVELS.length, cols = 4, rows = Math.ceil(N / cols);
+    const cardW = 106, cardH = 46, gapX = 6, gapY = 8;
+    const gridW = cols * cardW + (cols - 1) * gapX;
+    return { N, cols, rows, cardW, cardH, gapX, gapY, startX: (VW - gridW) / 2, gridTop: 38 };
+  }
+  function charSelGeom() {
+    const cardW = 96, gap = 14, totalW = 4 * cardW + 3 * gap;
+    return { cardW, gap, startX: (VW - totalW) / 2, cy: 130 };
+  }
+  function menuTap(ix, iy) {
+    if (state === TITLE) {
+      if (iy >= 186 && iy <= 214) { setDifficulty(isRookie() ? 'classic' : 'rookie'); sfx.ui(); }
+      else startCharSelect();
+    } else if (state === CHARSEL) {
+      const g = charSelGeom();
+      for (let i = 0; i < 4; i++) {
+        const cx = g.startX + i * (g.cardW + g.gap) + g.cardW / 2;
+        if (ix > cx - g.cardW / 2 && ix < cx + g.cardW / 2 && iy > g.cy - 60 && iy < g.cy + 58) {
+          if (selReady[0] && selIndex[0] === i) tryLaunch();
+          else { selIndex[0] = i; selReady[0] = true; sfx.confirm(); }
+          return;
+        }
+      }
+    } else if (state === WORLDSEL) {
+      if (ix >= BACK_CHIP.x && ix <= BACK_CHIP.x + BACK_CHIP.w && iy >= BACK_CHIP.y && iy <= BACK_CHIP.y + BACK_CHIP.h) { state = CHARSEL; sfx.ui(); return; }
+      const g = worldSelGeom();
+      for (let i = 0; i < g.N; i++) {
+        const col = i % g.cols, row = (i / g.cols) | 0;
+        const x = g.startX + col * (g.cardW + g.gapX), y = g.gridTop + row * (g.cardH + g.gapY);
+        if (ix > x && ix < x + g.cardW && iy > y && iy < y + g.cardH) { worldSel = i; startChosenWorld(); return; }
+      }
+    } else if (state === STORY) { if (storyT > 6) state = PLAYING; }
+    else if (state === CLEAR) { if (clearAnim > 30) { clearAnim = 0; advanceLevel(); } }
+    else if (state === MORECOMING) { backToTitle(); }
+    else if (state === VICTORY) { if (victoryAnim > 40) backToTitle(); }
+  }
+  canvas.addEventListener('pointerdown', e => {
+    if (state === PLAYING || state === PAUSED) return;   // gameplay uses the d-pad overlay
+    e.preventDefault();
+    ensureAudio();
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    menuTap((e.clientX * dpr - offX) / scale, (e.clientY * dpr - offY) / scale);
+  }, { passive: false });
+
   function rawHeld(idx) {
     let L = false, R = false, U = false, D = false, shoot = false, jump = false, special = false, strafe = false, start = false, confirm = false, cancel = false;
     if (PADS && PADS[idx] && PADS[idx].connected) {
@@ -4060,16 +4122,17 @@
       cancel = p.button('east');
     }
     if (idx === 0) {
-      if (keys['arrowleft'] || keys['a']) L = true;
-      if (keys['arrowright'] || keys['d']) R = true;
-      if (keys['arrowup'] || keys['w']) U = true;
-      if (keys['arrowdown'] || keys['s']) D = true;
+      if (keys['ArrowLeft'] || keys['a']) L = true;
+      if (keys['ArrowRight'] || keys['d']) R = true;
+      if (keys['ArrowUp'] || keys['w']) U = true;
+      if (keys['ArrowDown'] || keys['s']) D = true;
       if (keys['x']) shoot = true;
       if (keys['z']) jump = true;
       if (keys['c']) special = true;
       if (keys['shift']) strafe = true;
       if (keys['Enter']) { start = true; confirm = true; }
-      if (keys['p'] || keys['Escape']) start = true;
+      if (keys['p']) start = true;
+      if (keys['Escape'] || keys['Backspace']) cancel = true;   // universal keyboard BACK/QUIT
       if (touchAct.left) L = true; if (touchAct.right) R = true;
       if (touchAct.up) U = true; if (touchAct.down) D = true;
       if (touchAct.ul) { U = true; L = true; } if (touchAct.ur) { U = true; R = true; }
@@ -4594,6 +4657,7 @@
   }
 
   function updateEnemyBullets() {
+    const spd = ebSpeedMul();   // ROOKIE slows every incoming shot (path unchanged)
     for (const b of ebullets) {
       if (!b.active) continue;
       if (b.color === 'barrel') { b.vy = (b.vy || 0) + (b.grav || 0.22); b.spin = (b.spin || 0) + 0.16; }
@@ -4608,7 +4672,7 @@
         }
         b.spin = Math.atan2(b.vy, b.vx);
       }
-      b.x += b.vx; b.y += b.vy;
+      b.x += b.vx * spd; b.y += b.vy * spd;
       // blocked by destructible cover
       let eBlocked = false;
       for (const hz of LV.hazards) if (hz.type === 'destructible' && hz.hp > 0 && b.x > hz.x - hz.w / 2 && b.x < hz.x + hz.w / 2 && b.y > hz.y - hz.h && b.y < hz.y) { b.active = false; eBlocked = true; break; }
@@ -4813,6 +4877,7 @@
   }
 
   function advanceLevel() {
+    markCleared(levelIndex);   // this world is done -> world-select star + cursor
     if (levelIndex + 1 < LEVELS.length) { loadLevel(levelIndex + 1); state = PLAYING; }
     else {
       // All six worlds cleared -> VICTORY / credits. (Hook for future L7-8:
@@ -4931,14 +4996,20 @@
   // STATE TRANSITIONS / MENUS
   // ════════════════════════════════════════════════════════════════════════
   function startCharSelect() { state = CHARSEL; selIndex = [0, 0]; selReady = [false, false]; sfx.confirm(); }
-  function beginGame() {
+  // beginGame(startIdx, showStory): start the campaign at any chosen world.
+  // Defaults preserve the original behaviour (world 0 with the story intro),
+  // so __bf.beginGame() and legacy callers keep working unchanged.
+  function beginGame(startIdx, showStory) {
+    startIdx = Math.max(0, Math.min(LEVELS.length - 1, startIdx | 0));
+    if (showStory === undefined) showStory = (startIdx === 0);
     players = [freshPlayer(0, BRO_ORDER[selIndex[0]])];
     if (p2Present) { players.push(freshPlayer(1, BRO_ORDER[selIndex[1]])); p2JoinedGame = true; }
     score = 0; combo = 0; newBestFlash = 0; shotsFired = 0; shotsHit = 0;
-    loadLevel(0);
-    state = STORY; storyT = 0;
+    loadLevel(startIdx);
+    if (showStory) { state = STORY; storyT = 0; } else { state = PLAYING; }
     startMusic();
   }
+  function startChosenWorld() { ensureAudio(); beginGame(worldSel, worldSel === 0); }
   function togglePause() {
     if (state === PLAYING) { state = PAUSED; }
     else if (state === PAUSED) { state = PLAYING; }
@@ -4951,7 +5022,18 @@
       // Track a second pad live (set AND clear) so a disconnected P2 never
       // strands a solo player at "waiting for P2".
       p2Present = !!(PADS && PADS[1] && PADS[1].connected);
+      // any left/right/up/down flips the difficulty toggle (pad dpad+stick,
+      // WASD/arrows, and the on-screen touch dpad all feed L/R/U/D)
+      if (anyMenuEdge('L') || anyMenuEdge('R') || anyMenuEdge('U') || anyMenuEdge('D')) { setDifficulty(isRookie() ? 'classic' : 'rookie'); sfx.ui(); }
       if (anyMenuEdge('confirm') || anyMenuEdge('start')) { ensureAudio(); startCharSelect(); }
+    } else if (state === WORLDSEL) {
+      const N = LEVELS.length;
+      if (anyMenuEdge('L')) { worldSel = (worldSel + N - 1) % N; sfx.ui(); }
+      if (anyMenuEdge('R')) { worldSel = (worldSel + 1) % N; sfx.ui(); }
+      if (anyMenuEdge('U')) { worldSel = (worldSel - 4 + N) % N; sfx.ui(); }
+      if (anyMenuEdge('D')) { worldSel = (worldSel + 4) % N; sfx.ui(); }
+      if (anyMenuEdge('confirm') || anyMenuEdge('start')) startChosenWorld();
+      if (anyMenuEdge('cancel')) { state = CHARSEL; sfx.ui(); }
     } else if (state === CHARSEL) {
       // P1 cursor
       const h0 = curHeld[0];
@@ -4990,7 +5072,9 @@
   function tryLaunch() {
     if (!selReady[0]) return;
     if (p2Present && !selReady[1]) return;
-    ensureAudio(); beginGame();
+    ensureAudio();
+    worldSel = Math.min(reached, LEVELS.length - 1);   // default to next unplayed
+    state = WORLDSEL; sfx.confirm();
   }
 
   // in-game pad edges (pause + 2P join)
@@ -5296,6 +5380,8 @@
     if (players.length === 1 && PADS && PADS[1] && PADS[1].connected && state === PLAYING) {
       hudText('P2 PRESS ✕ TO JOIN', VW / 2, VH - 8, 9, '#35e0ff', 'center');
     }
+    // active difficulty (corner tag; never overlaps score/boss bar)
+    hudText(isRookie() ? 'ROOKIE' : 'CLASSIC', 8, VH - 6, 6.5, isRookie() ? '#5dd66c' : 'rgba(127,220,255,0.7)', 'left');
   }
   function drawPlayerHUD(p, right) {
     const x0 = right ? VW - 10 : 10;
@@ -5363,7 +5449,10 @@
       const bx = VW / 2 - 90 + i * 60;
       drawSprTop(SPR['bro_' + BRO_ORDER[i] + '_r_stand'], bx, 148);
     }
-    if ((titlePulse >> 5) & 1) hudText('PRESS ✕ / ENTER TO START', VW / 2, 212, 12, '#ffe066', 'center');
+    // difficulty toggle (any dpad direction flips it — see handleMenus TITLE)
+    hudText('MODE: ' + (isRookie() ? 'ROOKIE (EASY)' : 'CLASSIC'), VW / 2, 196, 11, isRookie() ? '#5dd66c' : '#7fdcff', 'center');
+    hudText('◄ ► CHANGE MODE', VW / 2, 208, 7, 'rgba(255,255,255,0.7)', 'center');
+    if ((titlePulse >> 5) & 1) hudText('PRESS ✕ / ENTER TO START', VW / 2, 224, 11, '#ffe066', 'center');
     // control hint by input source
     const src = AC ? AC.currentInputSource() : 'keyboard';
     if (src === 'keyboard') hudText('MOVE: WASD/ARROWS   X SHOOT   Z JUMP   C BOMB   SHIFT STRAFE   ENTER START', VW / 2, 240, 6.5, 'rgba(255,255,255,0.75)', 'center');
@@ -5396,6 +5485,37 @@
     }
     if (!p2Present) hudText('P2 PRESS ✕ TO JOIN', VW / 2, VH - 40, 11, '#35e0ff', 'center');
     hudText(selReady[0] && (!p2Present || selReady[1]) ? 'PRESS ✕ AGAIN TO DEPLOY' : '✕ CONFIRM   MOVE TO CHOOSE', VW / 2, VH - 20, 10, '#ffe066', 'center');
+  }
+
+  function drawWorldSelect() {
+    applyHudCam();
+    ctx.imageSmoothingEnabled = false;   // CRUNCHY grid stays sharp
+    ctx.drawImage(PARALLAX.jungle.sky.c, 0, 0, VW, VH);
+    ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillRect(0, 0, VW, VH);
+    hudText('SELECT WORLD', VW / 2, 22, 16, '#ffe066', 'center');
+    const g = worldSelGeom();
+    for (let i = 0; i < g.N; i++) {
+      const col = i % g.cols, row = (i / g.cols) | 0;
+      const x = g.startX + col * (g.cardW + g.gapX), y = g.gridTop + row * (g.cardH + g.gapY);
+      const cx = x + g.cardW / 2;
+      const cleared = i < reached, sel = i === worldSel;
+      ctx.fillStyle = cleared ? 'rgba(20,60,28,0.62)' : 'rgba(0,0,0,0.5)';
+      ctx.fillRect(x, y, g.cardW, g.cardH);
+      ctx.lineWidth = sel ? 3 : 1.5;
+      ctx.strokeStyle = sel ? '#ffe066' : (cleared ? '#5dd66c' : 'rgba(255,255,255,0.35)');
+      ctx.strokeRect(x + 0.5, y + 0.5, g.cardW - 1, g.cardH - 1);
+      hudText(String(i + 1), x + 8, y + 16, 9, sel ? '#ffe066' : '#7fdcff', 'left');
+      if (cleared) hudText('★', x + g.cardW - 9, y + 16, 9, '#5dd66c', 'right');
+      hudText(LEVELS[i].name, cx, y + 36, 8, sel ? '#fff' : 'rgba(255,255,255,0.82)', 'center');
+    }
+    // BACK chip (touch/mouse target; pad ○ / keyboard ESC also go back)
+    ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(BACK_CHIP.x, BACK_CHIP.y, BACK_CHIP.w, BACK_CHIP.h);
+    ctx.lineWidth = 1.5; ctx.strokeStyle = 'rgba(255,255,255,0.5)'; ctx.strokeRect(BACK_CHIP.x + 0.5, BACK_CHIP.y + 0.5, BACK_CHIP.w - 1, BACK_CHIP.h - 1);
+    hudText('< BACK', BACK_CHIP.x + BACK_CHIP.w / 2, BACK_CHIP.y + 14, 8, '#fff', 'center');
+    const footY = g.gridTop + g.rows * (g.cardH + g.gapY) + 4;
+    hudText((worldSel === 0 ? 'START HERE: ' : 'DROP IN AT: ') + LEVELS[worldSel].name, VW / 2, footY, 9, '#ffce4d', 'center');
+    hudText('MODE: ' + (isRookie() ? 'ROOKIE (EASY)' : 'CLASSIC'), VW / 2, VH - 26, 8, isRookie() ? '#5dd66c' : '#7fdcff', 'center');
+    hudText('✕ / ENTER / TAP  START     ○ / ESC  BACK', VW / 2, VH - 12, 8, '#ffe066', 'center');
   }
 
   function drawStory() {
@@ -5530,6 +5650,7 @@
   function render() {
     if (state === TITLE) drawTitle();
     else if (state === CHARSEL) drawCharSelect();
+    else if (state === WORLDSEL) drawWorldSelect();
     else if (state === STORY) drawStory();
     else if (state === PLAYING) drawWorld();
     else if (state === PAUSED) drawPause();
@@ -5607,6 +5728,16 @@
     setP2(present, i, ready) { p2Present = present; if (i != null) selIndex[1] = i; if (ready) selReady[1] = true; },
     beginGame,
     joinP2: joinP2MidGame,
+    // ── world-select + difficulty test hooks (labeled; harness-only) ──
+    difficulty: () => difficultyMode,
+    setDiff(d) { setDifficulty(d); },
+    reached: () => reached,
+    setReached(n) { reached = n | 0; try { localStorage.setItem('broforce_reached', String(reached)); } catch {} },
+    worldSel: () => worldSel,
+    setWorldSel(i) { worldSel = Math.max(0, Math.min(LEVELS.length - 1, i | 0)); },
+    startChosenWorld,
+    levelName: (i) => LEVELS[i == null ? levelIndex : i].name,
+    levelCount: () => LEVELS.length,
     gotoLevel(i) { loadLevel(i); state = PLAYING; },
     levelIndex: () => levelIndex,
     warpToBoss() { camX = LV.bossArenaX0; for (const p of players) { p.x = LV.bossArenaX0 + 60; p.y = LV.groundY; } for (const w of LV.waves) w.done = true; startBossFight(); },
