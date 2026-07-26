@@ -379,6 +379,166 @@
     g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.fill();
   }
 
+  // ════════════════════════════════════════════════════════════════════════
+  // CRUNCHY PIXEL-ART KIT — hand-pixeled 16-bit terrain/sprite primitives.
+  // Everything snaps to an integer pixel grid so bakes read as chunky, hard-
+  // edged blocks (no smooth gradients). Reused by terrain now + the later
+  // character/enemy/boss art pass. Draw terrain with imageSmoothing OFF so the
+  // upscale to screen keeps pixels razor-sharp.
+  // ════════════════════════════════════════════════════════════════════════
+  // Grid-snapped filled block.
+  function pxRect(g, x, y, w, h, color) {
+    x = Math.round(x); y = Math.round(y); w = Math.round(w); h = Math.round(h);
+    if (w <= 0 || h <= 0) return;
+    g.fillStyle = color; g.fillRect(x, y, w, h);
+  }
+  // Checkerboard dither of two tones (cell = px). Hard tone transition, not a blend.
+  function dither(g, x, y, w, h, colA, colB, px = 2) {
+    x = Math.round(x); y = Math.round(y); w = Math.round(w); h = Math.round(h);
+    if (w <= 0 || h <= 0) return;
+    for (let j = 0; j < h; j += px) {
+      for (let i = 0; i < w; i += px) {
+        g.fillStyle = ((((i / px) | 0) + ((j / px) | 0)) & 1) ? colB : colA;
+        g.fillRect(x + i, y + j, Math.min(px, w - i), Math.min(px, h - j));
+      }
+    }
+  }
+  // Hard 4-step tone ramp from a base color: outline / low / mid / high.
+  function pal(base) {
+    return { hi: shade(base, 0.34), mid: base, lo: shade(base, -0.30), out: shade(base, -0.60) };
+  }
+  // Seeded LCG (reusable — replaces the inline copies scattered in the bakes).
+  function rngOf(seed) { let s = (seed >>> 0) || 1; return () => (s = (s * 1664525 + 1013904223) >>> 0) / 4294967296; }
+  // Chunky grid-aligned speckle. `inset` keeps specks off the tile edges so
+  // horizontally-tiled ground still seams cleanly.
+  function pxNoise(g, x, y, w, h, colors, rnd, count, px = 2, inset = 0) {
+    const cw = Math.max(px, w - inset * 2), ch = Math.max(px, h - inset * 2);
+    for (let i = 0; i < count; i++) {
+      const rx = x + inset + Math.floor(rnd() * cw / px) * px;
+      const ry = y + inset + Math.floor(rnd() * ch / px) * px;
+      g.fillStyle = colors[(rnd() * colors.length) | 0];
+      g.fillRect(rx, ry, px, px);
+    }
+  }
+  // A chiseled shaded block: dark outline, lit top, dithered midriff, dark belly.
+  function pxBlock(g, x, y, w, h, p) {
+    x = Math.round(x); y = Math.round(y); w = Math.round(w); h = Math.round(h);
+    pxRect(g, x - 1, y - 1, w + 2, h + 2, p.out);       // outline
+    pxRect(g, x, y, w, h, p.mid);
+    const t = Math.max(2, Math.round(h * 0.32));
+    pxRect(g, x, y, w, t, p.hi);                          // lit cap
+    pxRect(g, x, y + h - t, w, t, p.lo);                  // shadowed belly
+    dither(g, x, y + t, w, Math.max(2, Math.round(h * 0.22)), p.hi, p.mid, 3);
+  }
+  // Crunchy square "glow" — concentric alpha squares (no smooth radial blur).
+  function pxGlow(g, cx, cy, r, color, step = 3) {
+    for (let i = r; i > 0; i -= step) {
+      g.fillStyle = rgba(color, 0.10 + 0.55 * (1 - i / r));
+      g.fillRect(Math.round(cx - i), Math.round(cy - i), Math.round(i * 2), Math.round(i * 2));
+    }
+  }
+  // Chunky stepped silhouette ridge: columns of width `step` from a quantized
+  // height fn down to floorY. fn MUST be periodic over w (fn(0)==fn(w)) and
+  // `step` MUST divide w so the layer tiles seamlessly.
+  function pxRidge(g, w, floorY, color, fn, step = 8, q = 4) {
+    for (let x = 0; x < w; x += step) {
+      const y = Math.round(fn(x + step / 2) / q) * q;
+      pxRect(g, x, y, step, floorY - y, color);
+    }
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
+  // CRUNCHY BITMAP FONT — 5x7 hand-pixeled glyphs. Rendered as grid-snapped
+  // fillRects (run-length per row → cheap; these are NOT drawImage, so pixel
+  // text never eats the ≤150 drawImage/frame budget). Routes the prominent UI
+  // text so titles/score/banners/floats read as pixel-art cohesive with terrain.
+  // Uppercase-only set; strings with unsupported glyphs fall back to hudText's
+  // Impact path (keeps mixed-case story paragraphs looking clean).
+  // ════════════════════════════════════════════════════════════════════════
+  const PXF = {
+    'A': ['01110', '10001', '10001', '11111', '10001', '10001', '10001'],
+    'B': ['11110', '10001', '10001', '11110', '10001', '10001', '11110'],
+    'C': ['01110', '10001', '10000', '10000', '10000', '10001', '01110'],
+    'D': ['11110', '10001', '10001', '10001', '10001', '10001', '11110'],
+    'E': ['11111', '10000', '10000', '11110', '10000', '10000', '11111'],
+    'F': ['11111', '10000', '10000', '11110', '10000', '10000', '10000'],
+    'G': ['01110', '10001', '10000', '10111', '10001', '10001', '01110'],
+    'H': ['10001', '10001', '10001', '11111', '10001', '10001', '10001'],
+    'I': ['11111', '00100', '00100', '00100', '00100', '00100', '11111'],
+    'J': ['00111', '00010', '00010', '00010', '10010', '10010', '01100'],
+    'K': ['10001', '10010', '10100', '11000', '10100', '10010', '10001'],
+    'L': ['10000', '10000', '10000', '10000', '10000', '10000', '11111'],
+    'M': ['10001', '11011', '10101', '10101', '10001', '10001', '10001'],
+    'N': ['10001', '11001', '11001', '10101', '10011', '10011', '10001'],
+    'O': ['01110', '10001', '10001', '10001', '10001', '10001', '01110'],
+    'P': ['11110', '10001', '10001', '11110', '10000', '10000', '10000'],
+    'Q': ['01110', '10001', '10001', '10001', '10101', '10010', '01101'],
+    'R': ['11110', '10001', '10001', '11110', '10100', '10010', '10001'],
+    'S': ['01111', '10000', '10000', '01110', '00001', '00001', '11110'],
+    'T': ['11111', '00100', '00100', '00100', '00100', '00100', '00100'],
+    'U': ['10001', '10001', '10001', '10001', '10001', '10001', '01110'],
+    'V': ['10001', '10001', '10001', '10001', '10001', '01010', '00100'],
+    'W': ['10001', '10001', '10001', '10101', '10101', '11011', '10001'],
+    'X': ['10001', '10001', '01010', '00100', '01010', '10001', '10001'],
+    'Y': ['10001', '10001', '01010', '00100', '00100', '00100', '00100'],
+    'Z': ['11111', '00001', '00010', '00100', '01000', '10000', '11111'],
+    '0': ['01110', '10001', '10011', '10101', '11001', '10001', '01110'],
+    '1': ['00100', '01100', '00100', '00100', '00100', '00100', '01110'],
+    '2': ['01110', '10001', '00001', '00010', '00100', '01000', '11111'],
+    '3': ['11110', '00001', '00001', '01110', '00001', '00001', '11110'],
+    '4': ['00010', '00110', '01010', '10010', '11111', '00010', '00010'],
+    '5': ['11111', '10000', '11110', '00001', '00001', '10001', '01110'],
+    '6': ['01110', '10000', '10000', '11110', '10001', '10001', '01110'],
+    '7': ['11111', '00001', '00010', '00100', '01000', '01000', '01000'],
+    '8': ['01110', '10001', '10001', '01110', '10001', '10001', '01110'],
+    '9': ['01110', '10001', '10001', '01111', '00001', '00001', '01110'],
+    '!': ['00100', '00100', '00100', '00100', '00100', '00000', '00100'],
+    ':': ['00000', '00100', '00100', '00000', '00100', '00100', '00000'],
+    '.': ['00000', '00000', '00000', '00000', '00000', '01100', '01100'],
+    ',': ['00000', '00000', '00000', '00000', '01100', '01100', '01000'],
+    '-': ['00000', '00000', '00000', '11111', '00000', '00000', '00000'],
+    '+': ['00000', '00100', '00100', '11111', '00100', '00100', '00000'],
+    '×': ['00000', '10001', '01010', '00100', '01010', '10001', '00000'],
+    '✕': ['00000', '10001', '01010', '00100', '01010', '10001', '00000'],
+    '★': ['00100', '01110', '11111', '01110', '01010', '10001', '00000'],
+    '•': ['00000', '00000', '01100', '01100', '00000', '00000', '00000'],
+    '/': ['00001', '00001', '00010', '00100', '01000', '10000', '10000'],
+    '%': ['11001', '11010', '00100', '00100', '01000', '01011', '10011'],
+    '(': ['00010', '00100', '01000', '01000', '01000', '00100', '00010'],
+    ')': ['01000', '00100', '00010', '00010', '00010', '00100', '01000'],
+    '<': ['00010', '00100', '01000', '10000', '01000', '00100', '00010'],
+    '>': ['01000', '00100', '00010', '00001', '00010', '00100', '01000'],
+    "'": ['00100', '00100', '00000', '00000', '00000', '00000', '00000'],
+    '"': ['01010', '01010', '00000', '00000', '00000', '00000', '00000'],
+  };
+  function pxSupported(str) { for (let i = 0; i < str.length; i++) { const c = str[i]; if (c === ' ') continue; if (!PXF[c]) return false; } return true; }
+  // Draw a run-length pixel string into context g. shadow=true → dark drop-shadow.
+  function pxTextG(g, str, x, y, scale, color, align, shadow) {
+    align = align || 'left';
+    const adv = 6 * scale, total = str.length * adv - scale;
+    const sx = align === 'center' ? Math.round(x - total / 2) : align === 'right' ? Math.round(x - total) : Math.round(x);
+    const top = Math.round(y) - 7 * scale;
+    for (let pass = shadow ? 0 : 1; pass < 2; pass++) {
+      g.fillStyle = pass === 0 ? (shadow === true ? 'rgba(0,0,0,0.85)' : shadow) : color;
+      const off = pass === 0 ? scale : 0;
+      let cx = sx;
+      for (let ci = 0; ci < str.length; ci++) {
+        const rows = PXF[str[ci]];
+        if (rows) {
+          for (let r = 0; r < 7; r++) {
+            const row = rows[r]; let c = 0;
+            while (c < 5) {
+              if (row[c] === '1') { let c2 = c; while (c2 < 5 && row[c2] === '1') c2++; g.fillRect(cx + c * scale + off, top + r * scale + off, (c2 - c) * scale, scale); c = c2; }
+              else c++;
+            }
+          }
+        }
+        cx += adv;
+      }
+    }
+  }
+  function pxText(str, x, y, scale, color, align) { pxTextG(ctx, str, x, y, scale, color, align, true); }
+
   // Per-frame draw helpers. drawSprRot/Pivot reset straight to the world cam.
   let _camX = 0, _camY = 0;
   function drawSpr(s, x, y) { ctx.drawImage(s.c, x - s.w / 2, y - s.h / 2, s.w, s.h); }
@@ -435,89 +595,80 @@
 
   // ---- Bro body: baked per (broId, facing, pose). Feet at bottom-center. ----
   const POSES = ['stand', 'run0', 'run1', 'jump', 'prone'];
+  // CRUNCHY bro: chunky pixel blocks, hard 4-tone ramps, dark outline. Same
+  // coordinate space / silhouette / footprint as before (baked ss=1).
   function bakeBro(g, b, facing, pose) {
     // Coordinate space: 26 wide x 34 tall, feet at (13, 33), facing right.
     g.translate(13, 0);
     if (facing < 0) g.scale(-1, 1);
-    const col = b.color, dk = b.dark, sk = b.skin, pants = b.pants;
+    const jp = pal(b.color), pp = pal(b.pants), sp = pal(b.skin), dp = pal(b.dark);
+    const boltc = b.bolt, BOOT = '#15161c';
     const legLift = pose === 'run0' ? 1 : pose === 'run1' ? -1 : 0;
-    const crouch = pose === 'prone';
-    g.lineJoin = 'round'; g.lineWidth = 1.4; g.strokeStyle = 'rgba(0,0,0,0.6)';
-    if (crouch) {
-      // prone: low body lying, firing horizontally
-      g.fillStyle = pants; g.fillRect(-11, 26, 20, 6); g.strokeRect(-11, 26, 20, 6);
-      const tg = g.createLinearGradient(0, 18, 0, 27);
-      tg.addColorStop(0, shade(col, 0.3)); tg.addColorStop(1, shade(col, -0.35));
-      g.fillStyle = tg; g.fillRect(-9, 18, 20, 9); g.strokeRect(-9, 18, 20, 9);
+    if (pose === 'prone') {
+      // legs/back lying
+      pxRect(g, -11, 26, 20, 7, pp.out); pxRect(g, -11, 27, 19, 5, pp.mid); pxRect(g, -11, 27, 19, 2, pp.hi);
+      pxRect(g, -3, 30, 12, 3, BOOT);
+      // torso
+      pxRect(g, -10, 17, 22, 11, jp.out); pxRect(g, -9, 18, 20, 9, jp.mid);
+      pxRect(g, -9, 18, 20, 3, jp.hi); pxRect(g, -9, 25, 20, 2, jp.lo);
+      pxRect(g, -6, 21, 12, 2, boltc);
       // head
-      g.fillStyle = sk; g.beginPath(); g.arc(9, 17, 5, 0, Math.PI * 2); g.fill(); g.stroke();
-      g.fillStyle = dk; g.fillRect(6, 11, 8, 4); // helmet band
+      pxRect(g, 4, 11, 11, 11, sp.out); pxRect(g, 5, 12, 9, 9, sp.mid); pxRect(g, 5, 12, 9, 3, sp.hi);
+      pxRect(g, 4, 10, 11, 4, dp.lo); pxRect(g, 5, 10, 9, 2, dp.mid);
+      pxRect(g, 11, 16, 2, 2, '#15181f');
       // gun
-      g.fillStyle = '#333a44'; g.fillRect(11, 17, 12, 3);
+      pxRect(g, 12, 16, 13, 4, '#20242c'); pxRect(g, 12, 16, 13, 1, '#565e70'); pxRect(g, 23, 15, 3, 5, '#15181f');
       return;
     }
-    // legs
-    const lg = g.createLinearGradient(0, 22, 0, 33);
-    lg.addColorStop(0, pants); lg.addColorStop(1, shade(pants, -0.35));
-    g.fillStyle = lg;
+    // legs + boots
     if (pose === 'jump') {
-      g.fillRect(-8, 22, 6, 8); g.fillRect(2, 20, 6, 9);
-      g.strokeRect(-8, 22, 6, 8); g.strokeRect(2, 20, 6, 9);
-      g.fillStyle = '#1a1a22'; g.fillRect(-9, 29, 8, 3); g.fillRect(1, 28, 8, 3);
+      pxRect(g, -9, 21, 8, 10, pp.out); pxRect(g, -8, 22, 6, 8, pp.mid); pxRect(g, -8, 22, 6, 3, pp.hi);
+      pxRect(g, 1, 19, 8, 11, pp.out); pxRect(g, 2, 20, 6, 9, pp.mid); pxRect(g, 2, 20, 6, 3, pp.hi);
+      pxRect(g, -9, 29, 9, 3, BOOT); pxRect(g, 1, 28, 9, 3, BOOT);
     } else {
-      g.fillRect(-7, 22 - legLift, 6, 11 + legLift); g.fillRect(1, 22 + legLift, 6, 11 - legLift);
-      g.strokeRect(-7, 22 - legLift, 6, 11 + legLift); g.strokeRect(1, 22 + legLift, 6, 11 - legLift);
-      g.fillStyle = '#1a1a22'; g.fillRect(-8, 31 - legLift, 8, 3); g.fillRect(0, 31 + legLift, 8, 3);
+      const by = 22 - legLift, fy = 22 + legLift;
+      pxRect(g, -8, by - 1, 8, 12 + legLift, pp.out); pxRect(g, -7, by, 6, 11 + legLift, pp.mid);
+      pxRect(g, -7, by, 6, 3, pp.hi); pxRect(g, -7, by, 2, 11 + legLift, pp.lo);
+      pxRect(g, 0, fy - 1, 8, 12 - legLift, pp.out); pxRect(g, 1, fy, 6, 11 - legLift, pp.mid); pxRect(g, 1, fy, 6, 3, pp.hi);
+      pxRect(g, -8, 31 - legLift, 9, 3, BOOT); pxRect(g, 0, 31 + legLift, 9, 3, BOOT);
     }
-    // torso
-    const tg = g.createLinearGradient(-8, 9, 8, 24);
-    tg.addColorStop(0, shade(col, 0.35)); tg.addColorStop(0.55, col); tg.addColorStop(1, shade(col, -0.4));
-    g.fillStyle = tg;
-    g.beginPath();
-    g.moveTo(-8, 10); g.lineTo(8, 10); g.lineTo(7, 24); g.lineTo(-7, 24); g.closePath();
-    g.fill(); g.stroke();
-    // chest strap / accent
-    g.strokeStyle = rgba(b.bolt, 0.9); g.lineWidth = 1.6;
-    g.beginPath(); g.moveTo(-7, 12); g.lineTo(6, 20); g.stroke();
-    g.strokeStyle = 'rgba(0,0,0,0.6)'; g.lineWidth = 1.4;
-    // arm (back) holding gun forward
-    g.fillStyle = shade(col, -0.15);
-    g.fillRect(2, 12, 5, 9); g.strokeRect(2, 12, 5, 9);
+    // torso (jacket)
+    pxRect(g, -9, 9, 18, 16, jp.out); pxRect(g, -8, 10, 16, 14, jp.mid);
+    pxRect(g, -8, 10, 16, 4, jp.hi); pxRect(g, -8, 21, 16, 3, jp.lo);
+    dither(g, -8, 14, 16, 4, jp.hi, jp.mid, 2);
+    // chest strap accent (stepped diagonal)
+    pxRect(g, -7, 12, 4, 2, boltc); pxRect(g, -3, 15, 4, 2, boltc); pxRect(g, 1, 18, 5, 2, boltc);
+    pxRect(g, 7, 11, 2, 13, boltc);   // front rim highlight
+    // back arm holding gun forward
+    pxRect(g, 2, 12, 6, 10, jp.out); pxRect(g, 3, 12, 4, 9, jp.lo); pxRect(g, 3, 12, 4, 3, jp.mid);
     // head
-    g.fillStyle = sk; g.beginPath(); g.arc(0, 6, 5.4, 0, Math.PI * 2); g.fill(); g.stroke();
-    // face detail (eye)
-    g.fillStyle = '#20242c'; g.fillRect(2.5, 4.5, 1.6, 1.6);
+    pxRect(g, -6, 0, 12, 13, sp.out); pxRect(g, -5, 1, 10, 11, sp.mid);
+    pxRect(g, -5, 1, 10, 3, sp.hi); pxRect(g, -5, 10, 10, 2, sp.lo);
+    pxRect(g, 2, 5, 2, 2, '#15181f');   // eye
     // headgear per bro
-    if (b.helmet) { g.fillStyle = dk; g.beginPath(); g.arc(0, 4, 6, Math.PI, 0); g.fill(); g.fillRect(-6, 3, 12, 2.5); }
-    else if (b.cap) { g.fillStyle = dk; g.beginPath(); g.arc(0, 4, 6, Math.PI, 0); g.fill(); g.fillRect(2, 3, 8, 2.2); }
-    else if (b.bandana) { g.fillStyle = b.bandana; g.fillRect(-6, 1.5, 12, 3.4); g.fillRect(-8, 2, 3, 5); }
-    else if (b.mug) { g.fillStyle = dk; g.fillRect(-6, 0.5, 12, 3); g.fillStyle = '#e8e8f0'; g.fillRect(5, 5, 4, 4); g.strokeRect(5, 5, 4, 4); }
-    // ── detail pass: front rim light + small shading so the bro pops on a busy bg ──
-    g.fillStyle = rgba(b.bolt, 0.55);
-    g.fillRect(7, 11, 1.2, 13);                                  // torso front edge highlight
-    g.fillStyle = 'rgba(255,255,255,0.22)';
-    g.beginPath(); g.arc(0, 6, 5.4, -1.9, -0.5); g.lineWidth = 1.1; g.strokeStyle = 'rgba(255,255,255,0.28)'; g.stroke(); // head rim
-    g.fillStyle = 'rgba(0,0,0,0.22)';
-    if (pose !== 'jump') { g.fillRect(-7, 22 - legLift, 1.4, 11 + legLift); }   // back-leg shadow
-    g.fillStyle = 'rgba(255,255,255,0.16)';
-    g.fillRect(6, 12, 1.2, 8);                                   // arm highlight
-    // steam for coffee bro
-    if (b.mug) { glowDot(g, 7, 3, 3, '#fff', 0.4); }
+    if (b.helmet) { pxRect(g, -7, -1, 14, 5, dp.out); pxRect(g, -6, 0, 12, 3, dp.mid); pxRect(g, -6, 0, 12, 1, dp.hi); pxRect(g, -7, 3, 14, 2, dp.lo); }
+    else if (b.cap) { pxRect(g, -6, -1, 12, 4, dp.out); pxRect(g, -5, 0, 10, 2, dp.mid); pxRect(g, -5, 0, 10, 1, dp.hi); pxRect(g, 4, 2, 8, 2, dp.lo); }
+    else if (b.bandana) { pxRect(g, -7, 1, 14, 4, b.bandana); pxRect(g, -7, 1, 14, 1, '#ffffff'); pxRect(g, -9, 2, 3, 6, b.bandana); }
+    else if (b.mug) { pxRect(g, -6, -1, 12, 4, dp.out); pxRect(g, -5, 0, 10, 2, dp.mid); pxRect(g, 4, 5, 7, 6, '#2a201a'); pxRect(g, 5, 6, 5, 4, '#e8e8f0'); pxRect(g, 10, 6, 2, 3, '#2a201a'); }
+    // rim + steam
+    pxRect(g, -5, 0, 8, 1, 'rgba(255,255,255,0.35)');
+    if (b.mug) { pxRect(g, 7, 2, 2, 2, '#ffffff'); pxRect(g, 9, 0, 2, 2, 'rgba(255,255,255,0.6)'); }
   }
   for (const id of BRO_ORDER) {
     const b = BROS[id];
     for (const facing of [1, -1]) {
       for (const pose of POSES) {
-        SPR['bro_' + id + '_' + (facing > 0 ? 'r' : 'l') + '_' + pose] = bake(28, 36, g => bakeBro(g, b, facing, pose));
+        SPR['bro_' + id + '_' + (facing > 0 ? 'r' : 'l') + '_' + pose] = bake(28, 36, g => bakeBro(g, b, facing, pose), 1);
       }
     }
   }
   // gun arm sprite (barrel to the right, pivot at inner end)
   SPR.gun = bake(16, 6, g => {
-    g.fillStyle = '#2c313c'; g.fillRect(0, 1, 13, 4);
-    g.fillStyle = '#4a5060'; g.fillRect(0, 1, 13, 1.4);
-    g.fillStyle = '#1a1d24'; g.fillRect(11, 0.5, 3, 5);
-  });
+    pxRect(g, 0, 1, 13, 4, '#2c313c');
+    pxRect(g, 0, 1, 13, 1, '#565e70');
+    pxRect(g, 0, 4, 13, 1, '#181b22');
+    pxRect(g, 11, 0, 3, 6, '#15181f');
+  }, 1);
   // muzzle flash
   function bakeMuzzle(color) {
     return bake(20, 20, g => {
@@ -588,160 +739,135 @@
     return s;
   }
 
-  // ---- Enemies (baked, facing left toward players by default = facing -1) ----
+  // ---- Enemies (CRUNCHY, baked ss=1, facing left toward players by default) ----
   SPR.scout = bake(22, 28, g => {
     g.translate(11, 0);
-    const bg = g.createLinearGradient(-8, 6, 8, 26);
-    bg.addColorStop(0, '#c85a4a'); bg.addColorStop(1, '#7a2c22');
-    g.fillStyle = bg; g.strokeStyle = 'rgba(0,0,0,0.6)'; g.lineWidth = 1.4; g.lineJoin = 'round';
-    g.beginPath(); g.moveTo(-7, 8); g.lineTo(7, 8); g.lineTo(6, 22); g.lineTo(-6, 22); g.closePath(); g.fill(); g.stroke();
+    const bp = pal('#b04638');
     // legs
-    g.fillStyle = '#2a2a34'; g.fillRect(-6, 22, 4, 6); g.fillRect(2, 22, 4, 6);
-    // head/visor
-    g.fillStyle = '#3a3a48'; g.beginPath(); g.arc(0, 5, 5, 0, Math.PI * 2); g.fill(); g.stroke();
-    glowDot(g, -2, 5, 4, '#ff5252', 0.8);
-    g.fillStyle = '#ff5252'; g.fillRect(-5, 3.5, 6, 2.4);
-    // ── detail pass: rim light, chest plate seam, leg shading ──
-    g.fillStyle = 'rgba(255,190,170,0.5)'; g.fillRect(-7, 8, 1.2, 13);        // lit front edge (faces player)
-    g.fillStyle = 'rgba(0,0,0,0.28)'; g.fillRect(5, 9, 1.4, 12);             // shaded back edge
-    g.fillStyle = 'rgba(255,255,255,0.14)'; g.fillRect(-4, 11, 6, 1.2);      // chest plate seam
-    g.fillStyle = 'rgba(0,0,0,0.3)'; g.fillRect(-6, 24, 4, 2); g.fillRect(2, 24, 4, 2); // foot shadow
-    g.fillStyle = 'rgba(255,255,255,0.3)'; g.fillRect(-4.5, 2.5, 2, 1.4);    // visor glint
-  });
+    pxRect(g, -6, 21, 5, 7, '#1c1e26'); pxRect(g, 2, 21, 5, 7, '#1c1e26');
+    pxRect(g, -6, 21, 5, 2, '#2e3240'); pxRect(g, 2, 21, 5, 2, '#2e3240');
+    // torso
+    pxRect(g, -7, 7, 14, 15, bp.out); pxRect(g, -6, 8, 12, 13, bp.mid);
+    pxRect(g, -6, 8, 12, 4, bp.hi); pxRect(g, -6, 18, 12, 3, bp.lo);
+    dither(g, -6, 12, 12, 3, bp.hi, bp.mid, 2);
+    pxRect(g, -4, 13, 8, 2, 'rgba(255,220,200,0.25)');   // chest seam
+    pxRect(g, -7, 8, 1, 13, 'rgba(255,190,170,0.5)');    // lit front edge
+    // head / visor
+    pxRect(g, -5, 0, 10, 9, '#2a2d38'); pxRect(g, -5, 0, 10, 2, '#3d4150');
+    pxGlow(g, -1, 4, 4, '#ff5252', 2);
+    pxRect(g, -5, 3, 7, 2, '#ff5252'); pxRect(g, -5, 3, 5, 1, '#ffb0a0');
+  }, 1);
   SPR.turret = bake(34, 30, g => {
     g.translate(17, 0);
+    const bp = pal('#5a6274');
     // base
-    g.fillStyle = '#33384a'; g.beginPath(); g.moveTo(-14, 30); g.lineTo(14, 30); g.lineTo(9, 18); g.lineTo(-9, 18); g.closePath(); g.fill();
-    g.strokeStyle = 'rgba(0,0,0,0.6)'; g.lineWidth = 1.4; g.stroke();
+    pxRect(g, -14, 24, 28, 6, '#20242e'); pxRect(g, -11, 20, 22, 5, '#2e3444'); pxRect(g, -11, 20, 22, 2, '#3d4658');
+    for (const rx of [-9, -3, 3, 9]) pxRect(g, rx, 22, 2, 2, 'rgba(255,255,255,0.25)');
     // dome
-    const dg = g.createLinearGradient(0, 4, 0, 20);
-    dg.addColorStop(0, '#7a8296'); dg.addColorStop(1, '#3a4050');
-    g.fillStyle = dg; g.beginPath(); g.arc(0, 18, 11, Math.PI, 0); g.fill(); g.stroke();
-    glowDot(g, 0, 14, 5, '#ffce4d', 0.7);
-    g.fillStyle = '#ffce4d'; g.beginPath(); g.arc(0, 14, 3, 0, Math.PI * 2); g.fill();
-    // barrel
-    g.fillStyle = '#22262f'; g.fillRect(-16, 12, 8, 5);
-    // ── detail pass: dome rim/shine, base shading, bolts, barrel highlight ──
-    g.lineWidth = 1.6;
-    g.strokeStyle = 'rgba(255,255,255,0.28)'; g.beginPath(); g.arc(0, 18, 10, Math.PI * 1.02, Math.PI * 1.42); g.stroke();  // upper-left dome shine
-    g.strokeStyle = 'rgba(0,0,0,0.3)'; g.beginPath(); g.arc(0, 18, 10.5, Math.PI * 1.62, Math.PI * 1.98); g.stroke();      // upper-right shadow
-    g.fillStyle = 'rgba(0,0,0,0.3)'; g.fillRect(-14, 27, 28, 3);                 // base ground shadow
-    g.fillStyle = 'rgba(255,255,255,0.2)';
-    for (const rx of [-9, -3, 3, 9]) g.fillRect(rx, 22, 1.6, 1.6);               // base rivets
-    g.fillStyle = 'rgba(150,170,200,0.5)'; g.fillRect(-16, 12, 8, 1.4);          // barrel top highlight
-  });
+    pxRect(g, -11, 8, 22, 12, bp.out); pxRect(g, -10, 9, 20, 10, bp.mid);
+    pxRect(g, -10, 9, 20, 4, bp.hi); pxRect(g, -10, 16, 20, 3, bp.lo);
+    dither(g, -10, 13, 20, 3, bp.hi, bp.mid, 2);
+    // eye
+    pxGlow(g, 0, 14, 5, '#ffce4d', 2);
+    pxRect(g, -2, 12, 4, 4, '#ffe066'); pxRect(g, -2, 12, 4, 1, '#fff6c8');
+    // barrel (left)
+    pxRect(g, -16, 11, 9, 6, '#181b22'); pxRect(g, -16, 11, 9, 1, '#4a5568');
+  }, 1);
   SPR.drone = bake(30, 22, g => {
     g.translate(15, 11);
-    const bg = g.createLinearGradient(0, -8, 0, 8);
-    bg.addColorStop(0, '#8f6bd8'); bg.addColorStop(1, '#4a2c86');
-    g.fillStyle = bg; g.strokeStyle = 'rgba(0,0,0,0.6)'; g.lineWidth = 1.4;
-    g.beginPath(); g.ellipse(0, 0, 12, 7, 0, 0, Math.PI * 2); g.fill(); g.stroke();
-    glowDot(g, 0, 0, 6, '#c45fff', 0.7);
-    g.fillStyle = '#e9d0ff'; g.beginPath(); g.arc(0, 0, 3.4, 0, Math.PI * 2); g.fill();
-    // rotor blur
-    g.fillStyle = 'rgba(200,200,230,0.35)'; g.fillRect(-14, -10, 28, 2.4);
-  });
+    const bp = pal('#6a3fb0');
+    pxRect(g, -14, -10, 28, 2, 'rgba(200,200,230,0.35)');   // rotor blur
+    pxRect(g, -13, -2, 3, 4, '#3a2456'); pxRect(g, 10, -2, 3, 4, '#3a2456'); // side fins
+    // body
+    pxRect(g, -11, -6, 22, 12, bp.out); pxRect(g, -10, -5, 20, 10, bp.mid);
+    pxRect(g, -10, -5, 20, 3, bp.hi); pxRect(g, -10, 2, 20, 2, bp.lo);
+    // eye
+    pxGlow(g, 0, 0, 5, '#c45fff', 2);
+    pxRect(g, -2, -2, 4, 4, '#e9d0ff'); pxRect(g, -2, -2, 4, 1, '#ffffff');
+  }, 1);
   SPR.walker = bake(48, 50, g => {
     g.translate(24, 0);
+    const bp = pal('#5a6274');
     // legs
-    g.strokeStyle = '#2a2e3a'; g.lineWidth = 4; g.lineCap = 'round';
-    g.beginPath(); g.moveTo(-10, 30); g.lineTo(-16, 48); g.moveTo(10, 30); g.lineTo(16, 48); g.stroke();
-    g.beginPath(); g.moveTo(-8, 30); g.lineTo(-4, 48); g.moveTo(8, 30); g.lineTo(4, 48); g.stroke();
+    pxRect(g, -16, 30, 6, 18, '#20242e'); pxRect(g, 10, 30, 6, 18, '#20242e');
+    pxRect(g, -16, 30, 6, 2, '#3a4150'); pxRect(g, 10, 30, 6, 2, '#3a4150');
+    pxRect(g, -9, 30, 4, 16, '#2a2f3a'); pxRect(g, 5, 30, 4, 16, '#2a2f3a');
+    pxRect(g, -18, 46, 8, 4, '#15181f'); pxRect(g, 10, 46, 8, 4, '#15181f'); // feet
     // body
-    const bg = g.createLinearGradient(0, 8, 0, 34);
-    bg.addColorStop(0, '#9aa2b6'); bg.addColorStop(1, '#454b5e');
-    g.fillStyle = bg; g.strokeStyle = 'rgba(0,0,0,0.6)'; g.lineWidth = 1.6; g.lineJoin = 'round';
-    g.beginPath();
-    g.moveTo(-16, 12); g.lineTo(16, 12); g.lineTo(14, 32); g.lineTo(-14, 32); g.closePath();
-    g.fill(); g.stroke();
-    // eye
-    glowDot(g, -2, 20, 7, '#ff5252', 0.8);
-    g.fillStyle = '#ff5252'; g.fillRect(-12, 18, 12, 4);
-    // shoulder cannon
-    g.fillStyle = '#22262f'; g.fillRect(-22, 14, 9, 6);
-    // rivets
-    g.fillStyle = 'rgba(255,255,255,0.3)';
-    for (const rx of [-11, 0, 11]) g.fillRect(rx, 14, 2, 2);
-  });
+    pxRect(g, -16, 10, 32, 24, bp.out); pxRect(g, -15, 11, 30, 22, bp.mid);
+    pxRect(g, -15, 11, 30, 5, bp.hi); pxRect(g, -15, 29, 30, 4, bp.lo);
+    dither(g, -15, 16, 30, 4, bp.hi, bp.mid, 3);
+    for (const rx of [-11, 0, 11]) pxRect(g, rx, 13, 2, 2, 'rgba(255,255,255,0.3)');
+    // eye visor
+    pxGlow(g, -4, 20, 6, '#ff5252', 2);
+    pxRect(g, -12, 18, 12, 4, '#ff5252'); pxRect(g, -12, 18, 10, 1, '#ffb0a0');
+    // shoulder cannon (left)
+    pxRect(g, -22, 14, 9, 7, '#181b22'); pxRect(g, -22, 14, 9, 1, '#3a4150');
+  }, 1);
   // hit-flash whites
   for (const k of ['scout', 'turret', 'drone', 'walker']) SPR[k + '_w'] = whiten(SPR[k]);
 
   // ---- Sammy the cat ----
-  SPR.cat0 = bake(28, 16, g => bakeCat(g, 0));
-  SPR.cat1 = bake(28, 16, g => bakeCat(g, 1));
+  SPR.cat0 = bake(28, 16, g => bakeCat(g, 0), 1);
+  SPR.cat1 = bake(28, 16, g => bakeCat(g, 1), 1);
   function bakeCat(g, f) {
     g.translate(14, 0);
-    const fur = '#8a7050', dark = '#402d1a', cream = '#c9b184', pink = '#e79aa6';
+    const fur = pal('#9a7a52'), cream = '#c9b184', dark = '#3a2812', pink = '#e79aa6';
+    // tail
+    pxRect(g, -14, -2, 3, 7, fur.lo); pxRect(g, -13, -3, 4, 3, fur.mid); pxRect(g, -12, 4, 3, 4, fur.mid);
     // body
-    g.fillStyle = fur;
-    g.beginPath(); g.ellipse(0, 10, 11, 5, 0, 0, Math.PI * 2); g.fill();
-    // cream belly
-    g.fillStyle = cream; g.beginPath(); g.ellipse(-1, 12, 8, 2.2, 0, 0, Math.PI * 2); g.fill();
-    // tabby body stripes
-    g.fillStyle = dark;
-    g.fillRect(-6, 6, 1.6, 5); g.fillRect(-2, 5.5, 1.6, 5); g.fillRect(2, 6, 1.6, 4.5);
+    pxRect(g, -11, 6, 20, 8, fur.out); pxRect(g, -10, 6, 18, 7, fur.mid); pxRect(g, -10, 6, 18, 2, fur.hi);
+    pxRect(g, -8, 11, 14, 2, cream);   // belly
+    for (const sx of [-6, -2, 2]) pxRect(g, sx, 6, 1, 4, dark);   // stripes
+    // legs + paws
+    const off = f ? 1 : -1;
+    pxRect(g, -6, 13, 2, 3, fur.lo); pxRect(g, 4 - off, 13, 2, 3, fur.lo);
+    pxRect(g, -6, 15, 2, 1, cream); pxRect(g, 4 - off, 15, 2, 1, cream);
     // head
-    g.fillStyle = fur; g.beginPath(); g.arc(9, 7, 4.5, 0, Math.PI * 2); g.fill();
-    // forehead tabby stripes
-    g.fillStyle = dark; g.fillRect(8, 3.4, 0.9, 2.2); g.fillRect(9.8, 3.6, 0.9, 2);
-    // ears (orange with pink inner)
-    g.fillStyle = fur;
-    g.beginPath(); g.moveTo(7, 3); g.lineTo(8, -1); g.lineTo(10, 3); g.closePath(); g.fill();
-    g.beginPath(); g.moveTo(11, 3); g.lineTo(12, -1); g.lineTo(13, 3); g.closePath(); g.fill();
-    g.fillStyle = pink; g.fillRect(8.4, 1.7, 0.9, 1.3); g.fillRect(11.4, 1.7, 0.9, 1.3);
-    // tail (orange with a couple of dark rings)
-    g.strokeStyle = fur; g.lineWidth = 3; g.lineCap = 'round';
-    g.beginPath(); g.moveTo(-10, 8); g.quadraticCurveTo(-16, 2, -12, -2); g.stroke();
-    g.strokeStyle = dark; g.lineWidth = 1.6;
-    g.beginPath(); g.moveTo(-14.2, 4.4); g.lineTo(-12.4, 3.4); g.moveTo(-14.6, 1); g.lineTo(-12.6, 0.4); g.stroke();
-    // legs with white paws
-    g.strokeStyle = fur; g.lineWidth = 2.4;
-    const off = f ? 2 : -2;
-    g.beginPath(); g.moveTo(-6, 14); g.lineTo(-6 + off, 16); g.moveTo(4, 14); g.lineTo(4 - off, 16); g.stroke();
-    g.fillStyle = cream; g.fillRect(-7 + off, 15.2, 2, 1.5); g.fillRect(3 - off, 15.2, 2, 1.5);
-    // pink nose + green eye
-    g.fillStyle = pink; g.fillRect(12.3, 7.4, 1.4, 1.1);
-    g.fillStyle = '#aaff60'; g.fillRect(8, 6, 1.8, 1.8);
+    pxRect(g, 5, 2, 10, 10, fur.out); pxRect(g, 6, 3, 8, 8, fur.mid); pxRect(g, 6, 3, 8, 2, fur.hi);
+    // ears
+    pxRect(g, 6, 0, 2, 3, fur.mid); pxRect(g, 12, 0, 2, 3, fur.mid);
+    pxRect(g, 6, 1, 2, 1, pink); pxRect(g, 12, 1, 2, 1, pink);
+    // face
+    pxRect(g, 7, 4, 1, 2, dark); pxRect(g, 10, 4, 1, 2, dark);
+    pxRect(g, 8, 6, 2, 2, '#aaff60');   // eye
+    pxRect(g, 12, 7, 2, 1, pink);       // nose
   }
 
   // ---- Sammy rearing/roaring pose for the boss pounce ("REEARE!") ----
   SPR.catRear = bake(30, 30, g => {
-    const fur = '#8a7050', dark = '#402d1a', cream = '#c9b184', pink = '#e79aa6', claw = '#f4f0e6';
     g.translate(15, 0);
-    g.fillStyle = fur; g.beginPath(); g.ellipse(0, 24, 8, 6, 0, 0, Math.PI * 2); g.fill();     // haunches
-    g.beginPath(); g.ellipse(0, 15, 7, 10, 0, 0, Math.PI * 2); g.fill();                         // upright body
-    g.fillStyle = cream; g.beginPath(); g.ellipse(0, 17, 4, 7, 0, 0, Math.PI * 2); g.fill();     // belly
-    g.fillStyle = dark; g.fillRect(-5, 10, 1.6, 9); g.fillRect(3.4, 10, 1.6, 9);                 // stripes
-    g.fillStyle = fur; g.beginPath(); g.arc(0, 6, 5.5, 0, Math.PI * 2); g.fill();                // head
-    g.beginPath(); g.moveTo(-4, 3); g.lineTo(-5, -2); g.lineTo(-1, 3); g.closePath(); g.fill();  // ears
-    g.beginPath(); g.moveTo(4, 3); g.lineTo(5, -2); g.lineTo(1, 3); g.closePath(); g.fill();
-    g.fillStyle = pink; g.fillRect(-3.6, 0.4, 1, 1.4); g.fillRect(2.6, 0.4, 1, 1.4);
-    g.fillStyle = dark; g.fillRect(-2.4, 3.4, 1, 2); g.fillRect(1.4, 3.6, 1, 2);                 // forehead stripes
-    g.fillStyle = '#5a1a1a'; g.beginPath(); g.ellipse(0, 8.6, 2.2, 2.6, 0, 0, Math.PI * 2); g.fill(); // roar mouth
-    g.fillStyle = '#fff'; g.fillRect(-1.6, 7, 0.9, 1.3); g.fillRect(0.7, 7, 0.9, 1.3);           // fangs
-    g.fillStyle = '#aaff60'; g.fillRect(-3, 4.4, 1.6, 1.6); g.fillRect(1.4, 4.4, 1.6, 1.6);      // fierce eyes
-    g.strokeStyle = fur; g.lineWidth = 2.4; g.lineCap = 'round';                                 // raised paws
-    g.beginPath(); g.moveTo(-4, 10); g.lineTo(-9, 4); g.moveTo(4, 10); g.lineTo(9, 4); g.stroke();
-    g.strokeStyle = claw; g.lineWidth = 1;                                                       // claws
-    for (const px of [-11, -9.5, -8]) { g.beginPath(); g.moveTo(px, 4); g.lineTo(px - 1.5, 0.5); g.stroke(); }
-    for (const px of [8, 9.5, 11]) { g.beginPath(); g.moveTo(px, 4); g.lineTo(px + 1.5, 0.5); g.stroke(); }
-    g.strokeStyle = fur; g.lineWidth = 3;                                                        // tail
-    g.beginPath(); g.moveTo(6, 22); g.quadraticCurveTo(13, 18, 10, 12); g.stroke();
-  });
+    const fur = pal('#9a7a52'), cream = '#c9b184', dark = '#3a2812', pink = '#e79aa6', claw = '#f4f0e6';
+    // haunches + body
+    pxRect(g, -8, 20, 16, 9, fur.out); pxRect(g, -7, 21, 14, 7, fur.mid); pxRect(g, -7, 21, 14, 2, fur.hi);
+    pxRect(g, -7, 8, 14, 14, fur.out); pxRect(g, -6, 9, 12, 12, fur.mid);
+    pxRect(g, -3, 10, 6, 11, cream);   // belly
+    for (const sy of [10, 14, 18]) pxRect(g, -5, sy, 10, 1, dark);
+    // head
+    pxRect(g, -6, 0, 12, 11, fur.out); pxRect(g, -5, 1, 10, 9, fur.mid); pxRect(g, -5, 1, 10, 2, fur.hi);
+    pxRect(g, -5, -2, 3, 3, fur.mid); pxRect(g, 3, -2, 3, 3, fur.mid);   // ears
+    pxRect(g, -3, 3, 2, 2, '#aaff60'); pxRect(g, 2, 3, 2, 2, '#aaff60'); // fierce eyes
+    pxRect(g, -2, 6, 5, 4, '#5a1a1a'); pxRect(g, -2, 6, 5, 1, '#fff');   // roar mouth + fangs
+    // raised paws + claws
+    pxRect(g, -10, 3, 4, 4, fur.mid); pxRect(g, 7, 3, 4, 4, fur.mid);
+    pxRect(g, -11, 1, 1, 3, claw); pxRect(g, -9, 0, 1, 3, claw);
+    pxRect(g, 10, 1, 1, 3, claw); pxRect(g, 8, 0, 1, 3, claw);
+    // tail
+    pxRect(g, 6, 18, 4, 3, fur.lo); pxRect(g, 9, 14, 3, 5, fur.mid);
+  }, 1);
 
-  // ---- Pickups: weapon crates + powerup orbs ----
+  // ---- Pickups: weapon crates + powerup orbs (CRUNCHY, ss=1) ----
   function bakeCrate(color, letter) {
     return bake(22, 22, g => {
       g.translate(11, 11);
-      glowDot(g, 0, 0, 13, color, 0.55);
-      const bg = g.createLinearGradient(-9, -9, 9, 9);
-      bg.addColorStop(0, shade(color, 0.4)); bg.addColorStop(1, shade(color, -0.35));
-      g.fillStyle = bg; g.strokeStyle = 'rgba(0,0,0,0.7)'; g.lineWidth = 1.6;
-      g.beginPath(); g.rect(-9, -9, 18, 18); g.fill(); g.stroke();
-      g.fillStyle = 'rgba(255,255,255,0.85)';
-      g.font = '900 14px ' + HUD_FONT; g.textAlign = 'center'; g.textBaseline = 'middle';
-      g.fillText(letter, 0, 1);
-    });
+      pxGlow(g, 0, 0, 12, color, 3);
+      const cp = pal(color);
+      pxRect(g, -9, -9, 18, 18, cp.out); pxRect(g, -8, -8, 16, 16, cp.mid);
+      pxRect(g, -8, -8, 16, 4, cp.hi); pxRect(g, -8, 4, 16, 4, cp.lo);
+      dither(g, -8, -4, 16, 4, cp.hi, cp.mid, 2);
+      for (const [bx, by] of [[-7, -7], [5, -7], [-7, 5], [5, 5]]) pxRect(g, bx, by, 2, 2, 'rgba(255,255,255,0.5)');
+      pxTextG(g, letter, 0, 4, 1, '#ffffff', 'center', 'rgba(20,14,6,0.95)');
+    }, 1);
   }
   SPR.crate = {
     spread: bakeCrate('#ff9b3d', 'S'),
@@ -754,29 +880,29 @@
   // flame puff (grows/fades as it flies) + rocket sprite
   SPR.flame = bake(20, 20, g => {
     g.translate(10, 10);
-    glowDot(g, 0, 0, 10, '#ff5a10', 0.6);
-    glowDot(g, 0, 0, 6, '#ffce4d', 0.75);
-    g.fillStyle = '#fff2a0'; g.beginPath(); g.arc(0, 0, 3, 0, Math.PI * 2); g.fill();
-  });
+    pxGlow(g, 0, 0, 8, '#ff5a10', 2);
+    pxRect(g, -5, -4, 10, 10, '#ff7a1a'); pxRect(g, -4, -5, 8, 11, '#ff9b3d');
+    pxRect(g, -3, -2, 6, 6, '#ffce4d'); pxRect(g, -2, -1, 4, 4, '#fff2a0'); pxRect(g, -1, 0, 2, 2, '#ffffff');
+  }, 1);
   SPR.rocket = bake(22, 10, g => {
     g.translate(11, 5);
-    glowDot(g, -9, 0, 5, '#ffce4d', 0.85);                 // exhaust glow
-    g.fillStyle = '#d8d8e0'; g.fillRect(-8, -2.5, 12, 5);  // body
-    g.fillStyle = '#ff5252'; g.beginPath(); g.moveTo(4, -2.5); g.lineTo(10, 0); g.lineTo(4, 2.5); g.closePath(); g.fill(); // nose
-    g.fillStyle = '#8f979f';                                // fins
-    g.beginPath(); g.moveTo(-8, -2.5); g.lineTo(-10, -4.5); g.lineTo(-5, -2.5); g.closePath(); g.fill();
-    g.beginPath(); g.moveTo(-8, 2.5); g.lineTo(-10, 4.5); g.lineTo(-5, 2.5); g.closePath(); g.fill();
-  });
+    pxGlow(g, -9, 0, 4, '#ffce4d', 2);
+    pxRect(g, -10, -1, 3, 2, '#ff8a2a');   // flame
+    pxRect(g, -8, -3, 12, 6, '#c8ccd6'); pxRect(g, -8, -3, 12, 2, '#e6eaf2'); pxRect(g, -8, 1, 12, 2, '#8f979f');
+    pxRect(g, 4, -3, 3, 6, '#ff5252'); pxRect(g, 7, -1, 2, 2, '#ff5252');   // nose
+    pxRect(g, -9, -4, 3, 2, '#8f979f'); pxRect(g, -9, 2, 3, 2, '#8f979f');  // fins
+  }, 1);
   function bakeOrb(color, letter) {
     return bake(20, 20, g => {
       g.translate(10, 10);
-      glowDot(g, 0, 0, 12, color, 0.7);
-      const bg = g.createRadialGradient(-3, -3, 1, 0, 0, 9);
-      bg.addColorStop(0, '#fff'); bg.addColorStop(0.5, color); bg.addColorStop(1, shade(color, -0.4));
-      g.fillStyle = bg; g.beginPath(); g.arc(0, 0, 8, 0, Math.PI * 2); g.fill();
-      g.fillStyle = 'rgba(0,0,0,0.75)'; g.font = '900 11px ' + HUD_FONT; g.textAlign = 'center'; g.textBaseline = 'middle';
-      g.fillText(letter, 0, 1);
-    });
+      pxGlow(g, 0, 0, 10, color, 3);
+      const cp = pal(color);
+      pxRect(g, -8, -6, 16, 12, cp.out); pxRect(g, -6, -8, 12, 16, cp.out);
+      pxRect(g, -7, -5, 14, 10, cp.mid); pxRect(g, -5, -7, 10, 14, cp.mid);
+      pxRect(g, -5, -6, 8, 4, cp.hi); pxRect(g, -6, -4, 4, 6, cp.hi);
+      pxRect(g, -3, -3, 3, 3, '#ffffff');
+      pxTextG(g, letter, 0, 4, 1, '#0a0f14', 'center', false);
+    }, 1);
   }
   SPR.orb = {
     shield: bakeOrb('#7fdcff', 'S'),
@@ -786,18 +912,15 @@
   // weapon pod (falcon nod)
   SPR.pod = bake(38, 22, g => {
     g.translate(19, 11);
-    glowDot(g, 0, 0, 15, '#ffce4d', 0.4);
-    const bg = g.createLinearGradient(0, -9, 0, 9);
-    bg.addColorStop(0, '#d0d6e2'); bg.addColorStop(1, '#5a6070');
-    g.fillStyle = bg; g.strokeStyle = 'rgba(0,0,0,0.6)'; g.lineWidth = 1.6;
-    g.beginPath(); g.ellipse(0, 0, 16, 8, 0, 0, Math.PI * 2); g.fill(); g.stroke();
+    pxGlow(g, 0, 0, 12, '#ffce4d', 3);
     // wings
-    g.fillStyle = '#ffce4d';
-    g.beginPath(); g.moveTo(-4, -8); g.lineTo(-16, -14); g.lineTo(-8, -4); g.closePath(); g.fill();
-    g.beginPath(); g.moveTo(4, -8); g.lineTo(16, -14); g.lineTo(8, -4); g.closePath(); g.fill();
-    glowDot(g, 0, 0, 5, '#7fdcff', 0.8);
-    g.fillStyle = '#7fdcff'; g.beginPath(); g.arc(0, 0, 3.2, 0, Math.PI * 2); g.fill();
-  });
+    pxRect(g, -16, -13, 12, 4, '#ffce4d'); pxRect(g, 4, -13, 12, 4, '#ffce4d');
+    pxRect(g, -10, -9, 6, 4, '#e0a832'); pxRect(g, 4, -9, 6, 4, '#e0a832');
+    const cp = pal('#7a8296');
+    pxRect(g, -15, -7, 30, 14, cp.out); pxRect(g, -14, -6, 28, 12, cp.mid);
+    pxRect(g, -14, -6, 28, 4, cp.hi); pxRect(g, -14, 3, 28, 3, cp.lo);
+    pxGlow(g, 0, 0, 4, '#7fdcff', 2); pxRect(g, -3, -3, 6, 6, '#7fdcff'); pxRect(g, -3, -3, 6, 2, '#dff5ff');
+  }, 1);
   SPR.shieldBubble = bake(48, 52, g => {
     const gr = g.createRadialGradient(24, 26, 14, 24, 26, 25);
     gr.addColorStop(0, 'rgba(127,220,255,0)');
@@ -809,23 +932,22 @@
   // downed marker
   SPR.downed = bake(30, 30, g => {
     g.translate(15, 15);
-    glowDot(g, 0, 0, 14, '#ffce4d', 0.5);
-    g.strokeStyle = '#ffce4d'; g.lineWidth = 2.4;
-    g.beginPath(); g.arc(0, 0, 10, 0, Math.PI * 2); g.stroke();
-    g.fillStyle = '#ffce4d'; g.font = '900 16px ' + HUD_FONT; g.textAlign = 'center'; g.textBaseline = 'middle';
-    g.fillText('!', 0, 1);
-  });
+    pxGlow(g, 0, 0, 12, '#ffce4d', 3);
+    for (let a = 0; a < 16; a++) { const an = a / 16 * Math.PI * 2; pxRect(g, Math.round(Math.cos(an) * 10) - 1, Math.round(Math.sin(an) * 10) - 1, 3, 3, '#ffce4d'); }
+    pxTextG(g, '!', 0, 7, 2, '#ffce4d', 'center', 'rgba(0,0,0,0.7)');
+  }, 1);
 
-  // ---- HUD bro face icons ----
+  // ---- HUD bro face icons (CRUNCHY badge, ss=1) ----
   function bakeFace(id) {
     const b = BROS[id];
     return bake(20, 20, g => {
       g.translate(10, 10);
-      g.fillStyle = b.color; g.beginPath(); g.arc(0, 0, 9, 0, Math.PI * 2); g.fill();
-      g.fillStyle = b.skin; g.beginPath(); g.arc(0, 1, 6, 0, Math.PI * 2); g.fill();
-      g.fillStyle = b.dark; g.beginPath(); g.arc(0, -1, 6.5, Math.PI, 0); g.fill();
-      g.fillStyle = '#20242c'; g.fillRect(-3, 0, 1.6, 1.6); g.fillRect(1.6, 0, 1.6, 1.6);
-    });
+      const jp = pal(b.color), dp = pal(b.dark), sp = pal(b.skin);
+      pxRect(g, -9, -9, 18, 18, jp.out); pxRect(g, -8, -8, 16, 16, jp.mid); pxRect(g, -8, -8, 16, 4, jp.hi);
+      pxRect(g, -6, -7, 12, 6, dp.mid); pxRect(g, -6, -7, 12, 2, dp.hi);   // helmet dome
+      pxRect(g, -5, -2, 10, 8, sp.mid); pxRect(g, -5, -2, 10, 2, sp.hi);   // face
+      pxRect(g, -3, 1, 2, 2, '#15181f'); pxRect(g, 2, 1, 2, 2, '#15181f'); // eyes
+    }, 1);
   }
   SPR.face = {};
   for (const id of BRO_ORDER) SPR.face[id] = bakeFace(id);
@@ -870,473 +992,282 @@
   }
 
   // ════════════════════════════════════════════════════════════════════════
-  // PARALLAX — per-level baked layer sets. Add a builder for each new level.
+  // PARALLAX — per-level baked layer sets (CRUNCHY 16-bit pixel art).
   // Each layer: { spr, factor (0=static..1=world), y, tileW }. Drawn with a
-  // couple of wrapped drawImage calls.
+  // couple of wrapped drawImage calls. Sky/far/mid/near are chunky, atmospheric
+  // and each seamless across its own width (fn(0)==fn(w), features interior).
+  // An extra top-fringe `fg` layer per level is trimmed under LOWFX.
   // ════════════════════════════════════════════════════════════════════════
   const PARALLAX = {};
+  const GY = 232;
+  // Banded + dithered sky (crunchy, no smooth gradient). stops = [[y,color],...]
+  function crunchySky(stops, decorate) {
+    return bake(VW, VH, (g) => {
+      for (let i = 0; i < stops.length; i++) {
+        const y0 = stops[i][0], y1 = i + 1 < stops.length ? stops[i + 1][0] : VH;
+        pxRect(g, 0, y0, VW, y1 - y0, stops[i][1]);
+        if (i + 1 < stops.length) dither(g, 0, y1 - 7, VW, 14, stops[i][1], stops[i + 1][1], 4);
+      }
+      decorate && decorate(g);
+    }, 1);
+  }
+
+  // ── L1 JUNGLE — chunky mossy canopy, blocky trunks, pixel waterfall ──
   function bakeJungleParallax() {
-    const groundY = 232;
-    const mkRnd = (s) => { let seed = s >>> 0; return () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296; };
-    // ── SKY: moody deep-green gradient + baked god-ray shafts + hazy sun ──
-    const sky = bake(VW, VH, (g) => {
-      const sg = g.createLinearGradient(0, 0, 0, VH);
-      sg.addColorStop(0, '#08251a'); sg.addColorStop(0.38, '#134429'); sg.addColorStop(0.72, '#1f6b47'); sg.addColorStop(1, '#2c8f5e');
-      g.fillStyle = sg; g.fillRect(0, 0, VW, VH);
-      // hazy sun, high-right
-      glowDot(g, 386, 46, 130, '#d7ffb8', 0.28);
-      glowDot(g, 386, 46, 66, '#f2ffe0', 0.34);
-      // god-ray shafts fanning down-left from the sun (baked translucent quads)
-      g.save();
-      g.globalCompositeOperation = 'lighter';
-      const ax = 386, ay = 30;
-      for (let i = 0; i < 7; i++) {
-        const a = Math.PI * 0.56 + i * 0.11;          // pointing downward, fanning
-        const len = 300, half = 5 + i * 1.6;
-        const dx = Math.cos(a), dy = Math.sin(a), nx = -dy, ny = dx;
-        g.beginPath();
-        g.moveTo(ax, ay);
-        g.lineTo(ax + dx * len + nx * half, ay + dy * len + ny * half);
-        g.lineTo(ax + dx * len - nx * half, ay + dy * len - ny * half);
-        g.closePath();
-        g.fillStyle = 'rgba(190,255,150,0.045)';
-        g.fill();
-      }
+    const sky = crunchySky([[0, '#0a2b1c'], [70, '#13472b'], [140, '#1f6b47'], [200, '#2c8f5e']], (g) => {
+      glowDot(g, 388, 44, 120, '#d7ffb8', 0.30); glowDot(g, 388, 44, 58, '#f2ffe0', 0.42);
+      // blocky god-ray shafts fanning down-left
+      g.save(); g.globalCompositeOperation = 'lighter';
+      for (let i = 0; i < 6; i++) { const a = 2.0 + i * 0.12, len = 250; for (let t = 0; t < len; t += 6) { const x = 388 + Math.cos(a) * t, y = 40 + Math.sin(a) * t; pxRect(g, x, y, 4, 6, 'rgba(190,255,150,0.05)'); } }
       g.restore();
-    }, 1);
-    // ── FAR: misty distant tree silhouettes + a background WATERFALL ──
+    });
+    // FAR: stepped canopy ridge + distant pixel waterfall
     const far = bake(640, VH, (g, w) => {
-      // rolling canopy ridge (sine periods integer over w -> seams line up)
-      g.fillStyle = 'rgba(14,50,36,0.92)';
-      g.beginPath(); g.moveTo(0, groundY);
-      for (let x = 0; x <= w; x += 16) g.lineTo(x, 122 + Math.sin(x * 0.0196) * 26 + Math.sin(x * 0.0098) * 16);
-      g.lineTo(w, groundY); g.closePath(); g.fill();
-      // soft hazy puffs along the ridge
-      for (let x = 0; x <= w; x += 24) {
-        const y = 122 + Math.sin(x * 0.0196) * 26 + Math.sin(x * 0.0098) * 16;
-        glowDot(g, x, y, 24, '#1b4d39', 0.5);
-      }
-      // WATERFALL: dark rock cliff framing a bright falling column (interior)
-      const wx = 428;
-      g.fillStyle = 'rgba(8,28,22,0.96)';
-      g.fillRect(wx - 30, 66, 20, groundY - 66); g.fillRect(wx + 22, 66, 20, groundY - 66);
-      const wg = g.createLinearGradient(wx - 10, 0, wx + 22, 0);
-      wg.addColorStop(0, 'rgba(150,200,220,0.30)'); wg.addColorStop(0.5, 'rgba(224,246,255,0.62)'); wg.addColorStop(1, 'rgba(150,200,220,0.30)');
-      g.fillStyle = wg; g.fillRect(wx - 10, 72, 32, groundY - 76);
-      g.fillStyle = 'rgba(255,255,255,0.22)';
-      for (let sx = -8; sx <= 20; sx += 6) g.fillRect(wx + sx, 74, 1.4, groundY - 80);
-      glowDot(g, wx + 6, groundY - 4, 24, '#dff3ff', 0.5);
-      glowDot(g, wx + 6, groundY - 4, 12, '#ffffff', 0.6);
-      // low mist band
-      const mg = g.createLinearGradient(0, groundY - 72, 0, groundY);
-      mg.addColorStop(0, 'rgba(160,205,185,0)'); mg.addColorStop(1, 'rgba(172,212,192,0.18)');
-      g.fillStyle = mg; g.fillRect(0, groundY - 72, w, 72);
+      const R = x => 118 + Math.sin(x * 2 * Math.PI * 2 / w) * 24 + Math.sin(x * 2 * Math.PI * 4 / w) * 12;
+      pxRidge(g, w, GY, '#0f3122', R, 8, 4);
+      for (let x = 0; x < w; x += 16) pxRect(g, x, R(x + 8) - 4, 8, 4, '#1c5237');   // lit rim
+      // WATERFALL between two dark cliffs (interior)
+      const wx = 432; pxRect(g, wx - 30, 66, 18, GY - 66, '#0a221a'); pxRect(g, wx + 20, 66, 18, GY - 66, '#0a221a');
+      for (let y = 72; y < GY - 6; y += 4) { const c = ((y / 4) & 1) ? '#cfeefc' : '#9fd6ea'; pxRect(g, wx - 8, y, 26, 3, c); }
+      pxGlow(g, wx + 5, GY - 6, 22, '#dff3ff', 4);
     }, 1);
-    // ── MID: fuller, closer trees with broad layered canopies ──
+    // MID: blocky trunks + chunky canopy clusters
     const mid = bake(560, VH, (g, w) => {
-      const rnd = mkRnd(999);
-      for (let i = 0; i < 8; i++) {
-        const x = 45 + (i / 8) * (w - 90) + (rnd() - 0.5) * 24, th = 118 + rnd() * 52, ty = groundY - th;
-        const tw2 = 9 + rnd() * 3;
-        const tg = g.createLinearGradient(x - tw2, 0, x + tw2, 0);
-        tg.addColorStop(0, '#0f2417'); tg.addColorStop(0.5, '#274a2e'); tg.addColorStop(1, '#0c1e13');
-        g.fillStyle = tg; g.fillRect(x - tw2 / 2, ty + 24, tw2, th - 24);
-        // broad, overlapping canopy cluster
-        const cr0 = 40 + rnd() * 10;
-        glowDot(g, x, ty + 8, cr0, '#123c25', 0.95);
-        for (let k = 0; k < 6; k++) {
-          const cx = x + (rnd() - 0.5) * cr0 * 1.1, cy = ty + 4 + (rnd() - 0.5) * 24, cr = 20 + rnd() * 16;
-          glowDot(g, cx, cy, cr, k % 2 ? '#1c5a38' : '#154529', 0.9);
-        }
-        glowDot(g, x - cr0 * 0.3, ty - 2, 12, '#2f8f52', 0.4);   // sun-side leaf highlight
+      const rnd = rngOf(999);
+      for (let i = 0; i < 7; i++) {
+        const x = Math.round(40 + (i / 7) * (w - 80) + (rnd() - 0.5) * 20), th = 120 + ((rnd() * 12) | 0) * 4, ty = GY - th;
+        const trunk = pal('#274a2e'); pxRect(g, x - 6, ty + 20, 12, th - 20, trunk.lo); pxRect(g, x - 6, ty + 20, 5, th - 20, trunk.mid); pxRect(g, x - 1, ty + 20, 2, th - 20, trunk.out);
+        const leaf = pal('#1c5a38');
+        for (let k = 0; k < 6; k++) { const cx = x + (rnd() - 0.5) * 60, cy = ty + (rnd() - 0.5) * 30, s = 20 + ((rnd() * 5) | 0) * 4; pxRect(g, cx - s, cy - s, s * 2, s * 2, k & 1 ? leaf.lo : leaf.mid); }
+        pxRect(g, x - 30, ty - 10, 24, 12, leaf.hi);   // sun-side lit chunk
       }
     }, 1);
-    // ── NEAR: base bushes / fern clumps poking above the ground line ──
+    // NEAR: chunky fern/bush clumps on the ground line
     const near = bake(520, 46, (g, w) => {
-      const rnd = mkRnd(71);
-      for (let i = 0; i < 26; i++) {
-        const x = rnd() * w, base = 40 + rnd() * 4, sz = 16 + rnd() * 14, dark = i % 3 === 0;
-        glowDot(g, x, base - sz * 0.62, sz, dark ? '#123321' : '#1c4d30', 0.97);
-        g.strokeStyle = dark ? '#173d26' : '#2f7a48'; g.lineWidth = 1.7;
-        for (let f = 0; f < 6; f++) {
-          const a = -Math.PI / 2 + (f - 2.5) * 0.3, fl = sz * (1.0 + rnd() * 0.55);
-          g.beginPath(); g.moveTo(x, base); g.lineTo(x + Math.cos(a) * fl, base + Math.sin(a) * fl); g.stroke();
-        }
-        glowDot(g, x, base - sz * 0.7, 4, '#3a9a5a', 0.45);
-      }
+      const rnd = rngOf(71), fern = pal('#1c4d30');
+      for (let i = 0; i < 22; i++) { const x = Math.round(rnd() * w), base = 42, s = 12 + ((rnd() * 4) | 0) * 4, dk = i % 3 === 0; pxRect(g, x - s, base - s, s * 2, s, dk ? fern.lo : fern.mid); pxRect(g, x - s, base - s, s * 2, 3, fern.hi); for (let f = -2; f <= 2; f++) pxRect(g, x + f * 4, base - s - 6, 3, 8, dk ? fern.lo : fern.hi); }
     }, 1);
-    // ── CANOPY: dark leaf fringe + hanging vines framing the top (trimmed in LOWFX) ──
-    const canopy = bake(560, 62, (g, w) => {
-      const rnd = mkRnd(1313);
-      g.fillStyle = '#0b1d13'; g.fillRect(0, 0, w, 9);
-      for (let i = 0; i < 26; i++) {
-        const x = (i / 26) * w + (rnd() - 0.5) * 14, r = 13 + rnd() * 14, y = rnd() * 14;
-        glowDot(g, x, y, r, i % 2 ? '#0e2417' : '#16351f', 0.95);
-      }
-      for (let v = 0; v < 6; v++) {
-        const vx = 34 + (v / 6) * (w - 68) + (rnd() - 0.5) * 26, vlen = 26 + rnd() * 24;
-        g.strokeStyle = '#1c4a2e'; g.lineWidth = 2;
-        g.beginPath(); g.moveTo(vx, 7);
-        for (let s = 0; s <= vlen; s += 6) g.lineTo(vx + Math.sin(s * 0.2 + v) * 3, 7 + s);
-        g.stroke();
-        for (let s = 12; s < vlen; s += 12) glowDot(g, vx + Math.sin(s * 0.2 + v) * 3, 7 + s, 4, '#2f7a48', 0.7);
-      }
+    // FG: dark canopy fringe + hanging vines (LOWFX-trimmed)
+    const canopy = bake(560, 60, (g, w) => {
+      const rnd = rngOf(1313); pxRect(g, 0, 0, w, 8, '#0a1c12');
+      for (let x = 0; x < w; x += 8) { const r = 10 + ((rnd() * 4) | 0) * 3; pxRect(g, x - r, 0, r * 2, r, (x / 8) & 1 ? '#0e2417' : '#16351f'); }
+      for (let v = 0; v < 6; v++) { const vx = Math.round(30 + (v / 6) * (w - 60)), vl = 24 + ((rnd() * 5) | 0) * 4; for (let s = 6; s < vl; s += 4) pxRect(g, vx + Math.round(Math.sin(s * 0.2 + v) * 3), 6 + s, 3, 4, s % 8 < 4 ? '#1c4a2e' : '#2f7a48'); }
     }, 1);
-    const layers = [
-      { spr: far, factor: 0.25, y: 0 },
-      { spr: mid, factor: 0.5, y: 0 },
-      { spr: near, factor: 0.82, y: groundY - 34 },
-    ];
-    if (!LOWFX) layers.push({ spr: canopy, factor: 0.68, y: 0 });   // LOWFX trims the top fringe
+    const layers = [{ spr: far, factor: 0.25, y: 0 }, { spr: mid, factor: 0.5, y: 0 }, { spr: near, factor: 0.82, y: GY - 34 }];
+    if (!LOWFX) layers.push({ spr: canopy, factor: 0.68, y: 0 });
     PARALLAX.jungle = { sky, layers };
   }
   bakeJungleParallax();
 
+  // ── L2 DESERT — stacked sandstone mesas, blocky dunes, sun haze ──
   function bakeDesertParallax() {
-    const groundY = 232;
-    const sky = bake(VW, VH, (g) => {
-      const sg = g.createLinearGradient(0, 0, 0, VH);
-      sg.addColorStop(0, '#f2c063'); sg.addColorStop(0.45, '#f0a24e'); sg.addColorStop(1, '#e6c88a');
-      g.fillStyle = sg; g.fillRect(0, 0, VW, VH);
-      // blazing sun
-      glowDot(g, 96, 60, 60, '#fff6d0', 0.65);
-      glowDot(g, 96, 60, 30, '#ffffff', 0.9);
-    }, 1);
-    // far dunes (soft, pale)
-    const far = bake(680, VH, (g, w) => {
-      let seed = 8181; const rnd = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296;
-      g.fillStyle = 'rgba(214,168,104,0.85)';
-      g.beginPath(); g.moveTo(0, groundY);
-      for (let x = 0; x <= w; x += 30) g.lineTo(x, 150 + Math.sin(x * 0.012) * 34 + Math.sin(x * 0.05) * 8);
-      g.lineTo(w, groundY); g.closePath(); g.fill();
-    }, 1);
-    // mid dunes (warmer) + a couple cacti/rock silhouettes
+    const sky = crunchySky([[0, '#f2c063'], [110, '#f0a24e'], [190, '#e6c88a']], (g) => { glowDot(g, 96, 58, 70, '#fff2c8', 0.6); glowDot(g, 96, 58, 34, '#ffffff', 0.85); });
+    const far = bake(680, VH, (g, w) => { const R = x => 150 + Math.sin(x * 2 * Math.PI * 2 / w) * 30 + Math.sin(x * 2 * Math.PI * 5 / w) * 8; pxRidge(g, w, GY, '#caa06a', R, 8, 4); for (let x = 0; x < w; x += 16) pxRect(g, x, R(x + 8), 8, 3, '#e0c090'); }, 1);
+    // MID: layered-strata mesas (the desert hallmark)
     const mid = bake(600, VH, (g, w) => {
-      let seed = 313; const rnd = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296;
-      g.fillStyle = 'rgba(192,132,66,0.92)';
-      g.beginPath(); g.moveTo(0, groundY);
-      for (let x = 0; x <= w; x += 26) g.lineTo(x, 178 + Math.sin(x * 0.018 + 1) * 26);
-      g.lineTo(w, groundY); g.closePath(); g.fill();
-      // distant rock buttes
-      g.fillStyle = 'rgba(150,96,46,0.9)';
-      for (const bx of [140, 430]) { g.fillRect(bx, groundY - 60, 40, 60); g.fillRect(bx - 8, groundY - 44, 56, 44); }
+      const R = x => 176 + Math.sin(x * 2 * Math.PI * 3 / w + 1) * 22; pxRidge(g, w, GY, '#b0763c', R, 8, 4);
+      const bands = ['#c08a4a', '#a56a30', '#8a5426', '#b57c40'];
+      for (let x = 0; x < w; x += 8) { const y0 = Math.round(R(x + 4) / 4) * 4; for (let b = 0; b < 4; b++) pxRect(g, x, y0 + 6 + b * 8, 8, 4, bands[b]); }
+      const mesa = pal('#96602e'); for (const bx of [120, 420]) { pxBlock(g, bx, GY - 64, 44, 64, mesa); pxRect(g, bx - 8, GY - 48, 60, 8, mesa.lo); }
     }, 1);
-    // near dune ridge
-    const near = bake(560, 64, (g, w) => {
-      g.fillStyle = 'rgba(168,110,52,0.95)';
-      g.beginPath(); g.moveTo(0, 64);
-      for (let x = 0; x <= w; x += 22) g.lineTo(x, 22 + Math.sin(x * 0.03) * 16);
-      g.lineTo(w, 64); g.closePath(); g.fill();
-      g.fillStyle = 'rgba(224,182,110,0.5)';
-      for (let x = 0; x < w; x += 22) { g.beginPath(); g.moveTo(x, 22 + Math.sin(x * 0.03) * 16); g.lineTo(x + 11, 22 + Math.sin(x * 0.03) * 16 + 4); g.lineTo(x, 30 + Math.sin(x * 0.03) * 16); g.fill(); }
-    }, 1);
-    PARALLAX.desert = { sky, layers: [{ spr: far, factor: 0.22, y: 0 }, { spr: mid, factor: 0.45, y: 0 }, { spr: near, factor: 0.78, y: groundY - 16 }] };
+    const near = bake(560, 64, (g, w) => { const R = x => 22 + Math.sin(x * 2 * Math.PI * 4 / w) * 14; pxRidge(g, w, 64, '#a86e34', R, 8, 4); for (let x = 0; x < w; x += 8) pxRect(g, x, Math.round(R(x + 4) / 4) * 4, 8, 3, '#d0a860'); }, 1);
+    // FG: heat-haze band + a couple of foreground cacti (LOWFX-trimmed)
+    const fg = bake(600, 70, (g, w) => { const rnd = rngOf(51), cac = pal('#3f6b34'); for (let i = 0; i < 5; i++) { const x = Math.round(40 + (i / 5) * (w - 80)), h = 30 + ((rnd() * 5) | 0) * 4; pxRect(g, x - 4, 70 - h, 8, h, cac.mid); pxRect(g, x - 4, 70 - h, 3, h, cac.hi); pxRect(g, x - 12, 70 - h * 0.6, 8, 4, cac.mid); pxRect(g, x - 12, 70 - h * 0.6 - 10, 4, 12, cac.mid); pxRect(g, x + 4, 70 - h * 0.75, 8, 4, cac.mid); pxRect(g, x + 8, 70 - h * 0.75 - 10, 4, 12, cac.mid); } }, 1);
+    const layers = [{ spr: far, factor: 0.22, y: 0 }, { spr: mid, factor: 0.45, y: 0 }, { spr: near, factor: 0.78, y: GY - 16 }];
+    if (!LOWFX) layers.push({ spr: fg, factor: 0.9, y: GY - 62 });
+    PARALLAX.desert = { sky, layers };
   }
   bakeDesertParallax();
 
+  // ── L3 FACTORY — riveted girders, machinery, warning stripes, deep dark ──
   function bakeFactoryParallax() {
-    const groundY = 232;
-    const sky = bake(VW, VH, (g) => {
-      const sg = g.createLinearGradient(0, 0, 0, VH);
-      sg.addColorStop(0, '#1b2130'); sg.addColorStop(0.5, '#28303f'); sg.addColorStop(1, '#333c4d');
-      g.fillStyle = sg; g.fillRect(0, 0, VW, VH);
-      // hazard glow from below
-      glowDot(g, 240, VH + 10, 160, '#ff7a2a', 0.18);
-    }, 1);
-    // far girders + warning stripes
+    const sky = crunchySky([[0, '#171d2a'], [120, '#242c3b'], [200, '#333c4d']], (g) => pxGlow(g, 240, VH + 8, 120, '#ff7a2a', 6));
+    // FAR: riveted girder towers + cross-braces
     const far = bake(640, VH, (g, w) => {
-      g.fillStyle = 'rgba(28,34,46,0.9)';
-      for (let x = 30; x < w; x += 120) { g.fillRect(x, 30, 14, 200); g.fillRect(x - 40, 40, 94, 10); g.fillRect(x - 40, 150, 94, 10); }
-      // diagonal cross braces
-      g.strokeStyle = 'rgba(52,60,78,0.8)'; g.lineWidth = 4;
-      for (let x = 30; x < w; x += 120) { g.beginPath(); g.moveTo(x, 40); g.lineTo(x + 40, 150); g.moveTo(x + 14, 40); g.lineTo(x - 26, 150); g.stroke(); }
+      const gi = pal('#2c3446');
+      for (let x = 30; x < w; x += 120) { pxRect(g, x, 30, 14, 200, gi.mid); pxRect(g, x, 30, 4, 200, gi.hi); pxRect(g, x + 10, 30, 4, 200, gi.lo); pxRect(g, x - 40, 42, 94, 10, gi.mid); pxRect(g, x - 40, 152, 94, 10, gi.mid); for (let y = 44; y < 160; y += 22) { pxRect(g, x - 30, y, 3, 3, gi.hi); pxRect(g, x + 40, y, 3, 3, gi.hi); } }
     }, 1);
-    // mid machinery + pipes
+    // MID: big pipes + glowing machine blocks
     const mid = bake(600, VH, (g, w) => {
-      // big pipes
-      for (const py of [70, 120]) {
-        const pg = g.createLinearGradient(0, py - 8, 0, py + 8);
-        pg.addColorStop(0, '#5a6272'); pg.addColorStop(0.5, '#3a4150'); pg.addColorStop(1, '#22283340');
-        g.fillStyle = '#3a4150'; g.fillRect(0, py - 7, w, 14);
-        g.fillStyle = 'rgba(255,255,255,0.12)'; g.fillRect(0, py - 7, w, 3);
-        g.fillStyle = 'rgba(0,0,0,0.3)'; for (let x = 20; x < w; x += 80) g.fillRect(x, py - 9, 6, 18);
-      }
-      // machine blocks along the base
-      let seed = 707; const rnd = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296;
-      for (let x = 20; x < w; x += 90) {
-        const bh = 50 + rnd() * 50, bw = 44 + rnd() * 24;
-        const mg = g.createLinearGradient(0, 232 - bh, 0, 232);
-        mg.addColorStop(0, '#4a5162'); mg.addColorStop(1, '#2a303c');
-        g.fillStyle = mg; g.fillRect(x, 232 - bh, bw, bh);
-        glowDot(g, x + bw * 0.5, 232 - bh * 0.6, 6, '#ff9b3d', 0.6);
-        g.fillStyle = '#ff9b3d'; g.fillRect(x + bw * 0.5 - 3, 232 - bh * 0.6 - 2, 6, 4);
-      }
+      const pi = pal('#4a5162');
+      for (const py of [70, 122]) { pxRect(g, 0, py - 8, w, 16, pi.mid); pxRect(g, 0, py - 8, w, 3, pi.hi); pxRect(g, 0, py + 5, w, 3, pi.lo); for (let x = 20; x < w; x += 80) pxRect(g, x, py - 10, 6, 20, pi.out); }
+      const rnd = rngOf(707), mb = pal('#454c5e');
+      for (let x = 20; x < w; x += 90) { const bh = 50 + ((rnd() * 12) | 0) * 4, bw = 44 + ((rnd() * 6) | 0) * 4; pxBlock(g, x, 232 - bh, bw, bh, mb); pxGlow(g, x + bw * 0.5, 232 - bh * 0.6, 8, '#ff9b3d', 3); pxRect(g, x + bw * 0.5 - 3, 232 - bh * 0.6 - 2, 6, 4, '#ffce4d'); }
     }, 1);
-    // near cabling / warning strip
-    const near = bake(520, 60, (g, w) => {
-      g.fillStyle = '#20262f'; g.fillRect(0, 40, w, 20);
-      for (let x = 0; x < w; x += 24) { g.fillStyle = (x / 24) % 2 ? '#ffce4d' : '#20262f'; g.beginPath(); g.moveTo(x, 40); g.lineTo(x + 12, 40); g.lineTo(x + 24, 60); g.lineTo(x + 12, 60); g.closePath(); g.fill(); }
-      g.strokeStyle = 'rgba(90,98,114,0.9)'; g.lineWidth = 3;
-      g.beginPath(); for (let x = 0; x <= w; x += 8) g.lineTo(x, 20 + Math.sin(x * 0.1) * 8); g.stroke();
-    }, 1);
-    PARALLAX.factory = { sky, layers: [{ spr: far, factor: 0.25, y: 0 }, { spr: mid, factor: 0.5, y: 0 }, { spr: near, factor: 0.8, y: groundY - 12 }] };
+    // NEAR: hazard chevron strip + cabling
+    const near = bake(576, 60, (g, w) => { pxRect(g, 0, 40, w, 20, '#20262f'); for (let x = 0; x < w; x += 24) pxRect(g, x, 40, 12, 20, (x / 24) & 1 ? '#ffce4d' : '#20262f'); for (let x = 0; x < w; x += 8) pxRect(g, x, 18 + Math.round(Math.sin(x * 2 * Math.PI * 8 / w) * 6 / 4) * 4, 4, 3, '#5a6272'); }, 1);
+    // FG: overhead pipe fringe (LOWFX-trimmed)
+    const fg = bake(600, 40, (g, w) => { pxRect(g, 0, 0, w, 10, '#1a1f28'); for (let x = 0; x < w; x += 40) { pxRect(g, x, 0, 12, 26, '#3a4150'); pxRect(g, x, 0, 4, 26, '#565e70'); pxRect(g, x + 2, 22, 8, 4, '#20262f'); } }, 1);
+    const layers = [{ spr: far, factor: 0.25, y: 0 }, { spr: mid, factor: 0.5, y: 0 }, { spr: near, factor: 0.8, y: GY - 12 }];
+    if (!LOWFX) layers.push({ spr: fg, factor: 0.4, y: 0 });
+    PARALLAX.factory = { sky, layers };
   }
   bakeFactoryParallax();
 
-  // ── L4 SNOW BASE — white/ice-blue palette ──
+  // ── L4 SNOW BASE — blocky peaks, ice base buildings, cold haze ──
   function bakeSnowParallax() {
-    const groundY = 232;
-    const sky = bake(VW, VH, (g) => {
-      const sg = g.createLinearGradient(0, 0, 0, VH);
-      sg.addColorStop(0, '#cfe6f5'); sg.addColorStop(0.5, '#9dc4e2'); sg.addColorStop(1, '#d8ecf7');
-      g.fillStyle = sg; g.fillRect(0, 0, VW, VH);
-      glowDot(g, 300, 56, 64, '#ffffff', 0.55);
-    }, 1);
-    // far snow peaks
+    const sky = crunchySky([[0, '#cfe6f5'], [110, '#9dc4e2'], [190, '#d8ecf7']], (g) => glowDot(g, 300, 54, 70, '#ffffff', 0.55));
     const far = bake(680, VH, (g, w) => {
-      let seed = 5150; const rnd = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296;
-      g.fillStyle = 'rgba(150,180,205,0.85)';
-      g.beginPath(); g.moveTo(0, groundY);
-      for (let x = 0; x <= w; x += 46) g.lineTo(x, 120 + Math.sin(x * 0.02) * 40 + rnd() * 14);
-      g.lineTo(w, groundY); g.closePath(); g.fill();
-      // snowcaps
-      g.fillStyle = 'rgba(255,255,255,0.9)';
-      for (let x = 0; x <= w; x += 46) { const py = 120 + Math.sin(x * 0.02) * 40; g.beginPath(); g.moveTo(x - 12, py + 14); g.lineTo(x, py); g.lineTo(x + 12, py + 14); g.closePath(); g.fill(); }
+      const R = x => 120 + Math.sin(x * 2 * Math.PI * 3 / w) * 40 + Math.sin(x * 2 * Math.PI * 6 / w) * 12; pxRidge(g, w, GY, '#96b4cd', R, 8, 4);
+      for (let x = 0; x < w; x += 8) { const y = Math.round(R(x + 4) / 4) * 4; pxRect(g, x, y, 8, 6, '#eef6fb'); }   // snowcaps
     }, 1);
-    // mid base buildings + antennas (steely blue)
+    // MID: steely base buildings + antenna lights
     const mid = bake(600, VH, (g, w) => {
-      let seed = 271; const rnd = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296;
-      for (let x = 20; x < w; x += 96) {
-        const bh = 60 + rnd() * 60, bw = 52 + rnd() * 26;
-        const mg = g.createLinearGradient(0, 232 - bh, 0, 232);
-        mg.addColorStop(0, '#7d9bb4'); mg.addColorStop(1, '#3f566c');
-        g.fillStyle = mg; g.fillRect(x, 232 - bh, bw, bh);
-        g.fillStyle = 'rgba(255,255,255,0.6)'; g.fillRect(x, 232 - bh, bw, 4);
-        glowDot(g, x + bw * 0.5, 232 - bh * 0.55, 5, '#8fe6ff', 0.7);
-        g.fillStyle = '#8fe6ff'; g.fillRect(x + bw * 0.5 - 2, 232 - bh * 0.55 - 2, 4, 4);
-      }
+      const rnd = rngOf(271);
+      for (let x = 20; x < w; x += 96) { const bh = 60 + ((rnd() * 12) | 0) * 4, bw = 52 + ((rnd() * 6) | 0) * 4, bld = pal('#5f7994'); pxBlock(g, x, 232 - bh, bw, bh, bld); pxRect(g, x, 232 - bh, bw, 4, '#cfe0ee'); for (let wy = 232 - bh + 10; wy < 226; wy += 14) for (let wx = x + 6; wx < x + bw - 6; wx += 12) pxRect(g, wx, wy, 6, 6, (wx & 8) ? '#2f4458' : '#8fe6ff'); pxGlow(g, x + bw * 0.5, 232 - bh - 6, 6, '#8fe6ff', 3); }
     }, 1);
-    // near snow drift ridge
-    const near = bake(560, 64, (g, w) => {
-      g.fillStyle = 'rgba(235,245,252,0.96)';
-      g.beginPath(); g.moveTo(0, 64);
-      for (let x = 0; x <= w; x += 24) g.lineTo(x, 24 + Math.sin(x * 0.03) * 14);
-      g.lineTo(w, 64); g.closePath(); g.fill();
-      g.fillStyle = 'rgba(170,205,230,0.5)';
-      for (let x = 0; x < w; x += 24) { g.beginPath(); g.moveTo(x, 24 + Math.sin(x * 0.03) * 14); g.lineTo(x + 12, 30 + Math.sin(x * 0.03) * 14); g.lineTo(x, 34 + Math.sin(x * 0.03) * 14); g.fill(); }
-    }, 1);
-    PARALLAX.snow = { sky, layers: [{ spr: far, factor: 0.22, y: 0 }, { spr: mid, factor: 0.46, y: 0 }, { spr: near, factor: 0.8, y: groundY - 16 }] };
+    const near = bake(560, 64, (g, w) => { const R = x => 24 + Math.sin(x * 2 * Math.PI * 4 / w) * 14; pxRidge(g, w, 64, '#c3dbec', R, 8, 4); for (let x = 0; x < w; x += 8) pxRect(g, x, Math.round(R(x + 4) / 4) * 4, 8, 4, '#eef6fb'); }, 1);
+    // FG: icicle fringe (LOWFX-trimmed)
+    const fg = bake(600, 40, (g, w) => { pxRect(g, 0, 0, w, 8, '#c3dbec'); const rnd = rngOf(88); for (let x = 4; x < w; x += 16) { const l = 8 + ((rnd() * 5) | 0) * 4; for (let y = 0; y < l; y += 4) pxRect(g, x, 6 + y, Math.max(2, 6 - (y >> 1)), 4, (y & 4) ? '#a9d4ec' : '#eef6fb'); } }, 1);
+    const layers = [{ spr: far, factor: 0.22, y: 0 }, { spr: mid, factor: 0.46, y: 0 }, { spr: near, factor: 0.8, y: GY - 16 }];
+    if (!LOWFX) layers.push({ spr: fg, factor: 0.4, y: 0 });
+    PARALLAX.snow = { sky, layers };
   }
   bakeSnowParallax();
 
-  // ── L5 VOLCANO — red/black palette, glowing lava underlight ──
+  // ── L5 VOLCANO — black cones with lava veins, magma pools, ember haze ──
   function bakeVolcanoParallax() {
-    const groundY = 232;
-    const sky = bake(VW, VH, (g) => {
-      const sg = g.createLinearGradient(0, 0, 0, VH);
-      sg.addColorStop(0, '#2a0e10'); sg.addColorStop(0.45, '#5a1414'); sg.addColorStop(1, '#b0350f');
-      g.fillStyle = sg; g.fillRect(0, 0, VW, VH);
-      glowDot(g, 240, VH + 20, 200, '#ff6a1a', 0.4);
-      glowDot(g, 110, 60, 34, '#ffcaa0', 0.4);
-    }, 1);
-    // far volcano cones with lava veins
+    const sky = crunchySky([[0, '#2a0e10'], [110, '#5a1414'], [190, '#b0350f']], (g) => { glowDot(g, 240, VH + 16, 200, '#ff6a1a', 0.42); glowDot(g, 110, 58, 40, '#ffcaa0', 0.4); });
+    // FAR: jagged cones + glowing crater tops + magma pool band
     const far = bake(680, VH, (g, w) => {
-      let seed = 9021; const rnd = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296;
-      g.fillStyle = 'rgba(30,14,14,0.92)';
-      g.beginPath(); g.moveTo(0, groundY);
-      for (let x = 0; x <= w; x += 60) g.lineTo(x, 110 + Math.abs(Math.sin(x * 0.014)) * 70 + rnd() * 10);
-      g.lineTo(w, groundY); g.closePath(); g.fill();
-      // glowing crater tops
-      for (let x = 60; x < w; x += 180) { glowDot(g, x, 118, 22, '#ff7a2a', 0.5); g.fillStyle = '#ffb060'; g.fillRect(x - 3, 112, 6, 8); }
+      const R = x => 110 + Math.abs(Math.sin(x * 2 * Math.PI * 3 / w)) * 66; pxRidge(g, w, GY, '#1e0e0e', R, 8, 4);
+      for (let x = 60; x < w; x += 170) { const y = Math.round(R(x) / 4) * 4; pxGlow(g, x, y + 4, 14, '#ff7a2a', 3); pxRect(g, x - 3, y, 6, 6, '#ffb060'); for (let k = 0; k < 3; k++) pxRect(g, x + (k - 1) * 4, y + 6 + k * 8, 3, 8, '#c8420f'); }   // lava veins
+      // distant magma pool glow along the base
+      for (let x = 0; x < w; x += 6) pxRect(g, x, GY - 6, 4, 6, ((x / 6) & 1) ? '#ff6a1a' : '#8a1206');
     }, 1);
-    // mid jagged ridges
     const mid = bake(600, VH, (g, w) => {
-      g.fillStyle = 'rgba(46,18,16,0.95)';
-      g.beginPath(); g.moveTo(0, groundY);
-      for (let x = 0; x <= w; x += 30) g.lineTo(x, 168 + Math.sin(x * 0.05) * 24);
-      g.lineTo(w, groundY); g.closePath(); g.fill();
-      // lava cracks
-      g.strokeStyle = 'rgba(255,110,30,0.6)'; g.lineWidth = 2;
-      for (let x = 20; x < w; x += 70) { g.beginPath(); g.moveTo(x, 200); g.lineTo(x + 8, 220); g.lineTo(x - 4, groundY); g.stroke(); }
+      const R = x => 168 + Math.sin(x * 2 * Math.PI * 5 / w) * 22; pxRidge(g, w, GY, '#2e1210', R, 8, 4);
+      for (let x = 20; x < w; x += 60) { const y = Math.round(R(x) / 4) * 4; for (let k = 0; k < 4; k++) pxRect(g, x + Math.round(Math.sin(k) * 4), y + 20 + k * 10, 3, 10, ((k & 1) ? '#ff6a1a' : '#c8420f')); }
     }, 1);
-    // near charred rock ridge with embers
-    const near = bake(560, 64, (g, w) => {
-      g.fillStyle = 'rgba(24,12,12,0.97)';
-      g.beginPath(); g.moveTo(0, 64);
-      for (let x = 0; x <= w; x += 22) g.lineTo(x, 26 + Math.sin(x * 0.04) * 14);
-      g.lineTo(w, 64); g.closePath(); g.fill();
-      g.fillStyle = 'rgba(255,120,40,0.5)';
-      for (let x = 0; x < w; x += 22) g.fillRect(x, 26 + Math.sin(x * 0.04) * 14, 10, 2);
-    }, 1);
-    PARALLAX.volcano = { sky, layers: [{ spr: far, factor: 0.22, y: 0 }, { spr: mid, factor: 0.46, y: 0 }, { spr: near, factor: 0.8, y: groundY - 16 }] };
+    const near = bake(560, 64, (g, w) => { const R = x => 26 + Math.sin(x * 2 * Math.PI * 5 / w) * 14; pxRidge(g, w, 64, '#180c0c', R, 8, 4); for (let x = 0; x < w; x += 8) pxRect(g, x, Math.round(R(x + 4) / 4) * 4, 8, 3, ((x / 8) & 1) ? '#ff7828' : '#7a2408'); }, 1);
+    // FG: ember-lit cave arch fringe (LOWFX-trimmed)
+    const fg = bake(600, 44, (g, w) => { pxRect(g, 0, 0, w, 10, '#140808'); const rnd = rngOf(37); for (let x = 0; x < w; x += 12) { const l = 8 + ((rnd() * 5) | 0) * 4; pxRect(g, x, 0, 8, l, '#241210'); if (rnd() < 0.4) pxRect(g, x + 2, l - 4, 3, 3, '#ff6a1a'); } }, 1);
+    const layers = [{ spr: far, factor: 0.22, y: 0 }, { spr: mid, factor: 0.46, y: 0 }, { spr: near, factor: 0.8, y: GY - 16 }];
+    if (!LOWFX) layers.push({ spr: fg, factor: 0.4, y: 0 });
+    PARALLAX.volcano = { sky, layers };
   }
   bakeVolcanoParallax();
 
-  // ── L6 ALIEN HIVE — purple/green organic palette ──
+  // ── L6 ALIEN HIVE — chitin mounds, pulsing egg-sacs, membrane, bio-glow ──
   function bakeHiveParallax() {
-    const groundY = 232;
-    const sky = bake(VW, VH, (g) => {
-      const sg = g.createLinearGradient(0, 0, 0, VH);
-      sg.addColorStop(0, '#1a0e2a'); sg.addColorStop(0.5, '#2e1550'); sg.addColorStop(1, '#20323a');
-      g.fillStyle = sg; g.fillRect(0, 0, VW, VH);
-      glowDot(g, 330, 64, 70, '#7dff9a', 0.22);
-      glowDot(g, 120, 120, 90, '#a45fff', 0.2);
-    }, 1);
-    // far hive mounds / egg silhouettes
+    const sky = crunchySky([[0, '#1a0e2a'], [110, '#2e1550'], [190, '#20323a']], (g) => { glowDot(g, 330, 62, 80, '#7dff9a', 0.24); glowDot(g, 120, 120, 96, '#a45fff', 0.22); });
     const far = bake(680, VH, (g, w) => {
-      let seed = 3777; const rnd = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296;
-      g.fillStyle = 'rgba(40,20,66,0.9)';
-      g.beginPath(); g.moveTo(0, groundY);
-      for (let x = 0; x <= w; x += 50) g.lineTo(x, 130 + Math.abs(Math.sin(x * 0.016)) * 60 + rnd() * 12);
-      g.lineTo(w, groundY); g.closePath(); g.fill();
-      for (let x = 40; x < w; x += 120) glowDot(g, x, 150, 20, '#7dff9a', 0.3);
+      const R = x => 130 + Math.abs(Math.sin(x * 2 * Math.PI * 3 / w)) * 56; pxRidge(g, w, GY, '#28143f', R, 8, 4);
+      for (let x = 40; x < w; x += 120) { const y = Math.round(R(x) / 4) * 4; pxGlow(g, x, y + 10, 12, '#7dff9a', 3); }
     }, 1);
-    // mid pulsing pods + tendrils
+    // MID: chitin pods on tendrils with glowing cores
     const mid = bake(600, VH, (g, w) => {
-      let seed = 611; const rnd = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296;
-      for (let x = 30; x < w; x += 90) {
-        const ph = 70 + rnd() * 60;
-        g.strokeStyle = 'rgba(90,50,130,0.9)'; g.lineWidth = 6; g.lineCap = 'round';
-        g.beginPath(); g.moveTo(x, 232); g.quadraticCurveTo(x + 10, 232 - ph * 0.6, x, 232 - ph); g.stroke();
-        const pg = g.createRadialGradient(x, 232 - ph, 2, x, 232 - ph, 16);
-        pg.addColorStop(0, '#c48fff'); pg.addColorStop(1, '#4a2a70');
-        g.fillStyle = pg; g.beginPath(); g.ellipse(x, 232 - ph, 12, 16, 0, 0, Math.PI * 2); g.fill();
-        glowDot(g, x, 232 - ph, 8, '#7dff9a', 0.5);
-      }
+      const rnd = rngOf(611);
+      for (let x = 30; x < w; x += 90) { const ph = 70 + ((rnd() * 14) | 0) * 4; for (let y = 0; y < ph; y += 6) pxRect(g, x - 2 + Math.round(Math.sin(y * 0.1) * 4), 232 - y, 5, 6, '#4a2a70'); const pod = pal('#8a4fc0'); pxBlock(g, x - 12, 232 - ph - 22, 24, 26, pod); pxGlow(g, x, 232 - ph - 9, 8, '#7dff9a', 3); }
     }, 1);
-    // near fleshy ridge
-    const near = bake(560, 64, (g, w) => {
-      g.fillStyle = 'rgba(48,22,64,0.96)';
-      g.beginPath(); g.moveTo(0, 64);
-      for (let x = 0; x <= w; x += 26) g.lineTo(x, 26 + Math.sin(x * 0.05) * 14);
-      g.lineTo(w, 64); g.closePath(); g.fill();
-      g.fillStyle = 'rgba(125,255,154,0.35)';
-      for (let x = 0; x < w; x += 26) glowDot(g, x + 6, 30 + Math.sin(x * 0.05) * 14, 6, '#7dff9a', 0.5);
-    }, 1);
-    PARALLAX.hive = { sky, layers: [{ spr: far, factor: 0.22, y: 0 }, { spr: mid, factor: 0.46, y: 0 }, { spr: near, factor: 0.8, y: groundY - 16 }] };
+    const near = bake(560, 64, (g, w) => { const R = x => 26 + Math.sin(x * 2 * Math.PI * 5 / w) * 14; pxRidge(g, w, 64, '#301640', R, 8, 4); for (let x = 0; x < w; x += 12) pxGlow(g, x + 6, Math.round(R(x + 6) / 4) * 4 + 4, 6, '#7dff9a', 3); }, 1);
+    // FG: fleshy membrane fringe with egg-sacs (LOWFX-trimmed)
+    const fg = bake(600, 44, (g, w) => { pxRect(g, 0, 0, w, 8, '#241238'); const rnd = rngOf(29); for (let x = 0; x < w; x += 10) { const r = 8 + ((rnd() * 4) | 0) * 3; pxRect(g, x - r, 0, r * 2, r, (x / 10) & 1 ? '#3a1c56' : '#4a2a70'); if (rnd() < 0.3) pxGlow(g, x, r, 5, '#a45fff', 3); } }, 1);
+    const layers = [{ spr: far, factor: 0.22, y: 0 }, { spr: mid, factor: 0.46, y: 0 }, { spr: near, factor: 0.8, y: GY - 16 }];
+    if (!LOWFX) layers.push({ spr: fg, factor: 0.4, y: 0 });
+    PARALLAX.hive = { sky, layers };
   }
   bakeHiveParallax();
 
-  // ---- ground tile (baked per palette) ----
-  // JUNGLE ground: chiseled mossy earth/rock. Tiles seamlessly horizontally
-  // (all randomised features stay interior; edges = gradient + full-width bands +
-  // a periodic grass fringe, so left edge matches right edge). Baked once.
-  function bakeGround(topCol, midCol, botCol) {
-    const w = 128, h = VH - 200;
+  // ════════════════════════════════════════════════════════════════════════
+  // GROUND + PLATFORM TILES — CRUNCHY 16-bit, hand-pixeled per palette.
+  // Ground tile is 128 wide and tiles seamlessly horizontally: full-width
+  // bands + periodic cap motif (period divides 128) + interior-only features.
+  // Only the top ~40px is on-screen (drawn from groundY=232 down past VH).
+  // ════════════════════════════════════════════════════════════════════════
+  // cfg: { body, deep, cap, capHi, capH, seed, strata:[[y,h,color]], features(g,w,h,rnd,B), capMotif(g,w) }
+  function crunchyGround(base, cfg) {
+    const w = 128, h = VH - 200, B = pal(base);
     return bake(w, h, (g) => {
-      let seed = 3131; const rnd = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296;
-      // base soil gradient (mossy lip -> rich brown -> dark)
-      const gg = g.createLinearGradient(0, 0, 0, h);
-      gg.addColorStop(0, '#3f7d2f'); gg.addColorStop(0.11, '#4a331c'); gg.addColorStop(0.4, midCol); gg.addColorStop(1, botCol);
-      g.fillStyle = gg; g.fillRect(0, 0, w, h);
-      // horizontal soil strata bands (full-width -> seamless), darker crevices + a warm seam
-      for (const b of [[16, 4, 'rgba(0,0,0,0.24)'], [26, 2, 'rgba(255,220,160,0.06)'], [38, 5, 'rgba(0,0,0,0.28)'], [54, 3, 'rgba(0,0,0,0.32)']]) {
-        g.fillStyle = b[2]; g.fillRect(0, b[0], w, b[1]);
-      }
-      // dirt speckle (interior)
-      for (let i = 0; i < 48; i++) { const x = 5 + rnd() * (w - 10), y = 12 + rnd() * (h - 14); g.fillStyle = rnd() < 0.5 ? 'rgba(0,0,0,0.22)' : 'rgba(255,230,180,0.07)'; g.fillRect(x, y, 2, 2); }
-      // embedded pebbles / stones (interior) with a tiny highlight
-      for (let i = 0; i < 11; i++) {
-        const x = 8 + rnd() * (w - 16), y = 20 + rnd() * (h - 26), r = 2 + rnd() * 3;
-        g.fillStyle = '#584732'; g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.fill();
-        g.fillStyle = 'rgba(255,235,190,0.18)'; g.beginPath(); g.arc(x - r * 0.3, y - r * 0.3, r * 0.5, 0, Math.PI * 2); g.fill();
-      }
-      // vertical cracks / crevices (interior)
-      g.strokeStyle = 'rgba(0,0,0,0.34)'; g.lineWidth = 1.4;
-      for (let i = 0; i < 4; i++) { const x = 16 + rnd() * (w - 32); g.beginPath(); g.moveTo(x, 10); let cy = 10; while (cy < h - 6) { cy += 6 + rnd() * 6; g.lineTo(x + (rnd() - 0.5) * 5, cy); } g.stroke(); }
-      // mossy grass top lip
-      const tg = g.createLinearGradient(0, 0, 0, 7); tg.addColorStop(0, '#4f9a38'); tg.addColorStop(1, '#2c5f22');
-      g.fillStyle = tg; g.fillRect(0, 0, w, 7);
-      g.fillStyle = 'rgba(180,255,150,0.35)'; g.fillRect(0, 0, w, 1.4);   // top highlight
-      // grass blades on the lip (periodic every 8px -> seamless across tiles)
-      for (let k = 0; k < 16; k++) {
-        const x = k * 8 + 2;
-        g.fillStyle = k % 2 ? '#3f8a2c' : '#57a63f';
-        g.beginPath(); g.moveTo(x, 7); g.lineTo(x + 2, 0.5); g.lineTo(x + 4, 7); g.closePath(); g.fill();
-        g.fillStyle = '#2c5f22'; g.fillRect(x + 3, 1, 1, 6);
-      }
-      // moss drips just under the lip (interior)
-      g.fillStyle = 'rgba(58,120,45,0.5)';
-      for (let i = 0; i < 8; i++) { const x = 6 + rnd() * (w - 12); g.fillRect(x, 7, 3, 3 + rnd() * 5); }
+      const rnd = rngOf(cfg.seed || 3131);
+      // body: stacked flat tone steps (crunchy, no smooth gradient)
+      pxRect(g, 0, 0, w, h, cfg.body);
+      pxRect(g, 0, 26, w, h - 26, cfg.deep);
+      dither(g, 0, 20, w, 8, cfg.body, cfg.deep, 4);
+      dither(g, 0, 42, w, 8, cfg.deep, shade(cfg.deep, -0.35), 4);
+      for (const s of (cfg.strata || [])) pxRect(g, 0, s[0], w, s[1], s[2]);   // full-width => seamless
+      cfg.features && cfg.features(g, w, h, rnd, B);                            // interior-only
+      // top surface cap (full width => seamless)
+      const capH = cfg.capH != null ? cfg.capH : 7;
+      pxRect(g, 0, 0, w, capH, cfg.cap || B.mid);
+      pxRect(g, 0, 0, w, 2, cfg.capHi || B.hi);
+      pxRect(g, 0, capH, w, 1, B.out);
+      dither(g, 0, capH + 1, w, 4, cfg.cap || B.mid, cfg.body, 4);
+      cfg.capMotif && cfg.capMotif(g, w, B);
     }, 1);
   }
-  SPR.ground_jungle = bakeGround('#3a7f3a', '#5a3a1e', '#3a2412');
-  // platform tile
-  function bakePlatform(topCol, botCol) {
+  // 64x16 ledge: bright cap, hard-shaded body, dithered belly, dark outline.
+  function crunchyPlatform(base, opts) {
+    opts = opts || {}; const P = pal(base);
     return bake(64, 16, (g) => {
-      g.fillStyle = botCol; g.fillRect(0, 0, 64, 16);
-      const tg = g.createLinearGradient(0, 0, 0, 6);
-      tg.addColorStop(0, shade(topCol, 0.3)); tg.addColorStop(1, topCol);
-      g.fillStyle = tg; g.fillRect(0, 0, 64, 6);
-      g.fillStyle = 'rgba(0,0,0,0.3)'; g.fillRect(0, 14, 64, 2);
-    }, 1.5);
+      const rnd = rngOf(opts.seed || 707);
+      pxRect(g, 0, 0, 64, 16, P.out);
+      pxRect(g, 0, 2, 64, 12, P.lo);
+      pxRect(g, 0, 2, 64, 6, P.mid);
+      dither(g, 0, 8, 64, 3, P.mid, P.lo, 3);
+      pxRect(g, 0, 0, 64, 3, opts.cap || P.hi);
+      pxRect(g, 0, 0, 64, 1, opts.capHi || shade(base, 0.6));
+      pxRect(g, 0, 14, 64, 2, P.out);
+      opts.detail && opts.detail(g, P, rnd);
+    }, 1);
   }
-  // JUNGLE platform: a mossy stone ledge (rock face + cracks + moss cap), not a flat bar.
-  SPR.plat_jungle = bake(64, 16, (g) => {
-    let seed = 515; const rnd = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296;
-    // rock face
-    const rg = g.createLinearGradient(0, 4, 0, 16);
-    rg.addColorStop(0, '#4a4238'); rg.addColorStop(0.5, '#38312a'); rg.addColorStop(1, '#241d18');
-    g.fillStyle = rg; g.fillRect(0, 4, 64, 12);
-    // rock facets / cracks
-    g.strokeStyle = 'rgba(0,0,0,0.35)'; g.lineWidth = 1;
-    for (let i = 0; i < 5; i++) { const x = 6 + rnd() * 52; g.beginPath(); g.moveTo(x, 6); g.lineTo(x + (rnd() - 0.5) * 8, 15); g.stroke(); }
-    // stone highlights
-    g.fillStyle = 'rgba(255,240,210,0.12)';
-    for (let i = 0; i < 6; i++) g.fillRect(4 + rnd() * 56, 6 + rnd() * 7, 2, 1.5);
-    // moss cap
-    const mg = g.createLinearGradient(0, 0, 0, 6); mg.addColorStop(0, '#4f9a38'); mg.addColorStop(1, '#2c6322');
-    g.fillStyle = mg; g.fillRect(0, 0, 64, 6);
-    g.fillStyle = 'rgba(160,240,130,0.4)'; g.fillRect(0, 0, 64, 1.4);
-    // moss drips over the lip
-    g.fillStyle = '#2c6322';
-    for (let i = 0; i < 9; i++) { const x = rnd() * 64; g.fillRect(x, 6, 3, 2 + rnd() * 4); }
-    // under-shadow
-    g.fillStyle = 'rgba(0,0,0,0.4)'; g.fillRect(0, 14, 64, 2);
-  }, 1.5);
 
-  // ---- Desert ground/platform (sandy, dune-speckled) ----
-  SPR.ground_desert = bake(128, VH - 200, (g, w, h) => {
-    const gg = g.createLinearGradient(0, 0, 0, h);
-    gg.addColorStop(0, '#e0b56e'); gg.addColorStop(0.22, '#b5813f'); gg.addColorStop(1, '#6e4a24');
-    g.fillStyle = gg; g.fillRect(0, 0, w, h);
-    // wind-ripple top
-    g.fillStyle = 'rgba(255,240,200,0.35)';
-    for (let x = 0; x < w; x += 10) g.fillRect(x, 0, 6, 2);
-    // strata lines
-    g.fillStyle = 'rgba(90,58,26,0.4)'; g.fillRect(0, 16, w, 2); g.fillRect(0, 34, w, 3);
-    let seed = 6161; const rnd = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296;
-    g.fillStyle = 'rgba(70,44,18,0.35)';
-    for (let i = 0; i < 36; i++) g.fillRect(rnd() * w, 8 + rnd() * (h - 8), 3, 3);
-  }, 1);
-  SPR.plat_desert = bakePlatform('#d0a860', '#6e4a24');
+  // ── JUNGLE ground/platform: mossy cap over chiseled soil + boulders ──
+  SPR.ground_jungle = crunchyGround('#4f9a38', {
+    seed: 313, body: '#5a3a1e', deep: '#31200f', cap: '#3f8a2c', capHi: '#8fe05a', capH: 6,
+    strata: [[22, 3, 'rgba(0,0,0,0.28)'], [32, 2, 'rgba(255,216,160,0.07)'], [46, 4, 'rgba(0,0,0,0.30)']],
+    features(g, w, h, rnd) {
+      const rock = pal('#6b5a44');
+      for (let i = 0; i < 4; i++) { const bw = 16 + ((rnd() * 3) | 0) * 4, bh = 12 + ((rnd() * 2) | 0) * 4, x = 12 + ((rnd() * (w - 28 - bw) / 4) | 0) * 4, y = 22 + ((rnd() * (h - 30 - bh) / 4) | 0) * 4; pxBlock(g, x, y, bw, bh, rock); pxRect(g, x, y, bw, 2, '#3f7d2f'); }
+      pxNoise(g, 6, 10, w - 12, h - 14, ['rgba(0,0,0,0.30)', 'rgba(255,225,170,0.10)', '#3f2a16'], rnd, 56, 2, 4);
+      g.fillStyle = 'rgba(0,0,0,0.34)';
+      for (let i = 0; i < 3; i++) { let x = 24 + ((rnd() * (w - 48) / 4) | 0) * 4, y = 12; while (y < h - 6) { g.fillRect(x, y, 2, 4); x += (rnd() < 0.5 ? -2 : 2); y += 6; } }
+      g.fillStyle = 'rgba(58,120,45,0.6)';
+      for (let i = 0; i < 7; i++) { const x = 8 + ((rnd() * (w - 16) / 4) | 0) * 4; g.fillRect(x, 6, 3, 4 + ((rnd() * 3) | 0) * 2); }
+    },
+    capMotif(g, w) { for (let x = 0; x < w; x += 8) { pxRect(g, x + 2, -1, 4, 3, (x / 8) & 1 ? '#57a63f' : '#3f8a2c'); pxRect(g, x + 3, 1, 2, 4, '#2c5f22'); } }
+  });
+  SPR.plat_jungle = crunchyPlatform('#4a4238', {
+    seed: 515, cap: '#3f8a2c', capHi: '#8fe05a',
+    detail(g, P, rnd) { for (let x = 2; x < 64; x += 8) pxRect(g, x, 3, 3, 2, x & 8 ? '#57a63f' : '#2c6322'); for (let x = 4; x < 64; x += 12) pxRect(g, x, 6, 2, 3 + ((rnd() * 3) | 0) * 2, '#2c6322'); pxNoise(g, 2, 6, 60, 7, ['rgba(255,240,210,0.14)', 'rgba(0,0,0,0.3)'], rnd, 14, 2); }
+  });
 
-  // ---- Factory ground/platform (steel plate, grating) ----
-  SPR.ground_factory = bake(128, VH - 200, (g, w, h) => {
-    const gg = g.createLinearGradient(0, 0, 0, h);
-    gg.addColorStop(0, '#606878'); gg.addColorStop(0.16, '#454c5e'); gg.addColorStop(1, '#23272f');
-    g.fillStyle = gg; g.fillRect(0, 0, w, h);
-    // top hazard trim
-    g.fillStyle = '#2a2e38'; g.fillRect(0, 0, w, 5);
-    g.fillStyle = '#8a91a2'; g.fillRect(0, 5, w, 2);
-    // plate seams + bolts
-    g.strokeStyle = 'rgba(0,0,0,0.35)'; g.lineWidth = 2;
-    for (let x = 0; x <= w; x += 32) { g.beginPath(); g.moveTo(x, 6); g.lineTo(x, h); g.stroke(); }
-    g.fillStyle = 'rgba(255,255,255,0.18)';
-    for (let x = 8; x < w; x += 32) { g.fillRect(x, 12, 3, 3); g.fillRect(x, h - 14, 3, 3); }
-    g.fillStyle = 'rgba(0,0,0,0.28)';
-    for (let y = 22; y < h; y += 26) g.fillRect(0, y, w, 2);
-  }, 1);
-  SPR.plat_factory = bake(64, 16, (g) => {
-    g.fillStyle = '#2a2e38'; g.fillRect(0, 0, 64, 16);
-    const tg = g.createLinearGradient(0, 0, 0, 8);
-    tg.addColorStop(0, '#6a7284'); tg.addColorStop(1, '#3a4150'); g.fillStyle = tg; g.fillRect(0, 0, 64, 7);
-    // grating slots
-    g.fillStyle = 'rgba(0,0,0,0.4)'; for (let x = 4; x < 60; x += 8) g.fillRect(x, 1, 3, 5);
-    // warning edge
-    g.fillStyle = '#ffce4d'; g.fillRect(0, 7, 64, 2);
-    g.fillStyle = 'rgba(0,0,0,0.5)'; g.fillRect(0, 13, 64, 3);
-  }, 1.5);
+  // ── DESERT ground/platform: layered sandstone strata + cracked hardpan ──
+  SPR.ground_desert = crunchyGround('#e0b56e', {
+    seed: 6161, body: '#c08a4a', deep: '#8a5c2c', cap: '#d6a860', capHi: '#f2d9a0', capH: 5,
+    strata: [[16, 3, '#a56a30'], [24, 2, '#e0b56e'], [30, 4, '#8a5426'], [40, 3, '#b57c40'], [50, 4, '#6e4a24']],
+    features(g, w, h, rnd) {
+      pxNoise(g, 6, 8, w - 12, h - 12, ['rgba(70,44,18,0.4)', 'rgba(255,240,200,0.12)'], rnd, 48, 2, 4);
+      // cracked-hardpan lines across the cap (interior)
+      g.fillStyle = 'rgba(70,44,18,0.55)';
+      for (let i = 0; i < 5; i++) { let x = 16 + ((rnd() * (w - 32) / 4) | 0) * 4; for (let k = 0; k < 4; k++) { g.fillRect(x, 2 + k * 2, 2, 2); x += (rnd() < 0.5 ? -4 : 4); } }
+      const stone = pal('#a06e38');
+      for (let i = 0; i < 3; i++) { const s = 8 + ((rnd() * 2) | 0) * 4, x = 14 + ((rnd() * (w - 28) / 4) | 0) * 4, y = 18 + ((rnd() * 8) | 0) * 4; pxBlock(g, x, y, s + 6, s, stone); }
+    },
+    capMotif(g, w) { for (let x = 0; x < w; x += 8) pxRect(g, x, 0, 6, 2, (x / 8) & 1 ? '#f2d9a0' : '#e6c690'); }
+  });
+  SPR.plat_desert = crunchyPlatform('#c9a05c', {
+    seed: 202, cap: '#e0b56e', capHi: '#f6e2b0',
+    detail(g, P, rnd) { for (let x = 3; x < 62; x += 10) pxRect(g, x, 6, 6, 2, 'rgba(90,58,26,0.5)'); pxNoise(g, 2, 4, 60, 9, ['rgba(255,240,200,0.16)', 'rgba(90,58,26,0.35)'], rnd, 16, 2); }
+  });
+
+  // ── FACTORY ground/platform: riveted steel panels + grating ──
+  SPR.ground_factory = crunchyGround('#6a7284', {
+    seed: 909, body: '#454c5e', deep: '#23272f', cap: '#565e70', capHi: '#8a91a2', capH: 6,
+    strata: [[20, 2, 'rgba(0,0,0,0.35)'], [34, 3, 'rgba(0,0,0,0.28)'], [48, 3, 'rgba(0,0,0,0.32)']],
+    features(g, w, h) {
+      // vertical panel seams every 32px (128/32=4 -> seamless) + corner rivets
+      for (let x = 0; x <= w; x += 32) { pxRect(g, x - 1, 8, 2, h - 8, '#1a1d24'); pxRect(g, x + 1, 8, 1, h - 8, '#7a8296'); }
+      for (let x = 8; x < w; x += 32) { pxRect(g, x, 12, 3, 3, '#8a91a2'); pxRect(g, x + 20, 12, 3, 3, '#8a91a2'); pxRect(g, x, 30, 3, 3, '#2a2e38'); }
+      // grating slots band
+      for (let x = 4; x < w; x += 8) pxRect(g, x, 24, 4, 3, 'rgba(0,0,0,0.5)');
+    },
+    capMotif(g, w) { for (let x = 0; x < w; x += 8) pxRect(g, x, 0, 6, 2, (x / 8) & 1 ? '#8a91a2' : '#565e70'); pxRect(g, 0, 5, w, 2, '#2a2e38'); }
+  });
+  SPR.plat_factory = crunchyPlatform('#3a4150', {
+    seed: 303, cap: '#6a7284', capHi: '#8a91a2',
+    detail(g, P, rnd) { for (let x = 4; x < 60; x += 8) pxRect(g, x, 1, 3, 4, 'rgba(0,0,0,0.4)'); pxRect(g, 0, 7, 64, 2, '#ffce4d'); for (let x = 6; x < 60; x += 16) pxRect(g, x, 3, 2, 2, '#8a91a2'); }
+  });
 
   // ---- Conveyor belt strip (animated chevrons drawn per-frame over ground) ----
   SPR.conveyorBelt = bake(48, 14, (g) => {
@@ -1365,46 +1296,64 @@
     g.fillStyle = 'rgba(0,0,0,0.4)'; g.fillRect(9, 0, 2, 20);
   }, 1.5);
 
-  // ---- L4/L5/L6 ground + platform tiles (distinct palettes) ----
-  SPR.ground_snow = bake(128, VH - 200, (g, w, h) => {
-    const gg = g.createLinearGradient(0, 0, 0, h);
-    gg.addColorStop(0, '#eef6fb'); gg.addColorStop(0.16, '#b9d4e6'); gg.addColorStop(1, '#5e7891');
-    g.fillStyle = gg; g.fillRect(0, 0, w, h);
-    g.fillStyle = '#ffffff'; g.fillRect(0, 0, w, 5);
-    // ice sheen streaks
-    g.fillStyle = 'rgba(255,255,255,0.5)'; for (let x = 0; x < w; x += 14) g.fillRect(x, 6, 8, 2);
-    let seed = 4242; const rnd = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296;
-    g.fillStyle = 'rgba(120,150,175,0.35)'; for (let i = 0; i < 30; i++) g.fillRect(rnd() * w, 10 + rnd() * (h - 10), 3, 3);
-  }, 1);
-  SPR.plat_snow = bakePlatform('#dfeef7', '#5e7891');
-  SPR.ground_volcano = bake(128, VH - 200, (g, w, h) => {
-    const gg = g.createLinearGradient(0, 0, 0, h);
-    gg.addColorStop(0, '#3a2018'); gg.addColorStop(0.14, '#241210'); gg.addColorStop(1, '#140a0a');
-    g.fillStyle = gg; g.fillRect(0, 0, w, h);
-    // glowing cracks
-    g.fillStyle = '#ff6a1a'; for (let x = 6; x < w; x += 26) g.fillRect(x, 2, 3, 3);
-    g.strokeStyle = 'rgba(255,90,20,0.55)'; g.lineWidth = 2;
-    for (let x = 12; x < w; x += 30) { g.beginPath(); g.moveTo(x, 6); g.lineTo(x + 6, 22); g.lineTo(x - 2, 40); g.stroke(); }
-    let seed = 8888; const rnd = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296;
-    g.fillStyle = 'rgba(0,0,0,0.35)'; for (let i = 0; i < 26; i++) g.fillRect(rnd() * w, 10 + rnd() * (h - 10), 3, 3);
-  }, 1);
-  SPR.plat_volcano = bake(64, 16, (g) => {
-    g.fillStyle = '#140a0a'; g.fillRect(0, 0, 64, 16);
-    const tg = g.createLinearGradient(0, 0, 0, 8); tg.addColorStop(0, '#4a2820'); tg.addColorStop(1, '#241210');
-    g.fillStyle = tg; g.fillRect(0, 0, 64, 7);
-    g.fillStyle = '#ff6a1a'; g.fillRect(0, 7, 64, 2);
-    g.fillStyle = 'rgba(0,0,0,0.5)'; g.fillRect(0, 13, 64, 3);
-  }, 1.5);
-  SPR.ground_hive = bake(128, VH - 200, (g, w, h) => {
-    const gg = g.createLinearGradient(0, 0, 0, h);
-    gg.addColorStop(0, '#4a2a66'); gg.addColorStop(0.16, '#331d4a'); gg.addColorStop(1, '#1c1330');
-    g.fillStyle = gg; g.fillRect(0, 0, w, h);
-    g.fillStyle = '#7dff9a'; for (let x = 8; x < w; x += 22) g.fillRect(x, 2, 4, 2);
-    // fleshy bumps
-    let seed = 5309; const rnd = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296;
-    for (let i = 0; i < 14; i++) { const x = rnd() * w, y = 10 + rnd() * (h - 14); glowDot(g, x, y, 6, '#7a3fb0', 0.5); }
-  }, 1);
-  SPR.plat_hive = bakePlatform('#7a3fb0', '#1c1330');
+  // ---- L4/L5/L6 ground + platform tiles (CRUNCHY, distinct palettes) ----
+  // ── SNOW: packed snow cap + blue ice chunks + frosty rock ──
+  SPR.ground_snow = crunchyGround('#eef6fb', {
+    seed: 4242, body: '#b9d4e6', deep: '#5e7891', cap: '#eef6fb', capHi: '#ffffff', capH: 7,
+    strata: [[18, 2, 'rgba(120,150,175,0.4)'], [30, 3, 'rgba(120,150,175,0.3)'], [46, 3, 'rgba(60,90,120,0.35)']],
+    features(g, w, h, rnd) {
+      const ice = pal('#8fd0ec');
+      for (let i = 0; i < 3; i++) { const s = 10 + ((rnd() * 2) | 0) * 4, x = 14 + ((rnd() * (w - 28) / 4) | 0) * 4, y = 18 + ((rnd() * 8) | 0) * 4; pxBlock(g, x, y, s + 4, s, ice); pxRect(g, x + 2, y + 2, 3, 3, '#eafaff'); }
+      pxNoise(g, 6, 10, w - 12, h - 12, ['rgba(255,255,255,0.5)', 'rgba(120,150,175,0.4)'], rnd, 40, 2, 4);
+      // icicles hanging under the cap (interior)
+      for (let i = 0; i < 5; i++) { const x = 12 + ((rnd() * (w - 24) / 4) | 0) * 4, l = 6 + ((rnd() * 3) | 0) * 4; for (let y = 0; y < l; y += 4) pxRect(g, x, 7 + y, Math.max(2, 5 - (y >> 1)), 4, (y & 4) ? '#a9d4ec' : '#eef6fb'); }
+    },
+    capMotif(g, w) { for (let x = 0; x < w; x += 8) pxRect(g, x, 5, 6, 2, (x / 8) & 1 ? '#cfe6f5' : '#ffffff'); }
+  });
+  SPR.plat_snow = crunchyPlatform('#6f8aa2', {
+    seed: 404, cap: '#eef6fb', capHi: '#ffffff',
+    detail(g, P, rnd) { for (let x = 3; x < 62; x += 12) pxRect(g, x, 3, 6, 2, '#ffffff'); for (let x = 6; x < 60; x += 16) { for (let y = 0; y < 6; y += 3) pxRect(g, x, 9 + y, Math.max(1, 3 - y), 3, '#a9d4ec'); } pxNoise(g, 2, 4, 60, 9, ['rgba(255,255,255,0.4)', 'rgba(60,90,120,0.3)'], rnd, 12, 2); }
+  });
+
+  // ── VOLCANO: black basalt + glowing lava cracks + ember crust ──
+  SPR.ground_volcano = crunchyGround('#3a2a26', {
+    seed: 8888, body: '#241210', deep: '#120808', cap: '#2e211d', capHi: '#5a3a30', capH: 6,
+    strata: [[24, 3, 'rgba(0,0,0,0.4)'], [40, 4, 'rgba(0,0,0,0.45)']],
+    features(g, w, h, rnd) {
+      const basalt = pal('#3a231e');
+      for (let i = 0; i < 4; i++) { const bw = 14 + ((rnd() * 3) | 0) * 4, bh = 10 + ((rnd() * 2) | 0) * 4, x = 12 + ((rnd() * (w - 28 - bw) / 4) | 0) * 4, y = 20 + ((rnd() * (h - 28 - bh) / 4) | 0) * 4; pxBlock(g, x, y, bw, bh, basalt); }
+      // glowing lava cracks (interior): hot core + orange halo, grid-snapped
+      for (let i = 0; i < 3; i++) { let x = 20 + ((rnd() * (w - 40) / 4) | 0) * 4, y = 8; while (y < h - 6) { pxRect(g, x - 2, y, 6, 4, 'rgba(255,106,26,0.5)'); pxRect(g, x, y, 2, 4, '#ffd27a'); x += (rnd() < 0.5 ? -4 : 4); y += 4; } }
+      pxNoise(g, 6, 10, w - 12, h - 12, ['rgba(0,0,0,0.4)', '#4a2a20'], rnd, 34, 2, 4);
+    },
+    capMotif(g, w) { for (let x = 0; x < w; x += 8) pxRect(g, x, 0, 6, 2, (x / 8) & 1 ? '#ff6a1a' : '#3a231e'); pxRect(g, 0, 4, w, 1, '#c8420f'); }
+  });
+  SPR.plat_volcano = crunchyPlatform('#2a1712', {
+    seed: 505, cap: '#3a231e', capHi: '#5a3a30',
+    detail(g, P, rnd) { pxRect(g, 0, 3, 64, 2, '#ff6a1a'); for (let x = 4; x < 60; x += 10) pxRect(g, x, 6, 3, 3, ((x / 10) & 1) ? '#c8420f' : 'rgba(255,106,26,0.5)'); pxNoise(g, 2, 6, 60, 8, ['rgba(0,0,0,0.4)', '#4a2a20'], rnd, 12, 2); }
+  });
+
+  // ── HIVE: organic chitin/flesh + pulsing egg-sacs + bio-glow veins ──
+  SPR.ground_hive = crunchyGround('#7a3fb0', {
+    seed: 5309, body: '#4a2a66', deep: '#241238', cap: '#6a349a', capHi: '#a45fff', capH: 6,
+    strata: [[22, 3, 'rgba(20,8,40,0.4)'], [38, 4, 'rgba(20,8,40,0.45)']],
+    features(g, w, h, rnd) {
+      // chitin plates (interior chiseled blocks)
+      const chit = pal('#5a2f82');
+      for (let i = 0; i < 3; i++) { const s = 12 + ((rnd() * 2) | 0) * 4, x = 14 + ((rnd() * (w - 28) / 4) | 0) * 4, y = 18 + ((rnd() * 8) | 0) * 4; pxBlock(g, x, y, s + 6, s, chit); }
+      // pulsing egg-sacs (green bio-glow, crunchy)
+      for (let i = 0; i < 4; i++) { const x = 12 + ((rnd() * (w - 24) / 4) | 0) * 4, y = 16 + ((rnd() * (h - 26) / 4) | 0) * 4; pxGlow(g, x, y, 6, '#7dff9a', 3); pxRect(g, x - 2, y - 2, 4, 4, '#c8ffd6'); }
+      // veins
+      g.fillStyle = 'rgba(125,255,154,0.4)';
+      for (let i = 0; i < 3; i++) { let x = 24 + ((rnd() * (w - 48) / 4) | 0) * 4, y = 10; while (y < h - 6) { g.fillRect(x, y, 2, 4); x += (rnd() < 0.5 ? -2 : 2); y += 6; } }
+      pxNoise(g, 6, 10, w - 12, h - 12, ['rgba(20,8,40,0.4)', 'rgba(164,95,255,0.25)'], rnd, 30, 2, 4);
+    },
+    capMotif(g, w) { for (let x = 0; x < w; x += 8) pxRect(g, x, 0, 6, 2, (x / 8) & 1 ? '#a45fff' : '#6a349a'); }
+  });
+  SPR.plat_hive = crunchyPlatform('#4a2a66', {
+    seed: 606, cap: '#7a3fb0', capHi: '#a45fff',
+    detail(g, P, rnd) { for (let x = 6; x < 58; x += 16) pxGlow(g, x, 4, 4, '#7dff9a', 3); for (let x = 3; x < 62; x += 8) pxRect(g, x, 7, 2, 3, 'rgba(125,255,154,0.35)'); pxNoise(g, 2, 6, 60, 8, ['rgba(20,8,40,0.4)', 'rgba(164,95,255,0.3)'], rnd, 12, 2); }
+  });
 
   // ---- DESTRUCTIBLE COVER (ice/crystal block; two damage states) ----
   function bakeIceBlock(cracked) {
@@ -1474,41 +1423,36 @@
   // existing frontArmor gate blocks left/front hits and allows right/back+above.
   SPR.shield = bake(34, 30, g => {
     g.translate(17, 0);
-    // body
-    const bg = g.createLinearGradient(0, 6, 0, 28);
-    bg.addColorStop(0, '#6a7284'); bg.addColorStop(1, '#33384a');
-    g.fillStyle = bg; g.strokeStyle = 'rgba(0,0,0,0.6)'; g.lineWidth = 1.4; g.lineJoin = 'round';
-    g.beginPath(); g.moveTo(-6, 8); g.lineTo(8, 8); g.lineTo(7, 24); g.lineTo(-5, 24); g.closePath(); g.fill(); g.stroke();
+    const bp = pal('#565e70');
     // legs
-    g.fillStyle = '#22262f'; g.fillRect(-4, 24, 4, 6); g.fillRect(3, 24, 4, 6);
+    pxRect(g, -4, 24, 4, 6, '#181b22'); pxRect(g, 3, 24, 4, 6, '#181b22');
+    // body
+    pxRect(g, -6, 7, 14, 17, bp.out); pxRect(g, -5, 8, 12, 15, bp.mid);
+    pxRect(g, -5, 8, 12, 4, bp.hi); pxRect(g, -5, 19, 12, 3, bp.lo);
     // head/eye
-    g.fillStyle = '#3a4150'; g.beginPath(); g.arc(2, 5, 4.5, 0, Math.PI * 2); g.fill(); g.stroke();
-    glowDot(g, 0, 5, 3.5, '#35e0ff', 0.8); g.fillStyle = '#35e0ff'; g.fillRect(-2, 3.5, 4, 2);
+    pxRect(g, -2, 0, 9, 8, '#2e3444'); pxRect(g, -2, 0, 9, 2, '#3d4658');
+    pxGlow(g, 1, 4, 3, '#35e0ff', 2); pxRect(g, -1, 3, 4, 2, '#35e0ff');
     // big riot shield on the LEFT (front)
-    const sg = g.createLinearGradient(-16, 0, -8, 0);
-    sg.addColorStop(0, '#9aa6c0'); sg.addColorStop(1, '#4a5470');
-    g.fillStyle = sg; g.strokeStyle = 'rgba(0,0,0,0.7)'; g.lineWidth = 1.8;
-    g.beginPath(); g.moveTo(-12, 2); g.quadraticCurveTo(-18, 15, -12, 28); g.lineTo(-9, 27); g.quadraticCurveTo(-14, 15, -9, 3); g.closePath(); g.fill(); g.stroke();
-    g.fillStyle = '#ffce4d'; g.fillRect(-14, 13, 4, 4);
-    g.fillStyle = 'rgba(255,255,255,0.3)'; g.fillRect(-12, 4, 2, 22);
-  });
+    const sp = pal('#6a7590');
+    pxRect(g, -15, 1, 7, 27, sp.out); pxRect(g, -14, 2, 5, 25, sp.mid); pxRect(g, -14, 2, 2, 25, sp.hi);
+    pxRect(g, -14, 12, 5, 4, '#ffce4d');   // emblem
+  }, 1);
   // SUICIDE BOT (round bomb-bot; windup telegraph then avoidable blast)
   SPR.suicide = bake(26, 24, g => {
     g.translate(13, 0);
+    const bp = pal('#a83e3e');
     // legs
-    g.strokeStyle = '#2a2e38'; g.lineWidth = 2.4; g.lineCap = 'round';
-    g.beginPath(); g.moveTo(-5, 18); g.lineTo(-8, 23); g.moveTo(5, 18); g.lineTo(8, 23); g.stroke();
-    // round bomb body
-    const bg = g.createRadialGradient(-3, 6, 2, 0, 10, 12);
-    bg.addColorStop(0, '#b04a4a'); bg.addColorStop(1, '#5e1e1e');
-    g.fillStyle = bg; g.strokeStyle = 'rgba(0,0,0,0.6)'; g.lineWidth = 1.6;
-    g.beginPath(); g.arc(0, 11, 10, 0, Math.PI * 2); g.fill(); g.stroke();
+    pxRect(g, -6, 18, 3, 5, '#1c1e26'); pxRect(g, 3, 18, 3, 5, '#1c1e26');
+    // round bomb body (stepped octagon)
+    pxRect(g, -6, 2, 12, 18, bp.out); pxRect(g, -9, 5, 18, 12, bp.out);
+    pxRect(g, -5, 3, 10, 16, bp.mid); pxRect(g, -8, 6, 16, 10, bp.mid);
+    pxRect(g, -5, 3, 10, 4, bp.hi); pxRect(g, -8, 6, 4, 10, bp.hi);
+    pxRect(g, -5, 15, 10, 3, bp.lo);
     // blinking light
-    glowDot(g, 0, 6, 5, '#ffce4d', 0.85); g.fillStyle = '#ffe066'; g.beginPath(); g.arc(0, 6, 2.6, 0, Math.PI * 2); g.fill();
+    pxGlow(g, 0, 6, 5, '#ffce4d', 2); pxRect(g, -2, 4, 4, 4, '#ffe066'); pxRect(g, -2, 4, 4, 1, '#fff6c8');
     // fuse spikes
-    g.fillStyle = '#2a2e38'; for (const a of [-0.6, 0, 0.6]) { g.save(); g.rotate(a); g.fillRect(-1.2, -4, 2.4, 6); g.restore(); }
-    g.fillStyle = 'rgba(255,255,255,0.25)'; g.fillRect(-6, 6, 3, 3);
-  });
+    pxRect(g, -1, -2, 2, 5, '#2a2e38'); pxRect(g, -5, 0, 2, 4, '#2a2e38'); pxRect(g, 4, 0, 2, 4, '#2a2e38');
+  }, 1);
   for (const k of ['shield', 'suicide']) SPR[k + '_w'] = whiten(SPR[k]);
 
   // ════════════════════════════════════════════════════════════════════════
@@ -1516,309 +1460,259 @@
   // ════════════════════════════════════════════════════════════════════════
   SPR.gorillaBody = bake(150, 140, g => {
     g.translate(75, 6);
-    // shoulders/torso
-    const bg = g.createLinearGradient(0, 10, 0, 120);
-    bg.addColorStop(0, '#8a90a4'); bg.addColorStop(0.5, '#5a6072'); bg.addColorStop(1, '#33384a');
-    g.fillStyle = bg; g.strokeStyle = 'rgba(0,0,0,0.65)'; g.lineWidth = 2.5; g.lineJoin = 'round';
-    g.beginPath();
-    g.moveTo(-52, 38); g.quadraticCurveTo(-60, 10, -34, 8);
-    g.lineTo(34, 8); g.quadraticCurveTo(60, 10, 52, 38);
-    g.lineTo(44, 120); g.lineTo(-44, 120); g.closePath();
-    g.fill(); g.stroke();
+    const bp = pal('#5a6072');
+    // torso block (wide shoulders)
+    pxRect(g, -54, 6, 108, 116, bp.out); pxRect(g, -52, 8, 104, 112, bp.mid);
+    pxRect(g, -52, 8, 104, 10, bp.hi); pxRect(g, -52, 110, 104, 10, bp.lo);
+    dither(g, -52, 18, 104, 10, bp.hi, bp.mid, 4);
+    pxRect(g, -52, 8, 10, 22, bp.lo); pxRect(g, 42, 8, 10, 22, bp.lo);   // shoulder bevels
     // belly plate
-    g.fillStyle = '#464c60'; g.beginPath(); g.ellipse(0, 74, 34, 40, 0, 0, Math.PI * 2); g.fill(); g.stroke();
-    // rivets
-    g.fillStyle = 'rgba(255,255,255,0.25)';
-    for (const [rx, ry] of [[-40, 30], [40, 30], [-42, 100], [42, 100]]) g.fillRect(rx, ry, 3, 3);
+    const bl = pal('#464c60');
+    pxRect(g, -34, 44, 68, 66, bl.out); pxRect(g, -32, 46, 64, 62, bl.mid);
+    pxRect(g, -32, 46, 64, 8, bl.hi); dither(g, -32, 54, 64, 48, bl.lo, bl.mid, 4);
+    for (const [rx, ry] of [[-44, 24], [40, 24], [-46, 100], [42, 100]]) { pxRect(g, rx, ry, 4, 4, bp.hi); pxRect(g, rx + 1, ry + 1, 2, 2, bp.lo); }
     // head
-    const hg = g.createLinearGradient(0, 14, 0, 44);
-    hg.addColorStop(0, '#9aa0b4'); hg.addColorStop(1, '#4a5062');
-    g.fillStyle = hg; g.beginPath(); g.ellipse(0, 30, 26, 24, 0, 0, Math.PI * 2); g.fill(); g.stroke();
-    // brow
-    g.fillStyle = '#2a2e3a'; g.fillRect(-22, 22, 44, 8);
-    // eyes
-    glowDot(g, -11, 26, 6, '#ff5252', 0.9); glowDot(g, 11, 26, 6, '#ff5252', 0.9);
-    g.fillStyle = '#ff7a52'; g.beginPath(); g.arc(-11, 26, 3, 0, Math.PI * 2); g.arc(11, 26, 3, 0, Math.PI * 2); g.fill();
-    // jaw
-    g.fillStyle = '#33384a'; g.fillRect(-16, 44, 32, 8);
-    g.fillStyle = '#e8e8f0'; for (let i = -12; i < 12; i += 6) g.fillRect(i, 44, 3, 5);
-  });
+    const hp = pal('#6a7286');
+    pxRect(g, -26, 10, 52, 44, hp.out); pxRect(g, -24, 12, 48, 40, hp.mid);
+    pxRect(g, -24, 12, 48, 8, hp.hi);
+    pxRect(g, -24, 22, 48, 8, '#20242e');   // brow
+    // eyes (glowing red)
+    pxGlow(g, -12, 26, 6, '#ff5252', 2); pxGlow(g, 12, 26, 6, '#ff5252', 2);
+    pxRect(g, -15, 24, 8, 5, '#ff5252'); pxRect(g, 7, 24, 8, 5, '#ff5252');
+    pxRect(g, -14, 24, 3, 2, '#ffd0c0'); pxRect(g, 8, 24, 3, 2, '#ffd0c0');
+    // jaw + teeth
+    pxRect(g, -18, 44, 36, 10, '#2a2f3a');
+    for (let i = -15; i < 15; i += 5) pxRect(g, i, 44, 3, 6, '#e8e8f0');
+  }, 1);
   SPR.gorillaArm = bake(40, 90, g => {
     g.translate(20, 8);
-    const ag = g.createLinearGradient(0, 0, 0, 80);
-    ag.addColorStop(0, '#7a8094'); ag.addColorStop(1, '#3a4052');
-    g.fillStyle = ag; g.strokeStyle = 'rgba(0,0,0,0.65)'; g.lineWidth = 2.4; g.lineJoin = 'round';
-    g.beginPath(); g.moveTo(-14, 0); g.lineTo(14, 0); g.lineTo(16, 60); g.quadraticCurveTo(16, 82, 0, 82); g.quadraticCurveTo(-16, 82, -16, 60); g.closePath(); g.fill(); g.stroke();
+    const ap = pal('#4a5164');
+    pxRect(g, -16, 0, 32, 66, ap.out); pxRect(g, -14, 0, 28, 64, ap.mid);
+    pxRect(g, -14, 0, 10, 64, ap.hi); pxRect(g, 6, 0, 8, 64, ap.lo);
+    dither(g, -4, 10, 10, 44, ap.hi, ap.mid, 4);
     // fist
-    g.fillStyle = '#2a2e3a'; g.beginPath(); g.arc(0, 74, 15, 0, Math.PI * 2); g.fill(); g.stroke();
-    g.fillStyle = 'rgba(255,255,255,0.2)'; for (const kx of [-8, 0, 8]) g.fillRect(kx, 66, 4, 4);
-    // piston highlight
-    g.fillStyle = 'rgba(255,255,255,0.2)'; g.fillRect(-10, 6, 4, 50);
-  });
+    const fp = pal('#3a4050');
+    pxRect(g, -16, 60, 32, 22, fp.out); pxRect(g, -14, 62, 28, 18, fp.mid);
+    pxRect(g, -14, 62, 28, 4, fp.hi);
+    for (const kx of [-10, -1, 8]) { pxRect(g, kx, 66, 5, 5, fp.lo); pxRect(g, kx, 66, 5, 2, fp.hi); }
+  }, 1);
   // chest core: closed (armored) vs open (weak point glowing)
   SPR.coreClosed = bake(46, 46, g => {
     g.translate(23, 23);
-    const bg = g.createRadialGradient(0, 0, 3, 0, 0, 20);
-    bg.addColorStop(0, '#5a6072'); bg.addColorStop(1, '#2a2e3a');
-    g.fillStyle = bg; g.beginPath(); g.arc(0, 0, 20, 0, Math.PI * 2); g.fill();
-    g.strokeStyle = '#22262f'; g.lineWidth = 3;
-    // shutter lines
-    for (let i = 0; i < 4; i++) { const a = i / 4 * Math.PI; g.beginPath(); g.moveTo(Math.cos(a) * 18, Math.sin(a) * 18); g.lineTo(-Math.cos(a) * 18, -Math.sin(a) * 18); g.stroke(); }
-    g.fillStyle = '#454c60'; g.beginPath(); g.arc(0, 0, 6, 0, Math.PI * 2); g.fill();
-  });
+    const cp = pal('#454c60');
+    pxRect(g, -18, -18, 36, 36, cp.out); pxRect(g, -16, -16, 32, 32, cp.mid);
+    pxRect(g, -16, -16, 32, 4, cp.hi); pxRect(g, -16, 12, 32, 4, cp.lo);
+    pxRect(g, -16, -2, 32, 4, '#20242e'); pxRect(g, -2, -16, 4, 32, '#20242e');   // shutter cross
+    pxRect(g, -6, -6, 12, 12, cp.lo); pxRect(g, -6, -6, 12, 2, cp.hi);
+  }, 1);
   SPR.coreOpen = bake(46, 46, g => {
     g.translate(23, 23);
-    glowDot(g, 0, 0, 22, '#ff5252', 0.9);
-    const bg = g.createRadialGradient(0, 0, 2, 0, 0, 16);
-    bg.addColorStop(0, '#fff'); bg.addColorStop(0.4, '#ffce4d'); bg.addColorStop(1, '#ff5252');
-    g.fillStyle = bg; g.beginPath(); g.arc(0, 0, 15, 0, Math.PI * 2); g.fill();
-    g.strokeStyle = '#7a2020'; g.lineWidth = 2.5; g.beginPath(); g.arc(0, 0, 18, 0, Math.PI * 2); g.stroke();
-  });
+    pxGlow(g, 0, 0, 20, '#ff5252', 3);
+    pxRect(g, -14, -14, 28, 28, '#7a2020'); pxRect(g, -12, -12, 24, 24, '#ff5252');
+    pxRect(g, -9, -9, 18, 18, '#ffce4d'); pxRect(g, -5, -5, 10, 10, '#fff2a0'); pxRect(g, -2, -2, 4, 4, '#ffffff');
+    pxRect(g, -14, -14, 28, 2, '#ff8a6a'); pxRect(g, -14, 12, 28, 2, '#7a2020');
+  }, 1);
   SPR.gorillaBody_w = whiten(SPR.gorillaBody);
   // barrel projectile the gorilla hurls
   SPR.barrel = bake(24, 26, g => {
     g.translate(12, 13);
-    const bg = g.createLinearGradient(-10, 0, 10, 0);
-    bg.addColorStop(0, '#8a5a2a'); bg.addColorStop(0.5, '#c88a4a'); bg.addColorStop(1, '#6a3f1a');
-    g.fillStyle = bg; g.strokeStyle = 'rgba(0,0,0,0.6)'; g.lineWidth = 1.6;
-    g.beginPath(); g.rect(-9, -11, 18, 22); g.fill(); g.stroke();
-    g.fillStyle = '#4a2c12'; g.fillRect(-9, -6, 18, 3); g.fillRect(-9, 3, 18, 3);
-    glowDot(g, 0, 0, 6, '#ffce4d', 0.4);
-  });
+    const bp = pal('#b0723a');
+    pxRect(g, -10, -12, 20, 24, bp.out); pxRect(g, -9, -11, 18, 22, bp.mid);
+    pxRect(g, -9, -11, 4, 22, bp.hi); pxRect(g, 5, -11, 4, 22, bp.lo);
+    pxRect(g, -9, -7, 18, 3, '#4a2c12'); pxRect(g, -9, 4, 18, 3, '#4a2c12');   // hoops
+    pxRect(g, -9, -11, 18, 2, '#5e3a1a'); pxRect(g, -9, 9, 18, 2, '#5e3a1a');
+  }, 1);
   // landing-zone shadow telegraph
   SPR.landZone = bake(80, 24, g => {
     g.translate(40, 12);
-    const gr = g.createRadialGradient(0, 0, 4, 0, 0, 38);
-    gr.addColorStop(0, 'rgba(255,82,82,0.55)'); gr.addColorStop(0.7, 'rgba(255,82,82,0.18)'); gr.addColorStop(1, 'rgba(255,82,82,0)');
-    g.fillStyle = gr; g.beginPath(); g.ellipse(0, 0, 38, 11, 0, 0, Math.PI * 2); g.fill();
-    g.strokeStyle = 'rgba(255,82,82,0.7)'; g.lineWidth = 2; g.beginPath(); g.ellipse(0, 0, 34, 9, 0, 0, Math.PI * 2); g.stroke();
-  });
+    pxGlow(g, 0, 0, 26, '#ff5252', 4);
+    for (let a = 0; a < 20; a++) { const an = a / 20 * Math.PI * 2; pxRect(g, Math.round(Math.cos(an) * 34) - 1, Math.round(Math.sin(an) * 8) - 1, 3, 3, 'rgba(255,82,82,0.85)'); }
+  }, 1);
 
   // ════════════════════════════════════════════════════════════════════════
   // BOSS SPRITES — Sand Worm (L2)
   // ════════════════════════════════════════════════════════════════════════
   SPR.wormSeg = bake(64, 46, g => {
     g.translate(32, 23);
-    const bg = g.createLinearGradient(-30, 0, 30, 0);
-    bg.addColorStop(0, '#6a4a26'); bg.addColorStop(0.5, '#a9773f'); bg.addColorStop(1, '#5e3f1e');
-    g.fillStyle = bg; g.strokeStyle = 'rgba(0,0,0,0.55)'; g.lineWidth = 2; g.lineJoin = 'round';
-    g.beginPath(); g.ellipse(0, 0, 30, 22, 0, 0, Math.PI * 2); g.fill(); g.stroke();
-    // segment ridges
-    g.strokeStyle = 'rgba(60,38,16,0.7)'; g.lineWidth = 3;
-    g.beginPath(); g.ellipse(0, 0, 24, 17, 0, 0, Math.PI * 2); g.stroke();
-    g.fillStyle = 'rgba(255,230,180,0.25)'; g.beginPath(); g.ellipse(-8, -8, 10, 6, 0, 0, Math.PI * 2); g.fill();
-  }, 2);
+    const wp = pal('#9a6e3a');
+    pxRect(g, -30, -20, 60, 40, wp.out); pxRect(g, -28, -18, 56, 36, wp.mid);
+    pxRect(g, -28, -18, 56, 8, wp.hi); pxRect(g, -28, 10, 56, 8, wp.lo);
+    dither(g, -28, -10, 56, 8, wp.hi, wp.mid, 4);
+    pxRect(g, -22, -14, 44, 4, '#6a4a26'); pxRect(g, -22, 10, 44, 4, '#4a3218');   // ridge rings
+    pxRect(g, -24, -14, 6, 28, '#6a4a26'); pxRect(g, 18, -14, 6, 28, '#4a3218');
+  }, 1);
   SPR.wormHead = bake(80, 76, g => {
     g.translate(40, 6);
-    // armored head plates
-    const hg = g.createLinearGradient(0, 0, 0, 62);
-    hg.addColorStop(0, '#b0824a'); hg.addColorStop(1, '#5e3f1e');
-    g.fillStyle = hg; g.strokeStyle = 'rgba(0,0,0,0.6)'; g.lineWidth = 2.4; g.lineJoin = 'round';
-    g.beginPath();
-    g.moveTo(-30, 20); g.quadraticCurveTo(-34, -2, 0, -4); g.quadraticCurveTo(34, -2, 30, 20);
-    g.lineTo(24, 40); g.lineTo(-24, 40); g.closePath(); g.fill(); g.stroke();
-    // mandible plates
-    g.fillStyle = '#7a5228'; g.beginPath(); g.moveTo(-30, 18); g.lineTo(-40, 34); g.lineTo(-22, 40); g.closePath(); g.fill(); g.stroke();
-    g.beginPath(); g.moveTo(30, 18); g.lineTo(40, 34); g.lineTo(22, 40); g.closePath(); g.fill(); g.stroke();
-    // small eyes
-    glowDot(g, -14, 8, 4, '#ffce4d', 0.8); glowDot(g, 14, 8, 4, '#ffce4d', 0.8);
-    g.fillStyle = '#3a2410'; g.beginPath(); g.arc(-14, 8, 2, 0, Math.PI * 2); g.arc(14, 8, 2, 0, Math.PI * 2); g.fill();
-    // ridge highlights
-    g.fillStyle = 'rgba(255,230,180,0.25)'; g.fillRect(-6, 2, 12, 4);
-  });
+    const wp = pal('#a8783e');
+    pxRect(g, -30, -4, 60, 44, wp.out); pxRect(g, -28, -2, 56, 40, wp.mid);
+    pxRect(g, -28, -2, 56, 8, wp.hi); pxRect(g, -28, 30, 56, 8, wp.lo);
+    dither(g, -28, 6, 56, 8, wp.hi, wp.mid, 4);
+    // mandibles
+    pxRect(g, -40, 28, 14, 14, wp.lo); pxRect(g, 26, 28, 14, 14, wp.lo);
+    pxRect(g, -40, 28, 14, 3, wp.mid); pxRect(g, 26, 28, 14, 3, wp.mid);
+    // plate ridges
+    pxRect(g, -20, 2, 40, 3, '#6a4a26'); pxRect(g, -16, 10, 32, 3, '#6a4a26');
+    // eyes
+    pxGlow(g, -14, 8, 4, '#ffce4d', 2); pxGlow(g, 14, 8, 4, '#ffce4d', 2);
+    pxRect(g, -16, 6, 6, 5, '#ffce4d'); pxRect(g, 10, 6, 6, 5, '#ffce4d');
+    pxRect(g, -16, 6, 2, 2, '#3a2410'); pxRect(g, 14, 6, 2, 2, '#3a2410');
+  }, 1);
   // open maw = weak point (glowing gullet + teeth ring)
   SPR.wormMaw = bake(64, 64, g => {
     g.translate(32, 32);
-    glowDot(g, 0, 0, 30, '#ff5252', 0.85);
-    const mg = g.createRadialGradient(0, 2, 3, 0, 4, 22);
-    mg.addColorStop(0, '#ffe066'); mg.addColorStop(0.4, '#ff7a2a'); mg.addColorStop(1, '#7a1010');
-    g.fillStyle = mg; g.beginPath(); g.ellipse(0, 2, 20, 22, 0, 0, Math.PI * 2); g.fill();
-    // teeth ring
-    g.fillStyle = '#f0e6d0';
-    for (let i = 0; i < 12; i++) { const a = i / 12 * Math.PI * 2; const x = Math.cos(a) * 19, y = 2 + Math.sin(a) * 21; g.save(); g.translate(x, y); g.rotate(a + Math.PI / 2); g.beginPath(); g.moveTo(-3, 0); g.lineTo(3, 0); g.lineTo(0, 7); g.closePath(); g.fill(); g.restore(); }
-    g.fillStyle = 'rgba(255,255,255,0.5)'; g.beginPath(); g.arc(-6, -6, 3, 0, Math.PI * 2); g.fill();
-  });
+    pxGlow(g, 0, 0, 28, '#ff5252', 3);
+    pxRect(g, -20, -20, 40, 44, '#7a1010'); pxRect(g, -16, -14, 32, 36, '#ff7a2a');
+    pxRect(g, -10, -8, 20, 26, '#ffe066'); pxRect(g, -5, -2, 10, 14, '#fff2a0');
+    for (let i = 0; i < 12; i++) { const a = i / 12 * Math.PI * 2; pxRect(g, Math.round(Math.cos(a) * 19) - 2, Math.round(2 + Math.sin(a) * 21) - 2, 4, 4, '#f0e6d0'); }
+  }, 1);
   SPR.wormHead_w = whiten(SPR.wormHead);
   // sand-mound eruption telegraph (drawn scaled by progress)
   SPR.sandMound = bake(90, 40, g => {
     g.translate(45, 40);
-    const mg = g.createLinearGradient(0, -34, 0, 0);
-    mg.addColorStop(0, 'rgba(224,182,110,0.95)'); mg.addColorStop(1, 'rgba(150,96,46,0.95)');
-    g.fillStyle = mg; g.beginPath(); g.moveTo(-42, 0); g.quadraticCurveTo(0, -38, 42, 0); g.closePath(); g.fill();
-    g.fillStyle = 'rgba(255,240,200,0.5)'; g.beginPath(); g.moveTo(-20, 0); g.quadraticCurveTo(-6, -22, 6, 0); g.closePath(); g.fill();
-    // warning ring
-    g.strokeStyle = 'rgba(255,82,82,0.8)'; g.lineWidth = 3; g.beginPath(); g.ellipse(0, -1, 40, 8, 0, 0, Math.PI); g.stroke();
-  });
+    const sp = pal('#c8955a');
+    for (let i = 0; i < 10; i++) { const w = 42 - i * 4; pxRect(g, -w, -i * 4, w * 2, 4, i < 3 ? sp.hi : sp.mid); }
+    pxRect(g, -20, -4, 12, 4, '#fff0c8');
+    for (let x = -40; x <= 40; x += 8) pxRect(g, x, -2, 4, 3, 'rgba(255,82,82,0.8)');
+  }, 1);
   SPR.sandSpit = bake(18, 18, g => {
     g.translate(9, 9);
-    glowDot(g, 0, 0, 8, '#c8955a', 0.5);
-    const bg = g.createRadialGradient(-2, -2, 1, 0, 0, 7);
-    bg.addColorStop(0, '#e0b56e'); bg.addColorStop(1, '#7a5228');
-    g.fillStyle = bg; g.beginPath(); g.arc(0, 0, 6, 0, Math.PI * 2); g.fill();
-    g.fillStyle = 'rgba(90,58,26,0.8)'; g.fillRect(-3, -1, 3, 3); g.fillRect(1, 1, 2, 2);
-  });
+    pxGlow(g, 0, 0, 7, '#c8955a', 2);
+    const sp = pal('#c89a5e');
+    pxRect(g, -6, -5, 12, 11, sp.out); pxRect(g, -5, -4, 10, 9, sp.mid); pxRect(g, -5, -4, 10, 3, sp.hi); pxRect(g, -3, 2, 3, 3, sp.lo);
+  }, 1);
 
   // ════════════════════════════════════════════════════════════════════════
   // BOSS SPRITES — Spider Tank (L3)
   // ════════════════════════════════════════════════════════════════════════
   SPR.spiderBody = bake(150, 84, g => {
     g.translate(75, 4);
-    // main hull
-    const bg = g.createLinearGradient(0, 0, 0, 72);
-    bg.addColorStop(0, '#7a8296'); bg.addColorStop(0.5, '#4a5162'); bg.addColorStop(1, '#2a303c');
-    g.fillStyle = bg; g.strokeStyle = 'rgba(0,0,0,0.65)'; g.lineWidth = 2.5; g.lineJoin = 'round';
-    g.beginPath();
-    g.moveTo(-64, 40); g.lineTo(-54, 14); g.quadraticCurveTo(0, 0, 54, 14); g.lineTo(64, 40);
-    g.lineTo(54, 68); g.lineTo(-54, 68); g.closePath(); g.fill(); g.stroke();
-    // armor plates + rivets
-    g.fillStyle = '#3a4150'; g.fillRect(-50, 44, 100, 20);
-    g.fillStyle = 'rgba(255,255,255,0.2)'; for (const rx of [-46, -24, 0, 24, 46]) { g.fillRect(rx, 18, 3, 3); g.fillRect(rx, 60, 3, 3); }
-    // hazard stripe
-    g.fillStyle = '#ffce4d'; for (let x = -48; x < 48; x += 16) { g.beginPath(); g.moveTo(x, 44); g.lineTo(x + 8, 44); g.lineTo(x, 50); g.closePath(); g.fill(); }
-    // cannon barrel (points left toward players)
-    g.fillStyle = '#22262f'; g.fillRect(-78, 34, 20, 12); g.fillRect(-82, 36, 6, 8);
-    // missile pod (right shoulder)
-    g.fillStyle = '#33384a'; g.fillRect(46, 8, 26, 16);
-    g.fillStyle = '#ff5252'; g.fillRect(50, 11, 5, 4); g.fillRect(58, 11, 5, 4); g.fillRect(66, 11, 5, 4);
-  });
+    const bp = pal('#4a5162');
+    pxRect(g, -64, 8, 128, 60, bp.out); pxRect(g, -62, 10, 124, 56, bp.mid);
+    pxRect(g, -62, 10, 124, 10, bp.hi); pxRect(g, -62, 58, 124, 8, bp.lo);
+    dither(g, -62, 20, 124, 8, bp.hi, bp.mid, 4);
+    pxRect(g, -50, 44, 100, 20, '#33384a');   // lower armor band
+    for (let x = -48; x < 48; x += 16) pxRect(g, x, 44, 8, 6, '#ffce4d');   // hazard stripes
+    for (const rx of [-46, -24, 0, 24, 46]) { pxRect(g, rx, 16, 3, 3, bp.hi); pxRect(g, rx, 58, 3, 3, bp.lo); }
+    // cannon barrel (left)
+    pxRect(g, -80, 34, 22, 12, '#181b22'); pxRect(g, -84, 36, 6, 8, '#181b22'); pxRect(g, -80, 34, 22, 2, '#3a4150');
+    // missile pod (right)
+    pxRect(g, 46, 6, 26, 16, '#2a2f3a');
+    for (const mx of [50, 58, 66]) pxRect(g, mx, 10, 4, 5, '#ff5252');
+  }, 1);
   // cockpit weak point (glowing dome; always the target)
   SPR.cockpit = bake(44, 40, g => {
     g.translate(22, 20);
-    glowDot(g, 0, 0, 20, '#35e0ff', 0.7);
-    const dg = g.createRadialGradient(-4, -6, 2, 0, 0, 16);
-    dg.addColorStop(0, '#ffffff'); dg.addColorStop(0.5, '#7fdcff'); dg.addColorStop(1, '#1c5ea0');
-    g.fillStyle = dg; g.beginPath(); g.arc(0, 2, 14, Math.PI, 0); g.fill();
-    g.fillStyle = '#1c2634'; g.fillRect(-15, 2, 30, 6);
-    g.strokeStyle = '#0e1a26'; g.lineWidth = 2; g.beginPath(); g.arc(0, 2, 14, Math.PI, 0); g.stroke();
-    g.fillStyle = 'rgba(255,255,255,0.7)'; g.beginPath(); g.arc(-5, -4, 3, 0, Math.PI * 2); g.fill();
-  });
+    pxGlow(g, 0, 0, 18, '#35e0ff', 3);
+    pxRect(g, -14, -12, 28, 16, '#1c5ea0'); pxRect(g, -12, -10, 24, 12, '#7fdcff');
+    pxRect(g, -12, -10, 24, 4, '#dff5ff'); pxRect(g, -8, -8, 6, 4, '#ffffff');   // glint
+    pxRect(g, -15, 2, 30, 6, '#1c2634'); pxRect(g, -15, 2, 30, 2, '#0e1a26');    // base
+  }, 1);
   SPR.spiderBody_w = whiten(SPR.spiderBody);
   // one mechanical leg (pivot at top/hip); drawn rotated per gait
   SPR.spiderLeg = bake(16, 60, g => {
     g.translate(8, 2);
-    g.strokeStyle = '#2a2e38'; g.lineWidth = 6; g.lineCap = 'round'; g.lineJoin = 'round';
-    g.beginPath(); g.moveTo(0, 0); g.lineTo(2, 30); g.lineTo(-4, 56); g.stroke();
-    g.strokeStyle = '#565e70'; g.lineWidth = 2.5;
-    g.beginPath(); g.moveTo(0, 0); g.lineTo(2, 30); g.lineTo(-4, 56); g.stroke();
-    // knee joint
-    g.fillStyle = '#7a8296'; g.beginPath(); g.arc(2, 30, 4, 0, Math.PI * 2); g.fill();
-    // foot
-    g.fillStyle = '#22262f'; g.fillRect(-8, 54, 8, 5);
-  });
+    pxRect(g, -3, 0, 6, 32, '#2a2e38'); pxRect(g, -2, 0, 3, 32, '#565e70');
+    pxRect(g, -4, 28, 6, 28, '#2a2e38'); pxRect(g, -3, 28, 3, 28, '#565e70');
+    pxRect(g, -3, 28, 6, 5, '#7a8296');   // knee
+    pxRect(g, -8, 54, 9, 5, '#181b22');   // foot
+  }, 1);
   SPR.spiderLeg_broken = bake(16, 60, g => {
     g.translate(8, 2);
-    g.strokeStyle = '#2a2e38'; g.lineWidth = 6; g.lineCap = 'round'; g.lineJoin = 'round';
-    g.beginPath(); g.moveTo(0, 0); g.lineTo(4, 22); g.lineTo(-2, 34); g.stroke();
-    g.strokeStyle = '#565e70'; g.lineWidth = 2.5; g.beginPath(); g.moveTo(0, 0); g.lineTo(4, 22); g.lineTo(-2, 34); g.stroke();
-    // sparking stub
-    glowDot(g, -2, 34, 6, '#ffce4d', 0.7); g.fillStyle = '#ff9b3d'; g.fillRect(-4, 32, 4, 4);
-  });
+    pxRect(g, -3, 0, 6, 22, '#2a2e38'); pxRect(g, -2, 0, 3, 22, '#565e70');
+    pxRect(g, -4, 20, 6, 14, '#2a2e38');
+    pxGlow(g, -1, 34, 6, '#ffce4d', 2); pxRect(g, -4, 32, 5, 4, '#ff9b3d');
+  }, 1);
   SPR.missile = bake(22, 10, g => {
     g.translate(11, 5);
-    const bg = g.createLinearGradient(0, -4, 0, 4);
-    bg.addColorStop(0, '#c0c6d2'); bg.addColorStop(1, '#5a6070');
-    g.fillStyle = bg; g.strokeStyle = 'rgba(0,0,0,0.5)'; g.lineWidth = 1;
-    g.beginPath(); g.moveTo(-10, -3); g.lineTo(6, -3); g.lineTo(10, 0); g.lineTo(6, 3); g.lineTo(-10, 3); g.closePath(); g.fill(); g.stroke();
-    g.fillStyle = '#ff5252'; g.fillRect(6, -2, 3, 4);
-    // fins
-    g.fillStyle = '#33384a'; g.beginPath(); g.moveTo(-10, -3); g.lineTo(-13, -6); g.lineTo(-8, -3); g.closePath(); g.fill();
-    g.beginPath(); g.moveTo(-10, 3); g.lineTo(-13, 6); g.lineTo(-8, 3); g.closePath(); g.fill();
-    // flame
-    glowDot(g, -11, 0, 5, '#ff9b3d', 0.85);
-  });
+    pxGlow(g, -11, 0, 4, '#ff9b3d', 2);
+    pxRect(g, -10, -1, 3, 2, '#ff8a2a');   // flame
+    pxRect(g, -8, -3, 14, 6, '#8f979f'); pxRect(g, -8, -3, 14, 2, '#c0c6d2'); pxRect(g, -8, 1, 14, 2, '#5a6070');
+    pxRect(g, 6, -2, 4, 4, '#ff5252');
+    pxRect(g, -9, -4, 3, 2, '#33384a'); pxRect(g, -9, 2, 3, 2, '#33384a');   // fins
+  }, 1);
 
   // ════════════════════════════════════════════════════════════════════════
   // BOSS SPRITES — Crystal Titan (L4)
   // ════════════════════════════════════════════════════════════════════════
   SPR.titanBody = bake(150, 150, g => {
     g.translate(75, 6);
-    const bg = g.createLinearGradient(0, 8, 0, 130);
-    bg.addColorStop(0, '#dff1fb'); bg.addColorStop(0.5, '#8fbfe0'); bg.addColorStop(1, '#456f92');
-    g.fillStyle = bg; g.strokeStyle = 'rgba(20,50,80,0.7)'; g.lineWidth = 2.5; g.lineJoin = 'round';
-    g.beginPath();
-    g.moveTo(-50, 40); g.lineTo(-44, 14); g.lineTo(-24, 8); g.lineTo(24, 8); g.lineTo(44, 14); g.lineTo(50, 40);
-    g.lineTo(42, 128); g.lineTo(-42, 128); g.closePath(); g.fill(); g.stroke();
-    // crystalline facets
-    g.strokeStyle = 'rgba(255,255,255,0.5)'; g.lineWidth = 1.6;
-    g.beginPath(); g.moveTo(-30, 40); g.lineTo(0, 20); g.lineTo(30, 40); g.moveTo(-24, 90); g.lineTo(0, 60); g.lineTo(24, 90); g.stroke();
-    // head — angular ice crown
-    const hg = g.createLinearGradient(0, 14, 0, 46); hg.addColorStop(0, '#eaf7ff'); hg.addColorStop(1, '#6f9bc0');
-    g.fillStyle = hg; g.beginPath(); g.moveTo(-22, 44); g.lineTo(-18, 20); g.lineTo(0, 12); g.lineTo(18, 20); g.lineTo(22, 44); g.closePath(); g.fill(); g.stroke();
+    const bp = pal('#7fb2d8');
+    pxRect(g, -50, 8, 100, 120, bp.out); pxRect(g, -48, 10, 96, 116, bp.mid);
+    pxRect(g, -48, 10, 96, 10, bp.hi); pxRect(g, -48, 118, 96, 8, bp.lo);
+    dither(g, -48, 20, 96, 10, bp.hi, bp.mid, 4);
+    // crystalline facet lines
+    pxRect(g, -30, 40, 4, 40, 'rgba(255,255,255,0.4)'); pxRect(g, 26, 40, 4, 40, 'rgba(255,255,255,0.4)');
+    pxRect(g, -2, 20, 4, 90, 'rgba(255,255,255,0.35)');
+    // shoulder spikes
+    pxRect(g, -58, -6, 10, 26, '#cfeaff'); pxRect(g, 48, -6, 10, 26, '#cfeaff');
+    pxRect(g, -58, -6, 10, 4, '#ffffff'); pxRect(g, 48, -6, 10, 4, '#ffffff');
+    // head ice crown
+    const hp = pal('#8fc4e6');
+    pxRect(g, -22, 12, 44, 34, hp.out); pxRect(g, -20, 14, 40, 30, hp.mid); pxRect(g, -20, 14, 40, 6, hp.hi);
+    for (const cx of [-14, 0, 14]) pxRect(g, cx, 8, 4, 6, '#eaf7ff');   // crown points
     // eyes
-    glowDot(g, -10, 30, 5, '#8fe6ff', 0.9); glowDot(g, 10, 30, 5, '#8fe6ff', 0.9);
-    g.fillStyle = '#eaffff'; g.fillRect(-13, 28, 6, 3); g.fillRect(7, 28, 6, 3);
-    // shoulder crystal spikes
-    g.fillStyle = '#cfeaff'; g.beginPath(); g.moveTo(-46, 20); g.lineTo(-58, -6); g.lineTo(-38, 12); g.closePath(); g.fill(); g.stroke();
-    g.beginPath(); g.moveTo(46, 20); g.lineTo(58, -6); g.lineTo(38, 12); g.closePath(); g.fill(); g.stroke();
-  });
+    pxGlow(g, -10, 30, 5, '#8fe6ff', 2); pxGlow(g, 10, 30, 5, '#8fe6ff', 2);
+    pxRect(g, -13, 28, 6, 3, '#eaffff'); pxRect(g, 7, 28, 6, 3, '#eaffff');
+  }, 1);
   SPR.titanBody_w = whiten(SPR.titanBody);
   SPR.titanFist = bake(46, 46, g => {
     g.translate(23, 23);
-    const fg = g.createRadialGradient(-5, -5, 3, 0, 0, 22);
-    fg.addColorStop(0, '#eaf7ff'); fg.addColorStop(0.6, '#7fb2d8'); fg.addColorStop(1, '#3a5f82');
-    g.fillStyle = fg; g.strokeStyle = 'rgba(20,50,80,0.7)'; g.lineWidth = 2;
-    g.beginPath(); g.moveTo(-18, -14); g.lineTo(18, -14); g.lineTo(20, 12); g.lineTo(0, 22); g.lineTo(-20, 12); g.closePath(); g.fill(); g.stroke();
-    g.fillStyle = '#cfeaff'; for (const kx of [-10, 0, 10]) { g.beginPath(); g.moveTo(kx - 4, -14); g.lineTo(kx, -22); g.lineTo(kx + 4, -14); g.closePath(); g.fill(); }
-  });
+    const fp = pal('#7fb2d8');
+    pxRect(g, -18, -14, 36, 32, fp.out); pxRect(g, -16, -12, 32, 28, fp.mid);
+    pxRect(g, -16, -12, 32, 6, fp.hi); pxRect(g, -16, 10, 32, 4, fp.lo);
+    for (const kx of [-12, -2, 8]) pxRect(g, kx, -18, 5, 6, '#cfeaff');   // knuckle spikes
+  }, 1);
   // armor crystal (intact) that guards the core
   SPR.titanArmor = bake(26, 30, g => {
     g.translate(13, 15);
-    const ag = g.createLinearGradient(0, -14, 0, 14); ag.addColorStop(0, '#eaf7ff'); ag.addColorStop(1, '#5f8fb8');
-    g.fillStyle = ag; g.strokeStyle = 'rgba(20,50,80,0.75)'; g.lineWidth = 1.8;
-    g.beginPath(); g.moveTo(0, -14); g.lineTo(9, -4); g.lineTo(6, 14); g.lineTo(-6, 14); g.lineTo(-9, -4); g.closePath(); g.fill(); g.stroke();
-    g.fillStyle = 'rgba(255,255,255,0.55)'; g.beginPath(); g.moveTo(0, -12); g.lineTo(4, -2); g.lineTo(0, 2); g.closePath(); g.fill();
-  });
-  // ice core (weak point) — reuse coreOpen style but blue
+    const ap = pal('#7fb2d8');
+    pxRect(g, -6, -14, 12, 4, ap.mid); pxRect(g, -9, -10, 18, 20, ap.out); pxRect(g, -8, -9, 16, 18, ap.mid);
+    pxRect(g, -8, -9, 16, 4, ap.hi); pxRect(g, -6, 8, 12, 4, ap.lo);
+    pxRect(g, -3, -11, 4, 10, 'rgba(255,255,255,0.5)');
+  }, 1);
+  // ice core (weak point) — blue
   SPR.titanCore = bake(46, 46, g => {
     g.translate(23, 23);
-    glowDot(g, 0, 0, 22, '#8fe6ff', 0.9);
-    const bg = g.createRadialGradient(0, 0, 2, 0, 0, 16);
-    bg.addColorStop(0, '#ffffff'); bg.addColorStop(0.4, '#8fe6ff'); bg.addColorStop(1, '#2f7fb0');
-    g.fillStyle = bg; g.beginPath(); g.arc(0, 0, 14, 0, Math.PI * 2); g.fill();
-    g.strokeStyle = '#1c5e86'; g.lineWidth = 2.5; g.beginPath(); g.arc(0, 0, 17, 0, Math.PI * 2); g.stroke();
-  });
+    pxGlow(g, 0, 0, 20, '#8fe6ff', 3);
+    pxRect(g, -14, -14, 28, 28, '#1c5e86'); pxRect(g, -12, -12, 24, 24, '#2f7fb0');
+    pxRect(g, -9, -9, 18, 18, '#8fe6ff'); pxRect(g, -5, -5, 10, 10, '#dff5ff'); pxRect(g, -2, -2, 4, 4, '#ffffff');
+  }, 1);
   SPR.shard = bake(16, 20, g => {
     g.translate(8, 10);
-    glowDot(g, 0, 0, 9, '#8fe6ff', 0.6);
-    const sg = g.createLinearGradient(0, -9, 0, 9); sg.addColorStop(0, '#eaf7ff'); sg.addColorStop(1, '#4f8fb8');
-    g.fillStyle = sg; g.strokeStyle = 'rgba(20,50,80,0.6)'; g.lineWidth = 1.2;
-    g.beginPath(); g.moveTo(0, -9); g.lineTo(5, 2); g.lineTo(0, 9); g.lineTo(-5, 2); g.closePath(); g.fill(); g.stroke();
-  });
+    pxGlow(g, 0, 0, 8, '#8fe6ff', 2);
+    pxRect(g, -2, -9, 4, 4, '#eaf7ff');
+    pxRect(g, -4, -5, 8, 10, '#8fc4e6'); pxRect(g, -4, -5, 3, 10, '#eaf7ff'); pxRect(g, 1, -5, 3, 10, '#4f8fb8');
+    pxRect(g, -2, 5, 4, 4, '#4f8fb8');
+  }, 1);
 
   // ════════════════════════════════════════════════════════════════════════
   // BOSS SPRITES — Flying Battleship (L5)
   // ════════════════════════════════════════════════════════════════════════
   SPR.shipHull = bake(170, 70, g => {
     g.translate(85, 4);
-    const bg = g.createLinearGradient(0, 0, 0, 52);
-    bg.addColorStop(0, '#8a5050'); bg.addColorStop(0.5, '#5a2e2e'); bg.addColorStop(1, '#301818');
-    g.fillStyle = bg; g.strokeStyle = 'rgba(10,4,4,0.7)'; g.lineWidth = 2.5; g.lineJoin = 'round';
-    // hull: pointed prow to the LEFT (faces players)
-    g.beginPath();
-    g.moveTo(-82, 22); g.lineTo(-58, 6); g.lineTo(66, 6); g.lineTo(78, 20); g.lineTo(66, 40); g.lineTo(-58, 46); g.closePath();
-    g.fill(); g.stroke();
-    // armor plating + rivets
-    g.fillStyle = 'rgba(0,0,0,0.3)'; g.fillRect(-56, 24, 120, 14);
-    g.fillStyle = '#ff7a2a'; for (let x = -50; x < 60; x += 18) { g.beginPath(); g.moveTo(x, 24); g.lineTo(x + 9, 24); g.lineTo(x, 30); g.closePath(); g.fill(); }
-    g.fillStyle = 'rgba(255,180,120,0.35)'; g.fillRect(-58, 6, 124, 4);
-    // fin
-    g.fillStyle = '#3a1c1c'; g.beginPath(); g.moveTo(60, 6); g.lineTo(80, -10); g.lineTo(72, 8); g.closePath(); g.fill();
-    // belly cannon barrel (center, points down)
-    g.fillStyle = '#22120f'; g.fillRect(-8, 40, 16, 12);
-  });
+    const bp = pal('#6a3838');
+    pxRect(g, -82, 6, 160, 42, bp.out); pxRect(g, -80, 8, 156, 38, bp.mid);
+    pxRect(g, -80, 8, 156, 8, bp.hi); pxRect(g, -80, 40, 156, 6, bp.lo);
+    pxRect(g, -82, 6, 10, 10, bp.lo); pxRect(g, -82, 36, 10, 10, bp.lo);   // prow taper (dark)
+    // armor band + hazard chevrons
+    pxRect(g, -56, 24, 120, 14, 'rgba(0,0,0,0.3)');
+    for (let x = -50; x < 60; x += 18) pxRect(g, x, 24, 9, 6, '#ff7a2a');
+    pxRect(g, -58, 6, 124, 3, '#c88a6a');   // top rim
+    pxRect(g, 60, -8, 14, 14, '#3a1c1c');   // fin
+    pxRect(g, -8, 40, 16, 12, '#22120f');   // belly cannon
+  }, 1);
   SPR.shipHull_w = whiten(SPR.shipHull);
   // engine pod — weak (glowing) vs armored
   function bakeEngine(weak) {
     return bake(38, 30, g => {
       g.translate(19, 15);
-      if (weak) glowDot(g, 0, 2, 16, '#ff9b3d', 0.85);
-      const eg = g.createLinearGradient(0, -12, 0, 14); eg.addColorStop(0, '#7a6a6a'); eg.addColorStop(1, '#2a1818');
-      g.fillStyle = eg; g.strokeStyle = 'rgba(10,4,4,0.7)'; g.lineWidth = 1.8;
-      g.beginPath(); g.ellipse(0, 0, 16, 12, 0, 0, Math.PI * 2); g.fill(); g.stroke();
-      const ng = g.createRadialGradient(0, 6, 1, 0, 6, 10);
-      ng.addColorStop(0, weak ? '#fff' : '#553030'); ng.addColorStop(0.5, weak ? '#ffce4d' : '#3a2020'); ng.addColorStop(1, weak ? '#ff5a1a' : '#1a0e0e');
-      g.fillStyle = ng; g.beginPath(); g.arc(0, 6, 8, 0, Math.PI * 2); g.fill();
-    });
+      if (weak) pxGlow(g, 0, 2, 14, '#ff9b3d', 3);
+      const ep = pal(weak ? '#8a5a3a' : '#5a4444');
+      pxRect(g, -16, -12, 32, 26, ep.out); pxRect(g, -14, -10, 28, 22, ep.mid); pxRect(g, -14, -10, 28, 5, ep.hi);
+      pxRect(g, -8, 0, 16, 12, weak ? '#ff5a1a' : '#2a1818');
+      pxRect(g, -5, 3, 10, 8, weak ? '#ffce4d' : '#3a2020');
+      if (weak) pxRect(g, -2, 5, 4, 4, '#ffffff');
+    }, 1);
   }
   SPR.shipEngine = bakeEngine(false);
   SPR.shipEngineWeak = bakeEngine(true);
@@ -1826,88 +1720,73 @@
   function bakeBridge(weak) {
     return bake(44, 34, g => {
       g.translate(22, 20);
-      if (weak) glowDot(g, 0, -2, 20, '#8fe6ff', 0.8);
-      const dg = g.createRadialGradient(-4, -8, 2, 0, 0, 16);
-      dg.addColorStop(0, weak ? '#ffffff' : '#9aa2b6'); dg.addColorStop(0.5, weak ? '#7fdcff' : '#5a6072'); dg.addColorStop(1, weak ? '#1c5ea0' : '#2a1818');
-      g.fillStyle = dg; g.strokeStyle = 'rgba(10,4,4,0.75)'; g.lineWidth = 2;
-      g.beginPath(); g.arc(0, 0, 14, Math.PI, 0); g.fill(); g.stroke();
-      g.fillStyle = weak ? '#0e2a3a' : '#1c120f'; g.fillRect(-15, 0, 30, 8);
-      g.fillStyle = 'rgba(255,255,255,0.6)'; g.beginPath(); g.arc(-5, -5, 3, 0, Math.PI * 2); g.fill();
-    });
+      if (weak) pxGlow(g, 0, -2, 18, '#8fe6ff', 3);
+      pxRect(g, -14, -14, 28, 18, weak ? '#1c5ea0' : '#33384a');
+      pxRect(g, -12, -12, 24, 14, weak ? '#7fdcff' : '#5a6072');
+      pxRect(g, -12, -12, 24, 4, weak ? '#dff5ff' : '#7a8296');
+      pxRect(g, -8, -10, 5, 4, '#ffffff');
+      pxRect(g, -15, 2, 30, 8, weak ? '#0e2a3a' : '#1c120f');
+    }, 1);
   }
   SPR.shipBridge = bakeBridge(false);
   SPR.shipBridgeWeak = bakeBridge(true);
   SPR.bomb = bake(18, 22, g => {
     g.translate(9, 9);
-    const bg = g.createRadialGradient(-3, -3, 1, 0, 0, 9);
-    bg.addColorStop(0, '#6a6a72'); bg.addColorStop(1, '#1a1a20');
-    g.fillStyle = bg; g.strokeStyle = 'rgba(0,0,0,0.6)'; g.lineWidth = 1.4;
-    g.beginPath(); g.arc(0, 0, 8, 0, Math.PI * 2); g.fill(); g.stroke();
-    g.fillStyle = '#ff5252'; g.fillRect(-2, -2, 4, 4);
-    g.fillStyle = '#7a5228'; g.fillRect(-1.5, -12, 3, 4);
-    glowDot(g, 0, -12, 4, '#ffce4d', 0.8);
-  });
+    const bp = pal('#3a3a44');
+    pxRect(g, -8, -8, 16, 16, bp.out); pxRect(g, -7, -7, 14, 14, bp.mid); pxRect(g, -7, -7, 6, 4, bp.hi);
+    pxRect(g, -3, -3, 4, 4, '#ff5252');
+    pxRect(g, -2, -13, 4, 5, '#7a5228'); pxGlow(g, 0, -12, 4, '#ffce4d', 2); pxRect(g, -1, -13, 2, 2, '#ffe066');
+  }, 1);
 
   // ════════════════════════════════════════════════════════════════════════
   // BOSS SPRITES — Alien Drill (L6)
   // ════════════════════════════════════════════════════════════════════════
   SPR.drillBody = bake(150, 100, g => {
     g.translate(75, 4);
-    // treads/base
-    g.fillStyle = '#2a1d3a'; g.fillRect(-52, 66, 104, 24);
-    g.fillStyle = '#4a2f6a'; for (let x = -50; x < 52; x += 16) g.fillRect(x, 68, 10, 20);
-    // hull (organic-mech, purple/green)
-    const bg = g.createLinearGradient(0, 8, 0, 70);
-    bg.addColorStop(0, '#8a4fb8'); bg.addColorStop(0.5, '#5a2f8a'); bg.addColorStop(1, '#331d4a');
-    g.fillStyle = bg; g.strokeStyle = 'rgba(15,8,25,0.7)'; g.lineWidth = 2.5; g.lineJoin = 'round';
-    g.beginPath(); g.moveTo(-48, 66); g.lineTo(-40, 18); g.lineTo(0, 8); g.lineTo(48, 22); g.lineTo(44, 66); g.closePath(); g.fill(); g.stroke();
+    // treads
+    pxRect(g, -52, 66, 104, 24, '#2a1d3a');
+    for (let x = -50; x < 52; x += 16) { pxRect(g, x, 68, 10, 20, '#4a2f6a'); pxRect(g, x, 68, 10, 3, '#5e3d84'); }
+    // hull
+    const bp = pal('#6a3fa0');
+    pxRect(g, -48, 8, 96, 60, bp.out); pxRect(g, -46, 10, 92, 56, bp.mid);
+    pxRect(g, -46, 10, 92, 8, bp.hi); pxRect(g, -46, 58, 92, 6, bp.lo);
+    dither(g, -46, 18, 92, 8, bp.hi, bp.mid, 4);
     // biolume vents
-    g.fillStyle = '#7dff9a'; for (const [vx, vy] of [[-30, 34], [-30, 50], [30, 40]]) g.fillRect(vx, vy, 8, 4);
-    glowDot(g, -26, 42, 8, '#7dff9a', 0.5);
-    // drill mount (left, faces players)
-    g.fillStyle = '#2a1d3a'; g.beginPath(); g.moveTo(-40, 30); g.lineTo(-40, 58); g.lineTo(-58, 50); g.lineTo(-58, 38); g.closePath(); g.fill(); g.stroke();
-  });
+    for (const [vx, vy] of [[-30, 34], [-30, 50], [26, 40]]) { pxGlow(g, vx + 4, vy + 2, 6, '#7dff9a', 2); pxRect(g, vx, vy, 8, 4, '#7dff9a'); }
+    // drill mount (left)
+    pxRect(g, -58, 36, 18, 14, '#2a1d3a'); pxRect(g, -58, 36, 18, 3, '#3a2a52');
+  }, 1);
   SPR.drillBody_w = whiten(SPR.drillBody);
-  // the conical drill bit (drawn rotated to spin), pointing LEFT
+  // the conical drill bit (drawn rotated to spin), pointing LEFT (tip at -38)
   SPR.drillBit = bake(56, 44, g => {
     g.translate(40, 22);
-    const dg = g.createLinearGradient(-40, 0, 16, 0);
-    dg.addColorStop(0, '#e0e0ea'); dg.addColorStop(0.5, '#9aa2b6'); dg.addColorStop(1, '#4a4050');
-    g.fillStyle = dg; g.strokeStyle = 'rgba(10,10,15,0.7)'; g.lineWidth = 2;
-    g.beginPath(); g.moveTo(-38, 0); g.lineTo(14, -18); g.lineTo(14, 18); g.closePath(); g.fill(); g.stroke();
-    // flutes
-    g.strokeStyle = 'rgba(0,0,0,0.5)'; g.lineWidth = 2;
-    for (let i = -1; i <= 1; i++) { g.beginPath(); g.moveTo(-30, i * 6); g.lineTo(12, i * 12); g.stroke(); }
-    g.fillStyle = 'rgba(255,255,255,0.4)'; g.beginPath(); g.moveTo(-36, -2); g.lineTo(-20, -8); g.lineTo(-24, 0); g.closePath(); g.fill();
-  });
+    const dp = pal('#8f97ac');
+    for (let i = 0; i < 13; i++) { const x = 14 - i * 4, h = Math.max(2, Math.round(18 - i * 1.35)); pxRect(g, x - 4, -h, 4, h * 2, i % 2 ? dp.mid : dp.hi); }
+    pxRect(g, -38, -2, 4, 4, dp.out);   // tip
+    for (let i = -1; i <= 1; i++) pxRect(g, -30, i * 8 - 1, 44, 2, 'rgba(0,0,0,0.4)');   // flutes
+  }, 1);
   // motor core (weak point when overheated)
   SPR.drillCore = bake(40, 40, g => {
     g.translate(20, 20);
-    glowDot(g, 0, 0, 19, '#ff6a2a', 0.9);
-    const bg = g.createRadialGradient(0, 0, 2, 0, 0, 14);
-    bg.addColorStop(0, '#fff'); bg.addColorStop(0.4, '#ffce4d'); bg.addColorStop(1, '#ff3a1a');
-    g.fillStyle = bg; g.beginPath(); g.arc(0, 0, 12, 0, Math.PI * 2); g.fill();
-    g.strokeStyle = '#7a2010'; g.lineWidth = 2.5;
-    for (let i = 0; i < 6; i++) { const a = i / 6 * Math.PI * 2; g.beginPath(); g.moveTo(Math.cos(a) * 8, Math.sin(a) * 8); g.lineTo(Math.cos(a) * 15, Math.sin(a) * 15); g.stroke(); }
-  });
+    pxGlow(g, 0, 0, 17, '#ff6a2a', 3);
+    pxRect(g, -12, -12, 24, 24, '#7a2010'); pxRect(g, -10, -10, 20, 20, '#ff3a1a');
+    pxRect(g, -7, -7, 14, 14, '#ffce4d'); pxRect(g, -4, -4, 8, 8, '#fff2a0'); pxRect(g, -2, -2, 4, 4, '#ffffff');
+    for (let i = 0; i < 4; i++) { const a = i / 4 * Math.PI * 2; pxRect(g, Math.round(Math.cos(a) * 13) - 1, Math.round(Math.sin(a) * 13) - 1, 3, 3, '#7a2010'); }
+  }, 1);
   SPR.rock = bake(18, 18, g => {
     g.translate(9, 9);
-    glowDot(g, 0, 0, 8, '#8a4fb8', 0.4);
-    const bg = g.createRadialGradient(-2, -2, 1, 0, 0, 8);
-    bg.addColorStop(0, '#6a4a8a'); bg.addColorStop(1, '#2a1a44');
-    g.fillStyle = bg; g.strokeStyle = 'rgba(10,6,18,0.6)'; g.lineWidth = 1.2;
-    g.beginPath(); g.moveTo(-6, -3); g.lineTo(0, -7); g.lineTo(7, -2); g.lineTo(5, 6); g.lineTo(-4, 6); g.closePath(); g.fill(); g.stroke();
-    g.fillStyle = '#7dff9a'; g.fillRect(-2, -1, 3, 3);
-  });
+    pxGlow(g, 0, 0, 7, '#8a4fb8', 2);
+    const rp = pal('#5a3a86');
+    pxRect(g, -6, -5, 12, 11, rp.out); pxRect(g, -5, -4, 10, 9, rp.mid); pxRect(g, -5, -4, 10, 3, rp.hi); pxRect(g, -5, 3, 10, 2, rp.lo);
+    pxRect(g, -2, -1, 3, 3, '#7dff9a');
+  }, 1);
   // hive burrow-mound telegraph (drawn scaled by progress)
   SPR.hiveMound = bake(90, 40, g => {
     g.translate(45, 40);
-    const mg = g.createLinearGradient(0, -34, 0, 0);
-    mg.addColorStop(0, 'rgba(140,90,190,0.95)'); mg.addColorStop(1, 'rgba(58,30,80,0.95)');
-    g.fillStyle = mg; g.beginPath(); g.moveTo(-42, 0); g.quadraticCurveTo(0, -38, 42, 0); g.closePath(); g.fill();
-    g.fillStyle = 'rgba(125,255,154,0.5)'; g.beginPath(); g.moveTo(-18, 0); g.quadraticCurveTo(-4, -20, 6, 0); g.closePath(); g.fill();
-    g.strokeStyle = 'rgba(125,255,154,0.85)'; g.lineWidth = 3; g.beginPath(); g.ellipse(0, -1, 40, 8, 0, 0, Math.PI); g.stroke();
-  });
+    for (let i = 0; i < 10; i++) { const w = 42 - i * 4; pxRect(g, -w, -i * 4, w * 2, 4, i < 3 ? '#a86ad0' : '#6a3fa0'); }
+    pxRect(g, -18, -4, 10, 4, '#c8ffd8');
+    for (let x = -40; x <= 40; x += 8) pxRect(g, x, -2, 4, 3, 'rgba(125,255,154,0.85)');
+  }, 1);
 
   // ════════════════════════════════════════════════════════════════════════
   // POOLS — fixed ring buffers, drawImage-only, no per-frame allocation.
@@ -3395,7 +3274,7 @@
     sfx.kill();
     combo++; comboTimer = 110;
     addScore(e.points, e.x, e.y - e.h - 6, byPlayer);
-    if (combo >= 3 && combo % 3 === 0) floatText(e.x, e.y - e.h - 18, 'COMBO x' + combo, '#ff5cae', 11);
+    if (combo >= 3 && combo % 3 === 0) floatText(e.x, e.y - e.h - 18, 'COMBO ×' + combo, '#ff5cae', 11);
   }
 
   // Is the boss's weak point currently exposed? While open, body hits count as
@@ -3999,6 +3878,9 @@
 
   function drawParallax() {
     const P = PARALLAX[LV.parallax];
+    // CRUNCHY terrain: nearest-neighbour upscale so baked pixel blocks stay
+    // razor-sharp. Re-enabled after platforms (before entities/hazards).
+    ctx.imageSmoothingEnabled = false;
     // sky (static, screen-space)
     ctx.setTransform(scale, 0, 0, scale, offX, offY);
     ctx.drawImage(P.sky.c, 0, 0, VW, VH);
@@ -4036,6 +3918,7 @@
       if (p.x + p.w < camX - 20 || p.x - p.w > camX + VW + 20) continue;
       ctx.drawImage(pl.c, p.x - p.w / 2, p.y - 8, p.w, 16);
     }
+    ctx.imageSmoothingEnabled = true;   // restore smoothing for entities/hazards/HUD
     // lava first (drawn under entities so bros stand above the surface glow)
     for (const hz of LV.hazards) {
       if (hz.type !== 'lava') continue;
@@ -4097,13 +3980,15 @@
     // baked lazily
     if (!SPR.chicken) SPR.chicken = bake(20, 20, g => {
       g.translate(10, 10);
-      glowDot(g, 0, 0, 12, '#ffd24d', 0.7);
-      g.fillStyle = '#ffe066'; g.beginPath(); g.ellipse(0, 2, 7, 6, 0, 0, Math.PI * 2); g.fill();
-      g.beginPath(); g.arc(4, -4, 4, 0, Math.PI * 2); g.fill();
-      g.fillStyle = '#ff5252'; g.beginPath(); g.moveTo(7, -6); g.lineTo(9, -5); g.lineTo(7, -3); g.fill();
-      g.fillStyle = '#ff9b3d'; g.fillRect(3, -8, 2, 3);
-      g.fillStyle = '#20242c'; g.fillRect(5, -5, 1.4, 1.4);
-    });
+      pxGlow(g, 0, 0, 10, '#ffd24d', 3);
+      const bp = pal('#ffe066');
+      pxRect(g, -7, -2, 14, 10, bp.out); pxRect(g, -6, -1, 12, 8, bp.mid); pxRect(g, -6, -1, 12, 3, bp.hi);   // body
+      pxRect(g, 1, -8, 8, 7, bp.mid); pxRect(g, 1, -8, 8, 2, bp.hi);   // head
+      pxRect(g, 3, -11, 3, 3, '#ff5252');   // comb
+      pxRect(g, 8, -6, 3, 2, '#ff9b3d');    // beak
+      pxRect(g, 5, -5, 2, 2, '#20242c');    // eye
+      pxRect(g, -4, 8, 2, 3, '#ff9b3d'); pxRect(g, 2, 8, 2, 3, '#ff9b3d');   // legs
+    }, 1);
     drawSpr(SPR.chicken, x, y);
   }
 
@@ -4221,8 +4106,17 @@
     }
   }
 
-  // ── HUD text (stroke + fill only; allowed) ──
+  // ── HUD text — routes the crunchy pixel font when every glyph is supported
+  //    (titles, score, banners, floats); falls back to Impact for mixed-case /
+  //    exotic strings (story paragraphs, "CO-OP RUN & GUN"). fillText is not
+  //    affected by imageSmoothingEnabled, so text stays crisp in either pass. ──
   function hudText(txt, x, y, size, color, align) {
+    txt = String(txt);
+    if (pxSupported(txt)) {
+      const scale = Math.max(1, Math.round(size / 7));
+      pxTextG(ctx, txt, x, y, scale, color, align || 'left', true);
+      return;
+    }
     ctx.font = '900 ' + size + 'px ' + HUD_FONT;
     ctx.textAlign = align || 'left'; ctx.textBaseline = 'alphabetic';
     ctx.lineWidth = Math.max(2.5, size * 0.28); ctx.lineJoin = 'round';
@@ -4284,65 +4178,30 @@
   // ── menu screens (canvas) ──
   let titlePulse = 0;
   function bakeTitleLogo() {
-    // Hand-drawn geometric block letters so the logo is unambiguous on ANY
-    // font stack (the O is a clean ring — never mistakable for a Q — and the B
-    // never reads as R). Each glyph = filled bars + stroked rings, drawn twice:
-    // a black outline pass, then a gradient fill pass on top.
-    function letterOps(ch, x, y, W, H, st) {
-      const o = { rects: [], lines: [], ells: [], arcs: [] };
-      const R = x + W, midY = y + H / 2;
-      switch (ch) {
-        case 'B':
-          o.rects.push([x, y, st, H], [x, y, W - st * 0.5, st], [x, midY - st / 2, W - st * 0.55, st], [x, y + H - st, W - st * 0.5, st], [R - st, y, st, H / 2], [R - st, midY, st, H / 2]);
-          break;
-        case 'R':
-          o.rects.push([x, y, st, H], [x, y, W - st * 0.4, st], [x, midY - st, W - st * 0.4, st], [R - st, y, st, H / 2]);
-          o.lines.push([x + st * 0.7, midY - st * 0.4, R - st * 0.2, y + H]);
-          break;
-        case 'O':
-          o.ells.push([x + W / 2, midY, W / 2 - st / 2, H / 2 - st / 2]);
-          break;
-        case 'F':
-          o.rects.push([x, y, st, H], [x, y, W - st * 0.2, st], [x, midY - st / 2, W * 0.72, st]);
-          break;
-        case 'C':
-          o.arcs.push([x + W / 2, midY, W / 2 - st / 2, H / 2 - st / 2, Math.PI * 0.34, Math.PI * 1.66]);
-          break;
-        case 'E':
-          o.rects.push([x, y, st, H], [x, y, W - st * 0.2, st], [x, midY - st / 2, W * 0.8, st], [x, y + H - st, W - st * 0.2, st]);
-          break;
+    // Crunchy pixel-font logo: thick dark outline + solid fill + a one-pixel
+    // top-edge highlight so BRO FORCE reads as a chunky 16-bit arcade sign.
+    function logoWord(g, word, cx, baseY, scale, mainCol, hiCol) {
+      // fat 8-directional dark outline
+      g.fillStyle = '#12060a';
+      for (let dx = -scale; dx <= scale; dx += scale) for (let dy = -scale; dy <= scale; dy += scale) {
+        if (dx === 0 && dy === 0) continue;
+        pxTextG(g, word, cx + dx, baseY + dy, scale, '#12060a', 'center', false);
       }
-      return o;
-    }
-    function drawOps(g, o, st, OL) {
-      for (const r of o.rects) g.fillRect(r[0] - OL, r[1] - OL, r[2] + 2 * OL, r[3] + 2 * OL);
-      g.lineWidth = st + 2 * OL; g.lineCap = 'round'; g.lineJoin = 'round';
-      for (const l of o.lines) { g.beginPath(); g.moveTo(l[0], l[1]); g.lineTo(l[2], l[3]); g.stroke(); }
-      for (const e of o.ells) { g.beginPath(); g.ellipse(e[0], e[1], e[2], e[3], 0, 0, Math.PI * 2); g.stroke(); }
-      for (const a of o.arcs) { g.beginPath(); g.ellipse(a[0], a[1], a[2], a[3], 0, a[4], a[5]); g.stroke(); }
-    }
-    function drawWord(g, text, cx, topY, H, st, gap, grad) {
-      const OL = 3, W = Math.round(H * 0.74), n = text.length;
-      const total = n * W + (n - 1) * gap;
-      let x = cx - total / 2;
-      // outline pass
-      g.fillStyle = '#000'; g.strokeStyle = '#000';
-      for (const ch of text) { drawOps(g, letterOps(ch, x, topY, W, H, st), st, OL); x += W + gap; }
-      // fill pass
-      x = cx - total / 2; g.fillStyle = grad; g.strokeStyle = grad;
-      for (const ch of text) { drawOps(g, letterOps(ch, x, topY, W, H, st), st, 0); x += W + gap; }
+      // top-edge highlight peeks above the fill
+      pxTextG(g, word, cx, baseY - scale, scale, hiCol, 'center', false);
+      // main fill
+      pxTextG(g, word, cx, baseY, scale, mainCol, 'center', false);
     }
     SPR.logo = bake(360, 92, g => {
-      const gr = g.createLinearGradient(0, 2, 0, 46); gr.addColorStop(0, '#ffe066'); gr.addColorStop(1, '#ff9b3d');
-      const gr2 = g.createLinearGradient(0, 48, 0, 90); gr2.addColorStop(0, '#7fdcff'); gr2.addColorStop(1, '#3aa0ff');
-      drawWord(g, 'BRO', 180, 2, 44, 13, 16, gr);
-      drawWord(g, 'FORCE', 180, 50, 40, 11, 9, gr2);
-    });
+      logoWord(g, 'BRO', 180, 46, 6, '#ffce3d', '#fff2a8');
+      logoWord(g, 'FORCE', 180, 88, 5, '#7fdcff', '#dff5ff');
+    }, 1);
   }
   bakeTitleLogo();
 
   function drawTitle() {
     applyHudCam();
+    ctx.imageSmoothingEnabled = false;   // CRUNCHY logo + parade bros stay sharp
     ctx.drawImage(PARALLAX.jungle.sky.c, 0, 0, VW, VH);
     // parallax bit for flavor
     ctx.drawImage(PARALLAX.jungle.layers[1].spr.c, ((-bgScroll * 0.3) % 560 + 560) % 560 - 560, 0, 560, VH);
@@ -4367,6 +4226,7 @@
 
   function drawCharSelect() {
     applyHudCam();
+    ctx.imageSmoothingEnabled = false;   // CRUNCHY bro portraits stay sharp
     ctx.drawImage(PARALLAX.jungle.sky.c, 0, 0, VW, VH);
     ctx.fillStyle = 'rgba(0,0,0,0.35)'; ctx.fillRect(0, 0, VW, VH);
     hudText('CHOOSE YOUR BRO', VW / 2, 34, 16, '#ffe066', 'center');
@@ -4443,6 +4303,7 @@
   // ── VICTORY / credits (cartoon tone). Hook: add more LEVELS for L7-8. ──
   function drawVictory() {
     applyHudCam();
+    ctx.imageSmoothingEnabled = false;   // CRUNCHY parade bros stay sharp
     ctx.drawImage(PARALLAX.hive.sky.c, 0, 0, VW, VH);
     ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillRect(0, 0, VW, VH);
     // fireworks-ish sparkle line of bros marching
@@ -4491,8 +4352,11 @@
     ctx.fillStyle = '#000'; ctx.fillRect(0, 0, canvas.width, canvas.height);
     drawParallax();
     drawGround();
-    // world entities
+    // world entities — CRUNCHY pixel sprites baked at ss=1: draw with smoothing
+    // OFF so the world→screen upscale keeps their pixels razor-sharp (matches
+    // terrain). Restored to ON before the glow/gradient projectiles + explosions.
     applyWorldCam();
+    ctx.imageSmoothingEnabled = false;
     for (const pu of pickups) drawPickup(pu);
     drawPod();
     for (const e of enemies) drawEnemy(e);
@@ -4500,6 +4364,7 @@
     if (boss) BOSS_DEFS[LV.boss].draw(boss);
     drawCat();                                   // after the boss so Sammy's pounce is visible ON TOP
     for (const p of players) drawPlayer(p);
+    ctx.imageSmoothingEnabled = true;
     for (const b of pbullets) if (b.active) drawBullet(b);
     for (const b of ebullets) if (b.active) drawEBullet(b);
     for (const e of explosions) if (e.active) drawExplosion(e);
