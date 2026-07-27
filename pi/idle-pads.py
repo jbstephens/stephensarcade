@@ -36,7 +36,7 @@ def gamepad_nodes():
         # the Motion Sensors or Touchpad sub-devices.
         if re.search(r"motion sensors|touchpad", name, re.I):
             continue
-        if not re.search(r"controller|dualshock|dualsense", name, re.I):
+        if not re.search(r"controller|dualshock|dualsense|8bitdo|8bit|sn30|x-box|xbox", name, re.I):
             continue
         yield f"/dev/input/{ev_m.group(1)}", mac_m.group(1), name
 

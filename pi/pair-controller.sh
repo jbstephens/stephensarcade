@@ -14,6 +14,13 @@ cat <<'EOT'
     PS4 (DualShock 4):  hold SHARE + PS together until the
                         light bar starts double-flashing white.
 
+    8BitDo SN30 Pro:    power on in X-INPUT mode by holding
+                        START + X, then hold the little PAIR
+                        button (top edge, by the USB-C port)
+                        for 3s until the LEDs flash fast.
+                        (X-input is required — other modes
+                        report a non-standard gamepad mapping.)
+
     Most other pads:    hold the pairing/sync button until
                         the lights flash rapidly.
 
@@ -30,7 +37,7 @@ bluetoothctl pairable on >/dev/null
 # Scan; discovered devices land in bluetoothctl's device list.
 bluetoothctl --timeout "$SCAN_SECONDS" scan on >/dev/null
 
-MACS=$(bluetoothctl devices | grep -iE 'controller|dualshock|dualsense|gamepad|joy-con' | awk '{print $2}')
+MACS=$(bluetoothctl devices | grep -iE 'controller|dualshock|dualsense|gamepad|joy-con|8bitdo|8bit|sn30|xbox' | awk '{print $2}')
 
 if [ -z "$MACS" ]; then
   echo "No controllers found. Make sure the light bar is double-flashing, then run this again."

@@ -109,6 +109,24 @@ UNIT
 sudo systemctl daemon-reload
 sudo systemctl enable --now ses-idle-pads.service
 
+# Silence the panel's Bluetooth widget. Its plugin pops a modal "Connection
+# successful" dialog on every connect — and since our pads are *trusted* and
+# auto-reconnect on wake, that dialog would grab input focus off the kiosk
+# every time a kid taps a button to wake a pad. We manage Bluetooth entirely
+# over SSH (ses-pair-controller), so the tray widget earns its keep nowhere.
+# Drop it from the panel's widget list AND move its .so out of the load path
+# (the panel dlopens every plugin to enumerate them, so config alone isn't
+# enough). Both steps are idempotent.
+mkdir -p "$HOME/.config"
+PANEL_INI="$HOME/.config/wf-panel-pi.ini"
+if ! grep -q '^widgets_right=' "$PANEL_INI" 2>/dev/null; then
+  printf '[panel]\nwidgets_right=volumepulse squeek\n' >> "$PANEL_INI"
+fi
+for BT_PLUGIN in /usr/lib/*/wf-panel-pi/libbluetooth.so; do
+  [ -e "$BT_PLUGIN" ] && sudo mv "$BT_PLUGIN" "$BT_PLUGIN.disabled"
+done
+pkill -x wf-panel-pi 2>/dev/null || true   # lwrespawn brings it back sans BT
+
 # LXDE/X11 — fallback if Wayland is ever switched off.
 if [ -d /etc/xdg/lxsession/LXDE-pi ]; then
   LXDE_AUTOSTART="$HOME/.config/lxsession/LXDE-pi/autostart"
