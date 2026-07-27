@@ -162,6 +162,48 @@
   const PADS = AC ? [AC.pad(0), AC.pad(1)] : null;
 
   // ════════════════════════════════════════════════════════════════════════
+  // HAPTICS — co-op controller rumble. Each event registers an INTENT for a
+  // pad (strongest magnitude wins); intents flush to ArcadeController.rumble()
+  // once per pad per frame, so simultaneous events never spam or preempt each
+  // other on the motor, and rapid auto-fire is throttled to a steady buzz.
+  // Everything no-ops when a pad is absent or has no actuator (keyboard /
+  // touch / iPad). Distinct from the audio-only sfx.rumble() (a noise burst).
+  //   hapt(idx, strong, weak, durMs) — one player's pad
+  //   haptBoth(strong, weak, durMs)  — both pads
+  // ════════════════════════════════════════════════════════════════════════
+  const HAPT_ON = !!(AC && AC.rumble);
+  const _haptWant = [ { s: 0, w: 0, d: 0 }, { s: 0, w: 0, d: 0 } ];
+  const _haptNext = [ 0, 0 ];
+  let _haptPrevShake = 0;
+  function hapt(idx, strong, weak, dur) {
+    if (!HAPT_ON || idx == null || idx < 0 || idx > 1) return;
+    const a = _haptWant[idx];
+    if (strong > a.s) a.s = strong;
+    if (weak   > a.w) a.w = weak;
+    if (dur    > a.d) a.d = dur;
+  }
+  function haptBoth(strong, weak, dur) { hapt(0, strong, weak, dur); hapt(1, strong, weak, dur); }
+  function haptFlush() {
+    if (!HAPT_ON) return;
+    // rising edge of screen-shake -> all-pads "impact" rumble scaled to the
+    // kick. Covers every boom/slam/barrel that raises `shake` with one hook.
+    const ds = shake - _haptPrevShake;
+    if (ds > 0.5) { const m = Math.min(shake / 14, 1); haptBoth(0.12 + 0.5 * m, 0.18 + 0.6 * m, 80 + ((130 * m) | 0)); }
+    _haptPrevShake = shake;
+    for (let i = 0; i < 2; i++) {
+      const a = _haptWant[i];
+      if (a.d > 0) {
+        const big = a.s >= 0.5 || a.d >= 180;      // impacts fire now; small ticks wait
+        if (big || frameCount >= _haptNext[i]) {
+          AC.rumble(i, { duration: a.d, strong: a.s, weak: a.w });
+          _haptNext[i] = frameCount + 4;           // ~66ms min gap between small ticks
+        }
+        a.s = a.w = a.d = 0;
+      }
+    }
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
   // AUDIO — synthesized, context created lazily on first user gesture.
   // ════════════════════════════════════════════════════════════════════════
   let audioCtx = null, muted = false;
@@ -4432,6 +4474,11 @@
     const count = w.count + (ben ? 4 : 0);
     const spread = ben ? Math.max(w.spread, 0.5) : w.spread;
     ensureAudio(); sfx[w.sfx]();
+    // haptics: weapon recoil tick, weighted by weapon (throttled in haptFlush)
+    if (w.kind === 'rocket') hapt(p.idx, 0.70, 0.50, 150);
+    else if (w.kind === 'laser') hapt(p.idx, 0.05, 0.28, 55);
+    else if (w.kind === 'flame') hapt(p.idx, 0.10, 0.34, 70);
+    else hapt(p.idx, 0.10, 0.26, 60);
     const gunLen = 12;
     const sx = p.x + p.aimx * gunLen;
     const sy = (p.prone ? p.y - PRONE_H * 0.5 : p.y - PLH * 0.55) + p.aimy * gunLen;
@@ -4460,6 +4507,7 @@
     p.specials--;
     ensureAudio(); sfx.special();
     bombFlash = 18; shake = Math.max(shake, 14);
+    hapt(p.idx, 1.0, 0.85, 320);
     p.invuln = Math.max(p.invuln, 50);
     boom(p.x, p.y - 14, 120, '#ffce4d');
     // clear all enemy bullets on screen + damage all enemies
@@ -4498,13 +4546,14 @@
   function hurtPlayer(p, force) {
     if (!p.alive || p.downed) return;
     if (!force && (p.invuln > 0 || p.respawnT > 0)) return;
-    if (p.shieldTime > 0) { p.shieldTime = 0; p.invuln = INVULN; floatText(p.x, p.y - 36, 'SHIELD!', '#7fdcff', 11); sfx.hit(); return; }
+    if (p.shieldTime > 0) { p.shieldTime = 0; p.invuln = INVULN; floatText(p.x, p.y - 36, 'SHIELD!', '#7fdcff', 11); sfx.hit(); hapt(p.idx, 0.20, 0.50, 90); return; }
     // BEN MODE light damage reduction: often shrugs off a hit (generous/kid-proof)
-    if (p.benTime > 0 && !force && Math.random() < 0.6) { p.invuln = 24; floatText(p.x, p.y - 36, 'GUARD', '#ffd23f', 10); sfx.clang(); return; }
+    if (p.benTime > 0 && !force && Math.random() < 0.6) { p.invuln = 24; floatText(p.x, p.y - 36, 'GUARD', '#ffd23f', 10); sfx.clang(); hapt(p.idx, 0.15, 0.40, 80); return; }
     p.health--;
     p.invuln = INVULN; p.flash = INVULN;
     p.vx = -p.facing * 2; p.vy = -3;
     sfx.playerHit();
+    hapt(p.idx, 0.90, 0.60, 220);
     combo = 0;
     if (p.health <= 0) downPlayer(p);
   }
@@ -4513,6 +4562,7 @@
     p.downed = true; p.downTimer = DOWN_TIME; p.reviveProg = 0; p.vy = -2;
     deathsThisLevel++;
     sfx.downed();
+    hapt(p.idx, 1.0, 0.35, 380);
     floatText(p.x, p.y - 40, 'DOWNED!', '#ff5252', 13);
     // both down -> checkpoint respawn
     const anyUp = players.some(o => o !== p && o.alive && !o.downed);
@@ -4526,6 +4576,7 @@
   function revivePlayer(p) {
     p.downed = false; p.health = 2; p.invuln = INVULN; p.reviveProg = 0;
     sfx.revive();
+    hapt(p.idx, 0.40, 0.60, 160);
     floatText(p.x, p.y - 40, 'REVIVED!', '#5dd66c', 13);
   }
 
@@ -4549,6 +4600,7 @@
     camX = Math.max(0, cp);
     // if boss arena, keep boss but heal players; else clear nearby enemies
     if (!arena.active) for (const e of enemies) if (e.active && Math.abs(e.x - cp) < VW) e.active = false;
+    haptBoth(0.70, 0.50, 450);
     bannerBig('CHECKPOINT', 'TRY AGAIN!');
   }
 
@@ -4578,6 +4630,7 @@
     }
     e.hp -= dmg; e.flash = 3;
     sfx.hit();
+    if (byPlayer) hapt(byPlayer.idx, 0.05, 0.18, 40);
     if (e.hp <= 0) killEnemy(e, byPlayer);
   }
   function killEnemy(e, byPlayer) {
@@ -4585,6 +4638,7 @@
     boom(e.x, e.y - e.h / 2, e.def.w > 36 ? 60 : 34, '#ff9944');
     spawnParts(e.x, e.y - e.h / 2, e.def.w > 36 ? 10 : 6);
     sfx.kill();
+    if (byPlayer) hapt(byPlayer.idx, 0.32, 0.40, 85);
     combo++; comboTimer = 110;
     if (chaos) chaos.kills++;
     addScore(e.points, e.x, e.y - e.h - 6, byPlayer);
@@ -4620,6 +4674,7 @@
     if (!boss) return;
     boss.hp -= dmg; boss.flash = 4;
     sfx.bossHurt();
+    if (byPlayer) hapt(byPlayer.idx, 0.30, 0.45, 70);
     score += 20 * dmg;
     spawnParts(boss.x, boss.y - 74, 4);
     if (boss.hp <= 0) defeatBoss();
@@ -4631,6 +4686,7 @@
     bossDefeatSeq = 130;
     slowmo = 90;
     sfx.bossRoar();
+    haptBoth(1.0, 0.70, 550);
     // score for boss kill
     score += 5000;
   }
@@ -4659,6 +4715,7 @@
       const pu = placePickup({ x: pod.x, y: pod.y, kind: 'weapon', weapon: w });
       if (pu) { pu.falling = true; pu.vy = 1; }
       boom(pod.x, pod.y, 40, '#ffce4d'); sfx.kill();
+      if (byPlayer) hapt(byPlayer.idx, 0.40, 0.50, 120);
       floatText(pod.x, pod.y - 20, 'WEAPON!', '#ffce4d', 11);
       pod = null;
     } else sfx.hit();
@@ -4686,6 +4743,7 @@
   function grabPickup(pu, p) {
     pu.active = false;
     ensureAudio();
+    hapt(p.idx, 0.28, 0.50, 120);
     if (pu.kind === 'weapon') { p.weapon = pu.weapon; sfx.pickup(); floatText(p.x, p.y - 40, WEAPONS[pu.weapon].name, WEAPONS[pu.weapon].color, 11); }
     else if (pu.kind === 'shield') { p.shieldTime = 600; sfx.shield(); floatText(p.x, p.y - 40, 'SHIELD', '#7fdcff', 11); }
     else if (pu.kind === 'ddmg') { p.ddmgTime = 600; sfx.shield(); floatText(p.x, p.y - 40, '2X DAMAGE', '#ff5cae', 11); }
@@ -4693,7 +4751,7 @@
     else if (pu.kind === 'chicken') { secretsFound++; score += 2000; sfx.confirm(); floatText(p.x, p.y - 44, 'SECRET! +2000', '#ffd24d', 13); }
     else if (pu.kind === 'crystal') {
       p.benTime = BEN_TIME; benCrystalT = 0; sfx.pickup(); sfx.confirm();
-      floatText(p.x, p.y - 44, 'BEN MODE!', '#ffd23f', 14); eventBanner('BEN MODE!', '#ffd23f', 170);
+      floatText(p.x, p.y - 44, 'BEN MODE!', '#ffd23f', 14); eventBanner('BEN MODE!', '#ffd23f', 170); hapt(p.idx, 0.75, 0.95, 380);
       const n = LOWFX ? 6 : 14;
       for (let i = 0; i < n; i++) { const pt = particles[_ptI]; _ptI = (_ptI + 1) % PT_MAX; const a = Math.random() * Math.PI * 2, s = 1 + Math.random() * 3; pt.active = true; pt.x = p.x; pt.y = p.y - 16; pt.vx = Math.cos(a) * s; pt.vy = Math.sin(a) * s - 1; pt.life = 24 + Math.random() * 16; pt.maxLife = 40; pt.size = 2 + Math.random() * 2.5; pt.spr = dotSpr(Math.random() < 0.5 ? '#ffd23f' : '#fff2a8'); pt.grav = 0.08; }
     }
@@ -4704,6 +4762,7 @@
   // ════════════════════════════════════════════════════════════════════════
   function rocketExplode(x, y, owner) {
     boom(x, y, 62, '#ff8a2a'); sfx.boom(); shake = Math.max(shake, 10); spawnParts(x, y, 8);
+    hapt(owner, 0.80, 0.60, 200);
     const R = 62, by = players[owner] || null;
     for (const e of enemies) if (e.active && Math.hypot(e.x - x, (e.y - e.h / 2) - y) < R) damageEnemy(e, 4, by, e.x, e.y - e.h / 2);
     if (boss && bossDefeatSeq === 0) {
@@ -4979,6 +5038,7 @@
     clearStats = computeClearStats();
     clearQuip = quips[LV.boss] || '';
     sfx.levelClear();
+    haptBoth(0.50, 0.80, 500);
     bannerT = 0;
     if (score > best) { best = score; try { localStorage.setItem('broforce_best', String(best)); } catch {} }
   }
@@ -5000,7 +5060,7 @@
       // All six worlds cleared -> VICTORY / credits. (Hook for future L7-8:
       // just push more LEVELS entries and this branch keeps advancing.)
       if (score > best) { best = score; try { localStorage.setItem('broforce_best', String(best)); } catch {} }
-      victoryAnim = 0; state = VICTORY; sfx.levelClear();
+      victoryAnim = 0; state = VICTORY; sfx.levelClear(); haptBoth(0.70, 0.90, 700);
       setTimeout(() => { try { sfx.confirm(); } catch {} }, 400);
     }
   }
@@ -5076,6 +5136,7 @@
     dadMech = { dir: 1, x: camX - 50, y: LV.groundY, t: 0, phase: 'in', fireT: DAD_FIRE_TIME, bob: 0 };
     eventBanner("DAD'S COFFEE MECH!", '#e0a86a', 230);
     if (sfx.rumble) sfx.rumble();
+    haptBoth(0.60, 0.90, 420);
   }
   function updateDadMech() {
     const m = dadMech; m.t++;
@@ -5119,6 +5180,7 @@
     chaos = { t: 0, dur: CHAOS_TIME, spawnT: 0, kills: 0 };
     eventBanner("LUKE'S CHAOS MODE!!!", '#ff5cae', 250);
     sfx.special();
+    haptBoth(0.60, 0.90, 420);
   }
   function updateChaos() {
     const c = chaos; c.t++;
@@ -5143,6 +5205,7 @@
       eventBanner('CHAOS CLEARED +' + bonus, '#ffd23f', 210);
       floatText(camX + VW / 2, VH * 0.46, 'CHAOS CLEARED', '#ffd23f', 14);
       sfx.levelClear();
+      haptBoth(0.50, 0.80, 420);
       chaos = null; endEvent();
     }
   }
@@ -5969,6 +6032,7 @@
     else { handleMenus(); document.body.classList.toggle('in-match', false); }
 
     render();
+    haptFlush();
 
     // store prev held for edge detection next frame
     prevHeld[0] = curHeld[0];
