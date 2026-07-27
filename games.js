@@ -87,5 +87,13 @@ window.GAMES_DATA = [
     "status": "PRESS START",
     "icon": "broforce",
     "source": "https://broforce.onrender.com/"
+  },
+  {
+    "slug": "shatteredsun",
+    "title": "SHATTERED SUN",
+    "genre": "RPG",
+    "status": "PRESS START",
+    "icon": "shattered",
+    "source": "https://shatteredsun.onrender.com/"
   }
 ];
