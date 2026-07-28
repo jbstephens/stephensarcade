@@ -3540,6 +3540,39 @@ window.CONTENT_INDEX = {"boss.ashen-king":"bosses/ashen-king.json","boss.beacon-
     return K.rgbToHex(A.r + (B.r - A.r) * t, A.g + (B.g - A.g) * t, A.b + (B.b - A.b) * t);
   }
 
+  // ---- doorway light (baked; region.js blits it into the chunk) ----------
+  // An interior's way out is a THRESHOLD run backed against the wall, not a gap,
+  // so it gets no jambs — it gets the two things that make a door findable from
+  // the middle of the room: daylight pooling on the boards just inside it, and a
+  // slow breath on the door itself (art-bible LAW 4). Softer than the dungeons'
+  // because no gloom layer is eating it and the room is already hearth-lit.
+  function doorwaySpill(color, peak) {
+    const W = TS * 5, H = TS * 3;
+    const c = K.makeCanvas(W, H); const ctx = c.getContext('2d');
+    const cx = W >> 1, bands = 8, bh = Math.ceil(H / bands);
+    for (let i = 0; i < bands; i++) {
+      const t = i / (bands - 1);
+      const half = Math.round(TS * 0.85 + t * TS * 1.55);
+      ctx.globalAlpha = peak * (1 - t) * (1 - t) + 0.03;
+      K.pxRect(ctx, cx - half, i * bh, half * 2, bh, color);
+    }
+    ctx.globalAlpha = Math.min(1, peak + 0.16);
+    K.pxRect(ctx, cx - TS, 0, TS * 2, 3, color);                 // the bright line at the sill
+    ctx.globalAlpha = 1;
+    return c;
+  }
+  function doorwayPulse(color) {
+    const frame = (radius, alpha) => {
+      const c = K.makeCanvas(TS * 4, TS * 3); const ctx = c.getContext('2d');
+      ctx.globalAlpha = alpha;
+      K.pxGlowSq(ctx, TS * 2, TS * 1.5, radius, color, 5);
+      K.pxRect(ctx, TS, TS * 1.5 - 2, TS * 2, 3, color);
+      ctx.globalAlpha = 1;
+      return c;
+    };
+    return [frame(34, 0.24), frame(27, 0.17)];
+  }
+
   // ---- floors ------------------------------------------------------------
   // Wood plank floor: horizontal courses with a dark seam, per-plank tone
   // jitter, seeded grain streaks and the odd knot — three variants keep the
@@ -4451,8 +4484,12 @@ window.CONTENT_INDEX = {"boss.ashen-king":"bosses/ashen-king.json","boss.beacon-
     // fire for an interior (no painted tiles, wisps, shrine, buildings, clouds),
     // but they keep the tile-registry contract identical to SS.Tiles.build().
     const empty = emptyCanvas();
+    // every wall material counts as wall when the region hunts for the way out
+    const wallNames = ['wall', 'wall-herbs', 'wall-books', 'wall-soot', 'wall-moth', 'wall-menu',
+      'wall-sconce', 'wall-sconce-violet', 'wall-sconce-ember', 'wall-sconce-steel'];
+    const doorway = { spill: doorwaySpill(K.LANTERN, 0.34), pulse: doorwayPulse(K.LANTERN) };
     cache = {
-      TS, tiles, statics, hash2, duskTint, paintMoor,
+      TS, tiles, statics, doorway, wallNames, hash2, duskTint, paintMoor,
       scatter: [empty], bogMush: empty,
       lips: { n: empty, s: empty, w: empty, e: empty },
       cloudShadow: () => emptyCanvas(),
@@ -4501,6 +4538,9 @@ window.CONTENT_INDEX = {"boss.ashen-king":"bosses/ashen-king.json","boss.beacon-
   const RUBBLE = '#4a4450';      // toppled stone / debris
   const IRON = '#2a2732';        // cold iron (gates, brazier bowls)
   const GRIEF = '#6fb6cc';       // the caged cold-flame blue of the fallen beacon
+  // The colour a doorway gives off: lantern-warm carrying a whisper of the
+  // beacon's cold, so the way out is the one warm thing on a grief-blue floor.
+  const DOORLIGHT = '#e0cf96';
 
   // ---- floor -------------------------------------------------------------
   // Cracked flagstone: cool stones over dark mortar, chipped corners, a few
@@ -4620,8 +4660,48 @@ window.CONTENT_INDEX = {"boss.ashen-king":"bosses/ashen-king.json","boss.beacon-
 
   // ---- doorway framing (auto-stamped by region.js on wall-gap pairs) ------
   // THE WAY FORWARD IS THE MOST LEGIBLE THING IN THE ROOM: every 2-tile gap in
-  // a wall run gets carved jambs and a cold light-spill so passages read from
-  // across a dark room, gloom or no gloom.
+  // a wall run gets carved jambs, a draft-light in the gap, a BREATHING glow on
+  // the door itself, and — the part that survives a door sitting flush with the
+  // top of the frame — a warm pool of light thrown onto the floor INSIDE the
+  // room. Standing mid-room you find the exit by the light it spills, not by
+  // spotting the gap.
+
+  // The pool a doorway THROWS onto the floor inside the room: hard stepped bands
+  // that widen and fade as the light falls away from the sill. Baked once and
+  // blitted into the chunk by the region's bake-time pool pass — never a runtime
+  // gradient. `peak` is the alpha at the sill; the dungeon runs it hot because
+  // the play state lays a 55% gloom over everything baked.
+  function doorwaySpill(color, peak) {
+    const W = TS * 5, H = TS * 3;
+    const c = K.makeCanvas(W, H); const ctx = c.getContext('2d');
+    const cx = W >> 1, bands = 8, bh = Math.ceil(H / bands);
+    for (let i = 0; i < bands; i++) {
+      const t = i / (bands - 1);
+      const half = Math.round(TS * 0.85 + t * TS * 1.55);
+      ctx.globalAlpha = peak * (1 - t) * (1 - t) + 0.04;
+      K.pxRect(ctx, cx - half, i * bh, half * 2, bh, color);
+    }
+    ctx.globalAlpha = Math.min(1, peak + 0.22);
+    K.pxRect(ctx, cx - TS, 0, TS * 2, 3, color);                 // the bright line at the sill
+    ctx.globalAlpha = 1;
+    return c;
+  }
+
+  // The door's BREATH: two baked frames a hair apart in reach and strength that
+  // the region runtime alternates on a slow cycle. Frame 0 is the fuller one and
+  // the one lowfx holds still, so guidance never gets quieter on the console.
+  function doorwayPulse(color) {
+    const frame = (radius, alpha) => {
+      const c = K.makeCanvas(TS * 4, TS * 3); const ctx = c.getContext('2d');
+      ctx.globalAlpha = alpha;
+      K.pxGlowSq(ctx, TS * 2, TS * 1.5, radius, color, 5);
+      K.pxRect(ctx, TS, TS * 1.5 - 2, TS * 2, 4, color);         // lit lintel bar across the gap
+      ctx.globalAlpha = 1;
+      return c;
+    };
+    return [frame(40, 0.34), frame(31, 0.24)];
+  }
+
   function doorwaySprites() {
     const s = K.ramp(STONE);
     const jamb = (side) => {
@@ -4633,13 +4713,13 @@ window.CONTENT_INDEX = {"boss.ashen-king":"bosses/ashen-king.json","boss.beacon-
       for (let fy = 5; fy < TS; fy += 6) K.pxRect(ctx, x0 + 1, fy, 4, 1, s.lo); // flutes
       return c;
     };
-    const glow = (() => {                                        // cold draft-light in the gap
+    const glow = (() => {                                        // draft-light in the gap
       const c = K.makeCanvas(TS * 2, TS); const ctx = c.getContext('2d');
       ctx.globalAlpha = 0.55;
-      K.pxGlowSq(ctx, TS, TS / 2, 22, GRIEF, 4);
+      K.pxGlowSq(ctx, TS, TS / 2, 22, DOORLIGHT, 4);
       return c;
     })();
-    return { jambL: jamb('l'), jambR: jamb('r'), glow };
+    return { jambL: jamb('l'), jambR: jamb('r'), glow, spill: doorwaySpill(DOORLIGHT, 0.5), pulse: doorwayPulse(DOORLIGHT) };
   }
 
   // Barred cold-iron gate: the locked way up, set in a stone frame. Purely a
@@ -4834,6 +4914,47 @@ window.CONTENT_INDEX = {"boss.ashen-king":"bosses/ashen-king.json","boss.beacon-
   const FOX = '#a8ccff';         // cold foxfire cyan
   const FOX_CORE = '#eaf4ff';    // foxfire core
   const CHASM = '#120c1c';       // the dark of the drop
+  // The colour a doorway gives off: moth-pink pushed warm, so the way onward
+  // reads as the Hollow's own light rather than a second cold accent.
+  const DOORLIGHT = '#eeb8b0';
+
+  // ---- doorway light (baked; blitted into the chunk by region.js) ---------
+  // The pool a doorway THROWS onto the heartwood inside the room: hard stepped
+  // bands widening and fading as the light falls away from the sill. Never a
+  // runtime gradient. `peak` is the alpha at the sill — the Hollow runs it hot
+  // because the play state lays a 55% gloom over everything baked.
+  function doorwaySpill(color, peak) {
+    const W = TS * 5, H = TS * 3;
+    const c = K.makeCanvas(W, H); const ctx = c.getContext('2d');
+    const cx = W >> 1, bands = 8, bh = Math.ceil(H / bands);
+    for (let i = 0; i < bands; i++) {
+      const t = i / (bands - 1);
+      const half = Math.round(TS * 0.85 + t * TS * 1.55);
+      ctx.globalAlpha = peak * (1 - t) * (1 - t) + 0.04;
+      K.pxRect(ctx, cx - half, i * bh, half * 2, bh, color);
+    }
+    ctx.globalAlpha = Math.min(1, peak + 0.22);
+    K.pxRect(ctx, cx - TS, 0, TS * 2, 3, color);
+    ctx.globalAlpha = 1;
+    return c;
+  }
+
+  // The door's BREATH: two baked frames a hair apart in reach and strength, which
+  // the region runtime alternates on a slow cycle. Frame 0 is the fuller one and
+  // the one lowfx holds still, so guidance never gets quieter on the console.
+  function doorwayPulse(color) {
+    const frame = (radius, alpha) => {
+      const c = K.makeCanvas(TS * 4, TS * 3); const ctx = c.getContext('2d');
+      ctx.globalAlpha = alpha;
+      K.pxGlowSq(ctx, TS * 2, TS * 1.5, radius, color, 5);
+      K.pxRect(ctx, TS, TS * 1.5 - 2, TS * 2, 4, color);         // lit lintel bar across the gap
+      ctx.globalAlpha = 1;
+      return c;
+    };
+    // the heartwood floor is warm and light already, so the Hollow's doors have
+    // to be pushed harder than the beacon's to still read as the brightest thing
+    return [frame(42, 0.42), frame(33, 0.30)];
+  }
 
   // ---- heartwood floor ---------------------------------------------------
   // Warm organic grain: wavering wood bands over a violet-shadow bed, faint
@@ -5210,7 +5331,10 @@ window.CONTENT_INDEX = {"boss.ashen-king":"bosses/ashen-king.json","boss.beacon-
     // fire for a dungeon, but they keep the tile-registry contract identical to
     // SS.Tiles.build() so the pipeline stays provider-agnostic.
     const empty = emptyCanvas();
-    // doorway framing (region.js auto-pass): mossy bark jambs + moth-pink spill
+    // doorway framing (region.js auto-pass): mossy bark jambs, a breathing bloom
+    // on the door itself, and the warm moth-lit pool it throws onto the heartwood
+    // INSIDE the room — so a door in the top wall is found by its light, not by
+    // spotting the gap. THE WAY FORWARD IS THE MOST LEGIBLE THING IN THE ROOM.
     const doorway = (() => {
       const b = K.ramp(BARK);
       const jamb = (side) => {
@@ -5225,10 +5349,10 @@ window.CONTENT_INDEX = {"boss.ashen-king":"bosses/ashen-king.json","boss.beacon-
       const glow = (() => {
         const c = K.makeCanvas(TS * 2, TS); const ctx = c.getContext('2d');
         ctx.globalAlpha = 0.55;
-        K.pxGlowSq(ctx, TS, TS / 2, 22, MOTH, 4);
+        K.pxGlowSq(ctx, TS, TS / 2, 22, DOORLIGHT, 4);
         return c;
       })();
-      return { jambL: jamb('l'), jambR: jamb('r'), glow };
+      return { jambL: jamb('l'), jambR: jamb('r'), glow, spill: doorwaySpill(DOORLIGHT, 0.6), pulse: doorwayPulse(DOORLIGHT) };
     })();
     cache = {
       TS, tiles, statics: {}, fixtures, doorway, wallNames: ['bark-wall'], hash2, duskTint, paintMoor,
@@ -6968,6 +7092,59 @@ window.CONTENT_INDEX = {"boss.ashen-king":"bosses/ashen-king.json","boss.beacon-
       }
     }
 
+    // ---- the ways out ------------------------------------------------------
+    // ART-BIBLE LAW 4: THE WAY FORWARD IS THE MOST LEGIBLE THING IN THE ROOM.
+    // One pass over the WHOLE map finds every doorway before anything is baked,
+    // so the chunk baker (jambs + floor spill) and the runtime breath read the
+    // exact same list, and a door that straddles a chunk seam is painted by both
+    // chunks it touches instead of being clipped in half. Two shapes of door:
+    //   GAP  — a 2-tile walkable break in a horizontal wall run (the dungeons and
+    //          the Hollow: the passages between locked rooms).
+    //   SILL — a run of `threshold` floor backed against a wall (the interiors'
+    //          front door, and a dungeon's return to the moor).
+    // Each record carries the room-side anchors, because light must fall on floor
+    // the player can actually stand on: `down` is the y a downward spill starts
+    // at, `up` the y an upward spill ends at, -1 when that side is not a room.
+    const doorways = [];
+    if (built.doorway) {
+      const WALLS = built.wallNames || ['wall'];
+      const isWall = (x, y) => WALLS.indexOf(tileNameAt(x, y)) >= 0;
+      const walkable = (x, y) => { const t = tileAt(x, y); return !!t && !t.solid; };
+      const isSill = (x, y) => tileNameAt(x, y) === 'threshold';
+      for (let ty = 0; ty < height; ty++) {
+        for (let tx = 0; tx < width; tx++) {
+          if (walkable(tx, ty) && walkable(tx + 1, ty) && isWall(tx - 1, ty) && isWall(tx + 2, ty) && isWall(tx - 2, ty) && isWall(tx + 3, ty)) {
+            doorways.push({
+              jambs: true, cx: tx * TS + TS, wy: ty * TS + TS / 2,
+              down: (walkable(tx, ty + 1) || walkable(tx + 1, ty + 1)) ? (ty + 1) * TS : -1,
+              up: (walkable(tx, ty - 1) || walkable(tx + 1, ty - 1)) ? ty * TS : -1,
+            });
+            continue;
+          }
+          // sill: only the LEFT end of a threshold run, so one door makes one record
+          if (!isSill(tx, ty) || isSill(tx - 1, ty)) continue;
+          let n = 1; while (isSill(tx + n, ty)) n++;
+          const wallAbove = isWall(tx, ty - 1), wallBelow = isWall(tx, ty + 1);
+          if (!wallAbove && !wallBelow) continue;
+          // the breath sits on the sill itself, never on the wall — a wall may be
+          // the outermost skin of the building, and light must not pool in the void
+          doorways.push({
+            jambs: false, cx: tx * TS + n * TS / 2, wy: ty * TS + TS / 2,
+            down: wallAbove ? ty * TS : -1,
+            up: wallBelow ? (ty + 1) * TS : -1,
+          });
+        }
+      }
+    }
+    // The upward throw is the downward one stood on its head — flipped ONCE here
+    // at load, never per frame.
+    const spillUp = (built.doorway && built.doorway.spill) ? (() => {
+      const src = built.doorway.spill;
+      const c = K.makeCanvas(src.width, src.height), x = c.getContext('2d');
+      x.translate(0, src.height); x.scale(1, -1); x.drawImage(src, 0, 0);
+      return c;
+    })() : null;
+
     // pre-render chunks
     const tilesPerChunk = Math.floor(512 / TS);       // 21 tiles -> 504px
     const chunkPx = tilesPerChunk * TS;
@@ -7026,23 +7203,28 @@ window.CONTENT_INDEX = {"boss.ashen-king":"bosses/ashen-king.json","boss.beacon-
             }
           }
         }
-        // doorway framing: any walkable 2-tile gap in a horizontal wall run
-        // gets carved jambs + a cold light-spill (built.doorway providers only).
-        // THE WAY FORWARD IS THE MOST LEGIBLE THING IN THE ROOM.
-        if (built.doorway) {
-          const WALLS = built.wallNames || ['wall'];
-          const isWall = (x, y) => WALLS.indexOf(tileNameAt(x, y)) >= 0;
-          const walkable = (x, y) => { const t = tileAt(x, y); return t && !t.solid; };
-          for (let ly = 0; ly < tilesPerChunk; ly++) {
-            for (let lx = 0; lx < tilesPerChunk; lx++) {
-              const tx = cx * tilesPerChunk + lx, ty = cy * tilesPerChunk + ly;
-              if (walkable(tx, ty) && walkable(tx + 1, ty) && isWall(tx - 1, ty) && isWall(tx + 2, ty) && isWall(tx - 2, ty) && isWall(tx + 3, ty)) {
-                const dx = lx * TS, dy = ly * TS;
-                ctx.drawImage(built.doorway.glow, dx, dy);
-                ctx.drawImage(built.doorway.jambL, dx, dy);
-                ctx.drawImage(built.doorway.jambR, dx + TS, dy);
-              }
-            }
+        // doorway framing: carved jambs + the gap's own draft-light, then the
+        // warm pool the door THROWS onto the floor inside the room. Every doorway
+        // whose art overlaps this chunk is painted here (the margin test), so a
+        // door on a chunk seam keeps its whole spill.
+        for (let di = 0; di < doorways.length; di++) {
+          const d = doorways[di], D = built.doorway;
+          const bx = d.cx - cx * chunkPx, by = d.wy - cy * chunkPx;
+          const spill = D.spill;
+          const marginX = spill ? spill.width : TS * 2, marginY = spill ? spill.height + TS : TS * 2;
+          if (bx < -marginX || bx > cw + marginX || by < -marginY || by > ch + marginY) continue;
+          if (d.jambs && D.jambL) {
+            ctx.drawImage(D.glow, bx - TS, by - TS / 2);
+            ctx.drawImage(D.jambL, bx - TS, by - TS / 2);
+            ctx.drawImage(D.jambR, bx, by - TS / 2);
+          }
+          // the light-spill rides the SAME bake-time pool list as hearths and
+          // sconces, so it lands over the finished floor stamps and under the
+          // region's dusk grade — hot path untouched.
+          if (spill) {
+            const half = spill.width / 2;
+            if (d.down >= 0) pools.push({ sprite: spill, x: bx - half, y: d.down - cy * chunkPx });
+            if (d.up >= 0 && spillUp) pools.push({ sprite: spillUp, x: bx - half, y: d.up - cy * chunkPx - spillUp.height });
           }
         }
         // baked floor-light pools over the finished stamps (bake-time only —
@@ -7050,7 +7232,8 @@ window.CONTENT_INDEX = {"boss.ashen-king":"bosses/ashen-king.json","boss.beacon-
         for (const p of pools) {
           ctx.save();
           if (p.a != null) ctx.globalAlpha = p.a;
-          K.pxGlowSq(ctx, p.x | 0, p.y | 0, p.r, p.color, 5);
+          if (p.sprite) ctx.drawImage(p.sprite, p.x | 0, p.y | 0);
+          else K.pxGlowSq(ctx, p.x | 0, p.y | 0, p.r, p.color, 5);
           ctx.restore();
         }
         built.duskTint(canvas);   // amber-violet dusk grading, baked
@@ -7174,7 +7357,9 @@ window.CONTENT_INDEX = {"boss.ashen-king":"bosses/ashen-king.json","boss.beacon-
       rect: { x: a.rect[0] * TS, y: a.rect[1] * TS, w: a.rect[2] * TS, h: a.rect[3] * TS },
       cameraLock: a.cameraLock ? { x: a.rect[0] * TS, y: a.rect[1] * TS, w: a.rect[2] * TS, h: a.rect[3] * TS } : null }));
 
-    let tick = 0, cloudX = 0, cloudY = 0;
+    // last drawn view, recorded by drawTerrain so the later light passes can cull
+    // against it without being handed a cam (scalars — zero allocation per frame)
+    let tick = 0, cloudX = 0, cloudY = 0, camX = 0, camY = 0, camW = 640, camH = 360;
     const region = {
       id: data.id, name: data.name, palette: data.palette, music: data.music,
       kind: (dungeon || hollow) ? 'dungeon' : interior ? 'interior' : 'exterior',
@@ -7198,6 +7383,7 @@ window.CONTENT_INDEX = {"boss.ashen-king":"bosses/ashen-king.json","boss.beacon-
         }
       },
       drawTerrain(ctx, cam) {
+        camX = cam.x; camY = cam.y; camW = cam.w; camH = cam.h;
         for (const c of chunks) {
           if (c.px + c.w < cam.x || c.px > cam.x + cam.w || c.py + c.h < cam.y || c.py > cam.y + cam.h) continue;
           ctx.drawImage(c.canvas, c.px, c.py);
@@ -7251,6 +7437,10 @@ window.CONTENT_INDEX = {"boss.ashen-king":"bosses/ashen-king.json","boss.beacon-
           ctx.drawImage(f, (p.x - f.width / 2) | 0, (p.y + 10 - f.height / 2) | 0);
         }
       },
+      // The shrine's flame plus THE DOORWAY'S BREATH. Both are baked-frame light
+      // laid over the finished world: the doorway breath in particular has to sit
+      // above the dungeon gloom, or the way out would be the one thing the gloom
+      // is allowed to swallow (art-bible LAW 4).
       drawShrineGlow(ctx) {
         const stages = built.shrineGlowStages;
         for (const p of props) {
@@ -7260,6 +7450,19 @@ window.CONTENT_INDEX = {"boss.ashen-king":"bosses/ashen-king.json","boss.beacon-
           if (!frames || !frames.length) continue;
           const f = frames[Math.floor(tick / 14) % frames.length];
           ctx.drawImage(f, (p.x - f.width / 2) | 0, (p.y - f.height / 2 - 14) | 0);
+        }
+        // Two baked frames on a 96-tick cycle — a slow breath in and out, not a
+        // blink. Under lowfx the door holds frame 0 (the fuller one): the guidance
+        // stays exactly as loud, it simply stops moving (LAW 3 — structural light
+        // runs in lowfx).
+        const pulse = built.doorway && built.doorway.pulse;
+        if (!pulse) return;
+        const f = pulse[SS.lowfx() ? 0 : (Math.floor(tick / 48) & 1)];
+        const hw = f.width / 2, hh = f.height / 2;
+        for (let i = 0; i < doorways.length; i++) {
+          const d = doorways[i];
+          if (d.cx + hw < camX || d.cx - hw > camX + camW || d.wy + hh < camY || d.wy - hh > camY + camH) continue;
+          ctx.drawImage(f, (d.cx - hw) | 0, (d.wy - hh) | 0);
         }
       },
       tickVal() { return tick; },
