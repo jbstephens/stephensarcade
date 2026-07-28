@@ -10504,6 +10504,7 @@ window.CONTENT_INDEX = {"boss.ashen-king":"bosses/ashen-king.json","boss.beacon-
   const HOOK_RANGE = 7;         // tiles the line reaches down the facing direction
   const HOOK_SPEED = 4.2;       // px/tick reeled across the drop (a quick yank, not a stroll)
   const HOOK_TICKS = 90;        // safety cap: a reel always ends, whatever the geometry
+  const HOOK_REEL_TICKS = 70;   // ticks a crossing is pulled over, however long the run-up
   const HOOK_IFRAMES = 24;      // brief mercy-invuln mid-air, so a crossing is never a punishment
   const HOOK_CYAN = '#67e8e0', HOOK_CORE = '#dcfffb';
 
@@ -10611,6 +10612,13 @@ window.CONTENT_INDEX = {"boss.ashen-king":"bosses/ashen-king.json","boss.beacon-
       if (pl.downed) { pl.x = a.landX + ox; pl.y = a.landY + oy; continue; }
       pl.hooking = true; pl.hookT = HOOK_TICKS;
       pl.hookX = a.landX + ox; pl.hookY = a.landY + oy;
+      // The lead is always within HOOK_RANGE of the landing, but a PARTNER can
+      // be anywhere in the room — and the biggest rooms are longer than the
+      // reel's tick budget. Pull him proportionally faster so the whole party
+      // arrives on the same beat instead of one hero running out of reel-clock
+      // half way, which on a hook-only ledge means P2 left on the wrong bank.
+      const far = Math.hypot(pl.hookX - pl.x, pl.hookY - pl.y);
+      pl.hookV = Math.max(HOOK_SPEED, far / HOOK_REEL_TICKS);
       pl.action = 'walk'; pl.moving = true;
       pl.attackTimer = 0; pl.rollTimer = 0; pl.regenT = 0;
       if (pl.hb) pl.hb.active = false;
@@ -10623,17 +10631,26 @@ window.CONTENT_INDEX = {"boss.ashen-king":"bosses/ashen-king.json","boss.beacon-
   // One reel step. Straight-line pull against the hook-aware view, so the party
   // still stops at a wall rather than tunnelling, and the tick cap guarantees the
   // state always ends. Scalars only.
+  //
+  // The cap ENDS the reel; it does not get to decide where a hero ends up. A
+  // crossing that stopped short would set a hero down mid-air or, worse, back on
+  // the near bank of a hook-only ledge with a solid drop between him and his
+  // partner — the one outcome this item exists to prevent. So a reel always
+  // finishes ON its target, and that is safe by construction: hookAim's landing
+  // is the first WALKABLE tile on the ray, and the 11px sideways tuck keeps the
+  // partner inside that same tile.
   function reelStep(world, pl) {
     const dx = pl.hookX - pl.x, dy = pl.hookY - pl.y;
     const d = Math.sqrt(dx * dx + dy * dy);
-    if (d <= HOOK_SPEED || --pl.hookT <= 0) {
-      if (d <= HOOK_SPEED) { pl.x = pl.hookX; pl.y = pl.hookY; }
+    const v = pl.hookV || HOOK_SPEED;
+    if (d <= v || --pl.hookT <= 0) {
+      pl.x = pl.hookX; pl.y = pl.hookY;
       pl.hooking = false; pl.action = 'idle'; pl.moving = false;
       SS.Audio && SS.Audio.sfx('roll');      // boots find the far bank
       return;
     }
     pl.action = 'walk'; pl.moving = true;
-    moveEntity(world, pl, dx / d * HOOK_SPEED, dy / d * HOOK_SPEED);
+    moveEntity(world, pl, dx / d * v, dy / d * v);
   }
 
   // The hookable cue (LAW 4/5). A cold cyan target-bracket that snaps around a
@@ -10677,7 +10694,7 @@ window.CONTENT_INDEX = {"boss.ashen-king":"bosses/ashen-king.json","boss.beacon-
       attackTimer: 0, rollTimer: 0, iframes: 0, hp: 6, maxhp: 6, downed: false,
       reviveT: 0, channeling: false, leaving: false, regenT: 0,
       // Kilnhook reel (D03): scalars, so a crossing allocates nothing
-      hooking: false, hookT: 0, hookX: 0, hookY: 0,
+      hooking: false, hookT: 0, hookX: 0, hookY: 0, hookV: 0,
       hitX: false, hitY: false, hitApplied: false,
       // combat hitbox (world coords) valid while action==='attack' mid-swing
       hb: { active: false, x: 0, y: 0, r: 0 } };
@@ -10720,10 +10737,36 @@ window.CONTENT_INDEX = {"boss.ashen-king":"bosses/ashen-king.json","boss.beacon-
   // reset the transient co-op flags on a hero (used by spawn/join/restore)
   function clearCoop(pl) { pl.downed = false; pl.reviveT = 0; pl.channeling = false; pl.leaving = false; pl.hooking = false; pl.hookT = 0; }
 
+  // Set a hero down BESIDE another on ground he can actually stand on. Every
+  // path that puts one hero at the other's feet goes through here — the P2
+  // drop-in, the checkpoint restore and the shared camera's warp — because
+  // "lead.x - 16" is a guess, and on a chasm lip, a gap lip or against a wall it
+  // is a guess that sets P2 down inside the scenery. Four sides first, then the
+  // diagonals. One module-level table, so a placement never allocates.
+  //
+  // Returns false when the lead has no ground beside him at all (he is mid-reel
+  // over a drop, or gliding the middle of a gap). The CALLER decides what that
+  // means, because the answer differs: a warp must simply not happen, while a
+  // drop-in has to put P2 somewhere and the lead's own footing is the one spot
+  // the party is provably standing on.
+  const BESIDE = [[-18, 0], [18, 0], [0, -18], [0, 18], [-18, -18], [18, 18], [-18, 18], [18, -18]];
+  function placeBeside(region, pl, lead) {
+    const TS = region.tileSize;
+    for (let i = 0; i < BESIDE.length; i++) {
+      const nx = lead.x + BESIDE[i][0], ny = lead.y + BESIDE[i][1];
+      if (!region.solidAt((nx / TS) | 0, (ny / TS) | 0)) { pl.x = nx; pl.y = ny; return true; }
+    }
+    return false;
+  }
+  function placeWithLead(region, pl, lead) {
+    if (placeBeside(region, pl, lead)) return;
+    pl.x = lead.x; pl.y = lead.y;      // share the footing the lead is stood on
+  }
+
   function joinFin() {
     if (players.fin.active) return false;
     players.fin.active = true; players.fin.hp = players.fin.maxhp = 6;
-    players.fin.x = players.kes.x - 16; players.fin.y = players.kes.y;
+    placeWithLead(SS.Game.region, players.fin, players.kes);
     players.fin.action = 'idle'; players.fin.moving = false;
     clearCoop(players.fin);
     SS.Audio && SS.Audio.sfx('join');
@@ -10875,7 +10918,7 @@ window.CONTENT_INDEX = {"boss.ashen-king":"bosses/ashen-king.json","boss.beacon-
     players.kes.active = true;
     if (finWasActive) players.fin.active = true;   // a mid-run co-op partner isn't dropped by the restore
     standUp(players.kes);
-    if (players.fin.active) { standUp(players.fin); players.fin.x = players.kes.x - 16; players.fin.y = players.kes.y; }
+    if (players.fin.active) { standUp(players.fin); placeWithLead(SS.Game.region, players.fin, players.kes); }
     SS.Audio && SS.Audio.sfx('chime');
   }
 
@@ -10931,14 +10974,10 @@ window.CONTENT_INDEX = {"boss.ashen-king":"bosses/ashen-king.json","boss.beacon-
   }
 
   function warpTo(region, pl, lead) {
-    const TS = region.tileSize;
-    // prefer beside the lead; fall back through diagonals to a non-solid tile so
-    // a hero is never warped into a wall.
-    const cands = [[-18, 0], [18, 0], [0, -18], [0, 18], [-18, -18], [18, 18], [-18, 18], [18, -18], [0, 0]];
-    for (let i = 0; i < cands.length; i++) {
-      const nx = lead.x + cands[i][0], ny = lead.y + cands[i][1];
-      if (!region.solidAt((nx / TS) | 0, (ny / TS) | 0)) { pl.x = nx; pl.y = ny; break; }
-    }
+    // No ground beside the lead means the lead is over the drop himself: a warp
+    // there would set the trailing hero INSIDE it, so the net simply waits for a
+    // frame where there is somewhere real to put him.
+    if (!placeBeside(region, pl, lead)) return;
     pl.moving = false;
     if (!pl.downed) pl.action = 'idle';
     if (pl.iframes < 12) pl.iframes = 12;   // the i-frame blink reads as a quick pop, not a jarring cut
@@ -11073,14 +11112,19 @@ window.CONTENT_INDEX = {"boss.ashen-king":"bosses/ashen-king.json","boss.beacon-
   const HEART_LIFE = 600;           // heart pickup lingers ~10s at 60Hz, then guts out
   const HEART_HEAL = 1;             // a heart pickup mends one heart (kid-forgiving healing economy)
   const HEART_R = 9;                // pickup radius (generous — a kid brushes it and it takes)
-  const MAX_ENEMIES = 24, MAX_ESHOTS = 24, MAX_POOFS = 12, MAX_PICKUPS = 8;
+  const MOTE_LIFE = 1800;           // an ember mote lies on the ground ~30s at 60Hz (three times a heart's fuse)
+  const MOTE_LIFE_CHARM = 3600;     // ~60s while the Ember-Game Charm is worn — the charm's promise, made real
+  const MOTE_R = 10;                // collection radius, a hair wider than a heart's: the mote is smaller and the hands are seven
+  const MOTE_SPLIT = 3;             // most motes one kill scatters (a 4-ember drop lands as 2 + 1 + 1)
+  const MOTE_FLICK = 90;            // last ~1.5s of a fuse flickers — "gather me up" (same tell as a heart)
+  const MAX_ENEMIES = 24, MAX_ESHOTS = 24, MAX_POOFS = 12, MAX_PICKUPS = 8, MAX_MOTES = 24;
   const T = ms => Math.max(1, Math.round((ms || 0) * 0.06));   // ms -> ticks
 
   const circleHit = SS.Entities.circleHit;
   const moveVsTiles = SS.Entities.moveVsTiles;
 
-  let pool = null, shots = null, poofs = null, pickups = null;
-  let META = null, enemyAtlas = null, poofFrames = null, heartFrame = null;
+  let pool = null, shots = null, poofs = null, pickups = null, motes = null;
+  let META = null, enemyAtlas = null, poofFrames = null, heartFrame = null, moteFrames = null;
   let bossAtlas = null, bossMETA = null;   // lazy — nothing bakes until a boss actually spawns
   let bossState = 'none';                   // 'none' | 'alive' | 'dead' (persists past the pool release for the director)
   let spawned = 0;
@@ -11124,8 +11168,10 @@ window.CONTENT_INDEX = {"boss.ashen-king":"bosses/ashen-king.json","boss.beacon-
     shots = new SS.Pool(MAX_ESHOTS, () => ({ x: 0, y: 0, vx: 0, vy: 0, life: 0, dmg: 0 }));
     poofs = new SS.Pool(MAX_POOFS, () => ({ x: 0, y: 0, life: 0, life0: POOF_LIFE }));
     pickups = new SS.Pool(MAX_PICKUPS, () => ({ x: 0, y: 0, life: 0, seed: 0 }));
+    motes = new SS.Pool(MAX_MOTES, () => ({ x: 0, y: 0, life: 0, seed: 0, val: 0 }));
     poofFrames = bakePoof();
     heartFrame = bakeHeartPickup();
+    moteFrames = bakeEmberMotes();
     return { atlas: enemyAtlas };
   }
 
@@ -11146,6 +11192,40 @@ window.CONTENT_INDEX = {"boss.ashen-king":"bosses/ashen-king.json","boss.beacon-
     return c;
   }
 
+  // A dropped ember mote: the same bead the HUD counter shows, put on the
+  // ground, so a kid reads "that is my number, lying in the grass". Two baked
+  // reads carry it across every floor in the game (LAW 5 — an interactable must
+  // out-read the set dressing): a 1px dark outline cuts it out of Steppe bone-
+  // sand and pale dungeon stone, and a baked ember halo cuts it out of Gloamwood
+  // near-black and the moor's teal dusk. A dither2 contact shadow plants it on
+  // the floor — loot lying down, never a hovering hazard. Two frames wink the
+  // glint (the shadow and footprint never move, so the mote stays planted); the
+  // draw hot path is one drawImage, lowfx-safe, no runtime blur or gradient.
+  function bakeEmberMotes() {
+    const R = K.ramp(K.EMBER), OUT = K.ramp('#3a1e08').out;
+    const rows = ['.###.', '#####', '#####', '#####', '.###.'];
+    const frames = [];
+    for (let f = 0; f < 2; f++) {
+      // the bead is outlined on a canvas of its own first: K.outline walks alpha,
+      // so the halo and the shadow must not be on the surface yet.
+      const b = K.makeCanvas(7, 7), bx = b.getContext('2d');
+      for (let y = 0; y < 5; y++) for (let x = 0; x < 5; x++) {
+        if (rows[y][x] !== '#') continue;
+        K.pxRect(bx, x + 1, y + 1, 1, 1, y === 0 ? R.hi : y >= 3 ? R.lo : R.mid);
+      }
+      K.pxRect(bx, 3, 2, 1, 1, R.hi);                        // lit crown
+      K.pxRect(bx, 2, 2, 1, 1, f ? R.spec : R.hi);           // the glint winks between the two frames
+      if (f) K.pxRect(bx, 4, 4, 1, 1, R.hi);
+      K.outline(b, OUT);
+      const S = 16, c = K.makeCanvas(S, S), ctx = c.getContext('2d'), cx = S >> 1, cy = S >> 1;
+      K.pxGlowSq(ctx, cx, cy, f ? 6 : 5, K.EMBER, 4);
+      K.dither2(ctx, cx - 3, cy + 3, 6, 2, K.DEEP_DUSK, 0.6);
+      ctx.drawImage(b, cx - 3, cy - 3);
+      frames.push(c);
+    }
+    return frames;
+  }
+
   // baked ash-and-ember death burst (stepped square glow — no shadowBlur)
   function bakePoof() {
     const frames = [], S = 30, n = 4;
@@ -11161,7 +11241,16 @@ window.CONTENT_INDEX = {"boss.ashen-king":"bosses/ashen-king.json","boss.beacon-
   }
 
   // ---- spawn / load / reset ---------------------------------------------
-  function reset() { if (pool) pool.clear(); if (shots) shots.clear(); if (poofs) poofs.clear(); if (pickups) pickups.clear(); spawned = 0; bossState = 'none'; teleSeen = Object.create(null); }
+  // Region change sweeps the field. Ember motes still lying about are swept into
+  // the purse rather than dropped on the floor of a region nobody is standing in
+  // any more: an ember a kill rolled ALWAYS reaches the counter, whatever the
+  // player does next. (Hearts have no such sweep — a mended heart you walked past
+  // is a choice, an ember you walked past is just arithmetic.)
+  function reset() {
+    if (motes) { const it = motes.items; for (let i = 0; i < it.length; i++) if (it[i].alive) creditMote(it[i]); motes.clear(); }
+    if (pool) pool.clear(); if (shots) shots.clear(); if (poofs) poofs.clear(); if (pickups) pickups.clear();
+    spawned = 0; bossState = 'none'; teleSeen = Object.create(null);
+  }
 
   function spawn(spec) {
     const def = spec.def; if (!def) return null;
@@ -11869,7 +11958,7 @@ window.CONTENT_INDEX = {"boss.ashen-king":"bosses/ashen-king.json","boss.beacon-
       if (Math.random() < (d.chance || 0)) {
         if (d.item) SS.State.give(d.item);
         else if (d.heart) spawnHeart(x, y);   // a mended-heart pickup (kid-forgiving healing economy)
-        else if (typeof d.embers === 'number') SS.State.addEmbers(emberHeart ? d.embers + Math.max(1, Math.round(d.embers * 0.5)) : d.embers);
+        else if (typeof d.embers === 'number') spawnMotes(x, y, emberHeart ? d.embers + Math.max(1, Math.round(d.embers * 0.5)) : d.embers);
       }
     }
   }
@@ -11878,6 +11967,29 @@ window.CONTENT_INDEX = {"boss.ashen-king":"bosses/ashen-king.json","boss.beacon-
   function spawnHeart(x, y) {
     const h = pickups.obtain(); if (!h) return;
     h.x = x; h.y = y; h.life = HEART_LIFE; h.seed = Math.random() * 6.283;
+  }
+
+  // Scatter a kill's embers as ground motes instead of teleporting the number.
+  // The split is exact — the motes always sum to `amount`, so the economy's
+  // totals are the ones the drop table always paid. If the ground pool is full
+  // (MAX_MOTES already lying about) the remainder goes straight to the purse:
+  // a capped pool costs the player nothing.
+  function spawnMotes(x, y, amount) {
+    amount = Math.round(amount) | 0; if (amount <= 0) return;
+    // Ember-Game Charm: the caravan kids' token keeps a scattered ember stubborn
+    // on the ground for twice as long — read once per kill, no per-mote lookup.
+    const life = (SS.State && SS.State.hasCharm('item.ember-game-charm')) ? MOTE_LIFE_CHARM : MOTE_LIFE;
+    const n = amount < MOTE_SPLIT ? amount : MOTE_SPLIT;
+    let left = amount;
+    for (let i = 0; i < n; i++) {
+      const share = Math.ceil(left / (n - i));
+      const m = motes.obtain();
+      if (!m) { if (SS.State) SS.State.addEmbers(left); return; }
+      left -= share;
+      const a = Math.random() * 6.283, d = 3 + Math.random() * 5;
+      m.x = x + Math.cos(a) * d; m.y = y + Math.sin(a) * d;
+      m.life = life; m.seed = Math.random() * 6.283; m.val = share;
+    }
   }
 
   function hurtPlayer(pl, dmg) {
@@ -11979,6 +12091,7 @@ window.CONTENT_INDEX = {"boss.ashen-king":"bosses/ashen-king.json","boss.beacon-
     updateShots(world, P);
     updatePoofs();
     updatePickups(P);
+    updateMotes(P);
   }
 
   // gentle slow-wander for a passive enemy: idle drift anchored to its home
@@ -12011,6 +12124,29 @@ window.CONTENT_INDEX = {"boss.ashen-king":"bosses/ashen-king.json","boss.beacon-
     }
     return false;
   }
+
+  // ember motes: same shape as the heart pickups above — tick the fuse, take on
+  // a brush from either standing hero, pooled + scalar, zero hot-loop allocation.
+  // The one difference is what happens at the end of the fuse: a mote that runs
+  // out does NOT gutter away, it gutters HOME. Seven-year-olds are slow to
+  // gather, get distracted mid-room, and lose track of where a kill happened;
+  // paying them the embers they already earned is the forgiving read, and it
+  // makes the totals identical to the old straight-to-counter behaviour. What
+  // the fuse governs is the JUICE — the mote you see, chase and pop.
+  function updateMotes(P) {
+    const it = motes.items;
+    for (let i = 0; i < it.length; i++) {
+      const m = it[i]; if (!m.alive) continue;
+      if (--m.life <= 0) { creditMote(m); motes.release(m); continue; }
+      if (brushes(m, P.kes) || brushes(m, P.fin)) {
+        creditMote(m);
+        SS.Audio && SS.Audio.sfx('pickup');
+        motes.release(m);
+      }
+    }
+  }
+  function brushes(m, pl) { return pl.active && !pl.downed && circleHit(m.x, m.y, MOTE_R, pl.x, pl.y, pl.r); }
+  function creditMote(m) { if (SS.State) SS.State.addEmbers(m.val); m.val = 0; }
 
   function contact(e, pl) {
     if (!pl.active || pl.downed || pl.iframes > 0) return;
@@ -12147,10 +12283,22 @@ window.CONTENT_INDEX = {"boss.ashen-king":"bosses/ashen-king.json","boss.beacon-
     }
   }
 
-  // dropped heart pickups (baked glow sprite; gentle bob + a low-life flicker
-  // that reads as "grab it before it guts out"). One drawImage each, lowfx-safe.
+  // dropped ground pickups — ember motes first, hearts over them (a heart is the
+  // more urgent grab and must never be hidden under loot). Baked sprites, one
+  // drawImage each, lowfx-safe: worst case MAX_MOTES + MAX_PICKUPS = 32 blits,
+  // and a real room's kills sit at three to nine.
   function drawPickups(ctx) {
-    const it = pickups.items, lowfx = SS.lowfx();
+    const lowfx = SS.lowfx();
+    const mi = motes.items, mf = moteFrames[0].width;
+    for (let i = 0; i < mi.length; i++) {
+      const m = mi[i]; if (!m.alive) continue;
+      if (m.life < MOTE_FLICK && ((m.life >> 3) & 1)) continue;   // flicker in the last ~1.5s
+      // the glint winks on a per-mote phase so a scatter never pulses in unison;
+      // lowfx holds the calm frame (one fewer thing twitching on the console).
+      const f = lowfx ? 0 : (((m.life >> 4) + m.seed) & 1);
+      ctx.drawImage(moteFrames[f], (m.x - mf / 2) | 0, (m.y - mf / 2) | 0);
+    }
+    const it = pickups.items;
     for (let i = 0; i < it.length; i++) {
       const h = it[i]; if (!h.alive) continue;
       if (h.life < 90 && ((h.life >> 3) & 1)) continue;   // flicker in the last ~1.5s
@@ -12174,6 +12322,8 @@ window.CONTENT_INDEX = {"boss.ashen-king":"bosses/ashen-king.json","boss.beacon-
   function poofCount() { return poofs ? poofs.liveCount : 0; }   // E16: live death-poof particles (read-only)
   function pickupCount() { return pickups ? pickups.liveCount : 0; }   // live heart pickups (read-only, harness)
   function pickupList() { const out = [], it = pickups ? pickups.items : []; for (let i = 0; i < it.length; i++) { const h = it[i]; if (h.alive) out.push({ x: Math.round(h.x), y: Math.round(h.y), life: h.life }); } return out; }
+  function moteCount() { return motes ? motes.liveCount : 0; }   // live ember motes on the ground (read-only, harness)
+  function moteList() { const out = [], it = motes ? motes.items : []; for (let i = 0; i < it.length; i++) { const m = it[i]; if (m.alive) out.push({ x: Math.round(m.x), y: Math.round(m.y), life: m.life, val: m.val }); } return out; }
 
   // ---- boss introspection (B01) — read-only for the dungeon director + harness
   function bossInfo() {
@@ -12187,6 +12337,7 @@ window.CONTENT_INDEX = {"boss.ashen-king":"bosses/ashen-king.json","boss.beacon-
     init, load, reset, update, spawn, dismiss,
     collectDrawList, drawOne, drawShots, drawPoofs, drawPickups,
     aliveCount, spawnedCount, list, nearestInfo, hpAt, telegraphSeen, poofCount, pickupCount, pickupList,
+    moteCount, moteList,
     bossInfo, bossStatus,
   };
 })();
@@ -12836,7 +12987,7 @@ window.CONTENT_INDEX = {"boss.ashen-king":"bosses/ashen-king.json","boss.beacon-
       SS.Players.drawProjectiles(ctx);
       SS.EnemyMgr.drawShots(ctx);
       SS.EnemyMgr.drawPoofs(ctx);
-      SS.EnemyMgr.drawPickups(ctx);      // dropped heart pickups (world-space)
+      SS.EnemyMgr.drawPickups(ctx);      // dropped ember motes + heart pickups (world-space)
       region.drawWisps(ctx);
       region.drawAmbientOverlay(ctx, cam);
       if (this._target) drawPrompt(ctx, this._target.ent.x, this._target.ent.y - 24, promptLabel(this._target));
@@ -14153,6 +14304,8 @@ window.CONTENT_INDEX = {"boss.ashen-king":"bosses/ashen-king.json","boss.beacon-
       livePoofs: () => SS.EnemyMgr.poofCount(),
       livePickups: () => SS.EnemyMgr.pickupCount(),   // live heart pickups (fix 3 verification)
       pickups: () => SS.EnemyMgr.pickupList(),         // live heart pickup positions (fix 3 verification)
+      liveMotes: () => SS.EnemyMgr.moteCount(),        // ember motes lying on the ground
+      motes: () => SS.EnemyMgr.moteList(),             // ember mote positions + fuse + value
       // ---- dungeon + boss read hooks (D01/B01) — read-only; harness drives input
       boss: () => SS.EnemyMgr.bossInfo(),
       bossHp: () => { const b = SS.EnemyMgr.bossInfo(); return b ? b.hp : null; },
