@@ -89,6 +89,14 @@ window.GAMES_DATA = [
     "source": "https://broforce.onrender.com/"
   },
   {
+    "slug": "powder-peak",
+    "title": "POWDER PEAK",
+    "genre": "SKIING",
+    "status": "PRESS START",
+    "icon": "powder",
+    "source": "https://powderpeak.onrender.com/"
+  },
+  {
     "slug": "shatteredsun",
     "title": "SHATTERED SUN",
     "genre": "RPG",
