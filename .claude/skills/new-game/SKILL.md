@@ -12,7 +12,9 @@ phases in order; do not skip verification gates.
 ## Phase 0 — Design on paper (with the user)
 
 Lock these BEFORE any code: core mechanic and central tension; controls
-(gamepad hold/press mapping, keyboard, touch); rules for
+(gamepad hold/press mapping + keyboard; touch comes free via the shared
+virtual pad overlay — only design touch if the game wants extra
+direct-manipulation gestures like tap-to-walk or board swipes); rules for
 death/damage/growth/score; single-player vs drop-in 2P; visual direction
 (one reference, e.g. "Crossy Road angle"). Kid-friendly defaults: shorten
 don't kill, respawn don't end, mercy mechanics when pinned. Write the
@@ -38,6 +40,14 @@ assets. The brief MUST contain, verbatim where applicable:
    (controller.js include + guards, pad-reachability, reserved combos,
    no shadowBlur, no backdrop-filter, prebaked sprites, <150 drawImage
    budget, pooling, lazy WebAudio, localStorage best under `<slug>_best`).
+   Explicitly include: "Do NOT build touch d-pads/joysticks/buttons —
+   controller.js injects a standard virtual pad overlay (touchpad-v1)
+   that drives pad(0) on touch devices. Direct-manipulation gestures
+   (tap/swipe/drag on the game itself) are welcome and coexist with it.
+   The <head> MUST have the standard metas: viewport
+   `width=device-width, initial-scale=1.0, maximum-scale=1.0,
+   user-scalable=no, viewport-fit=cover` plus the three
+   apple-mobile-web-app-* metas (capable=yes, black-translucent, title)."
 3. The verification loop as a RETURN CONDITION (Phase 3 list) — "do not
    return until all of this passes", including "LOOK at your screenshots
    and iterate until it meets the visual bar".
@@ -56,7 +66,13 @@ gameconsole/lib/controller.js for the pad API.
   keyboard-only regression, 2P join/down/respawn if applicable — zero
   console errors, every state pad-reachable.
 - 2D-context prototype instrumentation: per-frame op counts within budget.
-- Screenshots of title / busy gameplay / game over at 1280x720 — YOU read
+- Touch pass (CDP touch emulation, no gamepad stub): first tap engages
+  `#__arcade_touchpad`; drive title → gameplay with only the virtual
+  stick/✕; body gets `input-pad`; zero console errors. (Pattern:
+  gameconsole/scripts/test-touchpad.mjs — needs --experimental-websocket
+  on node 20 and --enable-unsafe-swiftshader if the game uses WebGL.)
+- Screenshots of title / busy gameplay / game over at 1280x720, plus one
+  gameplay shot at 1180x820 with the touch overlay engaged — YOU read
   the report AND look at the screenshots yourself before shipping.
 
 ## Phase 4 — Ship
@@ -78,6 +94,7 @@ git add -A && git commit && git pull --rebase && git push
 
 ```sh
 ssh -f -N -L 9223:localhost:9222 arcade@ses.local
+# node 20 needs: node --experimental-websocket pi/cdp.mjs …
 CDP_PORT=9223 node pi/cdp.mjs targets   # NEVER hijack an active game
 CDP_PORT=9223 node pi/cdp.mjs nav https://ses.q5labs.co/games/<slug>/
 CDP_PORT=9223 node pi/cdp.mjs fps 4     # want ~60; if low, instrument ops live
