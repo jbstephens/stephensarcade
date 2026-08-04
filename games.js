@@ -9,6 +9,14 @@ window.GAMES_DATA = [
     "source": "https://phaser-wars.onrender.com/fightinggame.html"
   },
   {
+    "slug": "phaser-wars-2",
+    "title": "PHASER WARS 2",
+    "genre": "FIGHTING",
+    "status": "PRESS START",
+    "icon": "phaser2",
+    "source": "https://phaserwars2.onrender.com/"
+  },
+  {
     "slug": "meteor-blaster",
     "title": "METEOR BLASTER",
     "genre": "ARCADE",
