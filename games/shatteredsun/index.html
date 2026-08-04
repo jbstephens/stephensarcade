@@ -2,7 +2,10 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Shattered Sun">
 <title>Shattered Sun</title>
 <!-- House control law: ArcadeController from the arcade shell; all uses guarded. -->
 <script src="https://ses.q5labs.co/lib/controller.js"></script>
@@ -700,6 +703,10 @@ window.CONTENT_INDEX = {"boss.ashen-king":"bosses/ashen-king.json","boss.beacon-
 
   // ---- fixed-step update: snapshot pad edges, then clear kb edges --------
   function update() {
+    // pad took over P1 (shared touch overlay or a real pad): drop any live
+    // touch-stick/button state so a mid-gesture handoff can't leave a stuck
+    // input, and keep the bespoke controls inert while the pad is connected
+    if (padOverridesTouch()) resetTouch();
     for (let p = 0; p < 2; p++) {
       const snap = pads[p];
       snap.prev = snap.curr;
@@ -796,6 +803,19 @@ window.CONTENT_INDEX = {"boss.ashen-king":"bosses/ashen-king.json","boss.beacon-
   }
 
   // ---- touch: virtual stick (left) + 2 buttons (right) + pause -----------
+  // The arcade shell's shared virtual touch gamepad registers as a CONNECTED
+  // ArcadeController pad, and the pad path above already drives P1 from it.
+  // While any pad is on P1 the game's own canvas stick/buttons stand down
+  // (no drawing, no touch processing) or the two control schemes double up.
+  function padOverridesTouch() {
+    if (!window.ArcadeController) return false;
+    const p = window.ArcadeController.pad(0);
+    return !!(p && p.connected);
+  }
+  function resetTouch() {
+    touch.active = false; touch.dx = 0; touch.dy = 0; touch.stickId = null;
+    for (const z of [touch.btnA, touch.btnB, touch.pause]) { z._id = null; z.down = false; z.justPressed = false; }
+  }
   const touch = {
     active: false, dx: 0, dy: 0,
     stickId: null, sx: 0, sy: 0,
@@ -819,6 +839,7 @@ window.CONTENT_INDEX = {"boss.ashen-king":"bosses/ashen-king.json","boss.beacon-
 
   function onTouchStart(e) {
     touchDevice = true;
+    if (padOverridesTouch()) { if (e.cancelable) e.preventDefault(); return; }
     for (const t of e.changedTouches) {
       const { x, y } = toDisplay(t);
       if (x < T.stickCx + T.stickR * 2 && touch.stickId == null) {
@@ -832,6 +853,7 @@ window.CONTENT_INDEX = {"boss.ashen-king":"bosses/ashen-king.json","boss.beacon-
     if (e.cancelable) e.preventDefault();
   }
   function onTouchMove(e) {
+    if (padOverridesTouch()) { if (e.cancelable) e.preventDefault(); return; }
     for (const t of e.changedTouches) {
       if (t.identifier === touch.stickId) {
         const { x, y } = toDisplay(t);
@@ -858,7 +880,7 @@ window.CONTENT_INDEX = {"boss.ashen-king":"bosses/ashen-king.json","boss.beacon-
 
   // draw the virtual controls (only on touch devices) — bitmap font labels
   function drawTouch(ctx) {
-    if (!touchDevice) return;
+    if (!touchDevice || padOverridesTouch()) return;
     const kit = SS.kit;
     ctx.save();
     ctx.globalAlpha = 0.55;
@@ -1265,10 +1287,13 @@ window.CONTENT_INDEX = {"boss.ashen-king":"bosses/ashen-king.json","boss.beacon-
 
 
 // ===== src/engine/renderer.js =====
-// E02 — Renderer. Internal 640x360 canvas, EXACT 2x integer blit to the
-// 1280x720 display (largest integer scale + black letterbox on other
-// viewports), imageSmoothingEnabled=false everywhere. Camera with region
-// bounds clamp + per-area camera locks. Plus a shelf-packing Atlas.
+// E02 — Renderer. Internal 640x360 canvas blitted to the display at the
+// largest FRACTIONAL scale that fits (letterboxed on the other axis).
+// On the 1280x720 cabinet the math lands on an EXACT 2x integer blit;
+// on iPads (e.g. 1180x750) it fills the screen at ~1.84x instead of
+// collapsing to a tiny 1x. imageSmoothingEnabled=false everywhere keeps
+// the nearest-neighbor pixels crisp. Camera with region bounds clamp +
+// per-area camera locks. Plus a shelf-packing Atlas.
 (function () {
   'use strict';
   const SS = window.SS || (window.SS = {});
@@ -1351,7 +1376,7 @@ window.CONTENT_INDEX = {"boss.ashen-king":"bosses/ashen-king.json","boss.beacon-
   };
 
   let display = null, dctx = null, internal = null, ictx = null;
-  let scale = 2, offX = 0, offY = 0;
+  let scale = 2, offX = 0, offY = 0, blitW = SCREEN_W * 2, blitH = SCREEN_H * 2;
 
   function resize() {
     if (!display) return;
@@ -1359,9 +1384,14 @@ window.CONTENT_INDEX = {"boss.ashen-king":"bosses/ashen-king.json","boss.beacon-
     const H = Math.max(1, window.innerHeight || 720);
     display.width = W; display.height = H;
     display.style.width = W + 'px'; display.style.height = H + 'px';
-    scale = Math.max(1, Math.floor(Math.min(W / SCREEN_W, H / SCREEN_H)));
-    offX = Math.floor((W - SCREEN_W * scale) / 2);
-    offY = Math.floor((H - SCREEN_H * scale) / 2);
+    // Fractional fit-to-window (floor-to-integer shrank iPads to a 1x
+    // postage stamp). 1280x720 yields exactly 2.0 — the cabinet keeps its
+    // pixel-perfect integer blit. Lower bound keeps degenerate windows sane.
+    scale = Math.max(0.25, Math.min(W / SCREEN_W, H / SCREEN_H));
+    blitW = Math.round(SCREEN_W * scale);
+    blitH = Math.round(SCREEN_H * scale);
+    offX = Math.floor((W - blitW) / 2);
+    offY = Math.floor((H - blitH) / 2);
     dctx.imageSmoothingEnabled = false;
     if (SS.Input) SS.Input.layoutTouch(W, H);
   }
@@ -1392,7 +1422,7 @@ window.CONTENT_INDEX = {"boss.ashen-king":"bosses/ashen-king.json","boss.beacon-
     dctx.fillStyle = '#05040a';
     dctx.fillRect(0, 0, display.width, display.height);
     dctx.imageSmoothingEnabled = false;
-    dctx.drawImage(internal, 0, 0, SCREEN_W, SCREEN_H, offX, offY, SCREEN_W * scale, SCREEN_H * scale);
+    dctx.drawImage(internal, 0, 0, SCREEN_W, SCREEN_H, offX, offY, blitW, blitH);
   }
 
   SS.Renderer = {

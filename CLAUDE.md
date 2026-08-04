@@ -39,7 +39,13 @@ count. Use the `/new-game` skill for the full checklist.
   movement via state polling. START = pause. South = confirm.
 - NEVER bind SELECT+START held together or the PS/home button — the shell
   reserves them for quit-to-menu (injected overlay).
-- Keyboard + touch also supported (iPad/desktop still first-class).
+- Keyboard + touch also supported (iPad/desktop still first-class). Touch
+  movement/buttons come FREE: controller.js injects a standard virtual pad
+  overlay (left stick + △○✕□ + SELECT/START) on first touch that drives
+  pad(0) — do NOT build per-game touch d-pads/joysticks. DO keep
+  direct-manipulation gestures (tap-to-walk, board swipes, drag-to-aim);
+  they coexist. Opt a page out with `window.ARCADE_NO_TOUCHPAD = true`
+  before controller.js loads (the launcher, ghost-patrol, scream-rocket).
 - Drop-in 2P where it makes sense: "P2 PRESS ✕ TO JOIN" on title + START
   joins mid-game; shared score; down-then-respawn rather than hard death.
 - localStorage for best scores. WebAudio synth SFX, context created lazily.
