@@ -20,7 +20,8 @@ for g in games:
     out.parent.mkdir(parents=True, exist_ok=True)
     print(f"→ {slug}  ←  {src}")
     subprocess.run(
-        ["curl", "-fsSL", "--max-time", "30", "-o", str(out), src],
+        ["curl", "-fsSL", "--max-time", "30", "--retry", "2", "--retry-delay", "5",
+         "--retry-all-errors", "-o", str(out), src],
         check=True,
     )
 
