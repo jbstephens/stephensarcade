@@ -118,6 +118,6 @@ window.GAMES_DATA = [
     "genre": "ADVENTURE",
     "status": "PRESS START",
     "icon": "moon",
-    "source": "https://ses.q5labs.co/fallenmoon/index.html"
+    "source": "https://fallenmoon.onrender.com/"
   }
 ];
