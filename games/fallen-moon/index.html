@@ -855,6 +855,15 @@ function defaultSave() {
     cartChest: false,         // the cartographer's salt chest
     mapTides: false,          // read the cartographer's wall map
     mapTable: false,          // looked at the half-drawn new map
+    /* PHASE 2 night one — THE PARCHED FOREST */
+    region: 'bay',            // where the adventure last saved
+    lastSpring: -1,           // index of the last shade spring touched (respawn anchor)
+    millChest: false, ferryChest: false, fgrottoChest: false,
+    cedarHeart: false,        // the Great Cedar's heart container
+    wardenTalked: 0,          // Fire Warden conversation depth
+    fallsHum: false,          // heard the hum at the sealed falls basin
+    forestSeen: false,        // crossed Cinder Pass once (region title shown)
+    swelterSeen: false,       // one-time swelter warning caption
     lastShade: [8.2, 7.0],
   };
 }
@@ -1720,7 +1729,7 @@ const FOG_GROTTO = { col: col(0x2c3038), near: 10, far: 46 };
 scene.fog = new THREE.Fog(0xf3e6cf, FOG0.near, FOG0.far);
 scene.background = null;   // sky dome covers
 
-const camera = new THREE.PerspectiveCamera(66, VW / VH, 0.2, 700);   // v2: wider action FOV
+const camera = new THREE.PerspectiveCamera(66, VW / VH, 0.2, 2100);  // v2: wider action FOV (v5: far plane reaches the Dried Falls)
 
 /* only characters are lit; the world is baked (Powder Peak lesson) */
 const sunLight = new THREE.DirectionalLight(0xfff0d8, 0.92);
@@ -1841,7 +1850,7 @@ const POOLS = [
 ];
 function gauss(d2, s2) { return Math.exp(-d2 / s2); }
 function groundH(x, z) {
-  if (x > 300) return 0;                          // portrait stage plane
+  if (x > 300 && z < -30) return 0;               // off-world strip: rooms + portrait stage
   // land ↔ seabed blend
   const landT = smoothstep((14 - z) / 26);        // 1 on land (z < -12), 0 in bay (z > 14)
   const land = 1.7 + Math.max(0, -z - 12) * 0.045 + vnoise(x * 0.05, z * 0.05) * 0.5;
@@ -1862,8 +1871,16 @@ function groundH(x, z) {
     const t = smoothstep(1 - (Math.min(da - GROTTO_A.r, db - GROTTO_B.r)) / 4);
     h = lerp(h, -3.1, clamp(t, 0, 1));
   }
-  // rim rises wall the world — smooth dunes/headland, not spikes
-  const ex = Math.max(0, Math.abs(x) - 90) + Math.max(0, -z - 90) + Math.max(0, z - 176);
+  // rim rises wall the world — smooth dunes/headland, not spikes.
+  // v5 CINDER PASS: the EAST rim dips to a walkable saddle around z≈38 —
+  // the road into the Parched Forest. No gate, just a hard walk.
+  let xe = Math.max(0, Math.abs(x) - 90);
+  if (x > 90) {
+    const pk = smoothstep(1 - Math.abs(z - 38) / 26);    // 1 on the saddle centerline
+    xe *= 1 - 0.94 * pk;
+    h += smoothstep((x - 90) / 22) * 3.2 * pk;           // gentle hump up out of the bay
+  }
+  const ex = xe + Math.max(0, -z - 90) + Math.max(0, z - 176);
   h += Math.min(26, ex * ex * 0.045) * (0.85 + vnoise(x * 0.04, z * 0.04) * 0.15);
   return h;
 }
@@ -1929,7 +1946,10 @@ function collide(px, pz, pr, fy) {
   for (let i = 0; i < COLL.length; i++) {
     const c = COLL[i];
     if (c.off) continue;
-    if (c.top !== undefined && fy !== undefined && fy >= c.top - 0.18) continue;
+    if (c.plat) continue;   // v6: pure platforms (stair treads, decks) support, never wall
+    // v6: tops within a real STEP of the feet are walkable (the fire-watch
+    // tower's stairs); crates/barrels (0.6+) still ask for a jump
+    if (c.top !== undefined && fy !== undefined && fy >= c.top - 0.42) continue;
     const dx = x - c.x, dz = z - c.z;
     const d2 = dx * dx + dz * dz, rr = c.r + pr;
     if (d2 < rr * rr && d2 > 0.0001) {
@@ -1937,7 +1957,10 @@ function collide(px, pz, pr, fy) {
       x = c.x + dx / d * rr; z = c.z + dz / d * rr;
     }
   }
-  return [clamp(x, -98, 98), clamp(z, -98, 184)];
+  // v5: the world clamp is piecewise — Brightharbor keeps its old walls,
+  // the Parched Forest opens the east (its real walls are __forestSolid)
+  if (x > 100) return [clamp(x, 100, 2178), clamp(z, -38, 1398)];
+  return [clamp(x, -98, 102), clamp(z, -98, 184)];
 }
 /* standing height at (x,z) for feet currently at fy: terrain, or the top of
    a platform prop we're over (and not far beneath) */
@@ -2003,12 +2026,18 @@ function grottoSolidAt(x, z) {
   if (!massifAt(x, z)) return false;
   return !grottoOpenAt(x, z);
 }
+/* v5: ONE solid authority for every zone — the grotto massif plus the
+   Parched Forest's walls/trunks/seal (defined later; guarded until then) */
+function worldSolidAt(x, z) {
+  if (grottoSolidAt(x, z)) return true;
+  return x > 98 && !!window.__forestSolid && window.__forestSolid(x, z);
+}
 /* axis-split slide against the solid region: from a known-good (ox,oz),
    accept as much of the move to (nx,nz) as stays out of stone */
 function resolveSolid(ox, oz, nx, nz) {
-  if (!grottoSolidAt(nx, nz)) return [nx, nz];
-  if (!grottoSolidAt(nx, oz)) return [nx, oz];
-  if (!grottoSolidAt(ox, nz)) return [ox, nz];
+  if (!worldSolidAt(nx, nz)) return [nx, nz];
+  if (!worldSolidAt(nx, oz)) return [nx, oz];
+  if (!worldSolidAt(ox, nz)) return [ox, nz];
   return [ox, oz];
 }
 
@@ -2035,9 +2064,14 @@ function pathDist(x, z) {
 }
 const _gc = [0, 0, 0];
 function groundColor(x, z, y) {
-  if (x > 300) { _gc[0] = 0.58; _gc[1] = 0.56; _gc[2] = 0.53; return _gc; }   // portrait
+  if (x > 300 && z < -30) { _gc[0] = 0.58; _gc[1] = 0.56; _gc[2] = 0.53; return _gc; }   // off-world strip
   if (inGrottoAt(x, z)) {
     mix3(col(0x565048), C_POOLBED, 0.12 + vnoise(x * 0.3, z * 0.3) * 0.1, _gc);
+    // v6: the entrance walkway is SUN-STRUCK near the mouth — the way out
+    // reads bright from deep inside (no more black-hole doorway)
+    if (z < 140 && z > 118 && Math.abs(x - GROTTO_ENT.x) < 9) {
+      mix3(_gc, [0.9, 0.83, 0.66], smoothstep((139 - z) / 8) * 0.85, _gc);
+    }
     return _gc;
   }
   const n = vnoise(x * 0.16, z * 0.16);
@@ -2572,16 +2606,20 @@ function buildGrotto() {
   grottoCapMesh = mdMesh(mdCaps, new THREE.MeshBasicMaterial({ vertexColors: true }), false);
   grottoCapMesh.matrixAutoUpdate = false; grottoCapMesh.updateMatrix();
   scene.add(grottoCapMesh);
-  // the MOUTH: a dark throat + portal stones so the entrance reads from the bay
+  // the MOUTH: portal stones frame it; the throat itself stays OPEN.
   (function mouth() {
     const md = chunkFor(GROTTO_ENT.x, GROTTO_ENT.z);
-    const dark = [0.09, 0.09, 0.11];
-    // black gullet plane just inside the opening (v3: widened + raised so no
-    // sky sliver ever reads around its edges from inside the chamber)
-    const gx = GROTTO_ENT.x, gz = 140;
-    md.p.push(gx - 8.5, -3.6, gz, gx + 8.5, -3.6, gz, gx + 8.5, 10.5, gz,
-              gx - 8.5, -3.6, gz, gx + 8.5, 10.5, gz, gx - 8.5, 10.5, gz);
-    for (let i = 0; i < 6; i++) md.c.push(dark[0], dark[1], dark[2]);
+    // v6 (John's photo: "the exit is a black hole"): the old black gullet
+    // plane stood ACROSS the walkway — walking out you faced a void wall.
+    // Gone. Through the doorway you now see the truth: sunlit sand and sky.
+    // Lit jamb walls flank the throat so the opening reads with depth from
+    // inside, and they still blot any raw-sky sliver around the door arc.
+    const gx = GROTTO_ENT.x;
+    const jamb = [0.86, 0.78, 0.6], jambD = [0.62, 0.56, 0.45];
+    for (const s of [-1, 1]) {
+      boxW(md, { x: gx + s * 3.55, y: -3.6, z: 133.9, w: 0.5, d: 1.7, h: 7.2, tw: 0.4, td: 1.2, ry: s * 0.12, col: jamb, colB: jambD });
+      boxW(md, { x: gx + s * 4.1, y: -3.6, z: 136.6, w: 0.6, d: 1.4, h: 5.4, tw: 0.45, td: 1.0, ry: s * 0.2, col: jambD });
+    }
     // portal stones + lintel
     for (const s of [-1, 1]) {
       latheW(md, [[2.0, -3.2], [1.7, 2.8], [0.8, 6.8]], { seg: 6, ex: 0.8, x: gx + s * 4.4, y: 0, z: 134, ry: s, col: C_ROCK, cols: [C_ROCK2, C_ROCK] });
@@ -2745,7 +2783,20 @@ function rebuildKelpPatch(patch) {
   const md = MD();
   let any = false;
   for (const s of patch.stalks) {
-    if (s.cut) continue;
+    if (s.cut) {
+      // v6 (John: "you just walk through walls"): the BURNED wall leaves
+      // charred stumps + scorch rings, so the corridor reads as an opened
+      // passage — not fog-of-rock you clip through
+      if (patch.tag === 'wall') {
+        any = true;
+        const y = groundH(s.x, s.z);
+        latheW(md, [[0.17, 0], [0.11, 0.24], [0.03, 0.34]],
+          { seg: 5, x: s.x, y, z: s.z, col: [0.17, 0.14, 0.12] });
+        latheW(md, [[0.34, 0.03], [0.05, 0.05]],
+          { seg: 6, flat: true, x: s.x, y, z: s.z, col: [0.11, 0.1, 0.09] });
+      }
+      continue;
+    }
     any = true;
     stalkGeom(md, s.x, groundH(s.x, s.z), s.z, s.h, (s.x * 57 + s.z * 131) | 0);
   }
@@ -2953,7 +3004,7 @@ function setSkyBlend(t) {
 }
 
 /* ── portrait stage (screenshot review only — inside the sky dome, own mesh) ── */
-const PSTAGE = { x: 330, z: 150 };
+const PSTAGE = { x: 330, z: -300 };   // v5: moved into the off-world strip (the forest owns the old spot)
 let pstageMesh = null;
 (function portraitStage() {
   const md = MD();
@@ -4247,6 +4298,49 @@ let beamDown = null, beamOut = null;
   beamOut.position.set(MIRROR_POS.x, groundH(MIRROR_POS.x, MIRROR_POS.z) + 0.15, MIRROR_POS.z);
   scene.add(beamOut);
 })();
+/* v6: light READS through the openings.
+   entGlow — daylight spilling through the entrance onto chamber A's floor.
+   corridorGlow — once the wall burns, warm light spills from both corridor
+   mouths and pools on the floor: a passage you can SEE, not walk-through rock. */
+let entGlow = null, corridorGlow = null;
+(function buildGrottoGlows() {
+  const gy = -3.05;
+  {
+    const md = MD();
+    const c = [1, 0.93, 0.72];
+    const gx = GROTTO_ENT.x;
+    // a soft fan from the doorway onto the chamber floor
+    pushQuad(md, [gx - 2.6, gy + 4.2, 136.2], [gx + 2.6, gy + 4.2, 136.2],
+      [gx + 4.6, gy + 0.05, 143.5], [gx - 4.6, gy + 0.05, 143.5], c);
+    lathe(md, [[0, gy + 0.08], [4.2, gy + 0.02]], { seg: 9, ex: 0.8, x: gx, y: 0, z: 141.5, col: c });
+    entGlow = mdMesh(md, new THREE.MeshBasicMaterial({
+      vertexColors: true, transparent: true, opacity: 0.26,
+      blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide, fog: false,
+    }), false);
+    entGlow.frustumCulled = false;
+    scene.add(entGlow);
+  }
+  {
+    const md = MD();
+    const c = [1, 0.85, 0.55];
+    for (const [ex, ez] of [[COR_WALK.ax, COR_WALK.az], [COR_WALK.bx, COR_WALK.bz]]) {
+      for (const off of [[1.7, 0.8], [-0.8, 1.7]]) {
+        pushQuad(md, [ex - off[0], gy, ez - off[1]], [ex + off[0], gy, ez + off[1]],
+          [ex + off[0], gy + 6.4, ez + off[1]], [ex - off[0], gy + 6.4, ez - off[1]], c);
+      }
+      lathe(md, [[0, gy + 0.09], [3.0, gy + 0.03]], { seg: 8, x: ex, y: 0, z: ez, col: c });
+    }
+    // a faint runner of light down the corridor itself
+    lathe(md, [[0, gy + 0.07], [2.2, gy + 0.02]], { seg: 7, x: (COR_WALK.ax + COR_WALK.bx) / 2, y: 0, z: (COR_WALK.az + COR_WALK.bz) / 2, col: c });
+    corridorGlow = mdMesh(md, new THREE.MeshBasicMaterial({
+      vertexColors: true, transparent: true, opacity: 0.2,
+      blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide, fog: false,
+    }), false);
+    corridorGlow.frustumCulled = false;
+    corridorGlow.visible = false;
+    scene.add(corridorGlow);
+  }
+})();
 
 /* ── interactable world items ── */
 /* chests (shared builder) */
@@ -4541,7 +4635,7 @@ function updateCamera(dtv) {
   for (let s = 0.2; s <= 1.0; s += 0.1) {
     const sx2 = tx + dx * dist * s, sz2 = tz + dz * dist * s;
     const sy2 = ty + dyv * dist * s;
-    if (groundH(sx2, sz2) + 0.42 > sy2 || grottoSolidAt(sx2, sz2) || outsideRoom(sx2, sz2)) {
+    if (groundH(sx2, sz2) + 0.42 > sy2 || worldSolidAt(sx2, sz2) || outsideRoom(sx2, sz2)) {
       dist = Math.max(0.9, dist * (s - 0.1)); break;
     }
   }
@@ -4834,14 +4928,17 @@ function poseHumanoid(c, st, t, speed, opts) {
   if (loco > 0) {
     /* v3 walk rev: heel-toe weight, counter-rotating shoulders over swaying
        hips, a subtle head bob. Sprint deepens everything and leans in. */
-    const f = w * (7.2 + speed * 1.1 + spr * 2.4);
-    legA = Math.sin(f) * (0.62 + spr * 0.22) * loco;
-    armA = -Math.sin(f) * (0.42 + spr * 0.3) * loco;
-    bob = Math.abs(Math.cos(f)) * (0.05 + spr * 0.02) * loco;
-    lean = (0.1 + spr * 0.42) * loco;              // sprint: crouched lean-in
-    sway = Math.sin(f) * (0.05 + spr * 0.015) * loco;     // hip sway
-    twist = Math.sin(f) * (0.09 + spr * 0.05) * loco;     // shoulder counter-rotation
-    headBob = Math.sin(f * 2) * 0.025 * loco;
+    /* v5 sprint feel: POWER, not patter — longer stride at lower cadence,
+       hip sway nearly killed (sway reads sashay at speed), harder lean,
+       bigger arm drive, steadier head. */
+    const f = w * (7.2 + speed * 1.1 + spr * 1.3);
+    legA = Math.sin(f) * (0.62 + spr * 0.36) * loco;
+    armA = -Math.sin(f) * (0.42 + spr * 0.46) * loco;
+    bob = Math.abs(Math.cos(f)) * (0.05 + spr * 0.035) * loco;
+    lean = (0.1 + spr * 0.5) * loco;               // sprint: driving lean-in
+    sway = Math.sin(f) * (0.05 - spr * 0.032) * loco;     // hip sway (walk only)
+    twist = Math.sin(f) * (0.09 + spr * 0.08) * loco;     // shoulder counter-rotation
+    headBob = Math.sin(f * 2) * 0.025 * (1 - spr * 0.6) * loco;
   }
   c.hipL.rotation.x = legA; c.hipR.rotation.x = -legA;
   // heel-toe: the knee stays straight into heel-strike, folds through
@@ -4914,14 +5011,17 @@ function poseAttack(c, n, ph) {
   c.shL.rotation.z = 0.35;
 }
 function poseAir(c, jvy) {
-  // v3 jump: knees tuck on the rise, legs reach on the fall, arms out
+  /* v5 jump: athletic, not prayerful — arms flung WIDE and nearly
+     straight for balance (lead arm higher, never symmetric), one knee
+     driving, legs reaching into the landing. */
   const up = clamp(jvy / 6.6, -1, 1);
-  c.kneeL.rotation.x = 0.9 + up * 0.6; c.kneeR.rotation.x = 0.7 + up * 0.5;
-  c.hipL.rotation.x = -0.5 - up * 0.3; c.hipR.rotation.x = -0.25 - up * 0.2;
-  c.shL.rotation.x = -0.4; c.shR.rotation.x = -0.4;
-  c.shL.rotation.z = 0.55; c.shR.rotation.z = -0.55;
-  c.elL.rotation.x = -0.4; c.elR.rotation.x = -0.4;
-  c.torso.rotation.x = 0.12 - up * 0.1;
+  c.kneeL.rotation.x = 0.95 + up * 0.6; c.kneeR.rotation.x = 0.45 + up * 0.35;
+  c.hipL.rotation.x = -0.6 - up * 0.35; c.hipR.rotation.x = -0.15 - up * 0.12;
+  c.shL.rotation.x = -0.55 - Math.max(0, -up) * 0.3;   // lead arm, rises into the fall
+  c.shR.rotation.x = -0.3 - Math.max(0, -up) * 0.2;
+  c.shL.rotation.z = 1.05; c.shR.rotation.z = -0.9;    // flung out, asymmetric
+  c.elL.rotation.x = -0.12; c.elR.rotation.x = -0.18;  // nearly straight
+  c.torso.rotation.x = 0.16 - up * 0.12;
 }
 function poseItemGet(c, ph) {
   const up = smoothstep(clamp(ph * 2.4, 0, 1));
@@ -5949,17 +6049,13 @@ const BOSS = {
 };
 function bossPhaseHp(ph) { return ph <= 1 ? BOSS_HP : ph === 2 ? 60 : 30; }
 function initBoss() {
+  // v6: BUILD only — every save-derived fact (defeated, cured eyes, resting
+  // spot) now lives in applyWorldState(), which runs at boot AND on every
+  // save transition. John's field bug: a completed save configured the boss
+  // at boot, then NEW GAME kept the cured boss — unfightable fresh game.
   BOSS.c = buildKingCrab();
   BOSS.c.root.position.set(BOSS.x, groundH(BOSS.x, BOSS.z), BOSS.z);
   scene.add(BOSS.c.root);
-  if (SAVE && SAVE.bossDone) {
-    BOSS.defeated = true; BOSS.crescentGiven = true;
-    BOSS.hp = 0;
-    BOSS.c.crN.visible = false;
-    calmBossEyes(1);
-    BOSS.x = GROTTO_B.x - 8; BOSS.z = GROTTO_B.z + 8;
-    BOSS.st = 'rest';
-  }
 }
 /* ── the boss HP bar — standing convention for every boss to come ── */
 const bossBarEl = el('bossBar'), bossFillEl = el('bossFill'), bossNameEl = el('bossName');
@@ -6167,7 +6263,7 @@ function hitBossClaw() {
   const cp = B.st === 'stuck' ? B.slamPos : bossClawPos();
   burst(psSpark, cp[0], groundH(cp[0], cp[1]) + 0.8, cp[1], 12, 2.2, 1.8, 0.5);
   if (B.st === 'stuck' || B.st === 'dizzy') B.t = Math.min(B.t, 1.2);   // brief extra window
-  dealBossDamage(10);            // 5x — the telegraphed weakness pays off
+  dealBossDamage(12);            // 6x — the telegraphed weakness pays off decisively
 }
 /* v4: body hits ALWAYS chip — small but real, with FULL feedback. A kid
    who only ever slashes the shell still wins this fight. */
@@ -6762,6 +6858,2071 @@ function animateEnemies(dtv, now) {
 }
 </script>
 <script>
+/* ═══════════════════ p6b — PHASE 2 night one: THE PARCHED FOREST ═══════════════════
+   The game's second region, east over Cinder Pass. ≥2.0km x 1.4km of
+   heat-stressed pine forest: the dry SILVERRUN riverbed spine walking up
+   to the DRIED FALLS, the fire-watch tower, the Great Cedar, six shade
+   springs, cinder boars, ember hornets, and the Fire Warden.
+   Sealed behind the rockfall: the plunge-pool basin (night two).
+
+   ARCHITECTURE: this block EXTENDS the Brightharbor world by wrapping the
+   handful of world-authority functions (groundH, groundColor, inShadeAt,
+   nearestShadeSpot, areaAt, currentInteract, doInteract, swingHits,
+   respawnLeftBehind, tickPlayer, animateNPCs, cullChunks, setQuest).
+   Single-source-of-truth rule everywhere: the SAME functions that place
+   geometry also answer collision/shade queries (v4 grotto lesson).      */
+
+/* ───────────────────────── geography (all locked here) ───────────────────────── */
+const FW = { x0: 170, x1: 2178, z0: -38, z1: 1398, passZ: 38 };   // solid-bounded playable rect
+const FOREST_EXTENT = { w: FW.x1 - FW.x0, h: FW.z1 - FW.z0 };      // 2008 x 1436 m
+
+/* the SILVERRUN — a dead river you walk UP, pass → crown (~2.4 km) */
+const RIVER = [
+  [235, 55], [380, 110], [500, 270], [650, 380], [820, 300], [980, 380],
+  [1080, 560], [1220, 660], [1340, 560], [1480, 660], [1580, 840],
+  [1700, 930], [1800, 1050], [1900, 1160], [1972, 1228],
+];
+const RIVER_CUM = (() => {   // cumulative segment lengths for the walk-up param
+  const c = [0];
+  for (let i = 1; i < RIVER.length; i++) {
+    c.push(c[i - 1] + Math.hypot(RIVER[i][0] - RIVER[i - 1][0], RIVER[i][1] - RIVER[i - 1][1]));
+  }
+  return c;
+})();
+const RIVER_LEN = RIVER_CUM[RIVER_CUM.length - 1];
+
+/* the crown: the plateau the falls pour from (poured from), and the basin */
+const CROWN = { x: 2030, z: 1290 };            // plateau center (solid — unclimbable)
+const BASIN = { x: 1938, z: 1192, r: 17 };     // the plunge pool — SEALED by rockfall
+const HUM_SPOT = { x: 1921, z: 1176 };         // where the hum line fires
+
+/* ridgelines & knolls — the sightline discipline */
+const RIDGES = [   // [ax, az, bx, bz, width, height]
+  [400, 520, 900, 640, 90, 16],
+  [1150, 900, 1650, 1050, 100, 18],
+  [1000, 190, 1650, 260, 85, 15],      // the south ridge (the Great Cedar's)
+  [600, 900, 900, 1200, 90, 14],
+  [1550, 350, 1900, 480, 80, 13],
+];
+const KNOLLS = [   // [x, z, height, radius]
+  [1100, 810, 13, 55],    // the fire-watch tower's knoll
+  [870, 640, 8, 32],      // vista knoll west
+  [1400, 950, 8, 32],     // vista knoll east
+];
+
+/* content clusters (~17): clearings, cracked-clay floors, flattened pads */
+const FCLUSTERS = [
+  { id: 'camp',      x: 250,  z: 60,   r: 20, flat: 1 },
+  { id: 'mill',      x: 650,  z: 392,  r: 18, flat: 1 },
+  { id: 'wheel2',    x: 983,  z: 392,  r: 14, flat: 1 },
+  { id: 'ferry',     x: 1338, z: 568,  r: 16, flat: 1 },
+  { id: 'hamlet',    x: 1580, z: 848,  r: 24, flat: 1 },
+  { id: 'tower',     x: 1100, z: 810,  r: 26, flat: 1 },
+  { id: 'cedar',     x: 1300, z: 210,  r: 18, flat: 1 },
+  { id: 'glade1',    x: 520,  z: 200,  r: 26, flat: 1 },
+  { id: 'glade2',    x: 900,  z: 560,  r: 26, flat: 1 },
+  { id: 'glade3',    x: 1520, z: 1100, r: 26, flat: 1 },
+  { id: 'hollow',    x: 1830, z: 1080, r: 20, flat: 1 },
+  { id: 'grotA',     x: 700,  z: 720,  r: 12, flat: 1 },
+  { id: 'grotB',     x: 1750, z: 380,  r: 12, flat: 1 },
+  { id: 'vista1',    x: 870,  z: 640,  r: 10 },
+  { id: 'vista2',    x: 1400, z: 950,  r: 10 },
+  { id: 'seam',      x: 1180, z: 645,  r: 10, flat: 1 },
+  { id: 'forecourt', x: 1900, z: 1165, r: 22, flat: 1 },
+];
+/* six SHADE SPRINGS — sanctuary, respawn anchors, save checkpoints */
+const FSPRINGS = [
+  { x: 390,  z: 130,  r: 5.5 }, { x: 700,  z: 340,  r: 5.5 },
+  { x: 1050, z: 600,  r: 5.5 }, { x: 1400, z: 690,  r: 5.5 },
+  { x: 1650, z: 900,  r: 5.5 }, { x: 1868, z: 1122, r: 5.5 },
+];
+/* the Great Cedar — hollow; ring solid + door gap share these numbers */
+const CEDAR = { x: 1300, z: 210, r0: 2.7, r1: 4.4, doorA: -2.25, doorHalf: 0.6 };
+const TOWER = { x: 1100, z: 810, deckY: 15.2 };
+const WARDEN_POS = { x: 1095.5, z: 803.5 };
+/* extra authored shade (rock shadows, tower roof, grotto alcoves, seal) */
+const FSHADE = [
+  { x: TOWER.x, z: TOWER.z, r: 4.6 },            // the tower's roof shadow column
+  { x: 1095.5, z: 804, r: 3.6 },                 // the warden's porch — her lesson is safe to hear
+  { x: 700, z: 720, r: 7 },                      // secret grotto A alcove
+  { x: 1750, z: 380, r: 7 },                     // secret grotto B alcove
+  { x: 1921, z: 1180, r: 6 },                    // the rockfall's own shadow
+  { x: 250, z: 68, r: 4 },                       // the camp's leaning rock
+  { x: 1180, z: 651, r: 4 },                     // the salt seam's overhang
+  { x: 870, z: 646, r: 3.4 }, { x: 1400, z: 956, r: 3.4 },   // vista cairn stones
+];
+
+/* ───────────────────────── the heightfield ───────────────────────── */
+const _bhGroundH = groundH;          // Brightharbor's own terrain (with the pass carve)
+function riverAt(x, z) {
+  // distance to the polyline + normalized walk-up parameter t (0 pass → 1 falls)
+  let bd = 1e9, bt = 0;
+  for (let i = 0; i < RIVER.length - 1; i++) {
+    const ax = RIVER[i][0], az = RIVER[i][1], bx = RIVER[i + 1][0], bz = RIVER[i + 1][1];
+    const dx = bx - ax, dz = bz - az;
+    const tt = clamp(((x - ax) * dx + (z - az) * dz) / (dx * dx + dz * dz || 1), 0, 1);
+    const d = Math.hypot(x - (ax + dx * tt), z - (az + dz * tt));
+    if (d < bd) { bd = d; bt = (RIVER_CUM[i] + tt * (RIVER_CUM[i + 1] - RIVER_CUM[i])) / RIVER_LEN; }
+  }
+  return [bd, bt];
+}
+const _riv = { d: 0, t: 0 };
+function forestRaw(x, z) {
+  // base: a long climb toward the crown, rolling under noise
+  let h = 5 + (x - 170) / 2010 * 17 + Math.max(0, z) / 1400 * 14;
+  h += vnoise(x * 0.008, z * 0.008) * 7 + vnoise(x * 0.021 + 5, z * 0.021) * 3
+     + vnoise(x * 0.06, z * 0.06 + 3) * 0.9;
+  // ridgelines
+  for (let i = 0; i < RIDGES.length; i++) {
+    const r = RIDGES[i];
+    const d = distSeg(x, z, r[0], r[1], r[2], r[3]);
+    if (d < r[4] * 2.4) h += r[5] * Math.exp(-(d * d) / (r[4] * r[4]));
+  }
+  // knolls
+  for (let i = 0; i < KNOLLS.length; i++) {
+    const k = KNOLLS[i], dx = x - k[0], dz = z - k[1];
+    h += k[2] * Math.exp(-(dx * dx + dz * dz) / (k[3] * k[3]));
+  }
+  // the SILVERRUN carves through everything — bed, banks, a levee lip
+  const rv = riverAt(x, z);
+  _riv.d = rv[0]; _riv.t = rv[1];
+  if (rv[0] < 26) {
+    const m = smoothstep((14 - rv[0]) / 7);
+    h -= m * 2.8;
+    const lev = rv[0] - 11;
+    h += 0.7 * Math.exp(-(lev * lev) / 9);
+  }
+  // the crown plateau — the wall the falls hang from (solid, unclimbable)
+  const dC = Math.hypot(x - CROWN.x, z - CROWN.z);
+  if (dC < 220) h += 58 * smoothstep((150 - dC) / 60);
+  // the plunge-pool bowl at the wall's foot
+  const dB = Math.hypot(x - BASIN.x, z - BASIN.z);
+  if (dB < 40) h -= 5 * Math.exp(-(dB * dB) / 225);
+  // region walls: the world ends in real mountains
+  const edge = Math.max(0, x - 2090) + Math.max(0, 10 - z) + Math.max(0, z - 1310);
+  if (edge > 0) h += Math.min(42, edge * edge * 0.03) * (0.85 + vnoise(x * 0.03, z * 0.03) * 0.15);
+  return h;
+}
+function forestH(x, z) {
+  let h = forestRaw(x, z);
+  // clearing pads flatten toward their center height (self-referential — no
+  // hand-kept constants to drift out of sync)
+  for (let i = 0; i < FCLUSTERS.length; i++) {
+    const c = FCLUSTERS[i];
+    if (!c.flat) continue;
+    const d = Math.hypot(x - c.x, z - c.z);
+    if (d < c.r + 9) {
+      const m = smoothstep((c.r + 9 - d) / 9) * 0.85;
+      h = lerp(h, forestRaw(c.x, c.z), m);
+    }
+  }
+  // spring bowls: a soft dish holding the seep
+  for (let i = 0; i < FSPRINGS.length; i++) {
+    const s = FSPRINGS[i];
+    const d = Math.hypot(x - s.x, z - s.z);
+    if (d < s.r + 8) {
+      const m = smoothstep((s.r + 8 - d) / 8);
+      h = lerp(h, forestRaw(s.x, s.z) - 0.7, m * 0.9);
+    }
+  }
+  // west blend: hand the terrain back to Brightharbor's saddle
+  if (x < 230) {
+    const w = smoothstep((230 - x) / 120);
+    h = lerp(h, _bhGroundH(110, clamp(z, 14, 62)) + 1.5, w * w);
+  }
+  return h;
+}
+const inForestQ = (x, z) => x > 110 && !(x > 300 && z < -30);
+groundH = function (x, z) {
+  if (inForestQ(x, z)) return forestH(x, z);
+  return _bhGroundH(x, z);
+};
+
+/* ───────────────────────── the tree grid (single source of truth) ─────────────────────────
+   Every pine in the forest comes from this deterministic per-cell function.
+   The mesh builder, the trunk collision, the boar tree-stun, AND the canopy
+   shade all read the same answers.                                          */
+const TCELL = 9;
+function clearingAt(x, z) {
+  for (let i = 0; i < FCLUSTERS.length; i++) {
+    const c = FCLUSTERS[i];
+    if (Math.hypot(x - c.x, z - c.z) < c.r) return true;
+  }
+  for (let i = 0; i < FSPRINGS.length; i++) {
+    const s = FSPRINGS[i];
+    if (Math.hypot(x - s.x, z - s.z) < s.r + 1.5) return true;
+  }
+  return false;
+}
+function treeInfo(ix, iz) {
+  const j1 = hash2(ix * 3 + 11, iz * 7 - 4);       // occupancy roll
+  const px = ix * TCELL + 4.5 + hash2(ix, iz) * 3.2;
+  const pz = iz * TCELL + 4.5 + hash2(ix + 7, iz + 3) * 3.2;
+  if (px > 2140 || pz < 16 || pz > 1330) return null;
+  if (px < 176) {
+    // the pass corridor: a sparse picket of trees along its edges — the
+    // threshold reads FOREST AHEAD, and the walkway center stays open
+    if (px < 126) return null;
+    const lat = Math.abs(pz - FW.passZ);
+    if (lat < 6.5 || lat > 13 + Math.max(0, px - 120) * 0.12) return null;
+    if (j1 * 0.5 + 0.5 > 0.4) return null;
+    const s2 = 0.75 + (hash2(ix + 13, iz + 29) * 0.5 + 0.5) * 0.5;
+    const bare2 = hash2(ix - 5, iz + 17) > 0.1;    // mostly dead sentinels
+    return { x: px, z: pz, s: s2, bare: bare2, r: 0.3 * s2 + 0.24, cr: bare2 ? 0 : 2.1 * s2 + 0.8, h: 7 * s2 + 2.5 };
+  }
+  if (Math.hypot(px - CROWN.x, pz - CROWN.z) < 165) return null;
+  if (clearingAt(px, pz)) return null;
+  const rv = riverAt(px, pz);
+  if (rv[0] < 10) return null;                     // the bed stays open sky
+  const g = vnoise(px * 0.006, pz * 0.006);        // grove noise: dense / sparse bands
+  const p = g > 0.12 ? 0.72 : g > -0.15 ? 0.3 : 0.07;
+  if (j1 * 0.5 + 0.5 > p) return null;
+  const s = 0.8 + (hash2(ix + 13, iz + 29) * 0.5 + 0.5) * 0.7;
+  const bare = hash2(ix - 5, iz + 17) > 0.5;       // dead snags: trunk + bones, no canopy
+  return { x: px, z: pz, s, bare, r: 0.3 * s + 0.26, cr: bare ? 0 : 2.4 * s + 0.9, h: 7.5 * s + 3 };
+}
+function eachTreeNear(x, z, fn) {
+  const ix0 = Math.floor(x / TCELL), iz0 = Math.floor(z / TCELL);
+  for (let ix = ix0 - 1; ix <= ix0 + 1; ix++) {
+    for (let iz = iz0 - 1; iz <= iz0 + 1; iz++) {
+      const t = treeInfo(ix, iz);
+      if (t && fn(t)) return true;
+    }
+  }
+  return false;
+}
+function treeTrunkAt(x, z, pad) {
+  return eachTreeNear(x, z, t => Math.hypot(x - t.x, z - t.z) < t.r + pad);
+}
+function canopyAt(x, z) {
+  return eachTreeNear(x, z, t => !t.bare && Math.hypot(x - t.x, z - t.z) < t.cr);
+}
+
+/* ───────────────────────── SOLID authority for the region ───────────────────────── */
+window.__forestSolid = function (x, z) {
+  if (x <= 98) return false;
+  if (x > 300 && z < -30) return false;                      // off-world strip
+  // Cinder Pass: the only gate through the west wall
+  if (x < FW.x0) {
+    const hw = 15 + Math.max(0, x - 120) * 0.12;             // flares open eastward
+    return Math.abs(z - FW.passZ) > hw;
+  }
+  if (x > FW.x1 || z < FW.z0 || z > FW.z1) return true;      // region walls
+  if (Math.hypot(x - CROWN.x, z - CROWN.z) < 150) return true;   // plateau: unclimbable
+  if (Math.hypot(x - BASIN.x, z - BASIN.z) < BASIN.r) return true;   // THE SEAL (night two opens it)
+  // the Great Cedar's hollow ring (door gap shared with the mesh)
+  {
+    const dx = x - CEDAR.x, dz = z - CEDAR.z;
+    const d = Math.hypot(dx, dz);
+    if (d > CEDAR.r0 && d < CEDAR.r1) {
+      let da = Math.atan2(dz, dx) - CEDAR.doorA;
+      da = ((da % TAU) + TAU) % TAU; if (da > Math.PI) da -= TAU;
+      if (Math.abs(da) > CEDAR.doorHalf) return true;
+    }
+  }
+  if (Math.hypot(x - TOWER.x, z - TOWER.z) < 3.0) return true;   // under-deck braces
+  if (treeTrunkAt(x, z, 0.3)) return true;                   // every pine trunk is real
+  return false;
+};
+
+/* ───────────────────────── shade & respawn wraps ───────────────────────── */
+const _bhInShadeAt = inShadeAt;
+function forestShadeAt(x, z) {
+  for (let i = 0; i < FSPRINGS.length; i++) {
+    const s = FSPRINGS[i];
+    if (Math.hypot(x - s.x, z - s.z) < s.r) return true;
+  }
+  const dCed = Math.hypot(x - CEDAR.x, z - CEDAR.z);
+  if (dCed < CEDAR.r1) return true;                          // inside the hollow
+  for (let i = 0; i < FSHADE.length; i++) {
+    const s = FSHADE[i];
+    if (Math.hypot(x - s.x, z - s.z) < s.r) return true;
+  }
+  return canopyAt(x, z);                                     // under the pines
+}
+inShadeAt = function (x, z) {
+  if (inForestQ(x, z)) return forestShadeAt(x, z);
+  return _bhInShadeAt(x, z);
+};
+const _bhNearestShade = nearestShadeSpot;
+let lastSpringIdx = (SAVE && typeof SAVE.lastSpring === 'number') ? SAVE.lastSpring : -1;
+nearestShadeSpot = function (x, z) {
+  if (inForestQ(x, z)) {
+    if (lastSpringIdx >= 0 && lastSpringIdx < FSPRINGS.length) {
+      const s = FSPRINGS[lastSpringIdx];
+      return { x: s.x, z: s.z };
+    }
+    let best = FSPRINGS[0], bd = 1e9;
+    for (const s of FSPRINGS) {
+      const d = Math.hypot(x - s.x, z - s.z);
+      if (d < bd) { bd = d; best = s; }
+    }
+    return { x: best.x, z: best.z };
+  }
+  return _bhNearestShade(x, z);
+};
+
+/* ───────────────────────── forest ground colors ───────────────────────── */
+const C_NEEDLE = col(0x96603c), C_NEEDLE2 = col(0x7a4a30), C_BLEACH = col(0xbfa878),
+      C_CLAY = col(0xc9a97c), C_CLAY2 = col(0xb08e60), C_FCRACK = col(0x8a6a48),
+      C_SILT = col(0xcfc2a4), C_SILT2 = col(0xb2a586), C_RIVERDARK = col(0x8f7f66),
+      C_LUSH = col(0x5c7a44), C_LUSH2 = col(0x486338),
+      C_SHADEF = col(0x4a4a46), C_TRUNK = col(0x9c8a72), C_TRUNK2 = col(0x7a6a55),
+      C_RUST = col(0x8f5434), C_RUST2 = col(0x6e3f28), C_OLIVE = col(0x7d6b3d),
+      C_FROCK = col(0x9a917f), C_FROCK2 = col(0x7c7364);
+const _bhGroundColor = groundColor;
+function forestColor(x, z, y) {
+  const n = vnoise(x * 0.13, z * 0.13), f = vnoise(x * 0.5 + 9, z * 0.5);
+  // rust needle-carpet base
+  mix3(C_NEEDLE, C_NEEDLE2, clamp(0.5 + n * 0.55 + f * 0.3, 0, 1), _gc);
+  // bleached grass on the high open ground
+  const big = vnoise(x * 0.008, z * 0.008);
+  if (big > 0.18) mix3(_gc, C_BLEACH, clamp((big - 0.18) * 3.2, 0, 0.75), _gc);
+  // cracked clay clearings
+  for (let i = 0; i < FCLUSTERS.length; i++) {
+    const c = FCLUSTERS[i];
+    const d = Math.hypot(x - c.x, z - c.z);
+    if (d < c.r + 4) {
+      const m = smoothstep((c.r + 4 - d) / 5);
+      mix3(_gc, f > 0.15 ? C_CLAY2 : C_CLAY, m * 0.9, _gc);
+      const crack = vnoise(x * 0.55 + 17, z * 0.55);
+      if (Math.abs(crack) < 0.07 && m > 0.4) mix3(_gc, C_FCRACK, 0.85, _gc);
+    }
+  }
+  // the Silverrun: pale silt and river stones, a dark memory-line down the middle
+  const rv = riverAt(x, z);
+  if (rv[0] < 16) {
+    const m = smoothstep((13 - rv[0]) / 6);
+    mix3(_gc, f > 0.2 ? [0.68, 0.66, 0.58] : [0.75, 0.73, 0.65], m * 0.94, _gc);
+    if (rv[0] < 3.0) mix3(_gc, C_RIVERDARK, 0.6 * (1 - rv[0] / 3.0), _gc);
+    if (vnoise(x * 0.9 + 3, z * 0.9) > 0.5 && m > 0.5) mix3(_gc, C_SALT, 0.45, _gc);
+    if (vnoise(x * 2.1 + 8, z * 2.1) > 0.5 && m > 0.5) mix3(_gc, C_FROCK2, 0.55, _gc);
+    // old waterline ribbons on the banks
+    if (m > 0.1 && m < 0.85 && Math.abs(vnoise(x * 0.4 + 6, z * 0.4)) < 0.08) mix3(_gc, C_FCRACK, 0.6, _gc);
+  }
+  // the crown ramp is stone, not dune — strata bands climbing to the lip
+  {
+    const dC = Math.hypot(x - CROWN.x, z - CROWN.z);
+    if (dC < 170) {
+      const t = smoothstep((158 - dC) / 45);
+      mix3(_gc, f > 0.15 ? C_FROCK2 : C_FROCK, t * 0.92, _gc);
+      if (t > 0.25 && Math.sin(y * 0.55 + vnoise(x * 0.09, z * 0.09) * 2.4) > 0.45) {
+        mix3(_gc, [0.44, 0.38, 0.31], 0.55 * t, _gc);
+      }
+    }
+  }
+  // spring oases: the only living green in the region
+  for (let i = 0; i < FSPRINGS.length; i++) {
+    const s = FSPRINGS[i];
+    const d = Math.hypot(x - s.x, z - s.z);
+    if (d < s.r + 4) {
+      mix3(_gc, d < s.r * 0.7 ? C_LUSH : C_LUSH2, smoothstep((s.r + 4 - d) / 4) * 0.85, _gc);
+    }
+  }
+  // canopy shade pools baked under the pines — hard-edged, colored, painterly
+  if (canopyAt(x, z)) mix3(_gc, C_SHADEF, 0.44, _gc);
+  return _gc;
+}
+groundColor = function (x, z, y) {
+  if (inForestQ(x, z)) return forestColor(x, z, y);
+  return _bhGroundColor(x, z, y);
+};
+</script>
+<script>
+/* ═══════════ p6b/2 — building the region ═══════════ */
+
+/* forest chunks: bigger tiles than Brightharbor (200 m), same cull loop */
+const FCH = 200, FCH_R2 = 150000;   // visible flag ~387 m; frustum trims the rest
+const fchunkMap = new Map();
+function fchunkFor(x, z) {
+  const cx = Math.floor(x / FCH), cz = Math.floor(z / FCH);
+  const key = cx + 'f' + cz;
+  let c = fchunkMap.get(key);
+  if (!c) {
+    c = { md: MD(), cx: cx * FCH + FCH / 2, cz: cz * FCH + FCH / 2, mesh: null, r2: FCH_R2, forest: true };
+    fchunkMap.set(key, c); chunks.push(c);
+  }
+  return c.md;
+}
+/* baked-light prop helpers routed into forest chunks */
+function fboxW(o) { boxW(fchunkFor(o.x, o.z), o); }
+function flatheW(prof, o) { latheW(fchunkFor(o.x, o.z), prof, o); }
+
+/* ── the ground sheet ── */
+(function buildForestGround() {
+  const gc = (x, z) => {
+    const y = forestH(x, z);
+    const c = forestColor(x, z, y);
+    return [c[0], c[1], c[2], y];
+  };
+  const cell = (x, z, s) => {
+    const md = fchunkFor(x + s / 2, z + s / 2);
+    const c00 = gc(x, z), c10 = gc(x + s, z), c01 = gc(x, z + s), c11 = gc(x + s, z + s);
+    pushTriWV(md, x, c00[3], z, x, c01[3], z + s, x + s, c11[3], z + s, c00, c01, c11);
+    pushTriWV(md, x, c00[3], z, x + s, c11[3], z + s, x + s, c10[3], z, c00, c11, c10);
+  };
+  const STEP = 8;
+  const fine = (x, z) => {
+    const rv = riverAt(x + STEP / 2, z + STEP / 2);
+    if (rv[0] < 24) return true;
+    for (let i = 0; i < FCLUSTERS.length; i++) {
+      const c = FCLUSTERS[i];
+      if (Math.hypot(x - c.x, z - c.z) < c.r + 8) return true;
+    }
+    for (let i = 0; i < FSPRINGS.length; i++) {
+      const s = FSPRINGS[i];
+      if (Math.hypot(x - s.x, z - s.z) < s.r + 10) return true;
+    }
+    return false;
+  };
+  for (let x = 110; x < 2180; x += STEP) {
+    for (let z = -38; z < 1398; z += STEP) {
+      if (fine(x, z)) {
+        const h = STEP / 2;
+        cell(x, z, h); cell(x + h, z, h); cell(x, z + h, h); cell(x + h, z + h, h);
+      } else cell(x, z, STEP);
+    }
+  }
+  // seam skirt where the 2.2 m Brightharbor grid meets the 8 m forest grid
+  // (only walkable/visible along the pass) — a strip dropping 4 m at x=110
+  const md = fchunkFor(112, 38);
+  for (let z = -6; z < 86; z += 4) {
+    const y0 = groundH(110, z), y1 = groundH(110, z + 4);
+    const c = forestColor(111, z + 2, y0);
+    md.p.push(110, y0 + 0.05, z, 110, y1 + 0.05, z + 4, 110, y1 - 4, z + 4,
+              110, y0 + 0.05, z, 110, y1 - 4, z + 4, 110, y0 - 4, z);
+    for (let i = 0; i < 6; i++) md.c.push(c[0] * 0.8, c[1] * 0.8, c[2] * 0.8);
+  }
+})();
+
+/* ── every pine in the region (mesh from the same grid the collision reads) ── */
+(function buildForestTrees() {
+  const ix0 = Math.floor(110 / TCELL), ix1 = Math.ceil(2180 / TCELL);
+  const iz0 = Math.floor(-38 / TCELL), iz1 = Math.ceil(1398 / TCELL);
+  for (let ix = ix0; ix <= ix1; ix++) {
+    for (let iz = iz0; iz <= iz1; iz++) {
+      const t = treeInfo(ix, iz);
+      if (!t) continue;
+      const md = fchunkFor(t.x, t.z);
+      const gy = forestH(t.x, t.z) - 0.25;
+      const j = hash2(ix + 31, iz - 7);
+      const trunkC = mix3(t.bare ? C_TRUNK : C_TRUNK2, C_BLEACH, t.bare ? 0.55 + j * 0.2 : 0.12 + j * 0.1);
+      const ry = j * 3.1;
+      if (t.bare) {
+        // dead snag: bleached trunk, a couple of bone branches, no canopy
+        boxW(md, { x: t.x, y: gy, z: t.z, w: t.r * 0.8, d: t.r * 0.8, h: t.h * 0.92, tw: t.r * 0.25, td: t.r * 0.25, ry, noBottom: true, col: trunkC });
+        boxW(md, { x: t.x, y: gy + t.h * 0.55, z: t.z, w: 0.09 * t.s, d: 0.09 * t.s, h: 1.7 * t.s, rx: 1.15, ry: ry + 0.7, col: mix3(trunkC, [0, 0, 0], 0.12) });
+        boxW(md, { x: t.x, y: gy + t.h * 0.72, z: t.z, w: 0.08 * t.s, d: 0.08 * t.s, h: 1.3 * t.s, rx: -1.2, ry: ry + 2.4, col: trunkC });
+      } else {
+        // heat-stressed pine: gray trunk, rust/olive needle cones
+        boxW(md, { x: t.x, y: gy, z: t.z, w: t.r * 0.8, d: t.r * 0.8, h: t.h * 0.5, tw: t.r * 0.45, td: t.r * 0.45, ry, noBottom: true, col: trunkC });
+        const cA = j > 0.25 ? C_RUST : j > -0.35 ? C_RUST2 : C_OLIVE;
+        const cB = mix3(cA, [0, 0, 0], 0.22);
+        latheW(md, [[t.cr * 0.95, t.h * 0.3], [t.cr * 0.52, t.h * 0.62], [0, t.h * 0.8]],
+          { seg: 5, ex: 0.94, x: t.x, y: gy, z: t.z, ry, col: cA, cols: [cB, cA] });
+        latheW(md, [[t.cr * 0.6, t.h * 0.58], [0, t.h * 1.02]],
+          { seg: 5, ex: 0.94, x: t.x, y: gy, z: t.z, ry: ry + 0.6, col: mix3(cA, C_BLEACH, 0.18) });
+      }
+    }
+  }
+})();
+
+/* ── river dressing: stones, dry pot-hole pools, salt rings — the dead
+   Silverrun reads RIVER for its whole 2.4 km walk-up ── */
+function riverPoint(dist) {
+  for (let i = 1; i < RIVER_CUM.length; i++) {
+    if (dist <= RIVER_CUM[i]) {
+      const t = (dist - RIVER_CUM[i - 1]) / (RIVER_CUM[i] - RIVER_CUM[i - 1]);
+      return [lerp(RIVER[i - 1][0], RIVER[i][0], t), lerp(RIVER[i - 1][1], RIVER[i][1], t)];
+    }
+  }
+  return RIVER[RIVER.length - 1];
+}
+(function riverDressing() {
+  const rnd = mulberry32(20260815);
+  // river stones tumbled along the bed
+  for (let d = 20; d < RIVER_LEN - 20; d += 8.5) {
+    const p = riverPoint(d);
+    const lx = p[0] + (rnd() - 0.5) * 11, lz = p[1] + (rnd() - 0.5) * 11;
+    if (riverAt(lx, lz)[0] > 8) continue;
+    if (clearingAt(lx, lz)) continue;
+    const md = fchunkFor(lx, lz);
+    const sc = 0.28 + rnd() * 0.55;
+    latheW(md, [[sc, -0.1], [sc * 0.72, sc * 0.55], [0, sc * 0.8]],
+      { seg: 5, ex: 0.7 + rnd() * 0.5, x: lx, y: forestH(lx, lz), z: lz, ry: rnd() * 6,
+        flat: true, col: rnd() > 0.5 ? C_FROCK : C_FROCK2 });
+  }
+  // dry pot-hole pools ringed in salt — where the last water stood
+  for (let d = 120; d < RIVER_LEN - 60; d += 150 + (rnd() - 0.5) * 60) {
+    const p = riverPoint(d);
+    const lx = p[0] + (rnd() - 0.5) * 4, lz = p[1] + (rnd() - 0.5) * 4;
+    if (clearingAt(lx, lz)) continue;
+    const md = fchunkFor(lx, lz);
+    const gy = forestH(lx, lz);
+    const r = 2.2 + rnd() * 1.6;
+    latheW(md, [[0, 0.06], [r, 0.02]], { seg: 9, ex: 0.8 + rnd() * 0.3, x: lx, y: gy, z: lz, ry: rnd() * 3, flat: true, col: [0.5, 0.46, 0.4] });
+    latheW(md, [[r * 0.94, 0.05], [r * 1.18, 0.09], [r * 1.3, 0.05]],
+      { seg: 9, ex: 0.8 + rnd() * 0.3, x: lx, y: gy, z: lz, ry: rnd() * 3, flat: true, col: [0.93, 0.91, 0.85] });
+  }
+})();
+
+/* ── far tier: 4 quadrant impressions — coarse ground + canopy blobs.
+   Always drawn in the region; the near chunks fade in over them. ── */
+const farTier = [];
+(function buildFarTier() {
+  const quads = [[170, 1175, -38, 680], [1175, 2180, -38, 680], [170, 1175, 680, 1398], [1175, 2180, 680, 1398]];
+  for (const [qx0, qx1, qz0, qz1] of quads) {
+    const md = MD();
+    const S = 40;
+    for (let x = qx0; x < qx1 - 1; x += S) {
+      for (let z = qz0; z < qz1 - 1; z += S) {
+        const p = [[x, z], [x, z + S], [x + S, z + S], [x + S, z]].map(([px, pz]) => {
+          const y = forestH(px, pz) - 0.6;
+          return [px, y, pz];
+        });
+        const c = forestColor(x + S / 2, z + S / 2, p[0][1]);
+        const cc = [c[0], c[1], c[2]];
+        pushTriWV(md, p[0][0], p[0][1], p[0][2], p[1][0], p[1][1], p[1][2], p[2][0], p[2][1], p[2][2], cc, cc, cc);
+        pushTriWV(md, p[0][0], p[0][1], p[0][2], p[2][0], p[2][1], p[2][2], p[3][0], p[3][1], p[3][2], cc, cc, cc);
+      }
+    }
+    // canopy blobs: every other tree cell, one cone each
+    const ix0 = Math.floor(qx0 / TCELL), ix1 = Math.ceil(qx1 / TCELL);
+    const iz0 = Math.floor(qz0 / TCELL), iz1 = Math.ceil(qz1 / TCELL);
+    for (let ix = ix0; ix <= ix1; ix += 2) {
+      for (let iz = iz0; iz <= iz1; iz += 2) {
+        const t = treeInfo(ix, iz);
+        if (!t || t.bare) continue;
+        const gy = forestH(t.x, t.z) - 0.4;
+        const cA = hash2(ix + 31, iz - 7) > 0 ? C_RUST : C_RUST2;
+        latheW(md, [[t.cr * 1.5, t.h * 0.25], [0, t.h * 0.95]],
+          { seg: 4, x: t.x, y: gy, z: t.z, col: cA });
+      }
+    }
+    const m = mdMesh(md, WORLD_MAT, false);
+    m.matrixAutoUpdate = false; m.updateMatrix();
+    m.visible = false;
+    scene.add(m);
+    farTier.push(m);
+  }
+  // Brightharbor from afar: a coarse west impression for the tower's look-home
+  const md = MD();
+  const S = 44;
+  for (let x = -110; x < 108; x += S) {
+    for (let z = -110; z < 180; z += S) {
+      const p = [[x, z], [x, z + S], [x + S, z + S], [x + S, z]].map(([px, pz]) => [px, _bhGroundH(px, pz) - 0.6, pz]);
+      const c = _bhGroundColor(x + S / 2, z + S / 2, p[0][1]);
+      const cc = [c[0], c[1], c[2]];
+      pushTriWV(md, p[0][0], p[0][1], p[0][2], p[1][0], p[1][1], p[1][2], p[2][0], p[2][1], p[2][2], cc, cc, cc);
+      pushTriWV(md, p[0][0], p[0][1], p[0][2], p[2][0], p[2][1], p[2][2], p[3][0], p[3][1], p[3][2], cc, cc, cc);
+    }
+  }
+  // the lighthouse & the moonwheel pylons read even as silhouettes
+  latheW(md, [[2.0, 0], [1.4, 7.5], [1.7, 8.3], [0, 10.6]], { seg: 6, x: 44, y: _bhGroundH(44, -16), z: -16, col: C_WHITE });
+  boxW(md, { x: -38, y: _bhGroundH(-38, -78), z: -78, w: 3.4, d: 1.2, h: 8.6, tw: 2.6, col: C_STONE });
+  const bhFar = mdMesh(md, WORLD_MAT, false);
+  bhFar.matrixAutoUpdate = false; bhFar.updateMatrix();
+  bhFar.visible = false;
+  scene.add(bhFar);
+  farTier.push(bhFar);
+})();
+
+/* ── the sea-line: a pale silver shimmer on the west horizon, visible only
+   from real height (the fire-watch tower's gift) ── */
+let seaLine = null;
+(function buildSeaLine() {
+  const md = MD();
+  const R = 415;
+  for (let s = 0; s < 7; s++) {
+    const a0 = Math.PI * 0.78 + s * 0.075, a1 = a0 + 0.075;
+    const c = s % 2 ? [0.86, 0.9, 0.93] : [0.8, 0.86, 0.9];
+    const p0 = [Math.cos(a0) * R, 0, Math.sin(a0) * R], p1 = [Math.cos(a1) * R, 0, Math.sin(a1) * R];
+    md.p.push(p0[0], -1.2, p0[2], p1[0], -1.2, p1[2], p1[0], 1.6, p1[2],
+              p0[0], -1.2, p0[2], p1[0], 1.6, p1[2], p0[0], 1.6, p0[2]);
+    for (let i = 0; i < 6; i++) md.c.push(c[0], c[1], c[2]);
+  }
+  seaLine = mdMesh(md, new THREE.MeshBasicMaterial({
+    vertexColors: true, transparent: true, opacity: 0.55, fog: false, depthWrite: false,
+  }), false);
+  seaLine.rotation.y = -0.35;   // west-by-northwest of the tower: over Brightharbor
+  seaLine.visible = false;
+  skyGrp.add(seaLine);
+})();
+
+/* ═══════════ landmarks ═══════════ */
+
+/* THE DRIED FALLS — a 60 m stone lip with no water. Its own always-on mesh. */
+let fallsMesh = null;
+(function buildFalls() {
+  const md = MD();
+  const faceA = Math.atan2(BASIN.z - CROWN.z, BASIN.x - CROWN.x);   // wall faces the basin
+  // v6 art pass: the falls are ONE stone WALL, flat-authored in warm strata
+  // (the noon bake turned their shade faces slate-blue — the flat-blue class)
+  const C_CLIFF = [0.64, 0.56, 0.45], C_CLIFF2 = [0.52, 0.45, 0.36], C_CLIFF3 = [0.72, 0.65, 0.53],
+        C_CHUTE = [0.93, 0.9, 0.81], C_STAIN = [0.82, 0.78, 0.68];
+  // the broad cliff band behind everything: a curved rampart of the crown
+  latheW(md, [[104, -6], [101, 22], [97.5, 44], [93, 58]],
+    { seg: 10, a0: faceA - 0.62, a1: faceA + 0.62, x: CROWN.x, y: forestH(CROWN.x + Math.cos(faceA) * 100, CROWN.z + Math.sin(faceA) * 100) - 2,
+      z: CROWN.z, flat: true, segJitter: 0.1,
+      col: C_CLIFF, cols: [C_CLIFF2, C_CLIFF, C_CLIFF, C_CLIFF3] });
+  // rock columns shoulder-to-shoulder along the wall
+  for (let i = -7; i <= 7; i++) {
+    const a = faceA + i * 0.06;
+    const r = 93 + Math.abs(i) * 2.4 + hash2(i, 3) * 3;
+    const cx = CROWN.x + Math.cos(a) * r, cz = CROWN.z + Math.sin(a) * r;
+    const gy = forestH(cx, cz) - 2;
+    const w = 8 + hash2(i, 9) * 2.2;
+    const hh = 44 + 16 * (1 - Math.abs(i) / 8) + hash2(i, 5) * 5;
+    latheW(md, [[w, 0], [w * 0.84, hh * 0.42], [w * 0.62, hh * 0.82], [w * 0.3, hh]],
+      { seg: 6, ex: 0.72, x: cx, y: gy, z: cz, ry: a + i, flat: true, segJitter: 0.13,
+        col: i % 2 ? C_CLIFF : C_CLIFF2, cols: [C_CLIFF2, C_CLIFF, C_CLIFF, C_CLIFF3] });
+  }
+  // the dry CHUTE: the broad bleached streak where the river poured over
+  {
+    const a = faceA;
+    const cx = CROWN.x + Math.cos(a) * 86, cz = CROWN.z + Math.sin(a) * 86;
+    const gy = forestH(cx, cz) - 2;
+    boxW(md, { x: cx, y: gy, z: cz, w: 6.8, d: 1.8, h: 56, tw: 4.6, td: 1.2, ry: -a + Math.PI / 2, col: C_CHUTE });
+    boxW(md, { x: cx, y: gy + 6, z: cz, w: 8.2, d: 1.3, h: 34, tw: 5.4, td: 0.9, ry: -a + Math.PI / 2, col: C_STAIN });
+    // the LIP: a heavy overhang shelf at the very top
+    const lx = CROWN.x + Math.cos(a) * 82, lz = CROWN.z + Math.sin(a) * 82;
+    boxW(md, { x: lx, y: gy + 56, z: lz, w: 10.5, d: 5.2, h: 4.2, tw: 8.4, td: 3.4, ry: -a + Math.PI / 2, col: C_CLIFF3 });
+    boxW(md, { x: lx + Math.cos(a) * -2.6, y: gy + 54.2, z: lz + Math.sin(a) * -2.6, w: 7.2, d: 2.6, h: 2.2, ry: -a + Math.PI / 2, col: C_CHUTE });
+    // the pour-notch: a dark mouth under the lip where the river fell out
+    boxW(md, { x: lx + Math.cos(a) * 1.2, y: gy + 51.4, z: lz + Math.sin(a) * 1.2, w: 4.8, d: 1.4, h: 3.2, tw: 3.6, ry: -a + Math.PI / 2, col: [0.26, 0.23, 0.2] });
+    // salt-scale marks down the chute — old water heights
+    for (let k = 0; k < 4; k++) {
+      boxW(md, { x: cx, y: gy + 9 + k * 11.5, z: cz, w: 7.0, d: 1.9, h: 0.7, ry: -a + Math.PI / 2, col: C_SALT });
+    }
+    // a talus skirt where the pour-over used to boil
+    latheW(md, [[7.5, -1.5], [4.5, 1.6], [0, 3.2]], { seg: 7, ex: 1.3, x: cx + Math.cos(a) * 3, y: gy - 0.5, z: cz + Math.sin(a) * 3, ry: -a, flat: true, segJitter: 0.12, col: C_CLIFF2 });
+  }
+  // THE ROCKFALL — fresh boulders sealing the plunge-pool basin. Marched
+  // along the same circle the collision seals (one source of truth).
+  const toFore = Math.atan2(1165 - BASIN.z, 1900 - BASIN.x);
+  for (let i = -5; i <= 5; i++) {
+    const a = toFore + i * 0.21;
+    const r = BASIN.r - 1 + Math.abs(hash2(i, 11)) * 2.5;
+    const bx = BASIN.x + Math.cos(a) * r, bz = BASIN.z + Math.sin(a) * r;
+    const gy = forestH(bx, bz) - 1.2;
+    const s = 3.3 + Math.abs(hash2(i, 7)) * 2.0 - Math.abs(i) * 0.14;
+    latheW(md, [[s, 0], [s * 0.85, s * 1.1], [s * 0.4, s * 1.9], [0, s * 2.3]],
+      { seg: 6, ex: 0.85, x: bx, y: gy, z: bz, ry: i * 1.7, flat: true, segJitter: 0.13,
+        col: i % 2 ? C_FROCK : C_FROCK2, cols: [C_FROCK2, C_FROCK, C_CLIFF3] });
+    // pale fresh-broken faces — these stones fell RECENTLY
+    if (i % 2 === 0) {
+      boxW(md, { x: bx, y: gy + s * 0.8, z: bz, w: s * 0.5, d: s * 0.4, h: s * 0.7, ry: i, rx: 0.4, col: C_CHUTE });
+    }
+  }
+  // second smaller course of rubble at their feet
+  for (let i = -6; i <= 6; i += 2) {
+    const a = toFore + i * 0.18;
+    const bx = BASIN.x + Math.cos(a) * (BASIN.r + 2.5), bz = BASIN.z + Math.sin(a) * (BASIN.r + 2.5);
+    const gy = forestH(bx, bz) - 0.6;
+    latheW(md, [[1.3, 0], [0.9, 1.1], [0, 1.7]], { seg: 5, x: bx, y: gy, z: bz, ry: i * 2.3, flat: true, segJitter: 0.1, col: C_FROCK2 });
+  }
+  fallsMesh = mdMesh(md, WORLD_MAT, false);
+  fallsMesh.matrixAutoUpdate = false; fallsMesh.updateMatrix();
+  fallsMesh.visible = false;
+  scene.add(fallsMesh);
+})();
+
+/* THE FIRE-WATCH TOWER — climbable by real stairs (collider tops) */
+let towerMesh = null;
+(function buildTower() {
+  const md = MD();
+  const tx = TOWER.x, tz = TOWER.z;
+  const gy = forestH(tx, tz) - 0.2;
+  const TIMB = col(0x8a6a48), TIMB2 = col(0x6b5138), PLANK = col(0xa08258), PLANK2 = col(0x87693f);
+  // legs + cross braces
+  for (const [sx, sz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) {
+    boxW(md, { x: tx + sx * 3.2, y: gy, z: tz + sz * 3.2, w: 0.34, d: 0.34, h: TOWER.deckY + 0.4, tw: 0.26, td: 0.26, shx: -sx * 0.9, shz: -sz * 0.9, col: TIMB, colB: TIMB2 });
+  }
+  for (let lvl = 0; lvl < 3; lvl++) {
+    const y = gy + 2.2 + lvl * 4.4, k = 1 - (y - gy) / (TOWER.deckY + 1) * 0.28;
+    for (const s of [-1, 1]) {
+      boxW(md, { x: tx, y, z: tz + s * 3.15 * k, w: 3.4 * k, d: 0.09, h: 0.22, rz: 0.62, col: TIMB2 });
+      boxW(md, { x: tx, y, z: tz + s * 3.15 * k, w: 3.4 * k, d: 0.09, h: 0.22, rz: -0.62, col: TIMB2 });
+      boxW(md, { x: tx + s * 3.15 * k, y, z: tz, w: 0.09, d: 3.4 * k, h: 0.22, rx: 0.62, col: TIMB2 });
+      boxW(md, { x: tx + s * 3.15 * k, y, z: tz, w: 0.09, d: 3.4 * k, h: 0.22, rx: -0.62, col: TIMB2 });
+    }
+  }
+  // stacked crates & braces under the deck (the solid base reads solid)
+  boxW(md, { x: tx, y: gy, z: tz, w: 2.0, d: 2.0, h: 2.6, tw: 1.7, td: 1.7, col: TIMB2 });
+  boxW(md, { x: tx + 1.1, y: gy, z: tz - 1.4, w: 0.6, d: 0.6, h: 1.2, ry: 0.4, col: PLANK2 });
+  boxW(md, { x: tx - 1.3, y: gy, z: tz + 1.2, w: 0.55, d: 0.55, h: 1.0, ry: 0.9, col: PLANK });
+  // the deck
+  boxW(md, { x: tx, y: gy + TOWER.deckY - 0.3, z: tz, w: 4.5, d: 4.5, h: 0.34, col: PLANK, colB: TIMB2 });
+  for (let i = 0; i < 6; i++) {
+    boxW(md, { x: tx - 3.75 + i * 1.5, y: gy + TOWER.deckY + 0.04, z: tz, w: 0.72, d: 4.45, h: 0.05, col: i % 2 ? PLANK2 : PLANK });
+  }
+  // railing (visual only — falling off the tower is allowed and funny)
+  for (const [sx, sz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) {
+    boxW(md, { x: tx + sx * 4.3, y: gy + TOWER.deckY, z: tz + sz * 4.3, w: 0.09, d: 0.09, h: 1.1, col: TIMB2 });
+  }
+  for (const s of [-1, 1]) {
+    boxW(md, { x: tx, y: gy + TOWER.deckY + 1.0, z: tz + s * 4.3, w: 4.36, d: 0.06, h: 0.09, col: TIMB });
+    boxW(md, { x: tx + s * 4.3, y: gy + TOWER.deckY + 1.0, z: tz, w: 0.06, d: 4.36, h: 0.09, col: TIMB });
+  }
+  // lookout roof on four posts + the warden's brazier and bell
+  for (const [sx, sz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) {
+    boxW(md, { x: tx + sx * 2.6, y: gy + TOWER.deckY, z: tz + sz * 2.6, w: 0.14, d: 0.14, h: 2.6, col: TIMB });
+  }
+  boxW(md, { x: tx, y: gy + TOWER.deckY + 2.6, z: tz, w: 3.6, d: 3.6, h: 1.5, tw: 0.1, td: 0.1, col: C_ROOF2, colB: C_ROOF });
+  latheW(md, [[0.5, 0], [0.62, 0.3], [0.4, 0.55], [0.5, 0.62]], { seg: 7, x: tx + 1.4, y: gy + TOWER.deckY + 0.05, z: tz + 1.3, col: col(0x4a4440) });
+  latheW(md, [[0.24, 0], [0.3, 0.28], [0, 0.4]], { seg: 6, x: tx - 1.6, y: gy + TOWER.deckY + 1.9, z: tz - 1.5, col: col(0x6a5a3a) });
+  // the warden's porch: a bench and a rain barrel at the base, in the shade
+  boxW(md, { x: tx - 4.6, y: gy, z: tz - 5.2, w: 1.1, d: 0.4, h: 0.5, col: PLANK2 });
+  latheW(md, [[0.42, 0], [0.5, 0.55], [0.42, 1.0], [0, 1.0]], { seg: 7, x: tx - 6.1, y: gy, z: tz - 4.6, col: TIMB2 });
+  /* THE STAIRS — four switchback flights; every tread is a collider top.
+     The same numbers place the boards and the physics. */
+  const FL = [
+    { fx: -4.2, fz: 4.35, dx: 1, dz: 0 },     // south flight, walks +x
+    { fx: 4.35, fz: 4.2, dx: 0, dz: -1 },     // east flight, walks -z
+    { fx: 4.2, fz: -4.35, dx: -1, dz: 0 },    // north flight, walks -x
+    { fx: -4.35, fz: -4.2, dx: 0, dz: 1 },    // west flight, walks +z
+  ];
+  const STEPS = 12, RISE = TOWER.deckY / (4 * STEPS);
+  for (let fl = 0; fl < 4; fl++) {
+    const F = FL[fl];
+    for (let i = 0; i < STEPS; i++) {
+      const t = (i + 0.5) / STEPS;
+      const x = tx + F.fx + F.dx * (8.4 * t - 0);
+      const z = tz + F.fz + F.dz * (8.4 * t - 0);
+      const y = gy + (fl * STEPS + i + 1) * RISE;
+      boxW(md, { x, y: y - 0.14, z, w: F.dx ? 0.42 : 0.6, d: F.dx ? 0.6 : 0.42, h: 0.14, col: i % 2 ? PLANK : PLANK2 });
+      // stringer post every 3rd step
+      if (i % 3 === 0) boxW(md, { x, y: gy, z, w: 0.09, d: 0.09, h: y - gy - 0.1, col: TIMB2 });
+      addColl(x, z, 0.72, y).plat = true;
+    }
+    // corner landing
+    const lx = tx + F.fx + F.dx * 8.7, lz = tz + F.fz + F.dz * 8.7;
+    const ly = gy + (fl + 1) * STEPS * RISE;
+    boxW(md, { x: lx, y: ly - 0.16, z: lz, w: 0.75, d: 0.75, h: 0.16, col: PLANK });
+    addColl(lx, lz, 1.0, ly).plat = true;
+  }
+  // deck walk surface: a grid of platform tops
+  for (const ox of [-2.8, 0, 2.8]) {
+    for (const oz of [-2.8, 0, 2.8]) {
+      addColl(tx + ox, tz + oz, 1.9, gy + TOWER.deckY).plat = true;
+    }
+  }
+  towerMesh = mdMesh(md, WORLD_MAT, false);
+  towerMesh.matrixAutoUpdate = false; towerMesh.updateMatrix();
+  towerMesh.visible = false;
+  scene.add(towerMesh);
+})();
+
+/* THE GREAT CEDAR — a colossal dead tree, hollow, with a secret inside */
+let cedarMesh = null, cedarGlow = null;
+(function buildCedar() {
+  const md = MD();
+  const gy = forestH(CEDAR.x, CEDAR.z) - 0.6;
+  // v6 art pass: warm FLAT bark strata (the noon bake read slate-blue on the
+  // shade side — an obelisk, not a tree)
+  const BARK = [0.52, 0.42, 0.31], BARK2 = [0.41, 0.32, 0.24], BONE = [0.79, 0.72, 0.59];
+  const doorSkip = (t0, t1, band) => {
+    if (band > 1) return false;
+    let da = ((t0 + 0.14 - CEDAR.doorA) % TAU + TAU) % TAU;
+    if (da > Math.PI) da -= TAU;
+    return Math.abs(da) < CEDAR.doorHalf;
+  };
+  // outer trunk: buttressed base, broken crown (open to the sky — the light shaft)
+  latheW(md, [[CEDAR.r1 + 1.6, 0], [CEDAR.r1, 3.2], [CEDAR.r1 - 0.5, 10], [3.0, 18], [2.2, 23], [1.9, 26]],
+    { seg: 12, ex: 0.96, x: CEDAR.x, y: gy, z: CEDAR.z, flat: true, segJitter: 0.14,
+      col: BARK, cols: [BARK2, BARK, BARK, mix3(BARK, BONE, 0.45), BONE], skip: doorSkip });
+  // root flares: the colossus grips its ridge (never crowding the door)
+  for (let i = 0; i < 7; i++) {
+    const a = CEDAR.doorA + 0.95 + i * (TAU - 1.9) / 6;
+    const rx2 = CEDAR.x + Math.cos(a) * (CEDAR.r1 + 0.7), rz2 = CEDAR.z + Math.sin(a) * (CEDAR.r1 + 0.7);
+    latheW(md, [[1.7 + hash2(i, 4) * 0.4, -0.4], [0.9, 2.4], [0, 5.2 + hash2(i, 8)]],
+      { seg: 5, ex: 0.6, x: rx2, y: forestH(rx2, rz2) - 0.4, z: rz2, ry: a, flat: true, segJitter: 0.12,
+        col: i % 2 ? BARK : BARK2 });
+    addColl(rx2, rz2, 0.9);
+  }
+  // the crown broke, not sawed: three jagged splinters ring the opening
+  for (const [sa, sh] of [[0.4, 3.4], [2.5, 2.6], [4.6, 4.1]]) {
+    latheW(md, [[0.55, 25.2], [0.28, 25.2 + sh * 0.6], [0, 25.2 + sh]],
+      { seg: 4, x: CEDAR.x + Math.cos(sa) * 1.5, y: gy, z: CEDAR.z + Math.sin(sa) * 1.5, flat: true,
+        col: BONE });
+  }
+  // inner liner — flat cave-dark, facing inward (the hollow feels like a room)
+  latheW(md, [[CEDAR.r0 + 0.5, 0], [CEDAR.r0 + 0.7, 6], [1.9, 14], [1.6, 20]],
+    { seg: 12, ex: 0.96, x: CEDAR.x, y: gy, z: CEDAR.z, inward: true, flat: true, segJitter: 0.12,
+      col: [0.32, 0.26, 0.2], cols: [[0.4, 0.32, 0.24], [0.32, 0.26, 0.2], [0.24, 0.2, 0.16]], skip: doorSkip });
+  // bone limbs
+  for (let i = 0; i < 5; i++) {
+    const a = i * 1.35 + 0.4;
+    boxW(md, { x: CEDAR.x + Math.cos(a) * 2.4, y: gy + 15 + i * 1.8, z: CEDAR.z + Math.sin(a) * 2.4, w: 0.35, d: 0.35, h: 4.5 - i * 0.4, tw: 0.1, td: 0.1, rx: 1.05, ry: a + 1.6, col: i % 2 ? BONE : mix3(BARK, BONE, 0.5) });
+  }
+  // doorposts: two worn bark shoulders framing the way in
+  for (const s of [-1, 1]) {
+    const a = CEDAR.doorA + s * (CEDAR.doorHalf + 0.22);
+    const px2 = CEDAR.x + Math.cos(a) * (CEDAR.r1 - 0.1), pz2 = CEDAR.z + Math.sin(a) * (CEDAR.r1 - 0.1);
+    latheW(md, [[0.9, -0.3], [0.55, 2.6], [0, 4.6]],
+      { seg: 5, ex: 0.7, x: px2, y: gy, z: pz2, ry: a, flat: true, col: mix3(BARK2, [0, 0, 0], 0.12) });
+  }
+  cedarMesh = mdMesh(md, WORLD_MAT, false);
+  cedarMesh.matrixAutoUpdate = false; cedarMesh.updateMatrix();
+  cedarMesh.visible = false;
+  scene.add(cedarMesh);
+  // the light shaft through the broken crown + a bright pool on the floor
+  const mdG = MD();
+  const c = [1, 0.95, 0.78];
+  for (const off of [[-1.1, 0], [0, 1.1]]) {
+    pushQuad(mdG, [CEDAR.x - off[0], gy + 19, CEDAR.z - off[1]], [CEDAR.x + off[0], gy + 19, CEDAR.z + off[1]],
+      [CEDAR.x + off[0] * 0.5 + 0.6, gy + 0.1, CEDAR.z + off[1] * 0.5 + 0.4], [CEDAR.x - off[0] * 0.5 + 0.6, gy + 0.1, CEDAR.z - off[1] * 0.5 + 0.4], c);
+  }
+  lathe(mdG, [[0, 0.12], [1.5, 0.1]], { seg: 8, x: CEDAR.x + 0.6, y: gy, z: CEDAR.z + 0.4, col: c });
+  cedarGlow = mdMesh(mdG, new THREE.MeshBasicMaterial({
+    vertexColors: true, transparent: true, opacity: 0.3,
+    blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+  }), false);
+  cedarGlow.matrixAutoUpdate = false; cedarGlow.updateMatrix();
+  cedarGlow.visible = false;
+  scene.add(cedarGlow);
+})();
+</script>
+<script>
+/* ═══════════ p6b/3 — clusters, springs, pickups, chests ═══════════ */
+
+/* ── shared small prop kit (baked into forest chunks) ── */
+function fRock(x, z, s, tall) {
+  const y = groundH(x, z) - 0.4;
+  const h = tall ? 3.4 * s : 1.2 * s;
+  flatheW([[1.0 * s, 0], [0.85 * s, h * 0.45], [0.6 * s, h * 0.82], [0.2 * s, h]],
+    { seg: 6, ex: 0.7 + vnoise(x, z) * 0.2, x, y, z, ry: x * 0.7, segJitter: 0.1,
+      col: C_FROCK, cols: [C_FROCK2, C_FROCK, C_FROCK] });
+  addColl(x, z, 0.9 * s);
+}
+function fCrate(x, z, ry, s2) {
+  s2 = s2 || 1;
+  const y = groundH(x, z);
+  fboxW({ x, y, z, w: 0.32 * s2, d: 0.32 * s2, h: 0.6 * s2, ry, col: C_WOOD, colB: C_WOOD2 });
+  fboxW({ x, y: y + 0.28 * s2, z, w: 0.34 * s2, d: 0.05 * s2, h: 0.06 * s2, ry, col: C_WOOD2 });
+  addColl(x, z, 0.45 * s2, y + 0.6 * s2);
+}
+function fStump(x, z, s) {
+  const y = groundH(x, z) - 0.15;
+  flatheW([[0.55 * s, 0], [0.48 * s, 0.55 * s], [0.52 * s, 0.6 * s]],
+    { seg: 7, x, y, z, col: C_TRUNK2, cols: [C_TRUNK2, C_TRUNK, C_BLEACH] });
+  addColl(x, z, 0.6 * s, y + 0.6 * s);
+}
+function fCairn(x, z) {
+  const y = groundH(x, z) - 0.1;
+  flatheW([[0.7, 0], [0.55, 0.5], [0.4, 0.85], [0.28, 1.25], [0.12, 1.6], [0, 1.7]],
+    { seg: 6, ex: 0.85, x, y, z, ry: x, segJitter: 0.14, col: C_FROCK, cols: [C_FROCK2, C_FROCK, C_FROCK2, C_FROCK] });
+  addColl(x, z, 0.7);
+}
+
+/* ── the six shade springs — one merged mesh: seep pool, ferns, and the
+   single LIVE green tree each one keeps alive ── */
+(function buildSprings() {
+  const md = MD();
+  const WATER = col(0x3d7d86), WATER2 = col(0x5ba3a8), FERN = col(0x4e7a3c), FERN2 = col(0x3d6330);
+  for (let si = 0; si < FSPRINGS.length; si++) {
+    const s = FSPRINGS[si];
+    const gy = groundH(s.x, s.z);
+    // the seep pool: a low water disc in the dish
+    const n = 10;
+    for (let k = 0; k < n; k++) {
+      const a0 = k / n * TAU, a1 = (k + 1) / n * TAU;
+      const r = s.r * 0.52;
+      const cc = k % 2 ? WATER : WATER2;
+      md.p.push(s.x, gy + 0.1, s.z,
+        s.x + Math.cos(a1) * r, gy + 0.1, s.z + Math.sin(a1) * r,
+        s.x + Math.cos(a0) * r, gy + 0.1, s.z + Math.sin(a0) * r);
+      md.c.push(cc[0], cc[1], cc[2], WATER[0], WATER[1], WATER[2], WATER[0], WATER[1], WATER[2]);
+    }
+    // seep stones
+    for (let k = 0; k < 5; k++) {
+      const a = k * 1.31 + si;
+      const rx = s.x + Math.cos(a) * s.r * 0.62, rz = s.z + Math.sin(a) * s.r * 0.62;
+      latheW(md, [[0.4, -0.1], [0.3, 0.25], [0, 0.4]], { seg: 5, x: rx, y: groundH(rx, rz), z: rz, ry: a * 2, col: k % 2 ? C_FROCK : C_FROCK2 });
+    }
+    // ferns: little green blade fans
+    for (let k = 0; k < 7; k++) {
+      const a = k * 0.93 + si * 2;
+      const fx = s.x + Math.cos(a) * s.r * (0.68 + hash2(k, si) * 0.15);
+      const fz = s.z + Math.sin(a) * s.r * (0.68 + hash2(k + 3, si) * 0.15);
+      const fy = groundH(fx, fz);
+      for (let b = 0; b < 3; b++) {
+        boxW(md, { x: fx, y: fy, z: fz, w: 0.05, d: 0.02, h: 0.55 + hash2(b, k) * 0.15, tw: 0.01, td: 0.01, rx: 0.5 + b * 0.25, ry: a + b * 2.1, col: b % 2 ? FERN : FERN2 });
+      }
+    }
+    // THE LIVE TREE — the one point of green canopy in the whole region
+    const ta = si * 1.1 + 0.6;
+    const tx = s.x + Math.cos(ta) * s.r * 0.85, tz = s.z + Math.sin(ta) * s.r * 0.85;
+    const ty = groundH(tx, tz) - 0.2;
+    boxW(md, { x: tx, y: ty, z: tz, w: 0.3, d: 0.3, h: 3.4, tw: 0.18, td: 0.18, noBottom: true, col: mix3(C_TRUNK2, [0, 0, 0], 0.15) });
+    latheW(md, [[2.5, 2.6], [1.5, 4.6], [0, 6.2]], { seg: 6, ex: 0.95, x: tx, y: ty, z: tz, col: FERN, cols: [FERN2, FERN] });
+    latheW(md, [[1.7, 4.4], [0, 6.9]], { seg: 5, ex: 0.95, x: tx, y: ty, z: tz, ry: 0.5, col: mix3(FERN, [1, 1, 0.7], 0.15) });
+    addColl(tx, tz, 0.55);
+  }
+  const m = mdMesh(md, WORLD_MAT, false);
+  m.matrixAutoUpdate = false; m.updateMatrix();
+  m.visible = false;
+  scene.add(m);
+  window.__springsMesh = m;
+})();
+
+/* ── CINDER PASS CAMP (abandoned) + the one signpost ── */
+const SIGNPOST = { x: 205, z: 46 };
+(function buildCamp() {
+  const c = FCLUSTERS[0];
+  const gy = groundH(c.x, c.z);
+  // cold firepit
+  flatheW([[0.8, -0.05], [0.9, 0.12], [0.75, 0.2]], { seg: 8, x: c.x, y: gy, z: c.z, col: C_FROCK2 });
+  flatheW([[0.35, 0], [0.4, 0.1], [0.1, 0.16]], { seg: 6, x: c.x, y: gy + 0.05, z: c.z, col: [0.2, 0.19, 0.18] });
+  // two bedrolls, left in a hurry
+  fboxW({ x: c.x - 2.6, y: gy, z: c.z + 1.4, w: 0.45, d: 1.0, h: 0.18, ry: 0.4, col: col(0x8a9bab), colB: C_WOOD2 });
+  fboxW({ x: c.x + 2.2, y: gy, z: c.z + 2.0, w: 0.45, d: 1.0, h: 0.18, ry: -0.6, col: col(0xad6a5c), colB: C_WOOD2 });
+  fCrate(c.x + 3.1, c.z - 1.8, 0.5); fCrate(c.x + 3.8, c.z - 1.2, 1.1, 0.8);
+  // the leaning rock that shades the camp (in FSHADE)
+  fRock(250, 70, 1.6, true);
+  // a dead cart — they left with less than they came with
+  fboxW({ x: c.x - 4.2, y: gy + 0.4, z: c.z - 2.5, w: 0.55, d: 0.85, h: 0.3, ry: 0.9, col: C_WOOD, colB: C_WOOD2 });
+  flatheW([[0.3, -0.02], [0.3, 0.02]], { seg: 8, x: c.x - 4.8, y: gy + 0.32, z: c.z - 3.1, col: C_WOOD2 });
+  addColl(c.x - 4.2, c.z - 2.5, 0.9);
+  // THE SIGNPOST — one sign, no gate
+  const sy = groundH(SIGNPOST.x, SIGNPOST.z);
+  fboxW({ x: SIGNPOST.x, y: sy, z: SIGNPOST.z, w: 0.09, d: 0.09, h: 2.3, col: C_WOOD2 });
+  fboxW({ x: SIGNPOST.x, y: sy + 1.65, z: SIGNPOST.z, w: 0.85, d: 0.06, h: 0.5, ry: -0.5, col: C_WOOD });
+  fboxW({ x: SIGNPOST.x, y: sy + 1.72, z: SIGNPOST.z, w: 0.72, d: 0.075, h: 0.09, ry: -0.5, col: C_WOOD2 });
+  fboxW({ x: SIGNPOST.x, y: sy + 1.9, z: SIGNPOST.z, w: 0.6, d: 0.075, h: 0.07, ry: -0.5, col: C_WOOD2 });
+  addColl(SIGNPOST.x, SIGNPOST.z, 0.3);
+})();
+
+/* ── the stranded waterwheels ── */
+function buildWaterwheel(cx, cz, ry, R, ruined) {
+  const gy = groundH(cx, cz);
+  const dxr = Math.cos(ry), dzr = -Math.sin(ry);
+  // the wheel: paddles + rim segments standing in the dry bed
+  for (let i = 0; i < 12; i++) {
+    const a = i / 12 * TAU + (ruined ? 0.3 : 0);
+    const px = cx, py = gy + R * 0.82 + Math.sin(a) * R, pz = cz;
+    fboxW({ x: px + dxr * Math.cos(a) * R * 0.0, y: py, z: pz + dzr * Math.cos(a) * R * 0.0,
+      w: 0.09, d: 0.5, h: 1.1, rx: 0, ry, rz: a, col: i % 2 ? C_WOOD : C_WOOD2 });
+  }
+  // hub + axle
+  flatheW([[0.35, -0.4], [0.35, 0.4]], { seg: 7, x: cx, y: gy + R * 0.82, z: cz, ry: 0, col: C_WOOD2 });
+  fboxW({ x: cx, y: gy + R * 0.82, z: cz, w: 2.4, d: 0.14, h: 0.14, ry: ry + Math.PI / 2, col: C_WOOD2 });
+  // support posts
+  for (const s of [-1, 1]) {
+    fboxW({ x: cx + dxr * 0 + Math.cos(ry + Math.PI / 2) * 2.1 * s, y: gy, z: cz + Math.sin(ry + Math.PI / 2) * -2.1 * s, w: 0.18, d: 0.18, h: gy < 0 ? 3 : R * 0.82, col: C_WOOD2 });
+  }
+  addColl(cx, cz, 1.4);
+  return gy;
+}
+(function buildMill() {
+  const c = FCLUSTERS[1];   // mill at the river bank
+  buildWaterwheel(c.x + 6, c.z - 8, 0.5, 2.6, false);
+  // the millhouse: a roofless stone shell, door gap, fallen beams
+  const gy = groundH(c.x, c.z);
+  const W = 3.1, D = 2.5;
+  fboxW({ x: c.x - W, y: gy - 0.2, z: c.z, w: 0.3, d: D, h: 2.6, col: C_STONE, colB: C_STONE2 });
+  fboxW({ x: c.x + W, y: gy - 0.2, z: c.z, w: 0.3, d: D, h: 1.8, col: C_STONE2 });
+  fboxW({ x: c.x, y: gy - 0.2, z: c.z - D, w: W, d: 0.3, h: 2.2, col: C_STONE });
+  fboxW({ x: c.x - 1.2, y: gy - 0.2, z: c.z + D, w: W - 1.6, d: 0.3, h: 1.5, col: C_STONE2 });   // front wall w/ door gap east
+  addColl(c.x - W, c.z, 0.9); addColl(c.x + W, c.z, 0.9);
+  addColl(c.x - 1, c.z - D, 1.6); addColl(c.x - 1.2, c.z + D, 1.4);
+  // fallen roof beams + the millstone
+  fboxW({ x: c.x + 0.4, y: gy + 0.1, z: c.z - 0.6, w: 0.14, d: 0.14, h: 3.4, rx: 1.35, ry: 0.4, col: C_WOOD2 });
+  fboxW({ x: c.x - 1.1, y: gy + 0.1, z: c.z + 0.4, w: 0.12, d: 0.12, h: 2.8, rx: 1.5, ry: -0.8, col: C_WOOD });
+  flatheW([[1.0, 0], [1.0, 0.3], [0.3, 0.32]], { seg: 9, x: c.x + 1.5, y: gy, z: c.z + 1.2, col: C_STONE2 });
+  addColl(c.x + 1.5, c.z + 1.2, 1.1, gy + 0.32);
+})();
+(function buildWheel2() {
+  const c = FCLUSTERS[2];
+  buildWaterwheel(c.x, c.z - 4, -0.3, 2.2, true);   // this one slumped off its axle
+  fRock(c.x - 5, c.z + 3, 1.2, false);
+  fStump(c.x + 4, c.z + 4, 1.1);
+})();
+
+/* ── the beached ferry barge, mid-river ── */
+(function buildFerry() {
+  const c = FCLUSTERS[3];
+  const gy = groundH(c.x, c.z);
+  const ry = 0.55;
+  // flat hull, heeled slightly; deck planks; a rail; the pole that pushed it
+  fboxW({ x: c.x, y: gy - 0.3, z: c.z, w: 4.4, d: 2.1, h: 1.0, tw: 4.0, td: 1.8, ry, rz: 0.06, col: C_WOOD2, colB: C_WOOD2 });
+  fboxW({ x: c.x, y: gy + 0.7, z: c.z, w: 4.2, d: 1.9, h: 0.14, ry, rz: 0.06, col: C_WOODW });
+  for (let i = 0; i < 5; i++) {
+    fboxW({ x: c.x - Math.cos(ry) * (3.2 - i * 1.6), y: gy + 0.84, z: c.z + Math.sin(ry) * (3.2 - i * 1.6), w: 0.09, d: 1.85, h: 0.06, ry, col: i % 2 ? C_WOOD : C_WOOD2 });
+  }
+  for (const s of [-1, 1]) {
+    fboxW({ x: c.x + Math.sin(ry) * 1.85 * s, y: gy + 0.84, z: c.z + Math.cos(ry) * 1.85 * s, w: 4.1, d: 0.07, h: 0.6, ry, col: C_WOOD2 });
+  }
+  fboxW({ x: c.x + 3.2, y: gy + 0.2, z: c.z - 2.6, w: 0.07, d: 0.07, h: 3.6, rx: 0.5, ry: 0.3, col: C_WOOD });
+  // the ferry rope, dead on the silt, and its far post
+  fboxW({ x: c.x - 6, y: groundH(c.x - 6, c.z + 5), z: c.z + 5, w: 0.16, d: 0.16, h: 1.9, col: C_WOOD2 });
+  addColl(c.x, c.z, 3.2); addColl(c.x + Math.cos(ry) * 3.6, c.z - Math.sin(ry) * 3.6, 1.6);
+  addColl(c.x - Math.cos(ry) * 3.6, c.z + Math.sin(ry) * 3.6, 1.6);
+})();
+
+/* ── the drying-rack hamlet ── */
+(function buildHamlet() {
+  const c = FCLUSTERS[4];
+  const leanTo = (x, z, ry) => {
+    const gy = groundH(x, z);
+    const dxr = Math.sin(ry), dzr = Math.cos(ry);
+    for (const s of [-1, 1]) {
+      fboxW({ x: x + Math.cos(ry) * 1.5 * s, y: gy, z: z - Math.sin(ry) * 1.5 * s, w: 0.12, d: 0.12, h: 1.9, col: C_WOOD2 });
+    }
+    fboxW({ x: x + dxr * 1.2, y: gy, z: z + dzr * 1.2, w: 1.7, d: 0.12, h: 0.9, ry, col: C_WOOD2 });   // low back
+    fboxW({ x: x + dxr * 0.5, y: gy + 1.85, z: z + dzr * 0.5, w: 1.75, d: 1.5, h: 0.12, ry, rx: 0.42, col: C_ROOF2, colB: C_ROOF });
+    addColl(x + dxr * 1.2, z + dzr * 1.2, 1.0);
+  };
+  leanTo(c.x - 8, c.z - 4, 0.4);
+  leanTo(c.x + 6, c.z - 7, -0.7);
+  leanTo(c.x + 9, c.z + 5, 2.1);
+  // fish-drying racks with nothing to dry
+  const rack = (x, z, ry) => {
+    const gy = groundH(x, z);
+    const dx = Math.cos(ry), dz = -Math.sin(ry);
+    for (const s of [-1, 1]) fboxW({ x: x + dx * 1.4 * s, y: gy, z: z + dz * 1.4 * s, w: 0.08, d: 0.08, h: 1.8, col: C_WOOD2 });
+    for (const hy of [0.8, 1.25, 1.7]) fboxW({ x, y: gy + hy, z, w: 1.45, d: 0.04, h: 0.05, ry: -ry, col: C_WOOD });
+    addColl(x - dx * 1.4, z - dz * 1.4, 0.2); addColl(x + dx * 1.4, z + dz * 1.4, 0.2);
+  };
+  rack(c.x - 2, c.z + 2, 0.3); rack(c.x + 1.5, c.z - 2.5, 1.2); rack(c.x - 5, c.z + 8, -0.4);
+  // a collapsed hut: the one that didn't make it
+  const gy = groundH(c.x + 2, c.z + 9);
+  fboxW({ x: c.x + 2, y: gy, z: c.z + 9, w: 1.8, d: 1.4, h: 0.8, ry: 0.3, rz: 0.12, col: C_STONE2 });
+  fboxW({ x: c.x + 2.3, y: gy + 0.6, z: c.z + 9.2, w: 2.0, d: 1.6, h: 0.2, ry: 0.35, rz: 0.3, col: C_ROOF2 });
+  addColl(c.x + 2, c.z + 9, 2.0);
+  // the well they dug when the river died — dry too
+  flatheW([[0.85, 0], [0.8, 0.7], [0.65, 0.75]], { seg: 8, x: c.x - 9, y: groundH(c.x - 9, c.z + 4) - 0.1, z: c.z + 4, col: C_STONE, cols: [C_STONE, C_STONE2] });
+  addColl(c.x - 9, c.z + 4, 1.05);
+})();
+
+/* ── boar glades: stump rings and wallows ── */
+(function buildGlades() {
+  for (const id of ['glade1', 'glade2', 'glade3']) {
+    const c = FCLUSTERS.find(q => q.id === id);
+    const rnd = mulberry32((c.x * 13 + c.z * 7) | 0);
+    for (let i = 0; i < 4; i++) {
+      const a = rnd() * TAU, d = c.r * (0.45 + rnd() * 0.4);
+      fStump(c.x + Math.cos(a) * d, c.z + Math.sin(a) * d, 0.8 + rnd() * 0.5);
+    }
+    // the wallow: a churned dark patch (visual only)
+    flatheW([[2.4, -0.12], [1.6, 0.02], [0, 0.06]], { seg: 8, x: c.x, y: groundH(c.x, c.z), z: c.z, col: mix3(C_FCRACK, [0, 0, 0], 0.25) });
+  }
+})();
+
+/* ── hornet hollow: a dead grove humming with wings ── */
+(function buildHollow() {
+  const c = FCLUSTERS.find(q => q.id === 'hollow');
+  const rnd = mulberry32(777);
+  for (let i = 0; i < 5; i++) {
+    const a = rnd() * TAU, d = c.r * (0.4 + rnd() * 0.5);
+    const x = c.x + Math.cos(a) * d, z = c.z + Math.sin(a) * d;
+    const gy = groundH(x, z) - 0.2;
+    fboxW({ x, y: gy, z, w: 0.34, d: 0.34, h: 6 + rnd() * 3, tw: 0.1, td: 0.1, ry: rnd() * 3, col: C_BLEACH });
+    addColl(x, z, 0.5);
+  }
+  // the papery nest bulb on the tallest snag
+  flatheW([[0.1, 4.6], [0.65, 5.4], [0.5, 6.4], [0, 6.7]], { seg: 6, x: c.x + 2, y: groundH(c.x + 2, c.z), z: c.z, col: mix3(C_BLEACH, C_CLAY, 0.5) });
+})();
+
+/* ── the two secret shade grottos + the salt seam ── */
+(function buildGrottos() {
+  for (const [id, ry] of [['grotA', 0.6], ['grotB', 3.6]]) {
+    const c = FCLUSTERS.find(q => q.id === id);
+    // a C of leaning slabs with a dark cool pocket inside
+    for (let i = 0; i < 4; i++) {
+      const a = ry + 1.2 + i * 0.9;
+      const x = c.x + Math.cos(a) * 6.5, z = c.z + Math.sin(a) * 6.5;
+      const gy = groundH(x, z) - 0.8;
+      flatheW([[2.6, 0], [2.2, 3.2], [1.2, 6.4], [0, 8]], { seg: 6, ex: 0.6, x, y: gy, z, ry: a, segJitter: 0.12, col: C_FROCK, cols: [C_FROCK2, C_FROCK, C_FROCK2] });
+      addColl(x, z, 2.4);
+    }
+    // the shade pool floor tint
+    flatheW([[5.5, 0.04], [0, 0.08]], { seg: 9, x: c.x, y: groundH(c.x, c.z), z: c.z, flat: true, col: [0.3, 0.3, 0.29] });
+  }
+  // the salt seam: an overhung rock face crusted white
+  const s = FCLUSTERS.find(q => q.id === 'seam');
+  const gy = groundH(s.x, s.z) - 0.5;
+  fboxW({ x: s.x, y: gy, z: s.z + 4, w: 6.5, d: 1.6, h: 5.5, tw: 5.5, td: 2.6, shz: -1.2, col: C_FROCK, colB: C_FROCK2 });
+  addColl(s.x, s.z + 4, 2.2); addColl(s.x - 4, s.z + 4, 2.2); addColl(s.x + 4, s.z + 4, 2.2);
+  for (let i = 0; i < 6; i++) {
+    const x = s.x - 5 + i * 2, z = s.z + 2.4 + hash2(i, 2) * 0.5;
+    flatheW([[0, 0], [0.3, 0.2], [0.16, 0.7], [0, 0.95]], { seg: 5, x, y: groundH(x, z), z, ry: i, col: i % 2 ? C_SALT : mix3(C_SALT, C_CLAY, 0.3) });
+  }
+})();
+
+/* ── vista knolls: cairns that pull the eye ── */
+fCairn(870, 646); fCairn(1400, 956);
+fCairn(872.4, 644.2); fCairn(1397.8, 954.6);
+
+/* ── forest chests (mill, ferry, secret grotto A) + the CEDAR HEART ── */
+const millChest = { x: 648.4, z: 390.2, opened: false, lid: null, group: null };
+{ const m = buildChestMesh(millChest.x, millChest.z, 2.2); millChest.group = m.group; millChest.lid = m.lid; }
+const ferryChest = { x: 1341.5, z: 571.5, opened: false, lid: null, group: null };
+{ const m = buildChestMesh(ferryChest.x, ferryChest.z, -0.9); ferryChest.group = m.group; ferryChest.lid = m.lid; }
+const fgrottoChest = { x: 700.8, z: 718.6, opened: false, lid: null, group: null };
+{ const m = buildChestMesh(fgrottoChest.x, fgrottoChest.z, 1.1); fgrottoChest.group = m.group; fgrottoChest.lid = m.lid; }
+const cedarChest = { x: CEDAR.x - 0.4, z: CEDAR.z - 0.7, opened: false, lid: null, group: null, heart: null };
+{
+  const m = buildChestMesh(cedarChest.x, cedarChest.z, CEDAR.doorA + Math.PI);
+  cedarChest.group = m.group; cedarChest.lid = m.lid;
+  const heart = buildHeartItem();
+  heart.visible = false;
+  scene.add(heart);
+  cedarChest.heart = heart;
+}
+const FCHESTS = [
+  { ch: millChest, key: 'millChest', salt: 4, big: 'SALT CRYSTALS', small: 'Four, from the miller’s last dry week.' },
+  { ch: ferryChest, key: 'ferryChest', salt: 4, big: 'SALT CRYSTALS', small: 'The ferry fare box. Nobody is coming to collect.' },
+  { ch: fgrottoChest, key: 'fgrottoChest', salt: 5, big: 'SALT CACHE', small: 'Five crystals, hidden where the sun never found them.' },
+];
+
+/* ── forest salt pickups (same unmistakable collectible language) ── */
+const fSalt = [
+  { x: 1573, z: 852 }, { x: 1587, z: 842 }, { x: 1578, z: 838 },        // hamlet
+  { x: 1176, z: 642 }, { x: 1185, z: 648 }, { x: 1180, z: 638 }, { x: 1174, z: 650 },   // the seam
+  { x: 1752, z: 384 }, { x: 1747, z: 376 }, { x: 1754, z: 377 },        // grotto B
+  { x: 986, z: 388 }, { x: 700, z: 348 },                               // wheel2, spring 2 bank
+  { x: 1897, z: 1157 },                                                 // forecourt
+].map((p, i) => {
+  const m = new THREE.Mesh(SALT_GEO, SALT_MAT);
+  m.frustumCulled = false;
+  m.visible = false;
+  m.position.set(p.x, groundH(p.x, p.z) + 0.16, p.z);
+  scene.add(m);
+  return { x: p.x, z: p.z, got: false, mesh: m, baseY: groundH(p.x, p.z) + 0.16, ph: i * 0.9, chimed: false };
+});
+</script>
+<script>
+/* ═══════════ p6b/4 — creatures, the Warden, swelter, region gameplay ═══════════ */
+
+/* ── new voices ── */
+SFX.huff = function () { if (!AC) return; const t = AC.currentTime;
+  noiseBurst(t, 0.18, 0.2, 220, 90, 0.9, 'lowpass');
+  noiseBurst(t + 0.22, 0.14, 0.16, 260, 100, 0.9, 'lowpass');
+  tone(70, t, 0.2, 0.14, 'sine', null, 50); };
+SFX.boarGo = function () { if (!AC) return; const t = AC.currentTime;
+  noiseBurst(t, 0.5, 0.18, 340, 120, 0.8, 'lowpass');
+  tone(58, t, 0.4, 0.2, 'sine', null, 42); };
+SFX.buzz = function () { if (!AC) return; const t = AC.currentTime;
+  tone(190, t, 0.3, 0.05, 'sawtooth', null, 240);
+  tone(383, t + 0.04, 0.24, 0.03, 'sawtooth', null, 460); };
+SFX.hum = function () { if (!AC) return; const t = AC.currentTime;
+  [49, 98.6, 147.2].forEach((f, i) => tone(f, t, 3.4 - i * 0.6, [0.16, 0.07, 0.035][i], 'sine'));
+  tone(196.5, t + 0.8, 1.6, 0.02, 'sine'); };
+SFX.drain = function () { if (!AC) return; const t = AC.currentTime;
+  tone(392, t, 0.3, 0.07, 'triangle', null, 240);
+  noiseBurst(t, 0.2, 0.05, 1600, 700, 1.2); };
+
+/* ── CINDER BOAR — big, charging, long telegraph, 3 hits cures it ── */
+function buildCinderBoar() {
+  const root = new THREE.Group();
+  root.scale.setScalar(1.18);
+  const mat = TOON.clone();
+  const parts = [];
+  const mk = (md) => { const m = mdMesh(md, mat); m.frustumCulled = false; parts.push(m); return m; };
+  const charC = [0.37, 0.29, 0.25], charD = [0.29, 0.23, 0.2], belly = [0.48, 0.38, 0.31],
+        maneC = [0.68, 0.3, 0.12], tuskC = [0.95, 0.91, 0.8], hoof = [0.14, 0.12, 0.11];
+  const body = node(root, 0, 0.62, 0);
+  const md = MD();
+  // torso: heavy shoulders, tucked rump — faces +z like the crabs
+  box(md, { x: 0, y: -0.3, z: -0.55, w: 0.3, d: 0.5, h: 0.56, tw: 0.24, td: 0.4, col: charC, colB: belly });
+  box(md, { x: 0, y: -0.34, z: 0.12, w: 0.36, d: 0.42, h: 0.78, tw: 0.26, td: 0.3, col: charC, colB: belly });
+  // head: lowered wedge + snout + jaw
+  box(md, { x: 0, y: -0.16, z: 0.42, w: 0.25, d: 0.3, h: 0.48, tw: 0.17, td: 0.2, rx: 0.5, col: [0.33, 0.26, 0.22] });
+  box(md, { x: 0, y: -0.22, z: 0.68, w: 0.13, d: 0.16, h: 0.26, tw: 0.1, td: 0.12, rx: 0.35, col: charD });
+  lathe(md, [[0.09, 0], [0.1, 0.04]], { seg: 6, x: 0, y: -0.16, z: 0.84, ry: 0, col: [0.1, 0.08, 0.08] });   // snout disc
+  // TUSKS — the read at a glance
+  for (const s of [-1, 1]) {
+    box(md, { x: s * 0.14, y: -0.28, z: 0.72, w: 0.042, d: 0.042, h: 0.32, tw: 0.01, td: 0.01, rx: -0.8, rz: s * 0.4, col: tuskC });
+  }
+  // ears
+  for (const s of [-1, 1]) {
+    box(md, { x: s * 0.17, y: 0.16, z: 0.36, w: 0.07, d: 0.025, h: 0.18, tw: 0.012, td: 0.012, rz: s * 0.55, col: charD });
+  }
+  // mane ridge: singed rust bristles down the spine
+  for (let i = 0; i < 6; i++) {
+    box(md, { x: 0, y: 0.3 - i * 0.03, z: 0.3 - i * 0.24, w: 0.06, d: 0.085, h: 0.22 - i * 0.018, tw: 0.01, td: 0.012, rx: -0.3, col: i % 2 ? maneC : [0.52, 0.2, 0.08] });
+  }
+  box(md, { x: 0, y: -0.05, z: -1.02, w: 0.03, d: 0.03, h: 0.2, rx: 2.6, col: charD });   // tail
+  body.add(mk(md));
+  // legs: all four in one mesh
+  const mdL = MD();
+  for (const s of [-1, 1]) {
+    for (const fz of [0.32, -0.62]) {
+      box(mdL, { x: s * 0.2, y: 0.62 - 0.3, z: fz, w: 0.07, d: 0.09, h: -0.32, col: charD });
+      box(mdL, { x: s * 0.2, y: 0.0, z: fz, w: 0.06, d: 0.075, h: 0.06, col: hoof });
+    }
+  }
+  const legsM = mk(mdL);
+  root.add(legsM);
+  // hit flash ghost
+  const mdF = MD();
+  lathe(mdF, [[0, -0.5], [0.44, -0.25], [0.48, 0.12], [0.3, 0.34], [0, 0.4]], { seg: 8, ex: 0.72, col: [1, 1, 1] });
+  const flashM = mdMesh(mdF, new THREE.MeshBasicMaterial({ color: 0xfff2dc, transparent: true, opacity: 0.7, depthWrite: false }), false);
+  flashM.frustumCulled = false;
+  flashM.visible = false;
+  flashM.scale.set(1.05, 1.0, 1.5);
+  body.add(flashM);
+  // EMBER GLOW — sun-madness burning in the seams (its own additive mesh)
+  const mdG = MD();
+  const emberHi = [1.0, 0.72, 0.3], ember = [1.0, 0.45, 0.12];
+  for (const s of [-1, 1]) {
+    box(mdG, { x: s * 0.085, y: -0.02, z: 0.64, w: 0.055, d: 0.02, h: 0.09, rx: 0.5, col: emberHi });           // eyes
+    box(mdG, { x: s * 0.32, y: -0.28, z: 0.08, w: 0.02, d: 0.34, h: 0.06, rx: 0.15, col: ember });              // flank cracks
+    box(mdG, { x: s * 0.3, y: -0.1, z: -0.4, w: 0.02, d: 0.26, h: 0.05, rx: -0.2, col: ember });
+    box(mdG, { x: s * 0.34, y: -0.42, z: -0.15, w: 0.016, d: 0.2, h: 0.045, rx: 0.05, col: emberHi });
+    box(mdG, { x: s * 0.1, y: 0.14, z: -0.75, w: 0.014, d: 0.14, h: 0.04, rx: -0.4, col: ember });              // haunch embers
+  }
+  box(mdG, { x: 0, y: -0.2, z: 0.85, w: 0.03, d: 0.012, h: 0.03, col: emberHi });                               // nostril coal
+  const glow = mdMesh(mdG, new THREE.MeshBasicMaterial({
+    vertexColors: true, transparent: true, opacity: 0.85, blending: THREE.AdditiveBlending, depthWrite: false,
+  }), false);
+  glow.frustumCulled = false;
+  body.add(glow);
+  const shadow = blobShadow(0.62);
+  root.add(shadow);
+  return { root, body, legsM, flashM, glow, mat, shadow };
+}
+
+/* ── EMBER HORNET — fast imp-family fliers, dive in pairs ── */
+function buildEmberHornet() {
+  const root = new THREE.Group();
+  const body = node(root, 0, 0, 0);
+  const amber = [1.0, 0.62, 0.16], charC = [0.22, 0.14, 0.1], eyeC = [0.1, 0.05, 0.04];
+  const md = MD();
+  // head + big dark eyes
+  lathe(md, [[0, -0.02], [0.07, 0.03], [0.05, 0.1], [0, 0.12]], { seg: 6, x: 0, y: 0, z: 0.16, col: charC });
+  for (const s of [-1, 1]) {
+    box(md, { x: s * 0.05, y: 0.03, z: 0.2, w: 0.028, d: 0.02, h: 0.05, ry: s * 0.4, col: eyeC });
+  }
+  // thorax
+  lathe(md, [[0, -0.05], [0.09, 0.02], [0.08, 0.12], [0, 0.16]], { seg: 6, col: amber });
+  // banded abdomen sweeping back-down + stinger
+  const segs = [[0.085, amber], [0.09, charC], [0.075, amber], [0.05, charC]];
+  let az = -0.1, ay = -0.02;
+  for (let i = 0; i < segs.length; i++) {
+    box(md, { x: 0, y: ay, z: az, w: segs[i][0], d: 0.09, h: 0.11, tw: segs[i][0] * 0.8, td: 0.07, rx: 2.05, col: segs[i][1] });
+    az -= 0.09; ay -= 0.045;
+  }
+  box(md, { x: 0, y: ay + 0.02, z: az + 0.02, w: 0.02, d: 0.02, h: 0.1, tw: 0.002, td: 0.002, rx: 2.5, col: eyeC });
+  // dangling legs
+  for (const s of [-1, 1]) {
+    box(md, { x: s * 0.06, y: -0.1, z: 0.06, w: 0.01, d: 0.01, h: 0.09, rx: 0.6, rz: s * 0.5, col: charC });
+    box(md, { x: s * 0.07, y: -0.1, z: -0.01, w: 0.01, d: 0.01, h: 0.08, rx: 0.9, rz: s * 0.6, col: charC });
+  }
+  const torso = mdMesh(md, new THREE.MeshBasicMaterial({ vertexColors: true }));
+  torso.frustumCulled = false;
+  body.add(torso);
+  // two big wing pairs — the blur that reads "hornet" at distance
+  const mdW = MD();
+  const wingC = [1.0, 0.85, 0.6], wingC2 = [0.9, 0.95, 1.0];
+  for (const s of [-1, 1]) {
+    pushQuad(mdW, [s * 0.05, 0.12, 0.06], [s * 0.42, 0.2, -0.04], [s * 0.48, 0.16, -0.14], [s * 0.07, 0.08, -0.03], wingC2);
+    pushQuad(mdW, [s * 0.05, 0.1, -0.02], [s * 0.34, 0.14, -0.16], [s * 0.38, 0.1, -0.24], [s * 0.06, 0.05, -0.07], wingC);
+  }
+  const wings = mdMesh(mdW, new THREE.MeshBasicMaterial({
+    vertexColors: true, transparent: true, opacity: 0.42,
+    blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+  }), false);
+  wings.frustumCulled = false;
+  body.add(wings);
+  const shadow = blobShadow(0.17);
+  root.add(shadow);
+  return { root, body, torso, wings, shadow };
+}
+
+/* ── placements ── */
+const BOARS = [];
+for (const gid of ['glade1', 'glade2', 'glade3']) {
+  const c = FCLUSTERS.find(q => q.id === gid);
+  for (const [ox, oz] of [[-7, -4], [8, 6]]) {
+    const b = {
+      c: buildCinderBoar(), sx: c.x + ox, sz: c.z + oz, x: c.x + ox, z: c.z + oz,
+      hp: 3, st: 'graze', t: Math.random() * 3, ang: Math.random() * TAU,
+      dir: [0, 1], dead: false, cured: false, flash: 0, cd: 0,
+      area: areaOfForest(c.x + ox),
+    };
+    b.c.root.position.set(b.x, groundH(b.x, b.z), b.z);
+    scene.add(b.c.root);
+    BOARS.push(b);
+  }
+}
+function areaOfForest(x) { return x < 330 ? 'pass' : x < 950 ? 'fwest' : x < 1550 ? 'fmid' : 'feast'; }
+const HORNETS = [];
+(function placeHornets() {
+  const H = FCLUSTERS.find(q => q.id === 'hollow');
+  const F = FCLUSTERS.find(q => q.id === 'ferry');
+  const spots = [
+    [H.x - 5, H.z - 3, 0], [H.x - 1, H.z - 6, 0],
+    [H.x + 6, H.z + 4, 1], [H.x + 9, H.z + 1, 1],
+    [F.x + 5, F.z - 5, 2], [F.x + 8, F.z - 2, 2],
+  ];
+  for (const [x, z, pair] of spots) {
+    const h = {
+      m: buildEmberHornet(), sx: x, sz: z, x, z, y: groundH(x, z) + 2.2, face: 0,
+      st: 'drift', t: Math.random() * 2, dir: [0, 0, 0], dead: false, pair,
+      area: areaOfForest(x),
+    };
+    h.m.root.position.set(h.x, h.y, h.z);
+    scene.add(h.m.root);
+    HORNETS.push(h);
+  }
+})();
+/* the pass on-ramp: familiar bay creatures range the saddle */
+for (const s of [{ x: 152, z: 34 }, { x: 216, z: 50 }]) {
+  const cr = {
+    c: buildScorchCrab(), sx: s.x, sz: s.z, x: s.x, z: s.z, hp: 3,
+    st: 'patrol', t: Math.random() * 3, ang: 0, dir: [1, 0], dead: false, area: 'pass',
+    lungeCD: 0, flash: 0,
+  };
+  cr.c.root.position.set(cr.x, groundH(cr.x, cr.z), cr.z);
+  scene.add(cr.c.root);
+  crabs.push(cr);
+}
+for (const p of [[172, 30], [238, 66], [268, 44]]) {
+  const w = mkImp(p[0], p[1]);
+  w.area = 'pass';
+  w.y = groundH(w.x, w.z) + 1.8;
+  w.m.root.position.set(w.x, w.y, w.z);
+  scene.add(w.m.root);
+  wisps.push(w);
+}
+
+/* ── THE FIRE WARDEN ── */
+function buildWarden() {
+  return buildHumanoid({
+    h: 1.66, stoop: true,
+    skin: col(0xb9855c), hair: col(0xb8ab98), hairStyle: 'bun',
+    hat: col(0xa8895a),
+    coat: col(0x6e4a38), top: col(0x6e4a38),
+    sleeve: col(0x5f402f), sleeve2: col(0xb9855c),
+    pants: col(0x3f332a), boot: col(0x33302a),
+    belt: col(0x2e241a),
+  });
+}
+const warden = placeNPC(buildWarden, WARDEN_POS.x, WARDEN_POS.z, 0.9, 0);
+DLG.warden1 = { name: 'THE FIRE WARDEN', lines: [
+  'Somebody has to watch for a fire. Out here, everything is one.',
+  'Walk shade to shade, kid. The sun doesn’t blink in this forest.',
+], onDone: () => { SAVE.wardenTalked = Math.max(SAVE.wardenTalked || 0, 1); storeSave(); } };
+DLG.warden2 = { name: 'THE FIRE WARDEN', lines: [
+  'The falls went quiet the night the moon broke. Now the stones under them HUM.',
+  'Fresh rockfall, right over the plunge pool. I don’t climb. You look like you might.',
+], onDone: () => { SAVE.wardenTalked = 2; storeSave(); } };
+DLG.warden3 = { name: 'THE FIRE WARDEN', lines: [
+  'Drink at the springs. Mind the boars. And if you smell smoke — run to me.',
+], onDone: () => { storeSave(); } };
+
+/* ── boar brain ── */
+let boarsCured = 0, boarChargesDodged = 0;
+function tickBoarF(b) {
+  if (b.dead) return;
+  b.t += DT;
+  if (b.flash > 0) b.flash -= DT;
+  if (b.cd > 0) b.cd -= DT;
+  const gy = groundH(b.x, b.z);
+  const d2p = Math.hypot(P.x - b.x, P.z - b.z);
+  const faceP = () => { b.ang = angLerp(b.ang, Math.atan2(P.x - b.x, P.z - b.z), 0.08); };
+  if (b.st === 'leave') {
+    // cured: it shakes off the madness and trots away. nothing dies here either.
+    b.x += Math.sin(b.ang) * 3.4 * DT; b.z += Math.cos(b.ang) * 3.4 * DT;
+    const c = collide(b.x, b.z, 0.7);
+    const r = resolveSolid(b.x, b.z, c[0], c[1]);
+    b.x = r[0]; b.z = r[1];
+    if (b.t > 6) { b.dead = true; b.c.root.visible = false; }
+    return;
+  }
+  if (b.st === 'graze') {
+    const a = Math.sin(b.t * 0.4 + b.sx) * 2.4;
+    moveBoar(b, b.sx + Math.cos(a) * 4, b.sz + Math.sin(a * 1.2) * 4, 0.8);
+    if (d2p < 15 && P.x > 130) { b.st = 'alert'; b.t = 0; SFX.huff(); }
+  } else if (b.st === 'alert') {
+    faceP();
+    if (d2p > 21) { b.st = 'graze'; b.t = 0; }
+    else if (b.t > 0.55 && b.cd <= 0 && d2p < 17) { b.st = 'paw'; b.t = 0; SFX.huff(); }
+  } else if (b.st === 'paw') {
+    // THE TELEGRAPH: head down, forehoof scraping, ember smoke huffing
+    faceP();
+    if ((simTick % 9) === 0) {
+      const hx = b.x + Math.sin(b.ang) * 1.0, hz = b.z + Math.cos(b.ang) * 1.0;
+      burst(psDust, hx, gy + 0.35, hz, 3, 1.1, 0.9, 0.5);
+      psSpark.spawn(hx, gy + 0.5, hz, (Math.random() - 0.5), 0.8, (Math.random() - 0.5), 0.4);
+    }
+    if (b.t > 1.05) {
+      b.st = 'charge'; b.t = 0;
+      const d = d2p || 1;
+      b.dir = [(P.x - b.x) / d, (P.z - b.z) / d];
+      b.ang = Math.atan2(b.dir[0], b.dir[1]);
+      b.hitDone = false;
+      SFX.boarGo();
+      rumble({ duration: 200, strong: 0.4, weak: 0.6 });
+    }
+  } else if (b.st === 'charge') {
+    // a straight locked rush — jump it, sidestep it, or eat 2 hearts
+    const hx = b.x + Math.sin(b.ang) * 1.05, hz = b.z + Math.cos(b.ang) * 1.05;
+    if (treeTrunkAt(hx, hz, 0.55) || chargeProp(hx, hz) || window.__forestSolid(hx, hz)) {
+      // CRASH — tree wins. dizzy and vulnerable (kid-discoverable)
+      b.st = 'stun'; b.t = 0;
+      SFX.thump(true);
+      if (d2p < 26) CAM.shake = Math.max(CAM.shake, 0.24);
+      burst(psDust, hx, gy + 0.6, hz, 18, 2.4, 1.8, 0.8);
+      burst(psSpark, hx, gy + 1.0, hz, 8, 1.8, 1.4, 0.5);
+      rumble({ duration: 260, strong: 0.7, weak: 0.5 });
+      return;
+    }
+    b.x += b.dir[0] * 9.6 * DT; b.z += b.dir[1] * 9.6 * DT;
+    if ((simTick % 4) === 0) psDust.spawn(b.x, gy + 0.2, b.z, -b.dir[0] * 1.4, 0.8, -b.dir[1] * 1.4, 0.5);
+    if (!b.hitDone && Math.hypot(P.x - b.x, P.z - b.z) < 1.3) {
+      if (P.fy - groundH(P.x, P.z) < 0.7) {
+        b.hitDone = true;
+        hurtPlayer(2, b.x - b.dir[0], b.z - b.dir[1]);   // 2 HEARTS — it hits hard
+      } else if (!b.jumpCredit) {
+        b.jumpCredit = true;                              // sailed clean over the rush
+        boarChargesDodged++;
+      }
+    }
+    if (b.t > 2.0) { b.st = 'skid'; b.t = 0; }
+  } else if (b.st === 'skid') {
+    b.x += b.dir[0] * (2.4 - b.t * 3) * DT; b.z += b.dir[1] * (2.4 - b.t * 3) * DT;
+    if (b.t > 0.7) { b.st = 'alert'; b.t = 0; b.cd = 1.1; b.jumpCredit = false; }
+  } else if (b.st === 'stun') {
+    if (b.t > 2.6) { b.st = 'alert'; b.t = 0; b.cd = 0.8; b.jumpCredit = false; }
+  } else if (b.st === 'stagger') {
+    b.x += b.dir[0] * 3.5 * DT; b.z += b.dir[1] * 3.5 * DT;
+    if (b.t > 0.35) { b.st = 'alert'; b.t = 0; }
+  }
+  // soft push so it never overlaps a standing player
+  if (d2p < 1.5 && b.st !== 'charge') {
+    const d = d2p || 1;
+    b.x -= (P.x - b.x) / d * 1.4 * DT; b.z -= (P.z - b.z) / d * 1.4 * DT;
+  }
+}
+function moveBoar(b, tx, tz, sp) {
+  const dx = tx - b.x, dz = tz - b.z, d = Math.hypot(dx, dz);
+  if (d > 0.5) {
+    const c = collide(b.x + dx / d * sp * DT, b.z + dz / d * sp * DT, 0.6);
+    const r = resolveSolid(b.x, b.z, c[0], c[1]);
+    b.x = r[0]; b.z = r[1];
+    b.ang = angLerp(b.ang, Math.atan2(dx, dz), 0.06);
+  }
+}
+function chargeProp(x, z) {
+  for (let i = 0; i < COLL.length; i++) {
+    const c = COLL[i];
+    if (c.off || c.r < 0.4) continue;
+    if (c.top !== undefined && c.top - groundH(c.x, c.z) < 0.9) continue;   // low steps don't stop a boar
+    const dx = x - c.x, dz = z - c.z;
+    if (dx * dx + dz * dz < (c.r + 0.4) * (c.r + 0.4)) return true;
+  }
+  return false;
+}
+function hitBoar(b) {
+  b.hp--;
+  b.flash = 0.22;
+  SFX.hit();
+  P.hitstop = 4;
+  rumble({ duration: 90, strong: 0.55, weak: 0.35 });
+  const gy = groundH(b.x, b.z);
+  burst(psSpark, b.x, gy + 0.7, b.z, 15, 2.3, 1.8, 0.45);
+  const d = Math.hypot(b.x - P.x, b.z - P.z) || 1;
+  b.dir = [(b.x - P.x) / d, (b.z - P.z) / d];
+  if (b.hp <= 0) {
+    // CURED — the madness lifts. it shakes, dims, and trots home to the trees.
+    b.cured = true;
+    boarsCured++;
+    b.st = 'leave'; b.t = 0;
+    b.ang = Math.atan2(b.dir[0], b.dir[1]);
+    b.c.glow.visible = false;
+    b.c.mat.color.setRGB(0.78, 0.72, 0.66);        // the char cools to plain hide
+    SFX.chime(0.6);
+    burst(psSparkle, b.x, gy + 0.9, b.z, 16, 1.4, 1.4, 1.0);
+    rumble({ duration: 200, strong: 0.3, weak: 0.5 });
+  } else if (b.st !== 'charge') {
+    b.st = 'stagger'; b.t = 0;
+  }
+}
+
+/* ── hornet brain: paired divers ── */
+let hornetsPopped = 0;
+function tickHornet(h) {
+  if (h.dead) return;
+  h.t += DT;
+  const gy = groundH(h.x, h.z);
+  if (inShadeAt(h.x, h.z) && h.st !== 'pop') { popHornet(h); return; }   // imp family: shade fizzles them
+  const d2p = Math.hypot(P.x - h.x, P.z - h.z);
+  const faceP = () => { h.face = Math.atan2(P.x - h.x, P.z - h.z); };
+  if (h.st === 'drift') {
+    h.y = gy + 1.85 + Math.sin(h.t * 3.1 + h.sx) * 0.25;
+    const dHome = Math.hypot(h.x - h.sx, h.z - h.sz);
+    if (dHome > 24) {
+      h.x += (h.sx - h.x) / dHome * 3.2 * DT;
+      h.z += (h.sz - h.z) / dHome * 3.2 * DT;
+      return;
+    }
+    if (d2p > 1.5 && d2p < 19) {
+      const d = d2p || 1;
+      h.x += (P.x - h.x) / d * 2.1 * DT;
+      h.z += (P.z - h.z) / d * 2.1 * DT;
+      faceP();
+    }
+    if (d2p < 6.5) {
+      h.st = 'tele'; h.t = 0; SFX.buzz();
+      // THE PAIR: its partner rears up with it and they dive together
+      for (const o of HORNETS) {
+        if (o !== h && !o.dead && o.pair === h.pair && o.st === 'drift') { o.st = 'tele'; o.t = -0.12; }
+      }
+    }
+  } else if (h.st === 'tele') {
+    faceP();
+    h.y = gy + 2.2 + Math.sin(h.t * 22) * 0.07;
+    if (h.t > 0.38) {
+      h.st = 'dive'; h.t = 0;
+      const ty = groundH(P.x, P.z) + 0.8;
+      const dx = P.x - h.x, dy = ty - h.y, dz = P.z - h.z;
+      const l = Math.hypot(dx, dy, dz) || 1;
+      h.dir = [dx / l * 11.5, dy / l * 11.5, dz / l * 11.5];
+      SFX.pop();
+    }
+  } else if (h.st === 'dive') {
+    h.x += h.dir[0] * DT; h.y += h.dir[1] * DT; h.z += h.dir[2] * DT;
+    if (Math.hypot(P.x - h.x, P.z - h.z) < 0.85 && Math.abs(h.y - (groundH(P.x, P.z) + 1.0)) < 1.0) {
+      hurtPlayer(1, h.x, h.z);
+      h.st = 'drift'; h.t = 0;
+    }
+    if (h.y < gy + 0.25 || h.t > 0.9) { h.st = 'drift'; h.t = 0; }
+  }
+}
+function popHornet(h) {
+  h.dead = true;
+  hornetsPopped++;
+  impPops.push({ m: h.m, t: 0 });
+  burst(psSpark, h.x, h.y, h.z, 16, 2.0, 1.0, 0.7);
+  burst(psSparkle, h.x, h.y, h.z, 10, 1.4, 0.7, 0.8);
+  SFX.pop();
+  rumble({ duration: 60, strong: 0.25, weak: 0.35 });
+}
+</script>
+<script>
+/* ═══════════ p6b/5 — region gameplay wiring (wraps), per-frame, telemetry ═══════════ */
+
+/* ── areas: the forest splits into respawn districts like the bay ── */
+const _bhAreaAt = areaAt;
+areaAt = function (x, z) {
+  if (x > 110 && !(x > 300 && z < -30)) return areaOfForest(x);
+  return _bhAreaAt(x, z);
+};
+const _bhRespawn = respawnLeftBehind;
+respawnLeftBehind = function () {
+  _bhRespawn();
+  const cur = P.area;
+  for (const b of BOARS) {
+    if ((b.dead || b.cured) && b.area !== cur) {
+      b.dead = false; b.cured = false; b.hp = 3; b.st = 'graze'; b.t = 0;
+      b.x = b.sx; b.z = b.sz; b.cd = 0; b.jumpCredit = false;
+      b.c.glow.visible = true; b.c.mat.color.setRGB(1, 1, 1);
+      b.c.root.visible = true;
+      b.c.root.position.set(b.x, groundH(b.x, b.z), b.z);
+    }
+  }
+  for (const h of HORNETS) {
+    if (h.dead && h.area !== cur) {
+      h.dead = false; h.st = 'drift'; h.t = 0;
+      h.x = h.sx; h.z = h.sz; h.y = groundH(h.x, h.z) + 1.9;
+      h.m.root.visible = true; h.m.root.scale.setScalar(1);
+    }
+  }
+};
+
+/* ── interactions ── */
+const _bhInteract = currentInteract;
+currentInteract = function () {
+  if (P.x > 105 && !roomAt(P.x, P.z)) {
+    const near = (x, z, r) => Math.hypot(P.x - x, P.z - z) < r;
+    if (near(warden.x, warden.z, 2.6)) return { id: 'wardenTalk', label: '✕ TALK' };
+    if (!cedarChest.opened && near(cedarChest.x, cedarChest.z, 1.7)) return { id: 'cedarChest', label: '✕ OPEN' };
+    for (let i = 0; i < FCHESTS.length; i++) {
+      const e = FCHESTS[i];
+      if (!e.ch.opened && near(e.ch.x, e.ch.z, 1.7)) return { id: 'fchest', e, label: '✕ OPEN' };
+    }
+    if (near(SIGNPOST.x, SIGNPOST.z, 2.5)) return { id: 'signpost', label: '✕ READ' };
+    return null;
+  }
+  return _bhInteract();
+};
+const _bhDoInteract = doInteract;
+doInteract = function (ctx) {
+  if (ctx.id === 'wardenTalk') {
+    const n = (SAVE && SAVE.wardenTalked) || 0;
+    startDialog(n === 0 ? 'warden1' : n === 1 ? 'warden2' : 'warden3', warden);
+  } else if (ctx.id === 'fchest') {
+    openForestChest(ctx.e);
+  } else if (ctx.id === 'cedarChest') {
+    openCedarChest();
+  } else if (ctx.id === 'signpost') {
+    SFX.page();
+    const gy = groundH(SIGNPOST.x, SIGNPOST.z);
+    startMicro({
+      cam: [SIGNPOST.x - 3.2, gy + 1.7, SIGNPOST.z + 2.8], look: [SIGNPOST.x, gy + 1.8, SIGNPOST.z],
+      dur: 2.0, at: 0.55,
+      caption: 'THE PARCHED FOREST — the Silverrun runs dry to the falls.', ms: 3600,
+    });
+  } else {
+    _bhDoInteract(ctx);
+  }
+};
+
+/* ── forest chests ── */
+const fChestAnims = [];
+function openForestChest(e) {
+  e.ch.opened = true;
+  SAVE[e.key] = true; storeSave();
+  fChestAnims.push({ ch: e.ch, t: 0, salt: e.salt, big: e.big, small: e.small });
+  SFX.chestOpen();
+}
+function tickFChests() {
+  for (let i = fChestAnims.length - 1; i >= 0; i--) {
+    const a = fChestAnims[i];
+    a.t += DT;
+    a.ch.lid.rotation.x = -smoothstep(clamp(a.t / 0.5, 0, 1)) * 1.9;
+    if (a.t > 0.65) {
+      fChestAnims.splice(i, 1);
+      P.salt += a.salt;
+      SAVE.salt = P.salt; storeSave();
+      itemToast(a.big, a.small);
+      SFX.pickup();
+      burst(psSparkle, a.ch.x, groundH(a.ch.x, a.ch.z) + 0.9, a.ch.z, 14, 1.2, 1.3, 0.9);
+    }
+  }
+}
+/* the Great Cedar's HEART CONTAINER — same beat as the wreck's */
+let cedarAnimT = -1, cedarHeartT = -1;
+function openCedarChest() {
+  cedarChest.opened = true;
+  SAVE.cedarHeart = true; storeSave();
+  cedarAnimT = 0;
+  SFX.chestOpen();
+}
+function tickCedarChest() {
+  if (cedarAnimT < 0) return;
+  cedarAnimT += DT;
+  cedarChest.lid.rotation.x = -smoothstep(clamp(cedarAnimT / 0.5, 0, 1)) * 1.9;
+  if (cedarAnimT > 0.4 && cedarHeartT < 0) {
+    cedarHeartT = 0;
+    cedarChest.heart.visible = true;
+  }
+  if (cedarHeartT >= 0) {
+    cedarHeartT += DT;
+    const y0 = groundH(cedarChest.x, cedarChest.z) + 0.5;
+    if (cedarHeartT < 1.0) {
+      cedarChest.heart.position.set(cedarChest.x, y0 + cedarHeartT * 0.9, cedarChest.z);
+      cedarChest.heart.rotation.y += DT * 3;
+    } else if (cedarHeartT < 1.7) {
+      const t = (cedarHeartT - 1.0) / 0.7;
+      cedarChest.heart.position.set(lerp(cedarChest.x, P.x, t), lerp(y0 + 0.9, groundH(P.x, P.z) + 1.9, t), lerp(cedarChest.z, P.z, t));
+      cedarChest.heart.rotation.y += DT * 6;
+    } else {
+      cedarChest.heart.visible = false;
+      cedarAnimT = -1; cedarHeartT = -1;
+      P.maxHearts = Math.min(8, P.maxHearts + 1);
+      P.hearts = P.maxHearts;
+      SAVE.mh = P.maxHearts; storeSave();
+      itemGetT = 0;
+      itemToast('HEART CONTAINER', 'The Great Cedar kept its last green heart for you.');
+      SFX.heart();
+      burst(psSparkle, P.x, groundH(P.x, P.z) + 1.4, P.z, 18, 1.4, 1.2, 1.0);
+    }
+  }
+}
+/* forest salt pickups */
+function tickFSalt() {
+  for (const s of fSalt) {
+    if (s.got) continue;
+    const d = Math.hypot(P.x - s.x, P.z - s.z);
+    if (d < 2.0 && !s.chimed) { s.chimed = true; SFX.chime(1.6); }
+    else if (d > 4.5) s.chimed = false;
+    if (d < 1.1) {
+      s.got = true;
+      P.salt++;
+      SAVE.salt = P.salt; storeSave();
+      s.mesh.visible = false;
+      SFX.pickup();
+      burst(psSparkle, s.x, groundH(s.x, s.z) + 0.5, s.z, 14, 1.2, 1.6, 0.8);
+    }
+  }
+}
+
+/* ── SWELTER + checkpoints + the hum: the region's own tick ── */
+let swelterT = 0, humLatch = false, regionNow = 'bay';
+let springNear = -1, springsSaved = 0;
+function tickForest() {
+  const inF = P.x > 110 && !roomAt(P.x, P.z);
+  const reg = inF ? 'forest' : 'bay';
+  if (reg !== regionNow) {
+    regionNow = reg;
+    if (SAVE) { SAVE.region = reg; storeSave(); }
+    if (reg === 'forest' && SAVE && !SAVE.forestSeen) {
+      SAVE.forestSeen = true; storeSave();
+      showCaption('THE PARCHED FOREST', 4200);
+    }
+  }
+  for (const b of BOARS) tickBoarF(b);
+  for (const h of HORNETS) tickHornet(h);
+  tickFChests(); tickCedarChest(); tickFSalt();
+  if (!inF) { swelterT = Math.max(0, swelterT - 3); springNear = -1; return; }
+  /* SWELTER — open sun east of the pass camp drains 1 heart / 20 s.
+     Canopy, rock shade, and the springs are fully safe. */
+  const exposed = P.x > 320 && !P.shade && state === 'play';
+  if (exposed) {
+    swelterT++;
+    if (swelterT === 600 && SAVE && !SAVE.swelterSeen) {
+      SAVE.swelterSeen = true; storeSave();
+      showCaption('The open sun out here has WEIGHT. Shade — quick.', 3400);
+    }
+    if (swelterT >= 1200) {
+      swelterT = 0;
+      P.hearts = Math.max(0, P.hearts - 1);
+      SFX.drain();
+      flashGlare(0.32, 0.7);
+      rumble({ duration: 150, strong: 0.2, weak: 0.4 });
+      if (P.hearts <= 0) { startSunstruck(); return; }
+    }
+  } else if (swelterT > 0) swelterT = Math.max(0, swelterT - 3);
+  /* shade springs: respawn anchors + save checkpoints */
+  springNear = -1;
+  for (let i = 0; i < FSPRINGS.length; i++) {
+    const s = FSPRINGS[i];
+    if (Math.hypot(P.x - s.x, P.z - s.z) < s.r) {
+      springNear = i;
+      if (lastSpringIdx !== i) {
+        lastSpringIdx = i; springsSaved++;
+        SAVE.lastSpring = i; SAVE.lastShade = [s.x, s.z]; SAVE.region = 'forest';
+        storeSave();
+        SFX.chime(1.2);
+        burst(psSparkle, P.x, P.fy + 1.0, P.z, 16, 1.1, 1.2, 1.0);
+        showCaption('The spring holds. You will wake here.', 2800);
+      }
+      break;
+    }
+  }
+  /* the sealed falls basin HUMS when you reach the rockfall */
+  const dh = Math.hypot(P.x - HUM_SPOT.x, P.z - HUM_SPOT.z);
+  if (dh < 13 && !humLatch) {
+    humLatch = true;
+    SFX.hum();
+    showCaption('The stones here fell recently. Something under there hums.', 4200);
+    if (SAVE && !SAVE.fallsHum) { SAVE.fallsHum = true; storeSave(); }
+  } else if (dh > 30) humLatch = false;
+}
+const _bhTickPlayer = tickPlayer;
+tickPlayer = function () {
+  _bhTickPlayer();
+  tickForest();
+};
+
+/* ── the sword reaches the new creatures ── */
+const _bhSwingHits = swingHits;
+swingHits = function () {
+  let any = _bhSwingHits();
+  if (P.x > 105) {
+    for (const b of BOARS) {
+      if (b.dead || b.st === 'leave') continue;
+      if (inSwingArc(b.x, b.z, 2.7, 1.35) && P.fy - groundH(b.x, b.z) < 1.8) {
+        hitBoar(b); any = true;
+      }
+    }
+    for (const h of HORNETS) {
+      if (h.dead) continue;
+      if (inSwingArc(h.x, h.z, 2.3) && h.y < P.fy + 2.6) { popHornet(h); any = true; }
+    }
+  }
+  return any;
+};
+
+/* ── world-state derivation for the region (called by applyWorldState) ── */
+window.__forestApplySave = function () {
+  for (const e of FCHESTS) {
+    const on = !!(SAVE && SAVE[e.key]);
+    e.ch.opened = on;
+    e.ch.lid.rotation.x = on ? -1.9 : 0;
+  }
+  const ced = !!(SAVE && SAVE.cedarHeart);
+  cedarChest.opened = ced;
+  cedarChest.lid.rotation.x = ced ? -1.9 : 0;
+  cedarChest.heart.visible = false;
+  cedarAnimT = -1; cedarHeartT = -1;
+  fChestAnims.length = 0;
+  lastSpringIdx = (SAVE && typeof SAVE.lastSpring === 'number') ? SAVE.lastSpring : -1;
+  regionNow = (SAVE && SAVE.region) || 'bay';
+  swelterT = 0; humLatch = false; springNear = -1;
+  for (const s of fSalt) { s.got = false; s.chimed = false; }
+  for (const b of BOARS) {
+    b.dead = false; b.cured = false; b.hp = 3; b.st = 'graze'; b.t = 0; b.cd = 0;
+    b.x = b.sx; b.z = b.sz; b.jumpCredit = false; b.flash = 0;
+    b.c.glow.visible = true; b.c.mat.color.setRGB(1, 1, 1);
+    b.c.root.visible = true;
+    b.c.root.position.set(b.x, groundH(b.x, b.z), b.z);
+  }
+  for (const h of HORNETS) {
+    h.dead = false; h.st = 'drift'; h.t = 0;
+    h.x = h.sx; h.z = h.sz; h.y = groundH(h.x, h.z) + 2.1;
+    h.m.root.visible = true; h.m.root.scale.setScalar(1);
+  }
+};
+
+/* ── per-frame: visibility, fog, animation, telemetry (rides cullChunks,
+   which updateVisuals calls right after it finishes the base fog) ── */
+const FOGF = { col: col(0xe9d2ab), near: 160, far: 1250 };
+const FDBG = { reveal: false, overhead: false };
+let fT = 0, fClock = performance.now(), dbgDone = false;
+const FCHEST_ALL = [millChest, ferryChest, fgrottoChest, cedarChest];
+cullChunks = function (ccx, ccz) {
+  const now = performance.now();
+  const dtv = Math.min(0.1, (now - fClock) / 1000);
+  fClock = now;
+  const reveal = FDBG.reveal;
+  const forestVis = reveal || (ccx > 40 && ccz < 100) || ccx > 130;
+  for (let i = 0; i < chunks.length; i++) {
+    const c = chunks[i];
+    if (!c.mesh) continue;
+    if (reveal) { c.mesh.visible = true; continue; }
+    if (c.forest && !forestVis) { c.mesh.visible = false; continue; }
+    const dx = c.cx - ccx, dz = c.cz - ccz;
+    c.mesh.visible = (dx * dx + dz * dz) < (c.r2 || 27225);
+  }
+  fallsMesh.visible = forestVis;
+  towerMesh.visible = forestVis;
+  cedarMesh.visible = forestVis;
+  window.__springsMesh.visible = forestVis;
+  const dcg = (ccx - CEDAR.x) * (ccx - CEDAR.x) + (ccz - CEDAR.z) * (ccz - CEDAR.z);
+  cedarGlow.visible = forestVis && dcg < 90000;
+  for (const m of farTier) m.visible = forestVis;
+  const near2 = (x, z, r) => { const dx = x - ccx, dz = z - ccz; return dx * dx + dz * dz < r * r; };
+  for (const ch of FCHEST_ALL) ch.group.visible = forestVis && near2(ch.x, ch.z, 80);
+  seaLine.visible = forestVis && P.fy - groundH(P.x, P.z) > 8 && P.x > 400;
+  // fog: the region breathes hotter and further (overrides the base set above)
+  if (FDBG.overhead) {
+    scene.fog.near = 1e7; scene.fog.far = 1e7 + 1;
+  } else {
+    const tgt = (state !== 'title' && P.x > 100) ? clamp((P.x - 100) / 80, 0, 1) : 0;
+    fT += (tgt - fT) * Math.min(1, dtv * 2.2);
+    if (fT > 0.005) {
+      scene.fog.near = lerp(scene.fog.near, FOGF.near, fT);
+      scene.fog.far = lerp(scene.fog.far, FOGF.far, fT);
+      const fc = scene.fog.color;
+      fc.setRGB(lerp(fc.r, FOGF.col[0], fT), lerp(fc.g, FOGF.col[1], fT), lerp(fc.b, FOGF.col[2], fT));
+    }
+  }
+  // swelter shimmer: the heat is visible where it hunts you
+  if (psShimmer && state === 'play' && !P.shade && P.x > 320 && Math.random() < 0.3) {
+    const a = Math.random() * TAU, d = 3 + Math.random() * 10;
+    const sx = P.x + Math.cos(a) * d, sz = P.z + Math.sin(a) * d;
+    psShimmer.spawn(sx, groundH(sx, sz) + 0.4 + Math.random(), sz, 0, 0.6 + Math.random() * 0.4, 0, 1.6);
+  }
+  animateForest(dtv, now, ccx, ccz);
+  syncForestTelemetry();
+  extendDebugOnce();
+};
+
+function animateForest(dtv, now, ccx, ccz) {
+  const w = now / 1000;
+  const near2 = (x, z, r) => { const dx = x - ccx, dz = z - ccz; return dx * dx + dz * dz < r * r; };
+  // THE FIRE WARDEN — scanning the treeline, one hand shading her eyes
+  const wv = near2(warden.x, warden.z, 42);
+  warden.char.root.visible = wv;
+  if (wv) {
+    const dx = P.x - warden.x, dz = P.z - warden.z, d = Math.hypot(dx, dz);
+    let look;
+    if (d < 6) {
+      let rel = Math.atan2(dx, dz) - warden.char.root.rotation.y;
+      rel = ((rel % TAU) + TAU) % TAU; if (rel > Math.PI) rel -= TAU;
+      look = clamp(rel, -0.85, 0.85);
+    }
+    poseHumanoid(warden.char, 'idle', dtv, 0, { lookAt: look, stoop: 0.08 });
+    const c = warden.char;
+    c.shR.rotation.x = -2.45 - Math.sin(c.anim.t * 0.7) * 0.05;
+    c.shR.rotation.z = -0.3;
+    c.elR.rotation.x = -1.85;
+    c.shL.rotation.x = 0.18;
+  }
+  // CINDER BOARS
+  for (const b of BOARS) {
+    if (b.dead) { b.c.root.visible = false; continue; }
+    const vis = near2(b.x, b.z, 46);
+    b.c.root.visible = vis;
+    if (!vis) continue;
+    const gy = groundH(b.x, b.z);
+    b.c.root.position.set(b.x, gy, b.z);
+    b.c.root.rotation.y = b.ang;
+    const moving = b.st === 'charge' || b.st === 'leave' || b.st === 'graze' || b.st === 'stagger';
+    const rate = b.st === 'charge' ? 30 : b.st === 'leave' ? 16 : 7;
+    b.c.legsM.rotation.x = moving ? Math.sin(w * rate + b.sx) * 0.22 : 0;
+    if (b.st === 'paw') {
+      b.c.body.rotation.x = 0.09 + Math.sin(w * 26) * 0.02;       // head dipped, hoof scraping
+      b.c.body.position.y = 0.58;
+    } else if (b.st === 'charge') {
+      b.c.body.rotation.x = -0.06;
+      b.c.body.position.y = 0.62 + Math.abs(Math.sin(w * 22)) * 0.05;
+    } else if (b.st === 'stun') {
+      b.c.body.rotation.z = Math.sin(w * 7) * 0.14;
+      b.c.body.rotation.x = -0.08;
+      b.c.body.position.y = 0.56;
+    } else {
+      b.c.body.rotation.x *= 0.86;
+      b.c.body.rotation.z *= 0.86;
+      b.c.body.position.y = 0.62 + (b.st === 'graze' ? Math.sin(w * 1.1 + b.sx) * 0.02 : 0);
+    }
+    b.c.flashM.visible = b.flash > 0;
+    if (b.flash > 0) b.c.flashM.material.opacity = 0.4 + Math.sin(now / 24) * 0.3;
+    if (b.c.glow.visible) b.c.glow.material.opacity = 0.65 + Math.sin(now / 110 + b.sx) * 0.25;
+  }
+  // EMBER HORNETS
+  for (const h of HORNETS) {
+    if (h.dead) continue;
+    const vis = near2(h.x, h.z, 42);
+    h.m.root.visible = vis;
+    if (!vis) continue;
+    h.m.root.position.set(h.x, h.y, h.z);
+    h.m.root.rotation.y = h.face || 0;
+    h.m.shadow.position.y = groundH(h.x, h.z) - h.y + 0.04;
+    h.m.wings.rotation.x = -0.05 + Math.sin(now / 1000 * 95 + h.sx) * 0.5;
+    if (h.st === 'tele') {
+      h.m.body.rotation.x = -0.6 - Math.sin(w * 24) * 0.06;
+      h.m.torso.material.color.setRGB(1.4, 1.2, 1.0);
+    } else if (h.st === 'dive') {
+      h.m.body.rotation.x = 0.9;
+      h.m.torso.material.color.setRGB(1.25, 1.1, 1.0);
+    } else {
+      h.m.body.rotation.x = 0.1 + Math.sin(w * 3 + h.sx) * 0.08;
+      h.m.torso.material.color.setRGB(1, 1, 1);
+    }
+    if (!LOWFX && Math.random() < 0.08) {
+      psSpark.spawn(h.x, h.y - 0.12, h.z, (Math.random() - 0.5) * 0.4, -0.5, (Math.random() - 0.5) * 0.4, 0.4);
+    }
+  }
+  // forest salt sparkle
+  for (const s of fSalt) {
+    if (s.got) { s.mesh.visible = false; continue; }
+    const sv = near2(s.x, s.z, 36);
+    s.mesh.visible = sv;
+    if (sv) {
+      s.mesh.position.y = s.baseY + 0.15 + Math.sin(now / 420 + s.ph * 4) * 0.09;
+      s.mesh.rotation.y += dtv * 1.7;
+      if (!LOWFX && Math.random() < 0.05) {
+        psSparkle.spawn(s.x + (Math.random() - 0.5) * 0.5, s.mesh.position.y + 0.25 + Math.random() * 0.35,
+          s.z + (Math.random() - 0.5) * 0.5, 0, 0.45, 0, 0.7);
+      }
+    }
+  }
+  // the cedar's light shaft breathes
+  if (cedarGlow.visible) cedarGlow.material.opacity = 0.26 + Math.sin(now / 700) * 0.05;
+}
+
+/* ── telemetry (__fm gains the region) ── */
+function syncForestTelemetry() {
+  const T = window.__fm;
+  if (!T) return;
+  T.region = regionNow;
+  T.swelterOn = regionNow === 'forest' && P.x > 320 && !P.shade && state === 'play';
+  T.swelterT = swelterT / 60;
+  T.springIdx = springNear;
+  T.lastSpring = lastSpringIdx;
+  T.springsSaved = springsSaved;
+  T.forestShade = inForestQ(P.x, P.z) ? forestShadeAt(P.x, P.z) : false;
+  T.boarsAlive = BOARS.filter(b => !b.dead && !b.cured).length;
+  T.boarsCured = boarsCured;
+  T.boarDodges = boarChargesDodged;
+  let bd = 999, bx = 0, bz = 0, bst = '';
+  for (const b of BOARS) {
+    if (b.dead || b.cured) continue;
+    const d = Math.hypot(P.x - b.x, P.z - b.z);
+    if (d < bd) { bd = d; bx = b.x; bz = b.z; bst = b.st; }
+  }
+  T.nearBoarDist = bd; T.nearBoarX = bx; T.nearBoarZ = bz; T.nearBoarState = bst;
+  T.hornetsAlive = HORNETS.filter(h => !h.dead).length;
+  T.hornetsPopped = hornetsPopped;
+  let hd = 999, hx = 0, hz = 0;
+  for (const h of HORNETS) {
+    if (h.dead) continue;
+    const d = Math.hypot(P.x - h.x, P.z - h.z);
+    if (d < hd) { hd = d; hx = h.x; hz = h.z; }
+  }
+  T.nearHornetDist = hd; T.nearHornetX = hx; T.nearHornetZ = hz;
+  T.fMillChest = millChest.opened; T.fFerryChest = ferryChest.opened;
+  T.fGrottoChest = fgrottoChest.opened; T.cedarHeartT = cedarChest.opened;
+  T.wardenTalked = SAVE ? (SAVE.wardenTalked || 0) : 0;
+  T.fallsHum = SAVE ? !!SAVE.fallsHum : false;
+  T.humNear = Math.hypot(P.x - HUM_SPOT.x, P.z - HUM_SPOT.z) < 13;
+  T.fSaltGot = fSalt.filter(s => s.got).length;
+  T.fExtentW = FOREST_EXTENT.w; T.fExtentH = FOREST_EXTENT.h;
+  T.riverLen = RIVER_LEN;
+  T.fSolidHere = window.__forestSolid(P.x, P.z);
+  T.onTowerDeck = Math.hypot(P.x - TOWER.x, P.z - TOWER.z) < 6 &&
+    P.fy > forestH(TOWER.x, TOWER.z) + 13;
+  T.saveRegion = SAVE ? (SAVE.region || 'bay') : 'bay';
+}
+
+/* ── debug additions (installed on the first frame after p7 boots) ── */
+function extendDebugOnce() {
+  if (dbgDone || !window.__fmDebug || window.__fmDebug.overhead) { dbgDone = true; return; }
+  dbgDone = true;
+  Object.assign(window.__fmDebug, {
+    /* layout-review overhead: reveal everything, kill fog and sky */
+    overhead(on) {
+      FDBG.reveal = FDBG.overhead = !!on;
+      skyDome.visible = !on;
+      sunDisc.visible = !on;
+      if (starMesh) starMesh.visible = !on && starOp > 0.01;
+      if (!on) { scene.fog.near = FOG0.near; scene.fog.far = FOG0.far; }
+    },
+    /* sightline audit: from a vantage, how many content clusters can be seen? */
+    sightline(vx, vz) {
+      const eyeY = groundH(vx, vz) + 1.7;
+      const out = { total: 0, vis: 0, ids: [] };
+      for (const c of FCLUSTERS) {
+        if (Math.hypot(c.x - vx, c.z - vz) < 25) continue;
+        out.total++;
+        const ty = groundH(c.x, c.z) + 2.5;
+        const dist = Math.hypot(c.x - vx, c.z - vz);
+        if (dist > 1200) continue;                     // lost to the haze
+        let clear = true;
+        const steps = Math.ceil(dist / 7);
+        for (let s = 1; s < steps; s++) {
+          const t = s / steps;
+          const sx = vx + (c.x - vx) * t, sz = vz + (c.z - vz) * t;
+          const ly = eyeY + (ty - eyeY) * t;
+          if (groundH(sx, sz) > ly + 0.4) { clear = false; break; }
+          // canopy occlusion: a live pine straddling the ray blocks it
+          if (t > 0.06 && t < 0.94 && inForestQ(sx, sz) &&
+              eachTreeNear(sx, sz, tr => !tr.bare &&
+                Math.hypot(sx - tr.x, sz - tr.z) < tr.cr + 2.2 &&
+                forestH(tr.x, tr.z) + tr.h > ly + 1.2)) { clear = false; break; }
+        }
+        if (clear) { out.vis++; out.ids.push(c.id); }
+      }
+      return out;
+    },
+    forestInfo() {
+      return { extent: FOREST_EXTENT, riverLen: Math.round(RIVER_LEN), clusters: FCLUSTERS.length, springs: FSPRINGS.length };
+    },
+    warpSpring(i) {
+      const s = FSPRINGS[clamp(i, 0, FSPRINGS.length - 1)];
+      window.__fmDebug.warp(s.x, s.z);
+    },
+  });
+}
+
+/* ── finalize every forest chunk (Brightharbor's were finalized in p4) ── */
+for (const c of chunks) {
+  if (!c.md || c.mesh) continue;
+  if (!c.md.p.length) { c.md = null; continue; }
+  c.mesh = mdMesh(c.md, WORLD_MAT, false);
+  c.mesh.matrixAutoUpdate = false; c.mesh.updateMatrix();
+  c.mesh.visible = false;
+  scene.add(c.mesh);
+  c.md = null;
+}
+</script>
+<script>
 /* ═══════════════════ p7 — flow, HUD, telemetry, main loop ═══════════════════ */
 
 let simTick = 0;
@@ -6788,7 +8949,131 @@ function beginNewGame() {
   fadeBlackEl.style.opacity = '1';
   try { localStorage.removeItem(SAVE_KEY); } catch (e) {}
   SAVE = defaultSave();
+  // v6: NO state survives a save switch — the whole world re-derives
+  applyWorldState();
+  P.x = SPAWN_POS.x; P.z = SPAWN_POS.z;
+  P.fy = groundH(P.x, P.z); P.air = false; P.jvy = 0;
+  P.heading = Math.PI;
+  P.st = 'idle'; P.vx = 0; P.vz = 0; P.iframes = 0; P.drawn = false;
+  P.shade = P.prevShade = true;
+  P.area = areaAt(P.x, P.z);
+  CAM.ready = false;
+  refreshTitleMenu();
   setTimeout(() => { startCine('wake'); }, 250);
+}
+
+/* ═══ v6: ONE world-state derivation (the dormant-boss NEW GAME bug).
+   Everything the world derives from the active save happens HERE — at
+   boot, on NEW GAME, and on CONTINUE. Never at build time. ═══ */
+function applyWorldState() {
+  const S = SAVE || defaultSave();
+  /* player-side stats */
+  P.maxHearts = S.mh; P.hearts = S.mh;
+  P.salt = S.salt;
+  P.sword = S.sword;
+  wick.sword.group.visible = true;
+  P.carryCrescent = S.q === 3 && !!S.bossDone;
+  P.sunstruckCount = 0; P.everSun = false;
+  QUEST.phases = S.ph;
+  /* kelp: the door + the wall follow their flags; everything else regrows */
+  kelpDoorCut = !!S.kelpDoor;
+  for (const patch of kelpPatches) {
+    for (const st of patch.stalks) {
+      st.cut = patch.tag === 'door' ? !!S.kelpDoor
+             : patch.tag === 'wall' ? !!S.wallBurned : false;
+    }
+    rebuildKelpPatch(patch);
+  }
+  for (const c2 of wallColl) c2.off = !!S.wallBurned;
+  /* chests: open or CLOSED both ways, mid-animation state cleared */
+  const lid = (ch, on) => { ch.opened = !!on; ch.lid.rotation.x = on ? -1.9 : 0; };
+  lid(chest, S.wreckChest); chest.heart.visible = false;
+  lid(doorChest, S.doorChest);
+  lid(homeChest, S.houseChest);
+  lid(tockChest, S.tockChest);
+  lid(pearlChest, S.pearlChest);
+  lid(cartChest, S.cartChest);
+  lid(lightChest, S.lightChest); lightChest.heart.visible = false;
+  chestAnimT = -1; heartFloatT = -1; doorChestAnimT = -1; homeChestAnimT = -1;
+  lightChestAnimT = -1; lightHeartT = -1; roomChestAnims.length = 0;
+  itemGetT = -1;
+  /* room life */
+  tockClock.ticksLeft = 0; tockClock.wasTicking = false;
+  if (tockPend) tockPend.rotation.z = 0;
+  pearlBoatAnimT = -1;
+  if (pearlBoat) {
+    if (S.boatWindow) {
+      pearlBoat.position.set(pearlRoom.boatSill.x, pearlRoom.boatSill.y, pearlRoom.boatSill.z);
+      pearlBoat.rotation.y = Math.PI / 2;
+    } else {
+      pearlBoat.position.set(pearlRoom.boatRug.x, 0.015, pearlRoom.boatRug.z);
+      pearlBoat.rotation.y = 0.6;
+    }
+  }
+  /* the sky — healed one step, or hard noon */
+  if (S.sky >= 1) {
+    setSkyBlend(1); shadeGrow = 1; setStarOp(0.95);
+    wheelRing.rotation.z = -Math.PI / 4;
+    crescentItem.visible = true;
+    crescentItem.scale.setScalar(0.8);
+    const a = Math.PI / 2 - Math.PI / 4;
+    const wy = groundH(WHEEL_POS.x, WHEEL_POS.z) + 4.2;
+    crescentItem.position.set(WHEEL_POS.x + Math.cos(a) * 3.1 * Math.cos(wheelRing.rotation.y), wy + Math.sin(a) * 3.1, WHEEL_POS.z - Math.cos(a) * 3.1 * Math.sin(wheelRing.rotation.y));
+  } else {
+    setSkyBlend(0); shadeGrow = 0; setStarOp(0);
+    wheelRing.rotation.z = 0;
+    crescentItem.visible = false;
+    crescentItem.scale.setScalar(1);
+  }
+  rebuildShadePools();
+  /* the tidepool */
+  tidepoolFilled = !!S.tidepool;
+  tidewater.visible = tidepoolFilled;
+  tidewater.position.y = groundH(REFILL_POOL.x, REFILL_POOL.z) + (tidepoolFilled ? 0.55 : -1.2);
+  if (moonfish) moonfish.visible = false;
+  /* THE BOSS — fully re-derived; a completed save must never leak a cured
+     boss (or anything else) into a fresh adventure */
+  BOSS.defeated = !!S.bossDone;
+  BOSS.crescentGiven = !!S.bossDone;
+  BOSS.active = false;
+  BOSS.clawHits = 0; BOSS.bodyHits = 0; BOSS.chargeN = 0; BOSS.wispT = 0;
+  BOSS.t = 0; BOSS.flash = 0;
+  BOSS.hpMax = BOSS_HP;
+  if (S.bossDone) {
+    BOSS.phase = 3; BOSS.hp = 0; BOSS.st = 'rest';
+    BOSS.x = GROTTO_B.x - 8; BOSS.z = GROTTO_B.z + 8;
+    BOSS.c.crN.visible = false;
+    calmBossEyes(1);
+  } else {
+    BOSS.phase = 0; BOSS.hp = BOSS_HP; BOSS.st = 'idle';
+    BOSS.x = GROTTO_B.x; BOSS.z = GROTTO_B.z - 2; BOSS.ang = Math.PI;
+    BOSS.c.crN.visible = true;
+    BOSS.c.body.rotation.set(0, 0, 0);
+    calmBossEyes(0);
+  }
+  refreshBossBar(false);
+  /* creatures back to their spawns */
+  for (const cr of crabs) {
+    cr.dead = false; cr.hp = 3; cr.st = 'patrol'; cr.t = 0; cr.flash = 0; cr.lungeCD = 0;
+    cr.x = cr.sx; cr.z = cr.sz;
+    cr.c.root.visible = true;
+    cr.c.root.position.set(cr.x, groundH(cr.x, cr.z), cr.z);
+  }
+  for (const w2 of wisps) {
+    const bossWisp = w2.area === 'boss';
+    w2.dead = bossWisp;
+    w2.st = 'drift'; w2.t = 0;
+    w2.x = w2.sx; w2.z = w2.sz; w2.y = groundH(w2.x, w2.z) + 1.8;
+    w2.m.root.visible = !bossWisp;
+    w2.m.root.scale.setScalar(1);
+  }
+  for (const s of saltPickups) { s.got = false; s.chimed = false; }
+  rebuildSalt();
+  /* the Parched Forest derives too */
+  if (window.__forestApplySave) window.__forestApplySave();
+  /* quest line */
+  if (SAVE) setQuest(S.q);
+  else { QUEST.q = 0; questEl.textContent = ''; questEl.classList.remove('on'); }
 }
 function tickTitle() {
   titleT += DT;
@@ -6837,69 +9122,14 @@ function titleCam(now) {
   cineCam(cx, cy, cz, -4, 1, -30);
 }
 
-/* ── apply a save (CONTINUE) ── */
+/* ── apply a save (CONTINUE) — the derivation itself lives in applyWorldState ── */
 function applySave() {
-  P.maxHearts = SAVE.mh; P.hearts = SAVE.mh;
-  P.salt = SAVE.salt;
-  P.sword = SAVE.sword;   // always true post-migration (v2: armed from the start)
-  wick.sword.group.visible = true;
-  QUEST.phases = SAVE.ph;
-  if (SAVE.kelpDoor) {
-    for (const s of doorKelp.stalks) s.cut = true;
-    rebuildKelpPatch(doorKelp);
-    kelpDoorCut = true;
-  }
-  if (SAVE.doorChest) {
-    doorChest.opened = true;
-    doorChest.lid.rotation.x = -1.9;
-  }
-  if (SAVE.wallBurned) {
-    for (const s of wallKelp.stalks) s.cut = true;
-    rebuildKelpPatch(wallKelp);
-    for (const c of wallColl) c.off = true;
-  }
-  if (SAVE.wreckChest) {
-    chest.opened = true;
-    chest.lid.rotation.x = -1.9;
-  }
-  if (SAVE.houseChest) {
-    homeChest.opened = true;
-    homeChest.lid.rotation.x = -1.9;
-  }
-  /* v4.5: the other rooms remember too */
-  if (SAVE.tockChest) { tockChest.opened = true; tockChest.lid.rotation.x = -1.9; }
-  if (SAVE.pearlChest) { pearlChest.opened = true; pearlChest.lid.rotation.x = -1.9; }
-  if (SAVE.cartChest) { cartChest.opened = true; cartChest.lid.rotation.x = -1.9; }
-  if (SAVE.lightChest) { lightChest.opened = true; lightChest.lid.rotation.x = -1.9; }
-  if (SAVE.boatWindow && pearlBoat) {
-    pearlBoat.position.set(pearlRoom.boatSill.x, pearlRoom.boatSill.y, pearlRoom.boatSill.z);
-    pearlBoat.rotation.y = Math.PI / 2;
-  }
-  if (SAVE.q === 3 && SAVE.bossDone) {
-    P.carryCrescent = true;
-  }
-  if (SAVE.sky >= 1) {
-    setSkyBlend(1);
-    shadeGrow = 1;
-    rebuildShadePools();
-    setStarOp(0.95);
-    wheelRing.rotation.z = -Math.PI / 4;
-    crescentItem.visible = true;
-    crescentItem.scale.setScalar(0.8);
-    const a = Math.PI / 2 - Math.PI / 4;
-    const wy = groundH(WHEEL_POS.x, WHEEL_POS.z) + 4.2;
-    crescentItem.position.set(WHEEL_POS.x + Math.cos(a) * 3.1 * Math.cos(wheelRing.rotation.y), wy + Math.sin(a) * 3.1, WHEEL_POS.z - Math.cos(a) * 3.1 * Math.sin(wheelRing.rotation.y));
-  }
-  if (SAVE.tidepool) {
-    tidepoolFilled = true;
-    tidewater.visible = true;
-    tidewater.position.y = groundH(REFILL_POOL.x, REFILL_POOL.z) + 0.55;
-  }
+  applyWorldState();
   P.x = SAVE.lastShade[0]; P.z = SAVE.lastShade[1];
   P.fy = groundH(P.x, P.z); P.air = false; P.jvy = 0;
   P.heading = Math.PI;
+  P.st = 'idle'; P.vx = 0; P.vz = 0; P.iframes = 0;
   P.area = areaAt(P.x, P.z);
-  setQuest(SAVE.q);
   fadeBlackEl.style.opacity = '0';
   CAM.ready = false;
   setState('play');
@@ -7278,6 +9508,8 @@ function updateVisuals(dtv, now) {
     mirror.group.visible = inGv;
     beamDown.visible = inGv;
     beamOut.visible = inGv;
+    entGlow.visible = inGv;                              // v6: the way out glows
+    corridorGlow.visible = inGv && wallBurned();         // v6: the opened passage glows
     chest.group.visible = near2(chest.x, chest.z, 75);
     doorChest.group.visible = near2(doorChest.x, doorChest.z, 60);
     // v4.5: every interior room is its own culled chunk (rooms sit 40 m
@@ -7400,6 +9632,7 @@ function frame(now) {
 
 /* ── boot ── */
 initBoss();
+applyWorldState();   // v6: boot derives the world from the save exactly once, here
 refreshTitleMenu();
 refreshPause();
 setState('title');
