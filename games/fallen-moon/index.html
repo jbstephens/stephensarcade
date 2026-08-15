@@ -762,6 +762,25 @@ const SFX = {
     [523, 659, 784, 1047].forEach((f, i) => tone(f, t + i * 0.12, 0.4, 0.09, 'triangle')); },
   heal() { if (!AC) return; const t = AC.currentTime;
     tone(784, t, 0.3, 0.05, 'sine'); tone(1175, t + 0.08, 0.34, 0.04, 'sine'); },
+  /* v4.5 — interior interaction voices */
+  crank() { if (!AC) return; const t = AC.currentTime;
+    // winding a clock: a ratchet of dry clicks climbing in pitch
+    for (let i = 0; i < 7; i++) {
+      noiseBurst(t + i * 0.11, 0.03, 0.09, 1400 + i * 220, 1000 + i * 180, 3);
+      tone(220 + i * 26, t + i * 0.11, 0.05, 0.025, 'square');
+    } },
+  tick(hi) { if (!AC) return; const t = AC.currentTime;
+    // one woodblock tock of the escapement — alternates tick / tock
+    noiseBurst(t, 0.03, 0.08, hi ? 2100 : 1500, hi ? 1500 : 1000, 3);
+    tone(hi ? 940 : 660, t, 0.06, 0.05, 'triangle'); },
+  creak() { if (!AC) return; const t = AC.currentTime;
+    // a stool taking weight
+    noiseBurst(t, 0.16, 0.07, 300, 160, 1.4, 'lowpass');
+    tone(140, t + 0.02, 0.18, 0.04, 'triangle', null, 90); },
+  page() { if (!AC) return; const t = AC.currentTime;
+    // a dry page turned
+    noiseBurst(t, 0.12, 0.06, 2400, 4200, 1.1);
+    noiseBurst(t + 0.1, 0.08, 0.04, 3200, 5000, 1.3); },
   door() { if (!AC) return; const t = AC.currentTime;
     // a latch click, a low wooden swing, a soft shut
     noiseBurst(t, 0.04, 0.1, 2200, 1500, 2.5);
@@ -826,6 +845,16 @@ function defaultSave() {
     compassSeen: false,
     houseChest: false,        // v4: the harbor-house interior chest
     bossHint: false,          // v4: one-time "hit the CLAW" floatText shown
+    /* v4.5 — EVERY DOOR OPENS */
+    tockChest: false,         // Granny Tock's salt chest
+    pearlChest: false,        // the chest under Pearl's bunk
+    lightChest: false,        // Finn's lighthouse chest (HEART CONTAINER)
+    clockWound: false,        // wound Granny's floor clock once (her line)
+    boatWindow: false,        // Pearl's toy boat set in the window
+    chartSeen: false,         // read the blank star chart
+    cartChest: false,         // the cartographer's salt chest
+    mapTides: false,          // read the cartographer's wall map
+    mapTable: false,          // looked at the half-drawn new map
     lastShade: [8.2, 7.0],
   };
 }
@@ -3080,40 +3109,34 @@ for (const p of POOLS) {
   }
 }
 
-/* ═══════════ v4: THE HARBOR HOUSE INTERIOR ═══════════
-   One village house (the big house at -38,-32) is enterable. The room is
-   its own culled chunk far off-world at INT; the door cine teleports the
-   player between HOUSE_DOOR.out and the interior spawn. Interior collision
-   is a single rect clamp + furniture circles — solid by construction. */
-const INT = { x: 330, z: -60, w: 3.6, d: 2.9, wallH: 2.8 };
-const INT_SPAWN = { x: 330, z: -58.75, heading: Math.PI };
-const INT_DOOR = { x: 330, z: -57.15 };
-const HOUSE_DOOR = (() => {
-  const hx = -38, hz = -32, ry = 0.3, d = 3.25;
-  const dxr = Math.sin(ry), dzr = Math.cos(ry);
-  return {
-    x: hx - dxr * d, z: hz - dzr * d,                    // the door face
-    outX: hx - dxr * 5.0, outZ: hz - dzr * 5.0,          // spawn-out spot
-    heading: Math.PI + ry,                               // facing away
-  };
-})();
-function inInteriorAt(x, z) {
-  return Math.abs(x - INT.x) < INT.w + 1.5 && Math.abs(z - INT.z) < INT.d + 1.5;
+/* ═══════════ v4.5: INTERIORS — EVERY DOOR OPENS ═══════════
+   v4 proved the pattern on the harbor house; v4.5 makes it a registry.
+   Each room is its own culled chunk far off-world (x > 300 → groundH = 0);
+   the door cine teleports the player between ext.out and the room spawn.
+   Collision authority per room = ONE clamp (rect or circle) + furniture
+   circles — solid by construction, no hand-kept second copy. */
+const ROOMS = [];
+function roomAt(x, z) {
+  for (let i = 0; i < ROOMS.length; i++) {
+    const R = ROOMS[i];
+    if (R.r) { if (Math.hypot(x - R.x, z - R.z) < R.r + 1.5) return R; }
+    else if (Math.abs(x - R.x) < R.w + 1.5 && Math.abs(z - R.z) < R.d + 1.5) return R;
+  }
+  return null;
 }
-const INT_COLL = [
-  [331.35, -60.85, 0.82],   // table
-  [330.4, -61.7, 0.28], [332.35, -59.85, 0.28],   // stools
-  [327.55, -61.35, 0.52], [327.55, -59.75, 0.52], // cot
-  [327.72, -58.38, 0.48],   // salt chest
-  [333.35, -59.0, 0.4],     // shelf
-];
-function interiorResolve(nx, nz) {
+function inInteriorAt(x, z) { return roomAt(x, z) !== null; }
+function interiorResolve(R, nx, nz) {
   const m = 0.38;
-  const cl = (x, z) => [clamp(x, INT.x - INT.w + m, INT.x + INT.w - m),
-                        clamp(z, INT.z - INT.d + m, INT.z + INT.d - m)];
+  const cl = R.r
+    ? (x, z) => {
+        const dx = x - R.x, dz = z - R.z, d = Math.hypot(dx, dz), mx = R.r - m;
+        return d > mx ? [R.x + dx / d * mx, R.z + dz / d * mx] : [x, z];
+      }
+    : (x, z) => [clamp(x, R.x - R.w + m, R.x + R.w - m),
+                 clamp(z, R.z - R.d + m, R.z + R.d - m)];
   let [x, z] = cl(nx, nz);
-  for (let i = 0; i < INT_COLL.length; i++) {
-    const c = INT_COLL[i];
+  for (let i = 0; i < R.coll.length; i++) {
+    const c = R.coll[i];
     const dx = x - c[0], dz = z - c[1];
     const d2 = dx * dx + dz * dz, rr = c[2] + 0.34;
     if (d2 < rr * rr && d2 > 0.0001) {
@@ -3123,6 +3146,29 @@ function interiorResolve(nx, nz) {
   }
   return cl(x, z);
 }
+/* exterior door of a propHouse at (hx,hz,ry): face center + spawn-out spot */
+function houseDoorOf(hx, hz, ry, d, outD) {
+  const dxr = Math.sin(ry), dzr = Math.cos(ry);
+  return {
+    x: hx - dxr * d, z: hz - dzr * d,                    // the door face
+    outX: hx - dxr * outD, outZ: hz - dzr * outD,        // spawn-out spot
+    heading: Math.PI + ry, ry,                           // facing away
+  };
+}
+/* ── the harbor house (v4) ── */
+const INT = { x: 330, z: -60, w: 3.6, d: 2.9, wallH: 2.8 };
+const INT_SPAWN = { x: 330, z: -58.75, heading: Math.PI };
+const INT_DOOR = { x: 330, z: -57.15 };
+const HOUSE_DOOR = houseDoorOf(-38, -32, 0.3, 3.25, 5.0);
+const INT_COLL = [
+  [331.35, -60.85, 0.82],   // table
+  [330.4, -61.7, 0.28], [332.35, -59.85, 0.28],   // stools
+  [327.55, -61.35, 0.52], [327.55, -59.75, 0.52], // cot
+  [327.72, -58.38, 0.48],   // salt chest
+  [333.35, -59.0, 0.4],     // shelf
+  [327.35, -62.35, 0.5],    // v4.5: net-mending bench (NW corner)
+  [328.25, -61.75, 0.2],    // v4.5: the mender's stool
+];
 let interiorMesh = null, interiorGlow = null;
 (function buildInterior() {
   const md = MD();
@@ -3244,6 +3290,35 @@ let interiorMesh = null, interiorGlow = null;
   // a small dark hearth ring under the chimney wall, cold a year now
   lathe(md, [[0.3, 0], [0.36, 0.09], [0.3, 0.12]], { seg: 8, x: cx + W - 1.4, y: 0.001, z: cz - D + 0.5, col: [0.3, 0.28, 0.26] });
   lathe(md, [[0.12, 0], [0.16, 0.07], [0.05, 0.12]], { seg: 6, x: cx + W - 1.4, y: 0.02, z: cz - D + 0.5, col: [0.2, 0.19, 0.18] });
+  /* ── v4.5: whose house IS this? A fisherman's — the net-mending bench
+     in the NW corner, work left mid-row a year ago ── */
+  const bnX = 327.35, bnZ = -62.35;
+  const C_NETD = mix3(C_NET, [0, 0, 0], 0.2);
+  box(md, { x: bnX, y: 0.42, z: bnZ, w: 0.62, d: 0.3, h: 0.06, col: [0.47, 0.37, 0.25], colB: TIM_D });  // bench top
+  for (const [lx2, lz2] of [[-0.5, -0.18], [0.5, -0.18], [-0.5, 0.18], [0.5, 0.18]]) {
+    box(md, { x: bnX + lx2, y: 0, z: bnZ + lz2, w: 0.045, d: 0.045, h: 0.42, col: TIM_D });
+  }
+  // the net across the bench: a mended half (tight) and the torn half (sagging)
+  box(md, { x: bnX - 0.22, y: 0.48, z: bnZ, w: 0.3, d: 0.34, h: 0.025, col: C_NETD });
+  box(md, { x: bnX + 0.28, y: 0.465, z: bnZ + 0.05, w: 0.28, d: 0.3, h: 0.02, rz: 0.14, col: mix3(C_NETD, [0, 0, 0], 0.25) });
+  box(md, { x: bnX + 0.52, y: 0.12, z: bnZ + 0.22, w: 0.16, d: 0.05, h: 0.42, tw: 0.09, rx: 0.25, col: C_NETD });  // spill to the floor
+  // netting needle + twine spool waiting on the mended side
+  box(md, { x: bnX - 0.3, y: 0.485, z: bnZ - 0.06, w: 0.11, d: 0.022, h: 0.015, ry: 0.5, col: [0.76, 0.66, 0.45] });
+  lathe(md, [[0.035, 0], [0.045, 0.03], [0.045, 0.06], [0.035, 0.09]], { seg: 6, x: bnX - 0.12, y: 0.485, z: bnZ + 0.08, col: [0.72, 0.6, 0.42] });
+  // cork floats strung over the bench end
+  for (let i = 0; i < 3; i++) {
+    lathe(md, [[0.05, 0], [0.065, 0.045], [0.05, 0.09]], { seg: 6, x: bnX - 0.58, y: 0.47 + i * 0.02, z: bnZ - 0.28 + i * 0.14, col: [0.66, 0.58, 0.44] });
+  }
+  // the mender's stool, pulled a step back — seat worn pale in the middle
+  const stX = 328.25, stZ = -61.75;
+  lathe(md, [[0.17, 0.36], [0.145, 0.41]], { seg: 7, x: stX, y: 0, z: stZ, col: [0.47, 0.37, 0.26] });
+  lathe(md, [[0.1, 0.405], [0.08, 0.415]], { seg: 7, x: stX, y: 0, z: stZ, col: [0.6, 0.5, 0.36] });
+  lathe(md, [[0.05, 0], [0.08, 0.36]], { seg: 6, x: stX, y: 0, z: stZ, col: TIM_D });
+  // sea boots under the oilskin peg (the coat hangs there since v4)
+  for (const s of [-1, 1]) {
+    box(md, { x: pegX + s * 0.1, y: 0, z: pegZ - 0.16, w: 0.07, d: 0.1, h: 0.3, tw: 0.06, td: 0.07, col: [0.3, 0.28, 0.24] });
+    box(md, { x: pegX + s * 0.1, y: 0, z: pegZ - 0.24, w: 0.07, d: 0.1, h: 0.09, col: [0.26, 0.24, 0.21] });
+  }
   interiorMesh = mdMesh(md, new THREE.MeshBasicMaterial({ vertexColors: true }), false);
   interiorMesh.matrixAutoUpdate = false; interiorMesh.updateMatrix();
   interiorMesh.visible = false;
@@ -3278,14 +3353,826 @@ const homeChest = { x: 327.72, z: -58.38, opened: false, lid: null, group: null 
   homeChest.group = m.group; homeChest.lid = m.lid;
   homeChest.group.visible = false;
 }
-/* the enterable house wears a welcome: doormat + light under the door */
-{
-  const md = chunkFor(HOUSE_DOOR.x, HOUSE_DOOR.z);
-  const y = groundH(HOUSE_DOOR.x, HOUSE_DOOR.z);
-  const dxr = Math.sin(0.3), dzr = Math.cos(0.3);
-  boxW(md, { x: HOUSE_DOOR.x - dxr * 0.62, y: y - 0.03, z: HOUSE_DOOR.z - dzr * 0.62, w: 0.52, d: 0.34, h: 0.06, ry: 0.3, col: mix3(C_NET, C_WOOD2, 0.35) });
-  boxW(md, { x: HOUSE_DOOR.x - dxr * 0.1, y, z: HOUSE_DOOR.z - dzr * 0.1, w: 0.46, d: 0.03, h: 0.06, ry: 0.3, col: [1.0, 0.88, 0.6] });
+/* every enterable door wears a welcome: doormat + light under the door */
+function doorWelcome(door) {
+  const md = chunkFor(door.x, door.z);
+  const y = groundH(door.x, door.z);
+  const dxr = Math.sin(door.ry), dzr = Math.cos(door.ry);
+  boxW(md, { x: door.x - dxr * 0.62, y: y - 0.03, z: door.z - dzr * 0.62, w: 0.52, d: 0.34, h: 0.06, ry: door.ry, col: mix3(C_NET, C_WOOD2, 0.35) });
+  boxW(md, { x: door.x - dxr * 0.1, y, z: door.z - dzr * 0.1, w: 0.46, d: 0.03, h: 0.06, ry: door.ry, col: [1.0, 0.88, 0.6] });
 }
+doorWelcome(HOUSE_DOOR);
+ROOMS.push({
+  id: 'harbor', promptId: 'houseDoor',
+  x: INT.x, z: INT.z, w: INT.w, d: INT.d, wallH: INT.wallH,
+  spawn: INT_SPAWN, inDoor: INT_DOOR, ext: HOUSE_DOOR, coll: INT_COLL,
+  get mesh() { return interiorMesh; }, get glow() { return interiorGlow; },
+  vis: [homeChest.group],
+});
+
+/* ═══════════ v4.5: GRANNY TOCK'S HOUSE — the house of stopped time ═══
+   The small house at (6,-38). A wall of clocks, all dead at different
+   hours; a scarf of knitted moon phases spilling from its basket; the
+   kettle cold at the hearth. The floor clock can be WOUND (p6). ═══ */
+const TOCK_ROOM = { x: 330, z: -100, w: 2.9, d: 2.3, wallH: 2.7 };
+const TOCK_DOOR = houseDoorOf(6, -38, 0.15, 2.58, 4.2);
+const TOCK_COLL = [
+  [329.05, -102.0, 0.5],    // the floor clock
+  [332.5, -100.2, 0.62],    // hearth
+  [331.2, -99.7, 0.48],     // rocking chair
+  [330.35, -99.05, 0.3],    // knitting basket
+  [332.3, -101.55, 0.42],   // salt chest
+  [327.75, -101.7, 0.38],   // tea table
+];
+const tockRoom = {
+  id: 'tock', promptId: 'tockDoor',
+  x: TOCK_ROOM.x, z: TOCK_ROOM.z, w: TOCK_ROOM.w, d: TOCK_ROOM.d, wallH: TOCK_ROOM.wallH,
+  spawn: { x: 330, z: -98.85, heading: Math.PI }, inDoor: { x: 330, z: -97.65 },
+  ext: TOCK_DOOR, coll: TOCK_COLL, mesh: null, glow: null, vis: [],
+  clockPos: { x: 329.05, z: -101.95 },
+};
+let tockPend = null;
+(function buildTockRoom() {
+  const md = MD();
+  const cx = TOCK_ROOM.x, cz = TOCK_ROOM.z, W = TOCK_ROOM.w, D = TOCK_ROOM.d, H = TOCK_ROOM.wallH;
+  /* palette — faded rose plaster, aged honey wood: a grandmother's room */
+  const PLAS = [0.78, 0.68, 0.6], PLAS_D = [0.62, 0.53, 0.47], PLAS_W = [0.72, 0.6, 0.54];
+  const TIM = [0.38, 0.29, 0.2], TIM_D = [0.27, 0.2, 0.14];
+  const FLOOR_A = [0.55, 0.44, 0.3], FLOOR_B = [0.48, 0.38, 0.26], FLOOR_HI = [0.64, 0.52, 0.36];
+  /* floor planks run along x (crosswise to the harbor house), worn pale
+     in the well-trodden lane between chair and hearth */
+  for (let i = 0; i < 9; i++) {
+    const pz = cz - D + 0.26 + i * 0.52;
+    const lit = (i >= 3 && i <= 5);
+    box(md, { x: cx, y: -0.09, z: pz, w: W + 0.28, d: 0.255, h: 0.09,
+      col: lit ? FLOOR_HI : (i % 2 ? FLOOR_A : FLOOR_B) });
+  }
+  /* walls */
+  const wall = (x, z, w2, d2, col) => box(md, { x, y: 0, z, w: w2, d: d2, h: H, col, colB: mix3(col, [0, 0, 0], 0.25) });
+  wall(cx, cz - D - 0.15, W + 0.3, 0.15, PLAS_D);   // north
+  wall(cx - W - 0.15, cz, 0.15, D + 0.3, PLAS_W);   // west — THE CLOCK WALL
+  wall(cx + W + 0.15, cz, 0.15, D + 0.3, PLAS);     // east (hearth)
+  const doorHW = 0.62;
+  wall(cx - (W + doorHW) / 2 - doorHW / 2, cz + D + 0.15, (W - doorHW) / 2 + 0.15, 0.15, PLAS);
+  wall(cx + (W + doorHW) / 2 + doorHW / 2, cz + D + 0.15, (W - doorHW) / 2 + 0.15, 0.15, PLAS);
+  box(md, { x: cx, y: 1.98, z: cz + D + 0.15, w: doorHW + 0.3, d: 0.15, h: H - 1.98, col: PLAS });
+  box(md, { x: cx, y: 0, z: cz + D + 0.13, w: doorHW, d: 0.06, h: 1.95, col: [0.32, 0.25, 0.18] });
+  box(md, { x: cx - doorHW - 0.06, y: 0, z: cz + D + 0.08, w: 0.07, d: 0.1, h: 2.02, col: TIM });
+  box(md, { x: cx + doorHW + 0.06, y: 0, z: cz + D + 0.08, w: 0.07, d: 0.1, h: 2.02, col: TIM });
+  box(md, { x: cx, y: 2.0, z: cz + D + 0.08, w: doorHW + 0.16, d: 0.1, h: 0.1, col: TIM });
+  lathe(md, [[0.035, 0], [0.045, 0.02], [0.02, 0.05]], { seg: 6, x: cx - doorHW + 0.16, y: 1.0, z: cz + D + 0.05, col: [0.62, 0.5, 0.3] });
+  for (const [sx, sz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) {
+    box(md, { x: cx + sx * (W - 0.02), y: 0, z: cz + sz * (D - 0.02), w: 0.09, d: 0.09, h: H, col: TIM_D });
+  }
+  /* ceiling + beams */
+  box(md, { x: cx, y: H, z: cz, w: W + 0.3, d: D + 0.3, h: 0.12, col: [0.4, 0.34, 0.27], colB: [0.4, 0.34, 0.27] });
+  for (const bz of [-1.5, 0, 1.5]) {
+    box(md, { x: cx, y: H - 0.2, z: cz + bz, w: W + 0.28, d: 0.1, h: 0.2, col: TIM_D, colB: TIM });
+  }
+  /* shuttered window on the north wall, east half — noon through the slats */
+  const winX = cx + 1.3, winZ = cz - D + 0.02;
+  box(md, { x: winX, y: 1.05, z: winZ - 0.06, w: 0.5, d: 0.06, h: 0.95, col: [0.35, 0.3, 0.26] });
+  box(md, { x: winX, y: 0.99, z: winZ + 0.02, w: 0.58, d: 0.06, h: 0.08, col: TIM });
+  box(md, { x: winX, y: 1.98, z: winZ + 0.02, w: 0.58, d: 0.06, h: 0.07, col: TIM });
+  for (let i = 0; i < 4; i++) {
+    box(md, { x: winX, y: 1.15 + i * 0.21, z: winZ + 0.005, w: 0.44, d: 0.012, h: 0.042, col: [1.0, 0.9, 0.66] });
+  }
+  /* ═══ THE CLOCK WALL (west) — every clock stopped at a different hour;
+     none has moved in a year. Octagonal faces, painted hands. ═══ */
+  const wx = cx - W - 0.02;   // wall inner face
+  const wallClock = (zc, yc, r, timeH, timeM, caseCol, faceCol) => {
+    // case: two rotated slabs make an octagon RIM, proud of the wall;
+    // the paler face floats inside it, hands + ticks in front of that
+    box(md, { x: wx, y: yc - r, z: zc, w: 0.028, d: r, h: r * 2, col: caseCol });
+    box(md, { x: wx, y: yc - r * 0.7071, z: zc - r * 0.7071, w: 0.028, d: r, h: r * 2, rx: Math.PI / 4, col: caseCol });
+    const fr = r * 0.74;
+    box(md, { x: wx + 0.032, y: yc - fr, z: zc, w: 0.012, d: fr, h: fr * 2, col: faceCol });
+    box(md, { x: wx + 0.032, y: yc - fr * 0.7071, z: zc - fr * 0.7071, w: 0.012, d: fr, h: fr * 2, rx: Math.PI / 4, col: faceCol });
+    // quarter-hour ticks
+    for (const [tz, ty] of [[0, fr * 0.78], [0, -fr * 0.78], [fr * 0.78, 0], [-fr * 0.78, 0]]) {
+      box(md, { x: wx + 0.046, y: yc + ty - 0.016, z: zc + tz, w: 0.006, d: 0.014, h: 0.032, col: [0.3, 0.26, 0.2] });
+    }
+    // hands pivot at the face center (box base pivots at its own x,y,z):
+    // 12 o'clock points up; rx swings them around the wall normal
+    const ha = (timeH % 12 + timeM / 60) / 12 * TAU, ma = timeM / 60 * TAU;
+    box(md, { x: wx + 0.052, y: yc, z: zc, w: 0.012, d: 0.02, h: fr * 0.52, rx: ha, col: [0.16, 0.13, 0.1] });
+    box(md, { x: wx + 0.056, y: yc, z: zc, w: 0.009, d: 0.014, h: fr * 0.82, rx: ma, col: [0.16, 0.13, 0.1] });
+    lathe(md, [[0.02, 0], [0.014, 0.025]], { seg: 5, x: wx + 0.058, y: yc - 0.012, z: zc, col: [0.55, 0.44, 0.26] });
+  };
+  const C_CASE1 = [0.42, 0.3, 0.2], C_CASE2 = [0.32, 0.26, 0.22], C_CASE3 = [0.5, 0.42, 0.3];
+  const C_FACE = [0.9, 0.86, 0.76], C_FACE2 = [0.85, 0.83, 0.78];
+  wallClock(cz - 1.55, 1.95, 0.26, 3, 7, C_CASE1, C_FACE);     // 3:07
+  wallClock(cz - 0.85, 1.6, 0.19, 11, 40, C_CASE2, C_FACE2);   // 11:40
+  wallClock(cz - 1.1, 2.25, 0.15, 6, 25, C_CASE3, C_FACE);     // 6:25
+  wallClock(cz - 0.15, 2.0, 0.3, 9, 15, C_CASE2, C_FACE);      // 9:15 — the big one
+  wallClock(cz + 0.55, 1.55, 0.17, 1, 50, C_CASE1, C_FACE2);   // 1:50
+  wallClock(cz + 0.6, 2.2, 0.21, 7, 5, C_CASE3, C_FACE);       // 7:05
+  wallClock(cz + 1.3, 1.85, 0.235, 4, 33, C_CASE2, C_FACE2);   // 4:33
+  /* ═══ the FLOOR CLOCK (north wall, west half) — the one you can wind.
+     Tall case, octagon face stopped at 12:00, pendulum hanging dead
+     (the pendulum itself is a separate mesh, driven by p6). ═══ */
+  const fcX = 329.05, fcZ = -102.05;
+  box(md, { x: fcX, y: 0, z: fcZ, w: 0.34, d: 0.2, h: 0.42, col: TIM_D });                   // plinth
+  box(md, { x: fcX, y: 0.42, z: fcZ, w: 0.28, d: 0.16, h: 1.28, col: C_CASE1 });             // trunk
+  box(md, { x: fcX, y: 0.52, z: fcZ + 0.155, w: 0.19, d: 0.012, h: 1.08, col: [0.16, 0.13, 0.11] });  // pendulum window (dark), facing the room
+  box(md, { x: fcX, y: 1.7, z: fcZ, w: 0.36, d: 0.21, h: 0.62, col: C_CASE1 });              // bonnet
+  box(md, { x: fcX, y: 2.32, z: fcZ, w: 0.4, d: 0.23, h: 0.08, col: TIM_D });                // cornice
+  const bfz = fcZ + 0.215;   // the face looks SOUTH, into the room
+  box(md, { x: fcX, y: 1.81, z: bfz, w: 0.12, d: 0.008, h: 0.4, col: C_FACE });              // face octagon
+  box(md, { x: fcX + 0.2 * 0.7071, y: 2.01 - 0.2 * 0.7071, z: bfz, w: 0.12, d: 0.008, h: 0.4, rz: Math.PI / 4, col: C_FACE });
+  box(md, { x: fcX, y: 2.01, z: bfz + 0.01, w: 0.016, d: 0.015, h: 0.15, col: [0.16, 0.13, 0.1] });           // both hands at XII
+  box(md, { x: fcX + 0.018, y: 2.01, z: bfz + 0.01, w: 0.011, d: 0.012, h: 0.11, col: [0.3, 0.25, 0.18] });
+  for (const [tx2, ty2] of [[0, 0.135], [0, -0.165], [0.13, -0.015], [-0.13, -0.015]]) {     // ticks
+    box(md, { x: fcX + tx2, y: 2.01 + ty2, z: bfz + 0.008, w: 0.014, d: 0.006, h: 0.032, col: [0.3, 0.26, 0.2] });
+  }
+  lathe(md, [[0.018, 0], [0.012, 0.02]], { seg: 5, x: fcX, y: 2.0, z: bfz + 0.012, col: [0.55, 0.44, 0.26] });
+  // the winding crank, hung on a nail beside the clock
+  box(md, { x: fcX + 0.32, y: 1.5, z: fcZ + 0.18, w: 0.016, d: 0.016, h: 0.14, col: [0.5, 0.42, 0.28] });
+  box(md, { x: fcX + 0.32, y: 1.62, z: fcZ + 0.18, w: 0.05, d: 0.016, h: 0.016, col: [0.5, 0.42, 0.28] });
+  /* ═══ the hearth (east wall) — stone arch, ash, the kettle gone cold ═══ */
+  const hx = cx + W - 0.28, hz = -100.2;
+  box(md, { x: hx + 0.14, y: 0, z: hz, w: 0.14, d: 0.75, h: 1.5, col: C_STONE });            // chimney breast
+  box(md, { x: hx - 0.02, y: 0, z: hz - 0.62, w: 0.16, d: 0.13, h: 1.05, col: C_STONE2 });   // piers
+  box(md, { x: hx - 0.02, y: 0, z: hz + 0.62, w: 0.16, d: 0.13, h: 1.05, col: C_STONE2 });
+  box(md, { x: hx - 0.02, y: 1.05, z: hz, w: 0.16, d: 0.75, h: 0.16, col: C_STONE2 });       // lintel
+  box(md, { x: hx + 0.05, y: 1.21, z: hz, w: 0.3, d: 0.85, h: 0.06, col: TIM });             // mantel shelf
+  box(md, { x: hx + 0.1, y: 0.02, z: hz, w: 0.2, d: 0.5, h: 0.5, col: [0.12, 0.11, 0.11] }); // firebox, dark
+  lathe(md, [[0.2, 0], [0.26, 0.06], [0.18, 0.09]], { seg: 7, x: hx - 0.05, y: 0.01, z: hz, col: [0.34, 0.33, 0.32] });   // cold ash heap
+  lathe(md, [[0.08, 0.02], [0.12, 0.05], [0.03, 0.1]], { seg: 6, x: hx - 0.08, y: 0.02, z: hz + 0.12, col: [0.42, 0.41, 0.4] });
+  // the kettle — dull copper, sitting IN the cold ash (nothing to boil)
+  lathe(md, [[0.02, 0.1], [0.13, 0.02], [0.14, 0.14], [0.05, 0.22], [0.06, 0.24]], { seg: 7, x: hx - 0.12, y: 0.03, z: hz - 0.18, col: [0.5, 0.34, 0.24] });
+  box(md, { x: hx - 0.12, y: 0.24, z: hz - 0.18, w: 0.014, d: 0.07, h: 0.09, col: [0.4, 0.28, 0.2] });    // handle hoop
+  box(md, { x: hx - 0.24, y: 0.1, z: hz - 0.22, w: 0.06, d: 0.016, h: 0.016, ry: 0.5, col: [0.45, 0.3, 0.22] });  // spout
+  // mantel keepsakes: two MORE stopped clocks and one candle (the only flame)
+  wallClockMantel(md, hx + 0.02, 1.27, hz - 0.55, 0.11, 10, 10, C_CASE3, C_FACE);
+  wallClockMantel(md, hx + 0.02, 1.27, hz + 0.32, 0.09, 2, 45, C_CASE2, C_FACE2);
+  lathe(md, [[0.045, 0], [0.05, 0.015], [0.02, 0.03]], { seg: 6, x: hx + 0.02, y: 1.27, z: hz + 0.58, col: [0.55, 0.44, 0.26] });  // candlestick
+  lathe(md, [[0.016, 0.03], [0.016, 0.14], [0.01, 0.16]], { seg: 5, x: hx + 0.02, y: 1.27, z: hz + 0.58, col: [0.92, 0.88, 0.78] });
+  /* ═══ rocking chair on a round rag rug, facing the hearth ═══ */
+  const rcX = 331.2, rcZ = -99.7;
+  // rag rug: concentric rings
+  const RUG = [[0.85, [0.5, 0.3, 0.24]], [0.68, [0.72, 0.62, 0.47]], [0.5, [0.36, 0.42, 0.4]], [0.32, [0.6, 0.36, 0.26]], [0.15, [0.75, 0.66, 0.5]]];
+  for (let i = 0; i < RUG.length; i++) {
+    lathe(md, [[0, 0.006 + i * 0.002], [RUG[i][0], 0.004 + i * 0.002]], { seg: 9, x: rcX - 0.15, y: 0, z: rcZ + 0.1, col: RUG[i][1] });
+  }
+  const chY = 0.16;   // seat height over the rockers
+  for (const s of [-1, 1]) {   // curved rockers: three angled segments each
+    box(md, { x: rcX - 0.05 + s * 0.21, y: 0.045, z: rcZ - 0.3, w: 0.025, d: 0.17, h: 0.035, rx: -0.35, col: TIM_D });
+    box(md, { x: rcX - 0.05 + s * 0.21, y: 0.0, z: rcZ, w: 0.025, d: 0.19, h: 0.035, col: TIM_D });
+    box(md, { x: rcX - 0.05 + s * 0.21, y: 0.045, z: rcZ + 0.3, w: 0.025, d: 0.17, h: 0.035, rx: 0.35, col: TIM_D });
+    for (const lz of [-0.16, 0.16]) box(md, { x: rcX - 0.05 + s * 0.21, y: 0.03, z: rcZ + lz, w: 0.022, d: 0.022, h: chY + 0.09, col: TIM });
+  }
+  box(md, { x: rcX - 0.05, y: chY + 0.12, z: rcZ, w: 0.24, d: 0.2, h: 0.04, col: [0.5, 0.4, 0.28] });   // seat
+  box(md, { x: rcX - 0.05, y: chY + 0.16, z: rcZ + 0.17, w: 0.22, d: 0.03, h: 0.55, rx: 0.18, col: [0.46, 0.36, 0.25] });  // back
+  for (let i = 0; i < 4; i++) {   // back spindles hint
+    box(md, { x: rcX - 0.19 + i * 0.093, y: chY + 0.2, z: rcZ + 0.185, w: 0.012, d: 0.012, h: 0.42, rx: 0.18, col: TIM });
+  }
+  // a folded shawl over one arm of the chair
+  box(md, { x: rcX + 0.13, y: chY + 0.14, z: rcZ - 0.02, w: 0.06, d: 0.16, h: 0.16, tw: 0.045, col: [0.55, 0.42, 0.45] });
+  /* ═══ the SCARF — knitted moon phases, absurdly long, spilling from the
+     basket and wandering clear across the floor ═══ */
+  const C_SCARF = [0.22, 0.24, 0.38], C_SCARF2 = [0.19, 0.2, 0.33];   // deep indigo
+  const C_MOON = [0.88, 0.89, 0.8];
+  const bkX = 330.35, bkZ = -99.05;
+  lathe(md, [[0.14, 0], [0.24, 0.14], [0.21, 0.32], [0.24, 0.36]], { seg: 7, x: bkX, y: 0, z: bkZ, col: [0.56, 0.45, 0.29] });  // basket
+  lathe(md, [[0.12, 0.3], [0.16, 0.38]], { seg: 6, x: bkX, y: 0, z: bkZ, col: C_SCARF });   // scarf heaped inside
+  box(md, { x: bkX + 0.2, y: 0.3, z: bkZ + 0.06, w: 0.012, d: 0.012, h: 0.3, rx: 0.5, rz: -0.4, col: [0.72, 0.62, 0.45] });  // needles
+  box(md, { x: bkX + 0.16, y: 0.3, z: bkZ + 0.1, w: 0.012, d: 0.012, h: 0.3, rx: 0.5, rz: 0.3, col: [0.72, 0.62, 0.45] });
+  // the run: flat knitted ribbon in bends, a moon phase on every segment
+  const SCARF_RUN = [
+    [330.05, -99.35, -0.6, 0.42], [329.62, -99.72, -1.1, 0.44], [329.35, -100.24, -1.65, 0.46],
+    [329.5, -100.78, -2.2, 0.44], [329.95, -101.08, -2.6, 0.42], [330.45, -101.15, -3.1, 0.44],
+    [330.95, -100.95, -3.7, 0.42], [331.3, -100.6, -4.2, 0.4],
+  ];
+  const PHASES = [1, 0.75, 0.5, 0.25, 0.06, 0.25, 0.5, 0.75];   // full → new → waxing back
+  for (let i = 0; i < SCARF_RUN.length; i++) {
+    const [sx2, sz2, sa, sl] = SCARF_RUN[i];
+    box(md, { x: sx2, y: 0.012, z: sz2, w: 0.115, d: sl, h: 0.024, ry: sa, col: i % 2 ? C_SCARF : C_SCARF2 });
+    // the phase: a pale disc, then (for partial phases) an indigo disc
+    // shifted across it — knitted moonlight, waxing and waning
+    const ph = PHASES[i];
+    lathe(md, [[0, 0.041], [0.075, 0.037]], { seg: 8, x: sx2, y: 0, z: sz2, col: C_MOON });
+    if (ph < 1) lathe(md, [[0, 0.043], [0.075, 0.039]], { seg: 8, x: sx2 + Math.cos(sa) * 0.15 * (1 - ph), y: 0, z: sz2 - Math.sin(sa) * 0.15 * (1 - ph), col: i % 2 ? C_SCARF : C_SCARF2 });
+  }
+  // fringe at the scarf's far end
+  for (let i = 0; i < 4; i++) {
+    box(md, { x: 331.42 + i * 0.005, y: 0.012, z: -100.44 - i * 0.055, w: 0.012, d: 0.05, h: 0.014, ry: -4.2, col: C_MOON });
+  }
+  /* the tea table (NW) — one cup, saucer, and a doily that outlived the tea */
+  const ttX = 327.75, ttZ = -101.7;
+  lathe(md, [[0.3, 0.5], [0.26, 0.55]], { seg: 8, x: ttX, y: 0, z: ttZ, col: [0.48, 0.38, 0.26] });
+  lathe(md, [[0.05, 0], [0.09, 0.5]], { seg: 6, x: ttX, y: 0, z: ttZ, col: TIM_D });
+  lathe(md, [[0, 0.56], [0.2, 0.55]], { seg: 8, x: ttX, y: 0, z: ttZ, col: [0.85, 0.8, 0.7] });   // doily
+  lathe(md, [[0.05, 0], [0.055, 0.05], [0.04, 0.06]], { seg: 6, x: ttX - 0.06, y: 0.56, z: ttZ + 0.04, col: [0.62, 0.68, 0.7] });  // cup
+  lathe(md, [[0.08, 0], [0.09, 0.012]], { seg: 7, x: ttX - 0.06, y: 0.555, z: ttZ + 0.04, col: [0.72, 0.76, 0.76] });             // saucer
+  tockRoom.mesh = mdMesh(md, new THREE.MeshBasicMaterial({ vertexColors: true }), false);
+  tockRoom.mesh.matrixAutoUpdate = false; tockRoom.mesh.updateMatrix();
+  tockRoom.mesh.visible = false;
+  scene.add(tockRoom.mesh);
+  /* glow: window beam + the one candle flame on the mantel */
+  const mdG = MD();
+  pushQuad(mdG, [winX - 0.42, 1.9, winZ + 0.02], [winX + 0.42, 1.9, winZ + 0.02],
+    [winX + 0.58, 0.02, winZ + 1.6], [winX - 0.58, 0.02, winZ + 1.6], [0.6, 0.52, 0.34]);
+  lathe(mdG, [[0, 0.001], [0.58, 0]], { seg: 8, ex: 0.7, x: winX, y: 0.025, z: winZ + 1.45, col: [0.7, 0.6, 0.38] });
+  const cnY = 1.44, cnX2 = hx + 0.02, cnZ2 = hz + 0.58;
+  for (const [ox, oz] of [[0.06, 0], [0, 0.06]]) {
+    pushQuad(mdG, [cnX2 - ox, cnY, cnZ2 - oz], [cnX2 + ox, cnY, cnZ2 + oz],
+      [cnX2 + ox, cnY + 0.09, cnZ2 + oz], [cnX2 - ox, cnY + 0.09, cnZ2 - oz], [1.0, 0.86, 0.55]);
+  }
+  lathe(mdG, [[0, 0.001], [0.22, 0]], { seg: 7, x: cnX2, y: 1.28, z: cnZ2, col: [1.0, 0.8, 0.45] });
+  tockRoom.glow = mdMesh(mdG, new THREE.MeshBasicMaterial({
+    vertexColors: true, transparent: true, opacity: 0.42,
+    blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+  }), false);
+  tockRoom.glow.matrixAutoUpdate = false; tockRoom.glow.updateMatrix();
+  tockRoom.glow.visible = false;
+  scene.add(tockRoom.glow);
+  /* the pendulum — its own tiny mesh so p6 can swing it */
+  const mdP = MD();
+  box(mdP, { x: 0, y: -0.52, z: 0, w: 0.012, d: 0.008, h: 0.52, col: [0.6, 0.5, 0.3] });
+  lathe(mdP, [[0.001, -0.6], [0.055, -0.56], [0.055, -0.53], [0.001, -0.5]], { seg: 7, x: 0, y: 0, z: 0, col: [0.72, 0.58, 0.32] });
+  tockPend = mdMesh(mdP, TOON);
+  tockPend.frustumCulled = false;
+  tockPend.position.set(fcX, 1.62, fcZ + 0.19);   // in the window, facing the room
+  tockPend.visible = false;
+  scene.add(tockPend);
+  tockRoom.vis.push(tockPend);
+})();
+/* mantel clock helper (tiny octagon on a stand; faces -x, into the room) */
+function wallClockMantel(md, x, y, z, r, th, tm, caseCol, faceCol) {
+  box(md, { x, y, z, w: 0.03, d: r, h: r * 2, col: caseCol });
+  box(md, { x, y: y + r - r * 0.7071, z: z - r * 0.7071, w: 0.03, d: r, h: r * 2, rx: Math.PI / 4, col: caseCol });
+  const fr = r * 0.75;
+  box(md, { x: x - 0.026, y: y + r - fr, z, w: 0.012, d: fr, h: fr * 2, col: faceCol });
+  box(md, { x: x - 0.026, y: y + r - fr * 0.7071, z: z - fr * 0.7071, w: 0.012, d: fr, h: fr * 2, rx: Math.PI / 4, col: faceCol });
+  const ha = (th % 12 + tm / 60) / 12 * TAU, ma = tm / 60 * TAU;
+  box(md, { x: x - 0.042, y: y + r, z, w: 0.008, d: 0.014, h: fr * 0.5, rx: ha, col: [0.16, 0.13, 0.1] });
+  box(md, { x: x - 0.046, y: y + r, z, w: 0.006, d: 0.011, h: fr * 0.8, rx: ma, col: [0.16, 0.13, 0.1] });
+  lathe(md, [[0.014, 0], [0.01, 0.018]], { seg: 5, x: x - 0.05, y: y + r - 0.01, z, col: [0.55, 0.44, 0.26] });
+}
+/* Granny's salt chest, by the hearth */
+const tockChest = { x: 332.3, z: -101.55, opened: false, lid: null, group: null };
+{
+  const m = buildChestMesh(tockChest.x, tockChest.z, -1.35);
+  tockChest.group = m.group; tockChest.lid = m.lid;
+  tockChest.group.visible = false;
+  tockRoom.vis.push(tockChest.group);
+}
+doorWelcome(TOCK_DOOR);
+ROOMS.push(tockRoom);
+
+/* ═══════════ v4.5: PEARL'S FAMILY HOUSE — a kid's world ═══
+   The small house at (-22,-40). Bunk with a sail blanket, a floor of
+   chalk stars drawn the way she imagines them (five-pointed, smiling —
+   wrong), a toy boat on a rug sea, a firefly jar long empty, and a
+   star chart that nobody could fill in. ═══ */
+const PEARL_ROOM = { x: 330, z: -140, w: 2.9, d: 2.3, wallH: 2.7 };
+const PEARL_DOOR = houseDoorOf(-22, -40, -0.2, 2.58, 4.2);
+const PEARL_COLL = [
+  [327.7, -140.75, 0.62], [327.7, -139.35, 0.62],   // bunk
+  [327.75, -138.35, 0.35],  // nightstand (firefly jar)
+  [328.5, -139.9, 0.38],    // the chest poking out from under the bunk
+  [332.55, -141.0, 0.4],    // treasure shelf
+];
+const pearlRoom = {
+  id: 'pearl', promptId: 'pearlDoor',
+  x: PEARL_ROOM.x, z: PEARL_ROOM.z, w: PEARL_ROOM.w, d: PEARL_ROOM.d, wallH: PEARL_ROOM.wallH,
+  spawn: { x: 330, z: -138.85, heading: Math.PI }, inDoor: { x: 330, z: -137.65 },
+  ext: PEARL_DOOR, coll: PEARL_COLL, mesh: null, glow: null, vis: [],
+  boatRug: { x: 330.7, z: -140.3 }, boatSill: { x: 331.05, z: -142.14, y: 1.04 },
+  chart: { x: 332.75, z: -139.55 },
+};
+let pearlBoat = null, pearlStar = null;
+(function buildPearlRoom() {
+  const md = MD();
+  const cx = PEARL_ROOM.x, cz = PEARL_ROOM.z, W = PEARL_ROOM.w, D = PEARL_ROOM.d, H = PEARL_ROOM.wallH;
+  /* palette — driftwood-pale walls, floor dark enough for chalk to sing */
+  const PLAS = [0.72, 0.72, 0.66], PLAS_D = [0.57, 0.57, 0.53], PLAS_W = [0.66, 0.66, 0.61];
+  const TIM = [0.38, 0.3, 0.21], TIM_D = [0.27, 0.21, 0.15];
+  const FLOOR_A = [0.38, 0.31, 0.23], FLOOR_B = [0.335, 0.27, 0.2];
+  for (let i = 0; i < 12; i++) {
+    const px = cx - W + 0.26 + i * 0.5;
+    box(md, { x: px, y: -0.09, z: cz, w: 0.245, d: D + 0.28, h: 0.09, col: i % 2 ? FLOOR_A : FLOOR_B });
+  }
+  const wall = (x, z, w2, d2, col) => box(md, { x, y: 0, z, w: w2, d: d2, h: H, col, colB: mix3(col, [0, 0, 0], 0.25) });
+  wall(cx, cz - D - 0.15, W + 0.3, 0.15, PLAS_D);
+  wall(cx - W - 0.15, cz, 0.15, D + 0.3, PLAS_W);
+  wall(cx + W + 0.15, cz, 0.15, D + 0.3, PLAS);
+  const doorHW = 0.62;
+  wall(cx - (W + doorHW) / 2 - doorHW / 2, cz + D + 0.15, (W - doorHW) / 2 + 0.15, 0.15, PLAS);
+  wall(cx + (W + doorHW) / 2 + doorHW / 2, cz + D + 0.15, (W - doorHW) / 2 + 0.15, 0.15, PLAS);
+  box(md, { x: cx, y: 1.98, z: cz + D + 0.15, w: doorHW + 0.3, d: 0.15, h: H - 1.98, col: PLAS });
+  box(md, { x: cx, y: 0, z: cz + D + 0.13, w: doorHW, d: 0.06, h: 1.95, col: [0.32, 0.25, 0.18] });
+  box(md, { x: cx - doorHW - 0.06, y: 0, z: cz + D + 0.08, w: 0.07, d: 0.1, h: 2.02, col: TIM });
+  box(md, { x: cx + doorHW + 0.06, y: 0, z: cz + D + 0.08, w: 0.07, d: 0.1, h: 2.02, col: TIM });
+  box(md, { x: cx, y: 2.0, z: cz + D + 0.08, w: doorHW + 0.16, d: 0.1, h: 0.1, col: TIM });
+  lathe(md, [[0.035, 0], [0.045, 0.02], [0.02, 0.05]], { seg: 6, x: cx - doorHW + 0.16, y: 1.0, z: cz + D + 0.05, col: [0.62, 0.5, 0.3] });
+  for (const [sx, sz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) {
+    box(md, { x: cx + sx * (W - 0.02), y: 0, z: cz + sz * (D - 0.02), w: 0.09, d: 0.09, h: H, col: TIM_D });
+  }
+  box(md, { x: cx, y: H, z: cz, w: W + 0.3, d: D + 0.3, h: 0.12, col: [0.4, 0.34, 0.27], colB: [0.4, 0.34, 0.27] });
+  for (const bz of [-1.5, 0, 1.5]) {
+    box(md, { x: cx, y: H - 0.2, z: cz + bz, w: W + 0.28, d: 0.1, h: 0.2, col: TIM_D, colB: TIM });
+  }
+  /* the window on the north wall — WIDE sill, waiting for a boat; it
+     "faces the bay" the way everything in this house faces hope */
+  const winX = 331.05, winZ = cz - D + 0.02;
+  box(md, { x: winX, y: 1.12, z: winZ - 0.06, w: 0.56, d: 0.06, h: 0.92, col: [0.35, 0.31, 0.27] });
+  box(md, { x: winX, y: 0.98, z: winZ + 0.09, w: 0.68, d: 0.16, h: 0.07, col: TIM });   // the deep sill
+  box(md, { x: winX, y: 2.02, z: winZ + 0.02, w: 0.64, d: 0.06, h: 0.07, col: TIM });
+  for (let i = 0; i < 4; i++) {
+    box(md, { x: winX, y: 1.22 + i * 0.2, z: winZ + 0.005, w: 0.5, d: 0.012, h: 0.042, col: [1.0, 0.9, 0.66] });
+  }
+  /* ═══ the BUNK (west wall) — sail-blanket up top, harbor of pillows ═══ */
+  const bkX = 327.7, bkZ = -140.05;
+  for (const [pz, ph] of [[-141.25, 1.85], [-138.85, 1.85]]) {
+    box(md, { x: bkX - 0.52, y: 0, z: pz, w: 0.07, d: 0.07, h: ph, col: TIM_D });
+    box(md, { x: bkX + 0.52, y: 0, z: pz, w: 0.07, d: 0.07, h: ph, col: TIM_D });
+  }
+  for (const py of [0.55, 1.45]) {   // rails + platforms
+    box(md, { x: bkX, y: py - 0.13, z: bkZ, w: 0.56, d: 1.27, h: 0.13, col: TIM });
+    box(md, { x: bkX, y: py, z: bkZ, w: 0.52, d: 1.2, h: 0.1, col: [0.76, 0.72, 0.62] });   // mattresses
+  }
+  // upper: the SAIL blanket — weathered canvas, rigging stitches, a patch
+  box(md, { x: bkX, y: 1.55, z: bkZ + 0.14, w: 0.54, d: 0.95, h: 0.07, tw: 0.44, td: 0.8, col: [0.82, 0.78, 0.66], colB: [0.66, 0.62, 0.52] });
+  box(md, { x: bkX - 0.08, y: 1.62, z: bkZ - 0.1, w: 0.1, d: 0.12, h: 0.015, ry: 0.3, col: [0.6, 0.38, 0.3] });   // the patch
+  for (let i = 0; i < 3; i++) {   // seam lines
+    box(md, { x: bkX - 0.4 + i * 0.35, y: 1.623, z: bkZ + 0.12, w: 0.012, d: 0.85, h: 0.008, col: [0.66, 0.62, 0.52] });
+  }
+  box(md, { x: bkX - 0.55, y: 1.53, z: bkZ + 0.55, w: 0.09, d: 0.3, h: 0.34, tw: 0.06, td: 0.22, col: [0.78, 0.74, 0.62] });  // blanket spills over the rail
+  box(md, { x: bkX, y: 1.56, z: bkZ - 0.92, w: 0.36, d: 0.2, h: 0.12, tw: 0.3, td: 0.16, col: [0.88, 0.85, 0.75] });  // pillow (upper)
+  // lower bunk: rumpled teal blanket, half kicked off
+  box(md, { x: bkX, y: 0.65, z: bkZ + 0.2, w: 0.52, d: 0.85, h: 0.09, tw: 0.42, td: 0.7, col: [0.3, 0.5, 0.47], colB: [0.22, 0.38, 0.36] });
+  box(md, { x: bkX + 0.3, y: 0.42, z: bkZ + 0.95, w: 0.22, d: 0.18, h: 0.28, tw: 0.16, rx: 0.5, col: [0.27, 0.45, 0.42] });
+  box(md, { x: bkX, y: 0.66, z: bkZ - 0.85, w: 0.34, d: 0.19, h: 0.11, tw: 0.28, td: 0.15, col: [0.88, 0.85, 0.75] });  // pillow (lower)
+  // ladder at the south end
+  for (const lx2 of [-0.25, 0.25]) box(md, { x: bkX + 0.62, y: 0, z: bkZ + 1.28 + lx2 * 0, w: 0.04, d: 0.04, h: 1.8, rx: 0, col: TIM });
+  { const lz2 = bkZ + 1.28;
+    box(md, { x: bkX + 0.62, y: 0, z: lz2 - 0.14, w: 0.04, d: 0.04, h: 1.8, col: TIM });
+    box(md, { x: bkX + 0.62, y: 0, z: lz2 + 0.14, w: 0.04, d: 0.04, h: 1.8, col: TIM });
+    for (let i = 0; i < 4; i++) box(md, { x: bkX + 0.62, y: 0.35 + i * 0.4, z: lz2, w: 0.035, d: 0.12, h: 0.035, col: TIM_D });
+  }
+  /* ═══ the CHALK FLOOR — her stars: five-pointed, smiling, wrong ═══ */
+  const CHALK = [0.93, 0.93, 0.9], CHALK_P = [0.9, 0.72, 0.78], CHALK_B = [0.68, 0.8, 0.9];
+  const star5 = (sx2, sz2, r, rot, colr, smile) => {
+    for (let i = 0; i < 5; i++) {   // the outline: five strokes tip-to-tip
+      const a0 = rot + i * TAU * 2 / 5, a1 = rot + (i + 1) * TAU * 2 / 5;
+      const x0 = sx2 + Math.sin(a0) * r, z0 = sz2 + Math.cos(a0) * r;
+      const x1 = sx2 + Math.sin(a1) * r, z1 = sz2 + Math.cos(a1) * r;
+      const mx = (x0 + x1) / 2, mz = (z0 + z1) / 2, len = Math.hypot(x1 - x0, z1 - z0);
+      box(md, { x: mx, y: 0.004, z: mz, w: 0.014, d: len / 2, h: 0.006, ry: Math.atan2(x1 - x0, z1 - z0), col: colr });
+    }
+    if (smile) {   // two chalk-dot eyes + a three-dab smile
+      box(md, { x: sx2 - r * 0.16, y: 0.004, z: sz2 + r * 0.12, w: 0.02, d: 0.02, h: 0.007, col: colr });
+      box(md, { x: sx2 + r * 0.16, y: 0.004, z: sz2 + r * 0.12, w: 0.02, d: 0.02, h: 0.007, col: colr });
+      box(md, { x: sx2, y: 0.004, z: sz2 - r * 0.2, w: r * 0.24, d: 0.016, h: 0.007, col: colr });
+      box(md, { x: sx2 - r * 0.22, y: 0.004, z: sz2 - r * 0.14, w: 0.02, d: 0.016, h: 0.007, ry: 0.7, col: colr });
+      box(md, { x: sx2 + r * 0.22, y: 0.004, z: sz2 - r * 0.14, w: 0.02, d: 0.016, h: 0.007, ry: -0.7, col: colr });
+    }
+  };
+  star5(330.0, -139.2, 0.42, 0.2, CHALK, true);      // the big one, beaming
+  star5(329.2, -140.1, 0.26, 1.1, CHALK_P, true);
+  star5(330.9, -138.6, 0.2, 2.3, CHALK_B, true);
+  star5(329.6, -138.5, 0.17, 0.8, CHALK, false);
+  star5(331.6, -139.6, 0.24, 1.9, CHALK_P, true);
+  // a chalk crescent moon with a sleepy smile beside them
+  { const mx2 = 331.9, mz2 = -138.5;
+    lathe(md, [[0, 0.005], [0.17, 0.003]], { seg: 8, x: mx2, y: 0, z: mz2, col: CHALK });
+    lathe(md, [[0, 0.007], [0.16, 0.005]], { seg: 8, x: mx2 + 0.07, y: 0, z: mz2 + 0.05, col: FLOOR_A });
+    box(md, { x: mx2 - 0.07, y: 0.008, z: mz2 - 0.07, w: 0.05, d: 0.014, h: 0.006, ry: 0.5, col: CHALK });
+  }
+  // chalk stubs where she knelt
+  for (const [chx, chz, chc] of [[330.4, -138.15, CHALK], [330.5, -138.2, CHALK_P], [329.0, -139.5, CHALK_B]]) {
+    box(md, { x: chx, y: 0.01, z: chz, w: 0.015, d: 0.04, h: 0.02, ry: chx * 3, col: chc });
+  }
+  /* ═══ the rug SEA (center-east) — waves for a toy boat ═══ */
+  const rgX = 330.7, rgZ = -140.3;
+  lathe(md, [[0, 0.008], [0.95, 0.005]], { seg: 9, ex: 1.25, x: rgX, y: 0, z: rgZ, col: [0.2, 0.32, 0.45] });
+  lathe(md, [[0.62, 0.01], [0.78, 0.009]], { seg: 9, ex: 1.25, x: rgX, y: 0, z: rgZ, col: [0.28, 0.42, 0.55] });
+  lathe(md, [[0.3, 0.012], [0.45, 0.011]], { seg: 9, ex: 1.25, x: rgX, y: 0, z: rgZ, col: [0.34, 0.5, 0.62] });
+  for (let i = 0; i < 5; i++) {   // little wave crests
+    box(md, { x: rgX - 0.7 + i * 0.34, y: 0.013, z: rgZ + ((i % 2) ? 0.22 : -0.18), w: 0.09, d: 0.014, h: 0.008, ry: 0.3, col: [0.8, 0.86, 0.9] });
+  }
+  /* ═══ the STAR CHART (east wall) — blank parchment, four pins ═══ */
+  const chX = cx + W - 0.02, chZ = -139.55;
+  box(md, { x: chX, y: 1.15, z: chZ, w: 0.025, d: 0.48, h: 0.68, col: [0.85, 0.79, 0.64] });
+  box(md, { x: chX - 0.005, y: 1.13, z: chZ, w: 0.02, d: 0.5, h: 0.02, col: [0.66, 0.6, 0.47] });   // curled bottom edge
+  box(md, { x: chX - 0.005, y: 1.81, z: chZ, w: 0.02, d: 0.5, h: 0.02, col: [0.66, 0.6, 0.47] });
+  for (const [pz2, py2] of [[-0.46, 1.16], [0.46, 1.16], [-0.46, 1.79], [0.46, 1.79]]) {
+    box(md, { x: chX - 0.03, y: py2, z: chZ + pz2, w: 0.02, d: 0.022, h: 0.022, col: [0.3, 0.24, 0.18] });
+  }
+  // faint compass rose she started in one corner, then stopped
+  box(md, { x: chX - 0.015, y: 1.24, z: chZ - 0.32, w: 0.014, d: 0.012, h: 0.1, col: [0.74, 0.68, 0.54] });
+  box(md, { x: chX - 0.015, y: 1.29, z: chZ - 0.32, w: 0.014, d: 0.05, h: 0.012, col: [0.74, 0.68, 0.54] });
+  /* nightstand at the bunk head: the FIREFLY JAR, empty a year */
+  const nsX = 327.75, nsZ = -138.35;
+  box(md, { x: nsX, y: 0, z: nsZ, w: 0.24, d: 0.24, h: 0.5, col: TIM });
+  box(md, { x: nsX, y: 0.5, z: nsZ, w: 0.28, d: 0.28, h: 0.04, col: [0.48, 0.38, 0.26] });
+  lathe(md, [[0.09, 0], [0.11, 0.05], [0.11, 0.2], [0.07, 0.26]], { seg: 7, x: nsX - 0.02, y: 0.54, z: nsZ, col: [0.62, 0.7, 0.66] });  // glass
+  lathe(md, [[0.07, 0.26], [0.075, 0.3]], { seg: 7, x: nsX - 0.02, y: 0.54, z: nsZ, col: [0.5, 0.42, 0.3] });   // cork
+  box(md, { x: nsX - 0.02, y: 0.545, z: nsZ, w: 0.06, d: 0.05, h: 0.012, col: [0.34, 0.3, 0.24] });  // dry husks at the bottom
+  /* the treasure shelf (east wall, south of the chart) — beach loot */
+  const shX = cx + W - 0.13, shZ = -141.0;
+  box(md, { x: shX, y: 1.0, z: shZ, w: 0.14, d: 0.6, h: 0.05, col: TIM });
+  box(md, { x: shX + 0.1, y: 0.78, z: shZ - 0.55, w: 0.04, d: 0.05, h: 0.24, col: TIM_D });
+  box(md, { x: shX + 0.1, y: 0.78, z: shZ + 0.55, w: 0.04, d: 0.05, h: 0.24, col: TIM_D });
+  lathe(md, [[0.06, 1.05], [0.075, 1.1], [0.01, 1.14]], { seg: 6, x: shX, y: 0, z: shZ - 0.35, col: [0.85, 0.78, 0.72] });  // shell
+  lathe(md, [[0.05, 1.05], [0.06, 1.09], [0.008, 1.12]], { seg: 6, x: shX, y: 0, z: shZ - 0.12, col: [0.7, 0.74, 0.78] });  // pebble
+  lathe(md, [[0.04, 1.05], [0.05, 1.12], [0.02, 1.16]], { seg: 5, x: shX, y: 0, z: shZ + 0.14, col: [0.95, 0.96, 0.92] });  // a salt crystal, her favorite
+  box(md, { x: shX, y: 1.05, z: shZ + 0.42, w: 0.09, d: 0.03, h: 0.11, rz: 0.3, col: [0.55, 0.35, 0.3] });   // sea glass shard
+  pearlRoom.mesh = mdMesh(md, new THREE.MeshBasicMaterial({ vertexColors: true }), false);
+  pearlRoom.mesh.matrixAutoUpdate = false; pearlRoom.mesh.updateMatrix();
+  pearlRoom.mesh.visible = false;
+  scene.add(pearlRoom.mesh);
+  /* glow: the window beam, wide and hopeful, falling across the chalk */
+  const mdG = MD();
+  pushQuad(mdG, [winX - 0.48, 1.9, winZ + 0.02], [winX + 0.48, 1.9, winZ + 0.02],
+    [winX + 0.66, 0.02, winZ + 1.75], [winX - 0.66, 0.02, winZ + 1.75], [0.6, 0.52, 0.34]);
+  lathe(mdG, [[0, 0.001], [0.64, 0]], { seg: 8, ex: 0.7, x: winX, y: 0.025, z: winZ + 1.6, col: [0.7, 0.6, 0.38] });
+  pearlRoom.glow = mdMesh(mdG, new THREE.MeshBasicMaterial({
+    vertexColors: true, transparent: true, opacity: 0.42,
+    blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+  }), false);
+  pearlRoom.glow.matrixAutoUpdate = false; pearlRoom.glow.updateMatrix();
+  pearlRoom.glow.visible = false;
+  scene.add(pearlRoom.glow);
+  /* the TOY BOAT — its own mesh; p6 carries it from the rug to the sill */
+  const mdB = MD();
+  lathe(mdB, [[0.0, 0.02], [0.075, 0.05], [0.08, 0.1], [0.06, 0.12]], { seg: 7, ex: 2.1, col: [0.55, 0.36, 0.24], cols: [[0.44, 0.29, 0.2], [0.55, 0.36, 0.24]] });
+  box(mdB, { x: 0, y: 0.1, z: 0, w: 0.012, d: 0.012, h: 0.3, col: [0.4, 0.31, 0.22] });   // mast
+  box(mdB, { x: 0.005, y: 0.14, z: 0.055, w: 0.004, d: 0.05, h: 0.2, tw: 0.004, td: 0.004, col: [0.9, 0.87, 0.78] });  // sail
+  box(mdB, { x: 0, y: 0.38, z: 0, w: 0.03, d: 0.008, h: 0.02, col: [0.7, 0.32, 0.28] });  // pennant
+  pearlBoat = mdMesh(mdB, TOON);
+  pearlBoat.frustumCulled = false;
+  pearlBoat.position.set(pearlRoom.boatRug.x, 0.015, pearlRoom.boatRug.z);
+  pearlBoat.rotation.y = 0.6;
+  pearlBoat.visible = false;
+  scene.add(pearlBoat);
+  pearlRoom.vis.push(pearlBoat);
+  /* the one real star (stretch): appears on the chart after the Crescent
+     payoff — drawn in gold, glowing faintly. Visibility = SAVE.sky ≥ 1. */
+  const mdS = MD();
+  const GOLD = [1.0, 0.9, 0.55], GOLD2 = [0.95, 0.82, 0.48];
+  // a small centered sparkle drawn on the parchment plane (yz):
+  // two long rays up/down + two along z + four short diagonals
+  box(mdS, { x: 0, y: -0.052, z: 0, w: 0.008, d: 0.011, h: 0.104, col: GOLD });
+  box(mdS, { x: 0, y: -0.008, z: 0, w: 0.008, d: 0.052, h: 0.016, col: GOLD });
+  for (const rx2 of [Math.PI / 4, 3 * Math.PI / 4, 5 * Math.PI / 4, 7 * Math.PI / 4]) {
+    box(mdS, { x: 0, y: 0, z: 0, w: 0.007, d: 0.009, h: 0.036, rx: rx2, col: GOLD2 });
+  }
+  pearlStar = mdMesh(mdS, new THREE.MeshBasicMaterial({
+    vertexColors: true, transparent: true, opacity: 0.95,
+    blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+  }));
+  pearlStar.frustumCulled = false;
+  pearlStar.position.set(chX - 0.045, 1.5, chZ + 0.16);
+  pearlStar.visible = false;
+  scene.add(pearlStar);
+})();
+/* the chest under the bunk — half tucked away, the way treasure should be */
+const pearlChest = { x: 328.5, z: -139.9, opened: false, lid: null, group: null };
+{
+  const m = buildChestMesh(pearlChest.x, pearlChest.z, 1.45);
+  pearlChest.group = m.group; pearlChest.lid = m.lid;
+  pearlChest.group.scale.setScalar(0.82);
+  pearlChest.group.visible = false;
+  pearlRoom.vis.push(pearlChest.group);
+}
+doorWelcome(PEARL_DOOR);
+ROOMS.push(pearlRoom);
+
+/* ═══════════ v4.5: FINN'S LIGHTHOUSE — the ground room ═══
+   Behind the kelp-bearded door: the keeper's kit, kept ready for a
+   night that stopped coming. Round stone room, stairs up blocked by
+   crates, the logbook open to its last entry — and the one big find
+   the village has been keeping: a HEART CONTAINER. ═══ */
+const LIGHT_ROOM = { x: 330, z: -180, r: 2.6, wallH: 3.2 };
+const LIGHT_DOOR = { x: 42.22, z: -16, outX: 40.75, outZ: -16.05, heading: Math.PI * 1.5, ry: Math.PI / 2 };
+const LIGHT_COLL = [
+  [328.35, -180.6, 0.6],    // logbook desk
+  [328.6, -178.85, 0.5],    // the great rope coil
+  [331.55, -178.4, 0.35],   // oil cans
+  [330.2, -181.6, 0.42],    // the chest
+];
+const lightRoom = {
+  id: 'light', promptId: 'lightDoor',
+  x: LIGHT_ROOM.x, z: LIGHT_ROOM.z, r: LIGHT_ROOM.r, wallH: LIGHT_ROOM.wallH,
+  spawn: { x: 330, z: -178.55, heading: Math.PI }, inDoor: { x: 330, z: -177.45 },
+  ext: LIGHT_DOOR, coll: LIGHT_COLL, mesh: null, glow: null, vis: [],
+  desk: { x: 328.35, z: -180.6 }, stairs: { x: 331.75, z: -179.35 },
+};
+(function buildLightRoom() {
+  const md = MD();
+  const cx = LIGHT_ROOM.x, cz = LIGHT_ROOM.z, R = LIGHT_ROOM.r, H = LIGHT_ROOM.wallH;
+  const STONE_A = [0.62, 0.6, 0.56], STONE_B = [0.55, 0.54, 0.51], STONE_D = [0.44, 0.44, 0.42];
+  const WHITE_W = [0.78, 0.77, 0.72];
+  const TIM = [0.38, 0.3, 0.21], TIM_D = [0.27, 0.21, 0.15];
+  /* the round wall: 18 tangent slabs, stone below, whitewash above,
+     the doorway segment (due south) left open */
+  const NW = 18, wr = R + 0.15;
+  for (let i = 0; i < NW; i++) {
+    const a = i / NW * TAU;
+    if (i === 0) continue;   // the door gap faces south (+z); the frame fills it
+    const px = cx + Math.sin(a) * wr, pz = cz + Math.cos(a) * wr;
+    box(md, { x: px, y: 0, z: pz, w: 0.53, d: 0.16, h: 1.3, ry: a, col: i % 2 ? STONE_A : STONE_B });
+    box(md, { x: px, y: 1.3, z: pz, w: 0.53, d: 0.16, h: H - 1.3, ry: a, col: i % 2 ? WHITE_W : mix3(WHITE_W, [0, 0, 0], 0.06) });
+    box(md, { x: px, y: 1.24, z: pz, w: 0.53, d: 0.165, h: 0.07, ry: a, col: TIM_D });   // timber string course
+    // the keeper painted the daymark inside too — a faded red band up high
+    box(md, { x: px, y: 2.35, z: pz, w: 0.53, d: 0.163, h: 0.34, ry: a, col: i % 2 ? [0.66, 0.33, 0.26] : [0.62, 0.31, 0.25] });
+  }
+  /* doorway: jambs + lintel + the shut door */
+  const dz = cz + R + 0.05;
+  box(md, { x: cx - 0.62, y: 0, z: dz, w: 0.12, d: 0.2, h: 2.05, col: STONE_D });
+  box(md, { x: cx + 0.62, y: 0, z: dz, w: 0.12, d: 0.2, h: 2.05, col: STONE_D });
+  box(md, { x: cx, y: 2.05, z: dz, w: 0.75, d: 0.2, h: 0.22, col: STONE_D });
+  box(md, { x: cx, y: 2.27, z: dz, w: 0.62, d: 0.18, h: H - 2.27, col: WHITE_W });
+  box(md, { x: cx, y: 0, z: dz + 0.06, w: 0.52, d: 0.06, h: 1.98, col: [0.32, 0.25, 0.18] });
+  lathe(md, [[0.035, 0], [0.045, 0.02], [0.02, 0.05]], { seg: 6, x: cx - 0.36, y: 1.0, z: dz, col: [0.55, 0.45, 0.28] });
+  /* floor: warm flagstone rings + a painted compass line; plank ceiling */
+  const FLOOR_S = [0.56, 0.51, 0.43], FLOOR_S2 = [0.5, 0.45, 0.38], FLOOR_S3 = [0.61, 0.55, 0.46];
+  lathe(md, [[0, -0.02], [R + 0.3, -0.04]], { seg: 14, x: cx, y: 0, z: cz, col: FLOOR_S2 });
+  lathe(md, [[R * 0.62, 0.005], [R * 0.98, 0.002]], { seg: 14, x: cx, y: 0, z: cz, col: FLOOR_S });
+  lathe(md, [[R * 0.3, 0.008], [R * 0.55, 0.004]], { seg: 12, x: cx, y: 0, z: cz, col: FLOOR_S3 });
+  lathe(md, [[0, 0.01], [R * 0.24, 0.007]], { seg: 10, x: cx, y: 0, z: cz, col: FLOOR_S2 });
+  lathe(md, [[R * 0.56, 0.009], [R * 0.63, 0.007]], { seg: 12, x: cx, y: 0, z: cz, col: [0.6, 0.34, 0.27] });   // the painted ring, faded red
+  lathe(md, [[0, H], [R + 0.3, H + 0.02]], { seg: 14, x: cx, y: 0, z: cz, col: [0.36, 0.31, 0.25] });
+  for (let i = 0; i < 4; i++) {
+    box(md, { x: cx, y: H - 0.16, z: cz - R + 0.4 + i * 1.3, w: R + 0.05, d: 0.09, h: 0.16, col: TIM_D });
+  }
+  box(md, { x: 331.05, y: H - 0.02, z: -178.9, w: 0.42, d: 0.42, h: 0.04, ry: 0.42, col: [0.14, 0.13, 0.12] });  // the hatch overhead
+  /* ═══ the STAIRS — climbing the east wall, then CRATES ═══ */
+  const stepColl = [];
+  for (let i = 0; i < 7; i++) {
+    const a = 1.05 + i * 0.26, sr = R - 0.42;
+    const sx2 = cx + Math.sin(a) * sr, sz2 = cz + Math.cos(a) * sr;
+    box(md, { x: sx2, y: 0, z: sz2, w: 0.52, d: 0.34, h: 0.17 + i * 0.165, ry: a, col: i % 2 ? [0.6, 0.54, 0.45] : [0.55, 0.49, 0.41] });
+    box(md, { x: sx2, y: 0.17 + i * 0.165, z: sz2, w: 0.54, d: 0.36, h: 0.035, ry: a, col: TIM_D });   // worn timber nosing
+    if (i < 4) stepColl.push([sx2, sz2, 0.48]);
+  }
+  for (const c of stepColl) LIGHT_COLL.push(c);
+  // the crates, square across the fifth step — Finn's polite "not yet"
+  { const a = 2.15, sr = R - 0.55;
+    const cx2 = cx + Math.sin(a) * sr, cz2 = cz + Math.cos(a) * sr;
+    const crate = (x, y, z, s2, ry2) => {
+      box(md, { x, y, z, w: s2, d: s2, h: s2 * 2, ry: ry2, col: [0.52, 0.42, 0.28] });
+      box(md, { x, y: y + s2 * 2 - 0.03, z, w: s2 + 0.015, d: s2 + 0.015, h: 0.03, ry: ry2, col: TIM_D });
+      box(md, { x, y: y + s2, z, w: s2 + 0.01, d: s2 + 0.01, h: 0.03, ry: ry2, col: TIM_D });
+    };
+    crate(cx2, 0.95, cz2, 0.24, a);
+    crate(cx2 - Math.cos(a) * 0.4, 0.95, cz2 + Math.sin(a) * 0.4, 0.2, a + 0.3);
+    crate(cx2 - Math.cos(a) * 0.15, 1.43, cz2 + Math.sin(a) * 0.15, 0.19, a - 0.2);
+    // a coil of rope thrown on top
+    lathe(md, [[0.1, 0], [0.16, 0.05], [0.14, 0.1], [0.08, 0.12]], { seg: 7, x: cx2 - Math.cos(a) * 0.1, y: 1.81, z: cz2 + Math.sin(a) * 0.1, col: [0.6, 0.5, 0.34] });
+  }
+  /* ═══ the keeper's kit ═══ */
+  // the great rope coil (floor, NW): stacked rings, a tail running out
+  const rpX = 328.6, rpZ = -178.85;
+  for (let i = 0; i < 4; i++) {
+    lathe(md, [[0.28 - i * 0.02, i * 0.09], [0.36 - i * 0.02, i * 0.09 + 0.05], [0.3 - i * 0.02, i * 0.09 + 0.09]], { seg: 8, x: rpX, y: 0, z: rpZ, col: i % 2 ? [0.62, 0.52, 0.36] : [0.56, 0.47, 0.32] });
+  }
+  box(md, { x: rpX + 0.55, y: 0.02, z: rpZ + 0.35, w: 0.4, d: 0.045, h: 0.045, ry: 0.5, col: [0.6, 0.5, 0.34] });
+  // a spare coil hung on a wall peg (west)
+  box(md, { x: cx - R + 0.1, y: 1.7, z: cz - 0.3, w: 0.05, d: 0.09, h: 0.05, ry: Math.PI / 2, col: TIM_D });
+  lathe(md, [[0.14, -0.35], [0.2, -0.28], [0.19, -0.05], [0.13, 0]], { seg: 7, x: cx - R + 0.16, y: 1.62, z: cz - 0.3, col: [0.58, 0.48, 0.33] });
+  // oil cans by the stair base — dented tin, long unneeded, still full
+  const ocX = 331.55, ocZ = -178.4;
+  for (const [ox2, oz2, os] of [[0, 0, 0.11], [0.22, 0.12, 0.09], [-0.05, 0.24, 0.08]]) {
+    lathe(md, [[os, 0], [os + 0.015, 0.05], [os - 0.01, 0.3], [0.02, 0.38], [0.025, 0.42]], { seg: 7, x: ocX + ox2, y: 0, z: ocZ + oz2, col: [0.55, 0.56, 0.55] });
+    box(md, { x: ocX + ox2, y: 0.3, z: ocZ + oz2 - os, w: 0.012, d: 0.05, h: 0.08, col: [0.48, 0.49, 0.48] });
+  }
+  /* the LENS SHELF (north wall) — spare lamp lenses, dustless, waiting */
+  const lsX = 330.3, lsZ = cz - R + 0.22;
+  box(md, { x: lsX, y: 1.35, z: lsZ, w: 0.75, d: 0.16, h: 0.05, col: TIM });
+  box(md, { x: lsX - 0.6, y: 1.12, z: lsZ, w: 0.04, d: 0.1, h: 0.25, col: TIM_D });
+  box(md, { x: lsX + 0.6, y: 1.12, z: lsZ, w: 0.04, d: 0.1, h: 0.25, col: TIM_D });
+  for (const [lx2, lr] of [[-0.38, 0.19], [0.05, 0.24], [0.45, 0.15]]) {   // upright lens discs
+    box(md, { x: lsX + lx2, y: 1.4, z: lsZ, w: lr, d: 0.022, h: lr * 2, col: [0.78, 0.87, 0.9] });
+    box(md, { x: lsX + lx2 + lr * 0.7071, y: 1.4 + lr - lr * 0.7071, z: lsZ, w: lr, d: 0.022, h: lr * 2, rz: Math.PI / 4, col: [0.72, 0.83, 0.87] });
+    box(md, { x: lsX + lx2, y: 1.4 + lr * 2 - 0.03, z: lsZ, w: lr * 0.55, d: 0.026, h: 0.03, col: [0.5, 0.44, 0.3] });   // brass rim hints
+    box(md, { x: lsX + lx2, y: 1.4, z: lsZ, w: lr * 0.55, d: 0.026, h: 0.03, col: [0.5, 0.44, 0.3] });
+  }
+  /* the LOGBOOK DESK (west) — open book, quill, the lamp he keeps clean */
+  const dkX = 328.35, dkZ = -180.6;
+  box(md, { x: dkX, y: 0.68, z: dkZ, w: 0.5, d: 0.36, h: 0.06, ry: 0.5, col: [0.5, 0.4, 0.27], colB: TIM_D });
+  for (const [ox2, oz2] of [[-0.38, -0.22], [0.38, -0.22], [-0.38, 0.22], [0.38, 0.22]]) {
+    const ca = Math.cos(0.5), sa = Math.sin(0.5);
+    box(md, { x: dkX + ox2 * ca + oz2 * sa, y: 0, z: dkZ - ox2 * sa + oz2 * ca, w: 0.05, d: 0.05, h: 0.68, col: TIM_D });
+  }
+  // the logbook: two leaves open at a shallow tent angle + ink line hints
+  box(md, { x: dkX - 0.09, y: 0.745, z: dkZ + 0.02, w: 0.14, d: 0.19, h: 0.012, ry: 0.5, rz: 0.1, col: [0.9, 0.87, 0.78] });
+  box(md, { x: dkX + 0.09, y: 0.745, z: dkZ - 0.06, w: 0.14, d: 0.19, h: 0.012, ry: 0.5, rz: -0.1, col: [0.87, 0.84, 0.75] });
+  box(md, { x: dkX, y: 0.74, z: dkZ - 0.02, w: 0.02, d: 0.2, h: 0.02, ry: 0.5, col: [0.4, 0.3, 0.2] });   // spine
+  for (let i = 0; i < 3; i++) {
+    box(md, { x: dkX - 0.12 + i * 0.02, y: 0.756, z: dkZ + 0.05 - i * 0.06, w: 0.08, d: 0.008, h: 0.004, ry: 0.5, col: [0.42, 0.4, 0.38] });
+  }
+  lathe(md, [[0.025, 0], [0.03, 0.03], [0.012, 0.05]], { seg: 5, x: dkX + 0.16, y: 0.74, z: dkZ + 0.14, col: [0.3, 0.28, 0.26] });  // ink pot
+  box(md, { x: dkX + 0.18, y: 0.77, z: dkZ + 0.13, w: 0.008, d: 0.014, h: 0.14, rx: 0.4, rz: 0.3, col: [0.85, 0.82, 0.7] });        // quill
+  // the lamp — brass base, glowing glass (same warm family as the harbor)
+  const lpX = dkX - 0.12, lpZ = dkZ - 0.16;
+  lathe(md, [[0.08, 0], [0.055, 0.04], [0.03, 0.09]], { seg: 7, x: lpX, y: 0.71, z: lpZ, col: [0.42, 0.33, 0.2] });
+  lathe(md, [[0.03, 0.09], [0.065, 0.15], [0.055, 0.25], [0.018, 0.3]], { seg: 7, x: lpX, y: 0.71, z: lpZ, col: [1.0, 0.93, 0.72] });
+  lathe(md, [[0.018, 0.3], [0.04, 0.33], [0, 0.35]], { seg: 6, x: lpX, y: 0.71, z: lpZ, col: [0.42, 0.33, 0.2] });
+  // keeper's chair, pushed back
+  box(md, { x: dkX + 0.35, y: 0.38, z: dkZ + 0.42, w: 0.19, d: 0.17, h: 0.04, ry: 0.6, col: [0.47, 0.37, 0.26] });
+  for (const [ox2, oz2] of [[-0.14, -0.12], [0.14, -0.12], [-0.14, 0.12], [0.14, 0.12]]) {
+    const ca = Math.cos(0.6), sa = Math.sin(0.6);
+    box(md, { x: dkX + 0.35 + ox2 * ca + oz2 * sa, y: 0, z: dkZ + 0.42 - ox2 * sa + oz2 * ca, w: 0.028, d: 0.028, h: 0.38, col: TIM_D });
+  }
+  box(md, { x: dkX + 0.47, y: 0.42, z: dkZ + 0.52, w: 0.18, d: 0.03, h: 0.42, ry: 0.6, rx: 0.12, col: [0.44, 0.35, 0.24] });
+  lightRoom.mesh = mdMesh(md, new THREE.MeshBasicMaterial({ vertexColors: true }), false);
+  lightRoom.mesh.matrixAutoUpdate = false; lightRoom.mesh.updateMatrix();
+  lightRoom.mesh.visible = false;
+  scene.add(lightRoom.mesh);
+  /* glow: the desk lamp + soft glints standing in the lenses */
+  const mdG = MD();
+  const gy = 0.71 + 0.19;
+  for (const [ox, oz] of [[0.3, 0], [0, 0.3]]) {
+    pushQuad(mdG, [lpX - ox, gy - 0.26, lpZ - oz], [lpX + ox, gy - 0.26, lpZ + oz],
+      [lpX + ox, gy + 0.3, lpZ + oz], [lpX - ox, gy + 0.3, lpZ - oz], [1.0, 0.86, 0.55]);
+  }
+  lathe(mdG, [[0, 0.001], [0.45, 0]], { seg: 8, x: lpX, y: 0.72, z: lpZ, col: [1.0, 0.8, 0.45] });
+  for (const [lx2, lr] of [[-0.38, 0.19], [0.05, 0.24], [0.45, 0.15]]) {
+    pushQuad(mdG, [lsX + lx2 - lr * 0.5, 1.4 + lr * 0.5, lsZ + 0.03], [lsX + lx2 + lr * 0.5, 1.4 + lr * 0.5, lsZ + 0.03],
+      [lsX + lx2 + lr * 0.5, 1.4 + lr * 1.5, lsZ + 0.03], [lsX + lx2 - lr * 0.5, 1.4 + lr * 1.5, lsZ + 0.03], [0.5, 0.75, 0.85]);
+  }
+  lightRoom.glow = mdMesh(mdG, new THREE.MeshBasicMaterial({
+    vertexColors: true, transparent: true, opacity: 0.42,
+    blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+  }), false);
+  lightRoom.glow.matrixAutoUpdate = false; lightRoom.glow.updateMatrix();
+  lightRoom.glow.visible = false;
+  scene.add(lightRoom.glow);
+})();
+/* Finn's chest — the HEART CONTAINER he kept polished */
+const lightChest = { x: 330.2, z: -181.6, opened: false, lid: null, group: null, heart: null };
+{
+  const m = buildChestMesh(lightChest.x, lightChest.z, -0.15);
+  lightChest.group = m.group; lightChest.lid = m.lid;
+  lightChest.group.visible = false;
+  const heart = buildHeartItem();
+  heart.visible = false;
+  scene.add(heart);
+  lightChest.heart = heart;
+  lightRoom.vis.push(lightChest.group);
+}
+doorWelcome(LIGHT_DOOR);
+ROOMS.push(lightRoom);
+
+/* ═══════════ v4.5+: THE CARTOGRAPHER'S HOUSE — the tide-measurer ═══
+   The small house at (22,-28). Charts of a coastline that keeps being
+   wrong: the old shoreline in confident ink, the dry bay sketched in
+   behind it. Pin flags march down the wall map, following the water
+   out. Somebody in Brightharbor never stopped measuring. ═══ */
+const CART_ROOM = { x: 330, z: -220, w: 2.9, d: 2.3, wallH: 2.7 };
+const CART_DOOR = houseDoorOf(22, -28, -0.4, 2.58, 4.2);
+const CART_COLL = [
+  [331.95, -221.15, 0.66],   // drafting table
+  [332.55, -219.9, 0.3],     // stool
+  [327.9, -221.55, 0.44],    // map-tube crate
+  [327.8, -218.55, 0.42],    // chest
+  [331.35, -218.3, 0.14],    // measuring stick
+];
+const cartRoom = {
+  id: 'cart', promptId: 'cartDoor',
+  x: CART_ROOM.x, z: CART_ROOM.z, w: CART_ROOM.w, d: CART_ROOM.d, wallH: CART_ROOM.wallH,
+  spawn: { x: 330, z: -218.85, heading: Math.PI }, inDoor: { x: 330, z: -217.65 },
+  ext: CART_DOOR, coll: CART_COLL, mesh: null, glow: null, vis: [],
+  wallMap: { x: 330.2, z: -222.0 }, table: { x: 331.95, z: -221.15 },
+};
+(function buildCartRoom() {
+  const md = MD();
+  const cx = CART_ROOM.x, cz = CART_ROOM.z, W = CART_ROOM.w, D = CART_ROOM.d, H = CART_ROOM.wallH;
+  /* palette — pale linen plaster, driftwood-grey timber, parchment + ink:
+     a room that has been squinted at for a year */
+  const PLAS = [0.74, 0.71, 0.64], PLAS_D = [0.6, 0.57, 0.51], PLAS_W = [0.68, 0.65, 0.58];
+  const TIM = [0.36, 0.31, 0.25], TIM_D = [0.26, 0.22, 0.18];
+  const FLOOR_A = [0.52, 0.43, 0.31], FLOOR_B = [0.46, 0.38, 0.27];
+  const PARCH = [0.88, 0.82, 0.66], PARCH_D = [0.8, 0.73, 0.57];
+  const INK = [0.2, 0.24, 0.32], SEA_OLD = [0.42, 0.55, 0.62], SAND_NEW = [0.78, 0.68, 0.5];
+  const PIN = [0.75, 0.28, 0.2];
+  for (let i = 0; i < 9; i++) {
+    const pz = cz - D + 0.26 + i * 0.52;
+    box(md, { x: cx, y: -0.09, z: pz, w: W + 0.28, d: 0.255, h: 0.09, col: i % 2 ? FLOOR_A : FLOOR_B });
+  }
+  const wall = (x, z, w2, d2, col) => box(md, { x, y: 0, z, w: w2, d: d2, h: H, col, colB: mix3(col, [0, 0, 0], 0.25) });
+  wall(cx, cz - D - 0.15, W + 0.3, 0.15, PLAS_D);   // north — THE WALL MAP
+  wall(cx - W - 0.15, cz, 0.15, D + 0.3, PLAS_W);   // west
+  wall(cx + W + 0.15, cz, 0.15, D + 0.3, PLAS);     // east (drafting corner)
+  const doorHW = 0.62;
+  wall(cx - (W + doorHW) / 2 - doorHW / 2, cz + D + 0.15, (W - doorHW) / 2 + 0.15, 0.15, PLAS);
+  wall(cx + (W + doorHW) / 2 + doorHW / 2, cz + D + 0.15, (W - doorHW) / 2 + 0.15, 0.15, PLAS);
+  box(md, { x: cx, y: 1.98, z: cz + D + 0.15, w: doorHW + 0.3, d: 0.15, h: H - 1.98, col: PLAS });
+  box(md, { x: cx, y: 0, z: cz + D + 0.13, w: doorHW, d: 0.06, h: 1.95, col: [0.3, 0.26, 0.21] });
+  box(md, { x: cx - doorHW - 0.06, y: 0, z: cz + D + 0.08, w: 0.07, d: 0.1, h: 2.02, col: TIM });
+  box(md, { x: cx + doorHW + 0.06, y: 0, z: cz + D + 0.08, w: 0.07, d: 0.1, h: 2.02, col: TIM });
+  box(md, { x: cx, y: 2.0, z: cz + D + 0.08, w: doorHW + 0.16, d: 0.1, h: 0.1, col: TIM });
+  lathe(md, [[0.035, 0], [0.045, 0.02], [0.02, 0.05]], { seg: 6, x: cx - doorHW + 0.16, y: 1.0, z: cz + D + 0.05, col: [0.62, 0.5, 0.3] });
+  for (const [sx, sz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) {
+    box(md, { x: cx + sx * (W - 0.02), y: 0, z: cz + sz * (D - 0.02), w: 0.09, d: 0.09, h: H, col: TIM_D });
+  }
+  box(md, { x: cx, y: H, z: cz, w: W + 0.3, d: D + 0.3, h: 0.12, col: [0.4, 0.34, 0.27], colB: [0.4, 0.34, 0.27] });
+  for (const bz of [-1.5, 0, 1.5]) {
+    box(md, { x: cx, y: H - 0.2, z: cz + bz, w: W + 0.28, d: 0.1, h: 0.2, col: TIM_D, colB: TIM });
+  }
+  /* shuttered window — west half of the north wall, over the tube crate */
+  const winX = cx - 1.5, winZ = cz - D + 0.02;
+  box(md, { x: winX, y: 1.05, z: winZ - 0.06, w: 0.5, d: 0.06, h: 0.95, col: [0.35, 0.3, 0.26] });
+  box(md, { x: winX, y: 0.99, z: winZ + 0.02, w: 0.58, d: 0.06, h: 0.08, col: TIM });
+  box(md, { x: winX, y: 1.98, z: winZ + 0.02, w: 0.58, d: 0.06, h: 0.07, col: TIM });
+  for (let i = 0; i < 4; i++) {
+    box(md, { x: winX, y: 1.15 + i * 0.21, z: winZ + 0.005, w: 0.44, d: 0.012, h: 0.042, col: [1.0, 0.9, 0.66] });
+  }
+  /* ═══ THE WALL MAP (north, east half) — the bay, and the pins that
+     followed the water out. Old shoreline in confident ink; the new
+     coast a dashed apology behind it. ═══ */
+  const wmX = cartRoom.wallMap.x, wmZ2 = cz - D + 0.02;
+  box(md, { x: wmX + 0.55, y: 0.95, z: wmZ2 - 0.02, w: 1.15, d: 0.03, h: 1.35, col: PARCH });
+  box(md, { x: wmX + 0.55, y: 0.92, z: wmZ2 - 0.04, w: 1.21, d: 0.02, h: 1.41, col: TIM_D });   // frame backing
+  // the old sea: a confident blue field on the map's upper half
+  box(md, { x: wmX + 0.55, y: 1.68, z: wmZ2 + 0.006, w: 1.05, d: 0.012, h: 0.55, col: SEA_OLD });
+  // the dry bay wedge creeping up into it
+  box(md, { x: wmX + 0.35, y: 1.68, z: wmZ2 + 0.012, w: 0.55, d: 0.012, h: 0.42, tw: 0.3, col: SAND_NEW });
+  // the old shoreline: one confident ink stroke
+  box(md, { x: wmX + 0.55, y: 1.66, z: wmZ2 + 0.02, w: 1.02, d: 0.012, h: 0.035, col: INK });
+  // dashed new shorelines, each lower than the last (the water leaving)
+  for (let r = 0; r < 3; r++) {
+    for (let i = 0; i < 5; i++) {
+      box(md, { x: wmX + 0.06 + i * 0.24, y: 1.5 - r * 0.17, z: wmZ2 + 0.02, w: 0.075, d: 0.012, h: 0.024, col: mix3(INK, PARCH, 0.25 + r * 0.18) });
+    }
+  }
+  // pin flags marching down the map with the retreating water
+  for (let r = 0; r < 4; r++) {
+    const px = wmX + 0.18 + r * 0.26, py = 1.62 - r * 0.16;
+    box(md, { x: px, y: py, z: wmZ2 + 0.028, w: 0.012, d: 0.012, h: 0.09, col: TIM_D });
+    box(md, { x: px + 0.028, y: py + 0.055, z: wmZ2 + 0.028, w: 0.03, d: 0.01, h: 0.035, col: PIN });
+  }
+  /* ═══ the DRAFTING TABLE (east) — tilted top, two charts, the lamp ═══ */
+  const dtX = cartRoom.table.x, dtZ = cartRoom.table.z;
+  for (const [ox, oz] of [[-0.52, -0.3], [0.52, -0.3], [-0.52, 0.3], [0.52, 0.3]]) {
+    box(md, { x: dtX + ox, y: 0, z: dtZ + oz, w: 0.055, d: 0.055, h: 0.62, col: TIM_D });
+  }
+  box(md, { x: dtX, y: 0.62, z: dtZ, w: 0.66, d: 0.42, h: 0.055, rx: -0.22, col: TIM });
+  // two parchments on the slope: the old map (finished) and the new (half-drawn)
+  box(md, { x: dtX - 0.24, y: 0.685, z: dtZ - 0.03, w: 0.24, d: 0.3, h: 0.012, rx: -0.22, ry: 0.08, col: PARCH });
+  box(md, { x: dtX - 0.24, y: 0.7, z: dtZ - 0.02, w: 0.17, d: 0.014, h: 0.02, rx: -0.22, ry: 0.08, col: INK });
+  box(md, { x: dtX + 0.22, y: 0.69, z: dtZ - 0.03, w: 0.26, d: 0.32, h: 0.012, rx: -0.22, ry: -0.06, col: PARCH_D });
+  box(md, { x: dtX + 0.14, y: 0.7, z: dtZ - 0.06, w: 0.1, d: 0.014, h: 0.02, rx: -0.22, ry: -0.06, col: mix3(INK, PARCH, 0.45) });
+  // inkwell + pen
+  lathe(md, [[0.03, 0], [0.035, 0.05], [0.02, 0.06]], { seg: 6, x: dtX + 0.48, y: 0.72, z: dtZ + 0.12, col: [0.16, 0.18, 0.24] });
+  box(md, { x: dtX + 0.38, y: 0.72, z: dtZ + 0.16, w: 0.09, d: 0.012, h: 0.012, ry: 0.5, col: [0.55, 0.44, 0.26] });
+  /* the oil lamp on the table's high corner */
+  lathe(md, [[0.05, 0], [0.06, 0.03], [0.025, 0.09], [0.045, 0.14], [0.02, 0.2]], { seg: 7, x: dtX - 0.45, y: 0.75, z: dtZ + 0.14, col: [0.66, 0.56, 0.4] });
+  /* stool */
+  lathe(md, [[0.16, 0.42], [0.14, 0.46]], { seg: 7, x: 332.55, y: 0, z: -219.9, col: TIM });
+  for (const a of [0.5, 2.6, 4.7]) {
+    box(md, { x: 332.55 + Math.cos(a) * 0.11, y: 0, z: -219.9 + Math.sin(a) * 0.11, w: 0.03, d: 0.03, h: 0.43, col: TIM_D });
+  }
+  /* map-tube crate (west) — rolled charts leaning like umbrellas */
+  box(md, { x: 327.9, y: 0, z: -221.55, w: 0.34, d: 0.34, h: 0.4, col: mix3(TIM, [0,0,0], 0.1) });
+  const TUBE = [[0.05, PARCH], [0.045, PARCH_D], [0.055, [0.72, 0.6, 0.44]], [0.042, PARCH]];
+  for (let i = 0; i < 4; i++) {
+    const [tr, tc] = TUBE[i];
+    const ta = i * 1.5, lean = 0.16 + (i % 2) * 0.1;
+    lathe(md, [[tr, 0], [tr, 0.95]], { seg: 6, x: 327.9 + Math.cos(ta) * 0.12, y: 0.3, z: -221.55 + Math.sin(ta) * 0.12, col: tc });
+    box(md, { x: 327.9 + Math.cos(ta) * 0.12, y: 1.24, z: -221.55 + Math.sin(ta) * 0.12, w: tr, d: tr, h: 0.03, col: mix3(tc, [0,0,0], 0.3) });
+  }
+  /* the measuring stick by the door — tick marks up its length */
+  box(md, { x: 331.35, y: 0, z: -218.3, w: 0.035, d: 0.035, h: 1.9, col: [0.58, 0.48, 0.32] });
+  for (let i = 1; i <= 6; i++) {
+    box(md, { x: 331.39, y: i * 0.28, z: -218.3, w: 0.02, d: 0.04, h: 0.022, col: INK });
+  }
+  cartRoom.mesh = mdMesh(md, new THREE.MeshBasicMaterial({ vertexColors: true }), false);
+  cartRoom.mesh.matrixAutoUpdate = false; cartRoom.mesh.updateMatrix();
+  cartRoom.mesh.visible = false;
+  scene.add(cartRoom.mesh);
+  /* glow: window beam + the lamp flame */
+  const mdG = MD();
+  pushQuad(mdG, [winX - 0.42, 1.9, winZ + 0.02], [winX + 0.42, 1.9, winZ + 0.02],
+    [winX + 0.58, 0.02, winZ + 1.6], [winX - 0.58, 0.02, winZ + 1.6], [0.6, 0.52, 0.34]);
+  lathe(mdG, [[0, 0.001], [0.58, 0]], { seg: 8, ex: 0.7, x: winX, y: 0.025, z: winZ + 1.45, col: [0.7, 0.6, 0.38] });
+  for (const [ox, oz] of [[0.05, 0], [0, 0.05]]) {
+    pushQuad(mdG, [dtX - 0.45 - ox, 0.95, dtZ + 0.14 - oz], [dtX - 0.45 + ox, 0.95, dtZ + 0.14 + oz],
+      [dtX - 0.45 + ox, 1.04, dtZ + 0.14 + oz], [dtX - 0.45 - ox, 1.04, dtZ + 0.14 - oz], [1.0, 0.86, 0.55]);
+  }
+  lathe(mdG, [[0, 0.001], [0.2, 0]], { seg: 7, x: dtX - 0.45, y: 0.96, z: dtZ + 0.14, col: [1.0, 0.8, 0.45] });
+  cartRoom.glow = mdMesh(mdG, new THREE.MeshBasicMaterial({
+    vertexColors: true, transparent: true, opacity: 0.42,
+    blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+  }), false);
+  cartRoom.glow.matrixAutoUpdate = false; cartRoom.glow.updateMatrix();
+  cartRoom.glow.visible = false;
+  scene.add(cartRoom.glow);
+})();
+/* the cartographer's chest, west wall */
+const cartChest = { x: 327.8, z: -218.55, opened: false, lid: null, group: null };
+{
+  const m = buildChestMesh(cartChest.x, cartChest.z, 2.1);
+  cartChest.group = m.group; cartChest.lid = m.lid;
+  cartChest.group.visible = false;
+  cartRoom.vis.push(cartChest.group);
+}
+doorWelcome(CART_DOOR);
+ROOMS.push(cartRoom);
 
 /* finalize chunks into meshes */
 for (const c of chunks) {
@@ -3609,8 +4496,8 @@ const _cv = new THREE.Vector3();
 function updateCamera(dtv) {
   if (CAM.mode !== 'follow') return;
   const inG = inGrottoAt(P.x, P.z);
-  const inH = inInteriorAt(P.x, P.z);   // v4: camera pulls close indoors
-  const wantDist = inH ? 2.15 : inG ? 2.55 : 3.3;
+  const inR = roomAt(P.x, P.z);   // v4: camera pulls close indoors (v4.5: any room)
+  const wantDist = inR ? 2.15 : inG ? 2.55 : 3.3;
   CAM.dist += (wantDist - CAM.dist) * Math.min(1, dtv * 3);
   // manual orbit inputs (stick/arrows are rates; mouse/touch are deltas)
   let manual = false;
@@ -3642,16 +4529,19 @@ function updateCamera(dtv) {
   }
   const py = P.fy;
   const tx = P.x + Math.sin(P.heading) * 0.35, tz = P.z + Math.cos(P.heading) * 0.35;
-  const ty = py + (inH ? 1.05 : inG ? 1.15 : 1.25);
+  const ty = py + (inR ? 1.05 : inG ? 1.15 : 1.25);
   const cp = Math.cos(CAM.pitch), spv = Math.sin(CAM.pitch);
   const dx = Math.sin(CAM.yaw) * cp, dz = Math.cos(CAM.yaw) * cp, dyv = spv;
   let dist = CAM.dist;
   // sphere-cast pullback: terrain + solid grotto rock + interior walls
+  // (rect rooms clamp on the rect; the lighthouse clamps on its circle)
+  const outsideRoom = (sx2, sz2) => inR && (inR.r
+    ? Math.hypot(sx2 - inR.x, sz2 - inR.z) > inR.r - 0.15
+    : (Math.abs(sx2 - inR.x) > inR.w - 0.15 || Math.abs(sz2 - inR.z) > inR.d - 0.15));
   for (let s = 0.2; s <= 1.0; s += 0.1) {
     const sx2 = tx + dx * dist * s, sz2 = tz + dz * dist * s;
     const sy2 = ty + dyv * dist * s;
-    if (groundH(sx2, sz2) + 0.42 > sy2 || grottoSolidAt(sx2, sz2) ||
-        (inH && (Math.abs(sx2 - INT.x) > INT.w - 0.15 || Math.abs(sz2 - INT.z) > INT.d - 0.15))) {
+    if (groundH(sx2, sz2) + 0.42 > sy2 || grottoSolidAt(sx2, sz2) || outsideRoom(sx2, sz2)) {
       dist = Math.max(0.9, dist * (s - 0.1)); break;
     }
   }
@@ -3659,7 +4549,7 @@ function updateCamera(dtv) {
   let cy = ty + dyv * dist;
   cy = Math.max(cy, groundH(cx, cz) + 0.4);
   if (inG) cy = Math.min(cy, py + 3.4);
-  if (inH) cy = Math.min(cy, INT.wallH - 0.3);
+  if (inR) cy = Math.min(cy, inR.wallH - 0.3);
   const k = CAM.ready ? Math.min(1, dtv * (manual ? 15 : 6.5)) : 1;
   CAM.x += (cx - CAM.x) * k; CAM.y += (cy - CAM.y) * k; CAM.z += (cz - CAM.z) * k;
   CAM.ready = true;
@@ -3776,8 +4666,9 @@ function doPulse() {
 
 /* ── shared horizontal move step: circle colliders + grotto solid rock ── */
 function moveWithCollision(nx, nz) {
-  if (inInteriorAt(P.x, P.z)) {           // v4: inside the harbor house
-    const r = interiorResolve(nx, nz);
+  const R = roomAt(P.x, P.z);
+  if (R) {                                // v4.5: inside any interior room
+    const r = interiorResolve(R, nx, nz);
     P.x = r[0]; P.z = r[1];
     return;
   }
@@ -4039,6 +4930,19 @@ function poseItemGet(c, ph) {
   c.shL.rotation.x = 0.15; c.shL.rotation.z = 0.25;
   c.head.rotation.x = -up * 0.4;
 }
+/* v4.5: sitting on the mender's stool — eased in and out via ph 0..1 */
+function poseSit(c, ph) {
+  const k = smoothstep(clamp(ph, 0, 1));
+  c.pelvis.position.y = (c.pelvis.userData.y0 || c.pelvis.position.y) - k * 0.33;
+  c.hipL.rotation.x = -k * 1.45; c.hipR.rotation.x = -k * 1.4;
+  c.kneeL.rotation.x = k * 1.5; c.kneeR.rotation.x = k * 1.42;
+  c.torso.rotation.x = k * 0.16;
+  // hands resting on the knees
+  c.shL.rotation.x = -k * 0.55; c.shL.rotation.z = 0.14 * k;
+  c.shR.rotation.x = -k * 0.55; c.shR.rotation.z = -0.14 * k;
+  c.elL.rotation.x = -k * 0.5; c.elR.rotation.x = -k * 0.5;
+  c.head.rotation.x = k * 0.1;
+}
 function poseCrumple(c, ph) {
   const k = smoothstep(clamp(ph, 0, 1));
   c.pelvis.position.y = (c.pelvis.userData.y0 || c.pelvis.position.y) - k * 0.35;
@@ -4102,6 +5006,11 @@ function animateWick(dtv, now) {
   } else if (state === 'cine' && CINE.id === 'wake') {
     poseHumanoid(c, 'idle', dtv, 0, { armsOverride: true });
     poseCrumple(c, 1 - clamp((CINE.t - 0.9) / 1.8, 0, 1));   // rises from the sand
+    swordToHand(false);
+  } else if (state === 'cine' && CINE.id === 'sit') {
+    // v4.5: the net-mending stool — settle in, rest, rise at the end
+    poseHumanoid(c, 'idle', dtv, 0, { armsOverride: true });
+    poseSit(c, Math.min(CINE.t * 2.4, (SIT_DUR - CINE.t) * 2.4));
     swordToHand(false);
   } else {
     c.pelvis.rotation.x = 0;
@@ -4374,21 +5283,54 @@ function grantFinnHeart() {
 function currentInteract() {
   if (!P) return null;
   const near = (x, z, r) => Math.hypot(P.x - x, P.z - z) < r;
-  // v4: inside the harbor house — its own little world of interactions
-  if (inInteriorAt(P.x, P.z)) {
-    if (!homeChest.opened && near(homeChest.x, homeChest.z, 1.5))
-      return { id: 'homeChest', label: '✕ OPEN' };
-    if (near(INT_DOOR.x, INT_DOOR.z, 1.2)) return { id: 'leaveHouse', label: '✕ LEAVE' };
+  // v4.5: inside ANY room — each one its own little world of interactions
+  const R = roomAt(P.x, P.z);
+  if (R) {
+    if (R.id === 'harbor') {
+      if (!homeChest.opened && near(homeChest.x, homeChest.z, 1.5))
+        return { id: 'homeChest', label: '✕ OPEN' };
+      if (near(328.25, -61.75, 1.25)) return { id: 'benchSit', label: '✕ SIT' };
+    } else if (R.id === 'tock') {
+      if (!tockChest.opened && near(tockChest.x, tockChest.z, 1.5))
+        return { id: 'tockChest', label: '✕ OPEN' };
+      if (tockClock.ticksLeft <= 0 && near(R.clockPos.x, R.clockPos.z, 1.45))
+        return { id: 'windClock', label: '✕ WIND THE CLOCK' };
+    } else if (R.id === 'pearl') {
+      if (!pearlChest.opened && near(pearlChest.x, pearlChest.z, 1.4))
+        return { id: 'pearlChest', label: '✕ OPEN' };
+      if (!SAVE.boatWindow && pearlBoatAnimT < 0 && near(R.boatRug.x, R.boatRug.z, 1.3))
+        return { id: 'toyBoat', label: '✕ PLACE THE BOAT' };
+      if (near(R.chart.x, R.chart.z, 1.45)) return { id: 'starChart', label: '✕ LOOK' };
+    } else if (R.id === 'light') {
+      if (!lightChest.opened && near(lightChest.x, lightChest.z, 1.5))
+        return { id: 'lightChest', label: '✕ OPEN' };
+      if (near(R.desk.x, R.desk.z, 1.35)) return { id: 'logbook', label: '✕ READ THE LOGBOOK' };
+      if (near(R.stairs.x, R.stairs.z, 1.35)) return { id: 'crates', label: '✕ LOOK' };
+    } else if (R.id === 'cart') {
+      if (!cartChest.opened && near(cartChest.x, cartChest.z, 1.5))
+        return { id: 'cartChest', label: '✕ OPEN' };
+      if (near(R.table.x, R.table.z, 1.3)) return { id: 'mapTable', label: '✕ LOOK' };
+      if (near(R.wallMap.x, R.wallMap.z + 0.6, 1.45)) return { id: 'tideMap', label: '✕ LOOK' };
+    }
+    if (near(R.inDoor.x, R.inDoor.z, 1.2)) return { id: 'leaveHouse', room: R, label: '✕ LEAVE' };
     return null;
   }
   if (near(HOUSE_DOOR.outX, HOUSE_DOOR.outZ, 1.7))
-    return { id: 'houseDoor', label: '✕ ENTER' };
+    return { id: 'houseDoor', room: ROOMS[0], label: '✕ ENTER' };
   if (QUEST.q === 3 && P.carryCrescent && near(WHEEL_POS.x, WHEEL_POS.z, 5.2))
     return { id: 'wheel', label: '✕ PLACE THE CRESCENT' };
   if (!chest.opened && near(chest.x, chest.z, 1.7))
     return { id: 'chest', label: '✕ OPEN' };
   if (!doorChest.opened && kelpDoorCut && near(doorChest.x, doorChest.z, 1.8))
     return { id: 'doorChest', label: '✕ OPEN' };
+  // v4.5: the other village doors (after the chests — the lighthouse door
+  // spot overlaps the door-chest beat and must never steal its ✕)
+  for (let i = 1; i < ROOMS.length; i++) {
+    const Rd = ROOMS[i];
+    if (Rd.id === 'light' && !kelpDoorCut) continue;   // kelp still bars it
+    if (near(Rd.ext.outX, Rd.ext.outZ, Rd.id === 'light' ? 1.4 : 1.7))
+      return { id: Rd.promptId, room: Rd, label: '✕ ENTER' };
+  }
   for (const [npc, tag, rad] of [[finn, 'finn', 2.4], [tock, 'tock', 2.4], [pearl, 'pearl', 2.9]]) {
     if (near(npc.x, npc.z, rad)) return { id: 'talk', npc, tag, label: '✕ TALK' };
   }
@@ -4422,14 +5364,216 @@ function doInteract(ctx) {
     openDoorChest();
   } else if (ctx.id === 'homeChest') {
     openHomeChest();
-  } else if (ctx.id === 'houseDoor') {
+  } else if (ctx.id === 'tockChest') {
+    openRoomChest(tockChest, 'tockChest', 3, 'SALT CRYSTALS',
+      'Three, from a tin marked RAINY DAYS. It has been sunny a year.');
+  } else if (ctx.id === 'pearlChest') {
+    openRoomChest(pearlChest, 'pearlChest', 3, 'SALT CRYSTALS',
+      'Three of them, hidden where mothers never sweep.');
+  } else if (ctx.id === 'lightChest') {
+    openLightChest();
+  } else if (ctx.id === 'cartChest') {
+    openRoomChest(cartChest, 'cartChest', 3, 'SALT CRYSTALS',
+      'Three, weighting the corners of a map that would not lie flat.');
+  } else if (ctx.id === 'tideMap') {
+    lookAtTideMap();
+  } else if (ctx.id === 'mapTable') {
+    lookAtMapTable();
+  } else if (ctx.id === 'houseDoor' || ctx.id === 'tockDoor' || ctx.id === 'pearlDoor' || ctx.id === 'lightDoor' || ctx.id === 'cartDoor') {
+    CINE.room = ctx.room;
     startCine('doorIn');
   } else if (ctx.id === 'leaveHouse') {
+    CINE.room = ctx.room;
     startCine('doorOut');
+  } else if (ctx.id === 'benchSit') {
+    startCine('sit');
+  } else if (ctx.id === 'windClock') {
+    windTheClock();
+  } else if (ctx.id === 'toyBoat') {
+    placeToyBoat();
+  } else if (ctx.id === 'starChart') {
+    lookAtChart();
+  } else if (ctx.id === 'logbook') {
+    readLogbook();
+  } else if (ctx.id === 'crates') {
+    lookAtCrates();
   } else if (ctx.id === 'wheel') {
     startCine('wheel');
   }
   // mirror: nothing on press — it's a hold
+}
+
+/* ═══ v4.5: THE ROOMS' INTERACTIONS — every one is ✕-prompted, one line
+   at most, and gets a tiny camera acknowledgment (a micro-beat, never a
+   text dump). State that matters is saved. ═══ */
+const MICRO = { cam: null, look: null, dur: 1.6, at: 0.55, t0: null, fired: false, caption: null, ms: 3000, onFire: null };
+function startMicro(o) {
+  MICRO.cam = o.cam; MICRO.look = o.look;
+  MICRO.dur = o.dur || 1.6; MICRO.at = o.at !== undefined ? o.at : 0.55;
+  MICRO.caption = o.caption || null; MICRO.ms = o.ms || 3000;
+  MICRO.onFire = o.onFire || null; MICRO.fired = false;
+  MICRO.t0 = [camera.position.x, camera.position.y, camera.position.z];
+  startCine('micro');
+}
+/* Granny's floor clock — wind it, hear it live, hear it die */
+const tockClock = { ticksLeft: 0, phase: 0, lastSign: 1, wasTicking: false };
+function windTheClock() {
+  SFX.crank();
+  startMicro({
+    cam: [330.35, 1.5, -100.5], look: [329.05, 1.6, -102.0], dur: 2.1, at: 0.9,
+    onFire() { tockClock.ticksLeft = 4.2; tockClock.phase = 0; tockClock.wasTicking = true; },
+  });
+}
+function tickClock() {
+  const C = tockClock;
+  if (C.ticksLeft > 0) {
+    C.ticksLeft -= DT;
+    // the swing dies with the spring: full arc at first, then nothing
+    const env = clamp(C.ticksLeft / 1.6, 0, 1) * 0.42 + 0.02;
+    C.phase += DT * 4.4;
+    const s = Math.sin(C.phase);
+    if (tockPend) tockPend.rotation.z = s * env;
+    const sign = s >= 0 ? 1 : -1;
+    if (sign !== C.lastSign) { C.lastSign = sign; if (roomAt(P.x, P.z)) SFX.tick(sign > 0); }
+    if (C.ticksLeft <= 0) {
+      C.ticksLeft = 0;
+      if (tockPend) tockPend.rotation.z = 0;
+      if (!SAVE.clockWound) {
+        SAVE.clockWound = true; storeSave();
+        showCaption('From outside, warm: “You hear that? …lovely.”', 3800);
+      }
+    }
+  }
+}
+/* Pearl's toy boat — Wick sets it in the window facing the dry bay */
+let pearlBoatAnimT = -1;
+function placeToyBoat() {
+  const R2 = pearlRoom;
+  startMicro({
+    cam: [330.3, 1.35, -139.6], look: [R2.boatSill.x, R2.boatSill.y + 0.1, R2.boatSill.z], dur: 2.3, at: 0.5,
+    caption: 'For when the tide comes back.', ms: 3200,
+    onFire() { pearlBoatAnimT = 0; SFX.pickup(); },
+  });
+}
+function tickBoat() {
+  if (pearlBoatAnimT < 0 || !pearlBoat) return;
+  pearlBoatAnimT += DT;
+  const R2 = pearlRoom;
+  const k = smoothstep(clamp(pearlBoatAnimT / 1.1, 0, 1));
+  const y = 0.015 + (R2.boatSill.y - 0.015) * k + Math.sin(k * Math.PI) * 0.35;
+  pearlBoat.position.set(
+    lerp(R2.boatRug.x, R2.boatSill.x, k), y, lerp(R2.boatRug.z, R2.boatSill.z, k));
+  pearlBoat.rotation.y = lerp(0.6, Math.PI / 2, k);
+  if (pearlBoatAnimT >= 1.1) {
+    pearlBoatAnimT = -1;
+    SAVE.boatWindow = true; storeSave();
+  }
+}
+/* the star chart — blank until the sky gets its first star back */
+function lookAtChart() {
+  const starred = SAVE.sky >= 1;
+  SFX.page();
+  startMicro({
+    cam: [331.5, 1.45, -139.85], look: [332.75, 1.45, -139.55], dur: 1.9, at: 0.55,
+    caption: starred ? 'One real star on it now. She drew it herself.'
+                     : 'Nobody could draw them for her.', ms: 3400,
+    onFire() { if (!SAVE.chartSeen) { SAVE.chartSeen = true; storeSave(); } },
+  });
+}
+/* the cartographer's wall map — pins following the water out */
+function lookAtTideMap() {
+  SFX.page();
+  startMicro({
+    cam: [330.2, 1.5, -220.4], look: [330.75, 1.45, -222.0], dur: 1.9, at: 0.55,
+    caption: 'The sea used to reach the third stone. Someone keeps measuring.', ms: 3600,
+    onFire() { if (!SAVE.mapTides) { SAVE.mapTides = true; storeSave(); } },
+  });
+}
+/* the half-drawn new map on the drafting table */
+function lookAtMapTable() {
+  SFX.page();
+  startMicro({
+    cam: [331.1, 1.35, -220.1], look: [331.95, 0.8, -221.15], dur: 1.9, at: 0.55,
+    caption: 'A new map, half-drawn. Waiting to be wrong again — the good way.', ms: 3600,
+    onFire() { if (!SAVE.mapTable) { SAVE.mapTable = true; storeSave(); } },
+  });
+}
+/* Finn's logbook — the last entry, a year old */
+function readLogbook() {
+  SFX.page();
+  startMicro({
+    cam: [329.35, 1.5, -179.75], look: [328.35, 0.85, -180.6], dur: 2.2, at: 0.6,
+    caption: '“Day 1 without night. Light not needed. Keeping it clean anyway.”', ms: 3800,
+  });
+}
+/* the crated stairs — Finn's polite "not yet" */
+function lookAtCrates() {
+  startMicro({
+    cam: [330.6, 1.1, -180.3], look: [331.3, 1.9, -178.6], dur: 1.9, at: 0.55,
+    caption: 'Finn’s hand: “The lamp room can wait for a lamp worth lighting.”', ms: 3600,
+  });
+}
+/* shared salt-chest opener for the v4.5 rooms */
+const roomChestAnims = [];
+function openRoomChest(ch, saveKey, salt, big, small) {
+  ch.opened = true;
+  SAVE[saveKey] = true; storeSave();
+  roomChestAnims.push({ ch, t: 0, salt, big, small });
+  SFX.chestOpen();
+}
+function tickRoomChests() {
+  for (let i = roomChestAnims.length - 1; i >= 0; i--) {
+    const a = roomChestAnims[i];
+    a.t += DT;
+    a.ch.lid.rotation.x = -smoothstep(clamp(a.t / 0.5, 0, 1)) * 1.9;
+    if (a.t > 0.65) {
+      roomChestAnims.splice(i, 1);
+      P.salt += a.salt;
+      SAVE.salt = P.salt; storeSave();
+      itemToast(a.big, a.small);
+      SFX.pickup();
+      burst(psSparkle, a.ch.x, 0.9, a.ch.z, 14, 1.2, 1.3, 0.9);
+    }
+  }
+}
+/* Finn's lighthouse chest — the HEART CONTAINER (same beat as the wreck) */
+let lightChestAnimT = -1, lightHeartT = -1;
+function openLightChest() {
+  lightChest.opened = true;
+  SAVE.lightChest = true; storeSave();
+  lightChestAnimT = 0;
+  SFX.chestOpen();
+}
+function tickLightChest() {
+  if (lightChestAnimT < 0) return;
+  lightChestAnimT += DT;
+  lightChest.lid.rotation.x = -smoothstep(clamp(lightChestAnimT / 0.5, 0, 1)) * 1.9;
+  if (lightChestAnimT > 0.4 && lightHeartT < 0) {
+    lightHeartT = 0;
+    lightChest.heart.visible = true;
+  }
+  if (lightHeartT >= 0) {
+    lightHeartT += DT;
+    const y0 = 0.5;
+    if (lightHeartT < 1.0) {
+      lightChest.heart.position.set(lightChest.x, y0 + lightHeartT * 0.9, lightChest.z);
+      lightChest.heart.rotation.y += DT * 3;
+    } else if (lightHeartT < 1.7) {
+      const t = (lightHeartT - 1.0) / 0.7;
+      lightChest.heart.position.set(lerp(lightChest.x, P.x, t), lerp(y0 + 0.9, 1.9, t), lerp(lightChest.z, P.z, t));
+      lightChest.heart.rotation.y += DT * 6;
+    } else {
+      lightChest.heart.visible = false;
+      lightChestAnimT = -1; lightHeartT = -1;
+      P.maxHearts = Math.min(8, P.maxHearts + 1);
+      P.hearts = P.maxHearts;
+      SAVE.mh = P.maxHearts; storeSave();
+      itemGetT = 0;
+      itemToast('HEART CONTAINER', 'Kept polished for a night worth lighting.');
+      SFX.heart();
+      burst(psSparkle, P.x, 1.4, P.z, 18, 1.4, 1.2, 1.0);
+    }
+  }
 }
 
 /* v4: the harbor-house salt chest */
@@ -5098,6 +6242,16 @@ function startCine(id) {
     fadeBlackEl.style.transition = 'opacity 0.24s ease';
     fadeBlackEl.style.opacity = '1';
     SFX.door();
+  } else if (id === 'micro') {
+    // v4.5: the smallest cinematic beat — the camera leans at the subject
+    CAM.mode = 'cine';
+  } else if (id === 'sit') {
+    // v4.5: Wick takes the mender's stool; the camera rests a beat
+    CAM.mode = 'cine';
+    SIT_RET[0] = P.x; SIT_RET[1] = P.z;
+    P.x = 328.25; P.z = -61.75; P.heading = 4.12;   // square to the bench
+    P.vx = 0; P.vz = 0; P.st = 'idle';
+    SFX.creak();
   }
 }
 function endCine() {
@@ -5106,6 +6260,8 @@ function endCine() {
   CAM.ready = false;
   setState('play');
 }
+const SIT_DUR = 3.0;               // v4.5: the whole sit beat, seconds
+const SIT_RET = [328.6, -61.3];    // where Wick steps back to afterwards
 const _cp = new THREE.Vector3(), _cl = new THREE.Vector3();
 function cineCam(px, py, pz, lx, ly, lz) {
   camera.position.set(px, py, pz);
@@ -5114,13 +6270,44 @@ function cineCam(px, py, pz, lx, ly, lz) {
 }
 function tickCine() {
   const t = (CINE.t += DT);
+  if (CINE.id === 'micro') {
+    // ease the camera from where it was toward the subject frame, hold
+    const k = smoothstep(clamp(t / 0.55, 0, 1));
+    cineCam(
+      lerp(MICRO.t0[0], MICRO.cam[0], k), lerp(MICRO.t0[1], MICRO.cam[1], k), lerp(MICRO.t0[2], MICRO.cam[2], k),
+      MICRO.look[0], MICRO.look[1], MICRO.look[2]);
+    if (!MICRO.fired && t >= MICRO.at) {
+      MICRO.fired = true;
+      if (MICRO.caption) showCaption(MICRO.caption, MICRO.ms);
+      if (MICRO.onFire) MICRO.onFire();
+    }
+    if (t >= MICRO.dur) endCine();
+    return;
+  }
+  if (CINE.id === 'sit') {
+    // a low resting frame along the bench line: the sitter in profile,
+    // the net waiting in front of him
+    const k = smoothstep(clamp(t / 0.8, 0, 1));
+    cineCam(lerp(330.3, 329.95, k), lerp(1.35, 1.02, k), lerp(-61.2, -61.7, k),
+      327.75, 0.72, -62.2);
+    if (CINE.step === 0 && t >= 1.1) {
+      CINE.step = 1;
+      showCaption('The nets still smell of the sea.', 2800);
+    }
+    if (t >= SIT_DUR) {
+      P.x = SIT_RET[0]; P.z = SIT_RET[1];
+      endCine();
+    }
+    return;
+  }
   if (CINE.id === 'doorIn' || CINE.id === 'doorOut') {
+    const R = CINE.room || ROOMS[0];
     if (CINE.step === 0 && t >= 0.32) {
       CINE.step = 1;
       if (CINE.id === 'doorIn') {
-        P.x = INT_SPAWN.x; P.z = INT_SPAWN.z; P.heading = INT_SPAWN.heading;
+        P.x = R.spawn.x; P.z = R.spawn.z; P.heading = R.spawn.heading;
       } else {
-        P.x = HOUSE_DOOR.outX; P.z = HOUSE_DOOR.outZ; P.heading = HOUSE_DOOR.heading;
+        P.x = R.ext.outX; P.z = R.ext.outZ; P.heading = R.ext.heading;
       }
       P.fy = groundH(P.x, P.z); P.air = false; P.jvy = 0;
       P.vx = 0; P.vz = 0; P.st = 'idle';
@@ -5679,6 +6866,15 @@ function applySave() {
     homeChest.opened = true;
     homeChest.lid.rotation.x = -1.9;
   }
+  /* v4.5: the other rooms remember too */
+  if (SAVE.tockChest) { tockChest.opened = true; tockChest.lid.rotation.x = -1.9; }
+  if (SAVE.pearlChest) { pearlChest.opened = true; pearlChest.lid.rotation.x = -1.9; }
+  if (SAVE.cartChest) { cartChest.opened = true; cartChest.lid.rotation.x = -1.9; }
+  if (SAVE.lightChest) { lightChest.opened = true; lightChest.lid.rotation.x = -1.9; }
+  if (SAVE.boatWindow && pearlBoat) {
+    pearlBoat.position.set(pearlRoom.boatSill.x, pearlRoom.boatSill.y, pearlRoom.boatSill.z);
+    pearlBoat.rotation.y = Math.PI / 2;
+  }
   if (SAVE.q === 3 && SAVE.bossDone) {
     P.carryCrescent = true;
   }
@@ -5879,6 +7075,10 @@ const TL = {
   bossBarOn: false, clawGlow: false,
   inInterior: false, homeChest: false,
   titleMode: 'menu', ngGuardOn: false,
+  // v4.5
+  room: null, tockChest: false, pearlChest: false, lightChest: false, cartChest: false,
+  clockWound: false, clockTicking: false, boatWindow: false, chartSeen: false,
+  sitting: false, caption: null, starOn: false,
 };
 window.__fm = TL;
 function syncTelemetry() {
@@ -5959,6 +7159,18 @@ function syncTelemetry() {
   TL.homeChest = homeChest.opened;
   TL.titleMode = titleMode;
   TL.ngGuardOn = el('ngGuard').classList.contains('on');
+  /* v4.5 */
+  const TR = roomAt(P.x, P.z);
+  TL.room = TR ? TR.id : null;
+  TL.tockChest = tockChest.opened; TL.pearlChest = pearlChest.opened;
+  TL.lightChest = lightChest.opened; TL.cartChest = cartChest.opened;
+  TL.clockWound = SAVE ? !!SAVE.clockWound : false;
+  TL.clockTicking = tockClock.ticksLeft > 0;
+  TL.boatWindow = SAVE ? !!SAVE.boatWindow : false;
+  TL.chartSeen = SAVE ? !!SAVE.chartSeen : false;
+  TL.sitting = state === 'cine' && CINE.id === 'sit';
+  TL.caption = floatEl.classList.contains('on') ? floatEl.textContent : null;
+  TL.starOn = !!(pearlStar && pearlStar.visible);
 }
 const FREECAM = { on: false, p: [0, 0, 0], l: [0, 0, 0] };
 let SIM_FREEZE = false;   // screenshot staging: halt sim ticks, keep rendering
@@ -6005,15 +7217,18 @@ function tickSim() {
       tickChest();
       tickDoorChest();
       tickHomeChest();
+      tickRoomChests(); tickLightChest(); tickClock(); tickBoat();   // v4.5
       tickSalt();
       if (IN.pause) { setState('pause'); pauseFocus = 0; refreshPause(); SFX.menu(); }
       break;
     }
-    case 'dialog': tickDialog(); tickChest(); tickDoorChest(); tickHomeChest(); break;
+    case 'dialog': tickDialog(); tickChest(); tickDoorChest(); tickHomeChest();
+      tickRoomChests(); tickLightChest(); tickClock(); tickBoat(); break;
     case 'pause': tickPause(); break;
     case 'cine':
       tickCine();
       if (CINE.id === 'wake' || CINE.id === 'sunstruck') tickChest();
+      if (CINE.id === 'micro' || CINE.id === 'sit') { tickClock(); tickBoat(); }   // v4.5
       break;
     case 'tbc': tickTBC(); break;
   }
@@ -6065,10 +7280,16 @@ function updateVisuals(dtv, now) {
     beamOut.visible = inGv;
     chest.group.visible = near2(chest.x, chest.z, 75);
     doorChest.group.visible = near2(doorChest.x, doorChest.z, 60);
-    // v4: the harbor-house interior is its own culled chunk
-    const inHv = near2(INT.x, INT.z, 45);
-    if (interiorMesh) { interiorMesh.visible = inHv; interiorGlow.visible = inHv; }
-    homeChest.group.visible = inHv;
+    // v4.5: every interior room is its own culled chunk (rooms sit 40 m
+    // apart off-world, so a 25 m radius shows exactly the one you're in)
+    for (let ri = 0; ri < ROOMS.length; ri++) {
+      const R = ROOMS[ri];
+      const rv = near2(R.x, R.z, 25);
+      if (R.mesh) R.mesh.visible = rv;
+      if (R.glow) R.glow.visible = rv;
+      for (let vi = 0; vi < R.vis.length; vi++) R.vis[vi].visible = rv;
+    }
+    if (pearlStar) pearlStar.visible = near2(330, -140, 25) && SAVE && SAVE.sky >= 1;
     wheelRing.visible = near2(WHEEL_POS.x, WHEEL_POS.z, 135);
     if (grottoCapMesh) grottoCapMesh.visible = near2(46, 155, 165);
     tidewater.visible = tidepoolFilled && near2(REFILL_POOL.x, REFILL_POOL.z, 110);
