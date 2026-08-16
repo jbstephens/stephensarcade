@@ -299,6 +299,24 @@
     position: absolute; inset: 0; background: #fff8ea;
     opacity: 0; pointer-events: none;
   }
+  /* v7 swelter package: heat vignette (builds through the grace period,
+     gentle pulse) + the cool relief wash. Pure gradients + opacity — no
+     backdrop-filter, no per-frame paint beyond a composited opacity. */
+  #sunveil {
+    position: absolute; inset: 0; pointer-events: none; opacity: 0;
+    background:
+      radial-gradient(ellipse 72% 68% at 50% 46%, rgba(255,140,40,0) 52%,
+        rgba(255,120,30,0.34) 86%, rgba(255,80,10,0.55) 100%);
+  }
+  #sunveil.on { animation: swpulse 1.5s ease-in-out infinite; }
+  @keyframes swpulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.035); } }
+  #reliefveil {
+    position: absolute; inset: 0; pointer-events: none; opacity: 0;
+    background:
+      radial-gradient(ellipse 80% 74% at 50% 48%, rgba(90,200,180,0) 46%,
+        rgba(70,180,160,0.3) 82%, rgba(50,150,140,0.5) 100%);
+  }
+  #sunstat { position: absolute; left: 26px; top: 20px; pointer-events: none; }
   #fadeBlack {
     position: absolute; inset: 0; background: #0b0e14;
     opacity: 1; pointer-events: none;
@@ -322,6 +340,7 @@
 
   <div id="hud">
     <canvas id="hearts" width="360" height="110"></canvas>
+    <canvas id="sunstat" width="46" height="46"></canvas>
     <div id="questLine"></div>
   </div>
   <div id="bossBar">
@@ -377,6 +396,8 @@
     <div id="tbcGo"></div>
   </div>
 
+  <div id="sunveil"></div>
+  <div id="reliefveil"></div>
   <div id="glare"></div>
   <div id="fadeBlack"></div>
 </div>
@@ -635,7 +656,10 @@ function endCamTouch(e) {
 }
 window.addEventListener('touchend', endCamTouch, { passive: true });
 window.addEventListener('touchcancel', endCamTouch, { passive: true });
-function rumble(opts) {
+function rumble(opts, tag) {
+  // tag: haptic vocabulary telemetry — swelter buzz / relief double-pulse
+  // must be DISTINCT from combat, and the gates assert the right one fired
+  window.__lastRumble = { tag: tag || 'generic', opts, t: performance.now() };
   if (window.ArcadeController && ArcadeController.rumble) {
     try { ArcadeController.rumble(0, opts); } catch (e) {}
   }
@@ -643,6 +667,7 @@ function rumble(opts) {
 
 /* ───────────────────────── audio (all synth, lazy ctx) ───────────────────────── */
 let AC = null, master = null, heatGain = null, shadeGain = null, heatLFO = null;
+let szGain = null;   // v7 swelter sizzle layer (rises with exposure, cuts on relief)
 let musicBoxT = 0, padOsc = [];
 function kickAudio() {
   if (AC) { if (AC.state === 'suspended') AC.resume().catch(() => {}); return; }
@@ -663,6 +688,21 @@ function kickAudio() {
   heatLFO = AC.createOscillator(); heatLFO.frequency.value = 0.13;
   const lg = AC.createGain(); lg.gain.value = 0.012;
   heatLFO.connect(lg); lg.connect(heatGain.gain); heatLFO.start();
+  // v7 swelter sizzle: bright filtered noise + a thin high shimmer — rises
+  // through the exposure grace period, drops to the shade hush on relief
+  {
+    const slen = AC.sampleRate * 1.5, sbuf = AC.createBuffer(1, slen, AC.sampleRate);
+    const sd = sbuf.getChannelData(0);
+    for (let i = 0; i < slen; i++) sd[i] = Math.random() * 2 - 1;
+    const ssrc = AC.createBufferSource(); ssrc.buffer = sbuf; ssrc.loop = true;
+    const bp = AC.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 3400; bp.Q.value = 0.8;
+    szGain = AC.createGain(); szGain.gain.value = 0.0;
+    ssrc.connect(bp); bp.connect(szGain); szGain.connect(master);
+    ssrc.start();
+    const szLFO = AC.createOscillator(); szLFO.frequency.value = 6.5;
+    const szLG = AC.createGain(); szLG.gain.value = 0.008;
+    szLFO.connect(szLG); szLG.connect(szGain.gain); szLFO.start();
+  }
   // shade pad: two soft detuned sines
   shadeGain = AC.createGain(); shadeGain.gain.value = 0.0; shadeGain.connect(master);
   [110, 164.8, 220.5].forEach((f, i) => {
@@ -823,6 +863,12 @@ function audioAmbient(dt, inShade, dusk) {
   const shadeTarget = (state === 'play' && inShade) ? 1.0 : 0.0;
   heatGain.gain.value += (heatTarget - heatGain.gain.value) * Math.min(1, dt * 2.2);
   shadeGain.gain.value += (shadeTarget - shadeGain.gain.value) * Math.min(1, dt * 2.0);
+  // v7 swelter sizzle: level pushed by the forest tick (__swAudioLevel);
+  // rises slowly with exposure, CUTS fast on relief (dt*5) to the shade hush
+  if (szGain) {
+    const szT = (state === 'play' ? (window.__swAudioLevel || 0) : 0) * 0.16;
+    szGain.gain.value += (szT - szGain.gain.value) * Math.min(1, dt * (szT < szGain.gain.value ? 5 : 1.6));
+  }
   if (inShade && state === 'play') {
     musicBoxT -= dt;
     if (musicBoxT <= 0) {
@@ -1748,14 +1794,26 @@ function bakeCol(nx, ny, nz, c, out) {
   else if (d > -0.15) { out[0] = c[0] * 0.8; out[1] = c[1] * 0.81; out[2] = c[2] * 0.9; }
   else { out[0] = c[0] * 0.56; out[1] = c[1] * 0.62; out[2] = Math.min(1, c[2] * 0.78 + 0.06); }
 }
+/* v7 WARM bake: same form shading, hue preserved. The standard bake's deep
+   shade branch cools toward BLUE (right for stone/sky bounce, and how the
+   whole bay was tuned) — but on thin organic forms it reads as saturated
+   blue paint on a TV (John's field photo: blue pine trunks). Organic props
+   (trees, stumps, snags) opt in via `warm: true` and shade toward BROWN. */
+function bakeColWarm(nx, ny, nz, c, out) {
+  const d = nx * SUNDIR[0] + ny * SUNDIR[1] + nz * SUNDIR[2];
+  if (d > 0.55) { out[0] = Math.min(1, c[0] * 1.08 + 0.02); out[1] = Math.min(1, c[1] * 1.04 + 0.01); out[2] = c[2] * 0.98; }
+  else if (d > 0.1) { out[0] = Math.min(1, c[0] * 1.0 + 0.01); out[1] = c[1] * 0.97; out[2] = c[2] * 0.94; }
+  else if (d > -0.15) { out[0] = c[0] * 0.84; out[1] = c[1] * 0.81; out[2] = c[2] * 0.76; }
+  else { out[0] = c[0] * 0.62; out[1] = c[1] * 0.57; out[2] = c[2] * 0.5; }
+}
 const _bc = [0, 0, 0];
-function pushTriW(md, ax, ay, az, bx, by, bz, cx, cy, cz, c, flip) {
+function pushTriW(md, ax, ay, az, bx, by, bz, cx, cy, cz, c, flip, warm) {
   if (flip) { const t1 = bx, t2 = by, t3 = bz; bx = cx; by = cy; bz = cz; cx = t1; cy = t2; cz = t3; }
   let ux = bx - ax, uy = by - ay, uz = bz - az;
   let vx = cx - ax, vy = cy - ay, vz = cz - az;
   let nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
   const l = Math.hypot(nx, ny, nz) || 1;
-  bakeCol(nx / l, ny / l, nz / l, c, _bc);
+  (warm ? bakeColWarm : bakeCol)(nx / l, ny / l, nz / l, c, _bc);
   md.p.push(ax, ay, az, bx, by, bz, cx, cy, cz);
   md.c.push(_bc[0], _bc[1], _bc[2], _bc[0], _bc[1], _bc[2], _bc[0], _bc[1], _bc[2]);
 }
@@ -1772,8 +1830,8 @@ function boxW(md, o) {   // baked-light version of box()
     cs[i] = [p[0] + o.x, p[1] + o.y, p[2] + o.z];
   }
   const qd = (a, b, c2, dd, cc) => {
-    pushTriW(md, a[0], a[1], a[2], b[0], b[1], b[2], c2[0], c2[1], c2[2], cc);
-    pushTriW(md, a[0], a[1], a[2], c2[0], c2[1], c2[2], dd[0], dd[1], dd[2], cc);
+    pushTriW(md, a[0], a[1], a[2], b[0], b[1], b[2], c2[0], c2[1], c2[2], cc, false, o.warm);
+    pushTriW(md, a[0], a[1], a[2], c2[0], c2[1], c2[2], dd[0], dd[1], dd[2], cc, false, o.warm);
   };
   // wound OUTWARD on every face (v2 backface audit: v1 wound these inward,
   // so building walls vanished at glancing angles and tops read upside-down)
@@ -1796,7 +1854,7 @@ function latheW(md, prof, o) {
     m.c.push(c[0], c[1], c[2], c[0], c[1], c[2], c[0], c[1], c[2]);
   };
   const base = o.flat ? flatPush : (m, ax, ay, az, bx, by, bz, cx, cy, cz, c) =>
-    pushTriW(m, ax, ay, az, bx, by, bz, cx, cy, cz, c, false);
+    pushTriW(m, ax, ay, az, bx, by, bz, cx, cy, cz, c, false, o.warm);
   // winding corrected per-face: normals point OUT of the axis (or IN for o.inward)
   const tri = (A, B, C, c) => {
     const nx = (B[1] - A[1]) * (C[2] - A[2]) - (B[2] - A[2]) * (C[1] - A[1]);
@@ -1884,6 +1942,69 @@ function groundH(x, z) {
   h += Math.min(26, ex * ex * 0.045) * (0.85 + vnoise(x * 0.04, z * 0.04) * 0.15);
   return h;
 }
+/* ═══ v7 ONE-GROUND-AUTHORITY ═══
+   The rendered ground sheet triangulates ANALYTIC samples on a fixed
+   lattice; anything asking groundH between lattice points used to get the
+   analytic field instead — up to 0.58 m off the visible triangles in the
+   bay, 5.6 m in the forest (measured). John's photos showed the cost:
+   feet in the ground, props floating, and no single truth for the far-tier
+   gates to compare against. From here on, groundH IS the mesh: an exact
+   replica of the builder's triangulation (same cell origins, same fine-cell
+   split, same diagonal), with a corner cache so it's cheaper per query than
+   the analytic function it wraps. The builders below sample this SAME
+   function at lattice corners, where it returns the analytic value —
+   rendered and simulated ground are now equal by construction. */
+function makeMeshField(analytic, x0, z0, x1, z1, step, finePred) {
+  const half = step / 2;
+  const cache = new Map();   // numeric half-step lattice keys — no per-query allocation
+  const corner = (x, z) => {
+    const rx = Math.round((x - x0) / half), rz = Math.round((z - z0) / half);
+    const k = rx * 2048 + rz;
+    let v = cache.get(k);
+    if (v !== undefined) return v;
+    const oddX = rx & 1, oddZ = rz & 1;
+    if (oddX !== oddZ) {
+      /* T-JUNCTION KILLER: a fine-cell mid-edge vertex on a coarse
+         neighbor's boundary must sit ON the coarse edge (the straight line
+         between the step-lattice corners) — otherwise the rendered sheet
+         cracks up to 0.54 m there and the field disagrees with the mesh
+         (found by the v7 dense-grid gate). Both the builder and this field
+         read corners HERE, so mesh and physics snap together. */
+      let coarseAdj = false;
+      if (oddX) {          // on a horizontal step boundary (z on the step lattice)
+        const cxo = x - half;
+        coarseAdj = (z < z1 - 1e-9 && !finePred(cxo, z)) ||
+                    (z - step >= z0 - 1e-9 && !finePred(cxo, z - step));
+        if (coarseAdj) v = (corner(x - half, z) + corner(x + half, z)) / 2;
+      } else {             // on a vertical step boundary (x on the step lattice)
+        const czo = z - half;
+        coarseAdj = (x < x1 - 1e-9 && !finePred(x, czo)) ||
+                    (x - step >= x0 - 1e-9 && !finePred(x - step, czo));
+        if (coarseAdj) v = (corner(x, z - half) + corner(x, z + half)) / 2;
+      }
+      if (!coarseAdj) v = analytic(x, z);
+    } else v = analytic(x, z);
+    cache.set(k, v);
+    return v;
+  };
+  return function (x, z) {
+    if (x < x0 || x >= x1 || z < z0 || z >= z1) return analytic(x, z);
+    const ix = Math.floor((x - x0) / step), iz = Math.floor((z - z0) / step);
+    let cx = x0 + ix * step, cz = z0 + iz * step, s = step;
+    if (finePred(cx, cz)) {
+      s = step / 2;
+      if (x >= cx + s) cx += s;
+      if (z >= cz + s) cz += s;
+    }
+    const y00 = corner(cx, cz), y10 = corner(cx + s, cz),
+          y01 = corner(cx, cz + s), y11 = corner(cx + s, cz + s);
+    const u = (x - cx) / s, v = (z - cz) / s;
+    return v >= u ? y00 + u * (y11 - y01) + v * (y01 - y00)
+                  : y00 + u * (y10 - y00) + v * (y11 - y10);
+  };
+}
+const BAY_FINE = (x, z) => x > -48 && x < 48 && z > -50 && z < 18;   // shared w/ buildGround
+groundH = makeMeshField(groundH, -110, -110, 110, 186, 2.2, BAY_FINE);
 /* ── grotto interior tests ── */
 function distSeg(px, pz, ax, az, bx, bz) {
   const dx = bx - ax, dz = bz - az;
@@ -2158,7 +2279,8 @@ function pushTriWV(md, ax, ay, az, bx, by, bz, cx, cy, cz, cA, cB, cC) {
   };
   // v3: double mesh resolution where the camera lives — the village, the
   // spawn beach, and the grass↔sand transition band around them
-  const fine = (x, z) => x > -48 && x < 48 && z > -50 && z < 18;
+  // (v7: BAY_FINE is shared with the groundH mesh-field — ONE triangulation)
+  const fine = BAY_FINE;
   for (let x = -110; x < 110; x += STEP) {
     for (let z = -110; z < 186; z += STEP) {
       if (fine(x, z)) {
@@ -4698,8 +4820,32 @@ function trySwingKelp() {
 }
 
 /* ── damage to the player ── */
-function hurtPlayer(n, fromX, fromZ) {
+/* v7 damage-visibility invariant (John's field mystery: hits landing with
+   "no enemy anywhere" on screen). A SOURCED hit only lands if its source is
+   actually rendered this frame: visible flag chain true AND bounding sphere
+   inside the camera frustum. Otherwise the hit is suppressed — no damage,
+   no knockback. Swelter is exempt by design (it never calls hurtPlayer and
+   carries its own full feedback package). */
+const _dmgFrustum = new THREE.Frustum();
+const _dmgMat = new THREE.Matrix4();
+const _dmgSphere = new THREE.Sphere();
+let dmgSuppressed = 0;
+const lastDmgCheck = { vis: null, frus: null };
+function damageSourceRendered(root) {
+  let o = root, vis = true;
+  while (o) { if (!o.visible) { vis = false; break; } o = o.parent; }
+  lastDmgCheck.vis = vis;
+  if (!vis) { lastDmgCheck.frus = null; return false; }
+  _dmgMat.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+  _dmgFrustum.setFromProjectionMatrix(_dmgMat);
+  _dmgSphere.center.setFromMatrixPosition(root.matrixWorld);
+  _dmgSphere.radius = 1.4;   // the source's BODY — generous enough for edge-of-screen, tight enough that behind-the-camera stays unseen
+  lastDmgCheck.frus = _dmgFrustum.intersectsSphere(_dmgSphere);
+  return lastDmgCheck.frus;
+}
+function hurtPlayer(n, fromX, fromZ, srcRoot) {
   if (P.iframes > 0 || state !== 'play') return;
+  if (srcRoot && !damageSourceRendered(srcRoot)) { dmgSuppressed++; return; }
   P.hearts = Math.max(0, P.hearts - n);
   P.iframes = 85;
   P.hitT = 0.34; P.st = 'hit';
@@ -5011,17 +5157,28 @@ function poseAttack(c, n, ph) {
   c.shL.rotation.z = 0.35;
 }
 function poseAir(c, jvy) {
-  /* v5 jump: athletic, not prayerful — arms flung WIDE and nearly
-     straight for balance (lead arm higher, never symmetric), one knee
-     driving, legs reaching into the landing. */
+  /* v7 jump: a SPRINT HURDLE, not a leap (John twice: the wide-flung
+     straight arms read theatrical). Torso pitched into the run, lead knee
+     driven up with the shin tucked, trail leg reaching back, arms in a
+     runner's counter-swing — right forward / left back, elbows ~90°,
+     held close to the body. Never symmetric, never wide. The fall blends
+     the lead leg down toward the landing so touchdown recovers straight
+     into the run. */
   const up = clamp(jvy / 6.6, -1, 1);
-  c.kneeL.rotation.x = 0.95 + up * 0.6; c.kneeR.rotation.x = 0.45 + up * 0.35;
-  c.hipL.rotation.x = -0.6 - up * 0.35; c.hipR.rotation.x = -0.15 - up * 0.12;
-  c.shL.rotation.x = -0.55 - Math.max(0, -up) * 0.3;   // lead arm, rises into the fall
-  c.shR.rotation.x = -0.3 - Math.max(0, -up) * 0.2;
-  c.shL.rotation.z = 1.05; c.shR.rotation.z = -0.9;    // flung out, asymmetric
-  c.elL.rotation.x = -0.12; c.elR.rotation.x = -0.18;  // nearly straight
-  c.torso.rotation.x = 0.16 - up * 0.12;
+  const fall = Math.max(0, -up);                       // 0 rising → 1 falling
+  // lead (left) knee drives up hard, then reaches for the ground
+  c.hipL.rotation.x = -1.15 + fall * 0.6;
+  c.kneeL.rotation.x = 1.35 - fall * 0.8;
+  // trail (right) leg stays back, folded, coming through late
+  c.hipR.rotation.x = 0.32 - fall * 0.45;
+  c.kneeR.rotation.x = 0.62 + fall * 0.22;
+  // runner's counter-swing: RIGHT arm punches forward bent, LEFT drives back
+  c.shR.rotation.x = -0.88 + fall * 0.28; c.shR.rotation.z = -0.14;
+  c.elR.rotation.x = -1.5;
+  c.shL.rotation.x = 0.55 - fall * 0.3; c.shL.rotation.z = 0.16;
+  c.elL.rotation.x = -1.18;
+  // torso pitched forward on the sprint line, easing up into the landing
+  c.torso.rotation.x = 0.3 - fall * 0.12;
 }
 function poseItemGet(c, ph) {
   const up = smoothstep(clamp(ph * 2.4, 0, 1));
@@ -5926,7 +6083,7 @@ function tickCrab(cr) {
     const lr = resolveSolid(lox, loz, c[0], c[1]);
     cr.x = lr[0]; cr.z = lr[1];
     // v3: a well-timed jump sails over the pinch
-    if (Math.hypot(P.x - cr.x, P.z - cr.z) < 1.3 && P.fy - groundH(P.x, P.z) < 0.7) hurtPlayer(1, cr.x, cr.z);
+    if (Math.hypot(P.x - cr.x, P.z - cr.z) < 1.3 && P.fy - groundH(P.x, P.z) < 0.7) hurtPlayer(1, cr.x, cr.z, cr.c.root);
     if (cr.t > 0.42) { cr.st = 'recover'; cr.t = 0; cr.lungeCD = 1.8; }
   } else if (cr.st === 'recover') {
     if (cr.t > 0.85) { cr.st = 'aggro'; cr.t = 0; }
@@ -6019,7 +6176,7 @@ function tickWisp(w) {   // — the SUN IMP brain (name kept from v1)
   } else if (w.st === 'dive') {
     w.x += w.dir[0] * DT; w.y += w.dir[1] * DT; w.z += w.dir[2] * DT;
     if (Math.hypot(P.x - w.x, P.z - w.z) < 0.85 && Math.abs(w.y - (groundH(P.x, P.z) + 1.0)) < 1.0) {
-      hurtPlayer(1, w.x, w.z);
+      hurtPlayer(1, w.x, w.z, w.m.root);
       w.st = 'drift'; w.t = 0;
     }
     if (w.y < gy + 0.25 || w.t > 1.1) { w.st = 'drift'; w.t = 0; }
@@ -6142,7 +6299,7 @@ function tickBoss() {
         CAM.shake = 0.5;
         rumble({ duration: 280, strong: 0.9, weak: 0.6 });
         burst(psDust, B.slamPos[0], groundH(B.slamPos[0], B.slamPos[1]) + 0.3, B.slamPos[1], 22, 2.6, 2.2, 0.8);
-        if (Math.hypot(P.x - B.slamPos[0], P.z - B.slamPos[1]) < 2.5) hurtPlayer(1, B.x, B.z);
+        if (Math.hypot(P.x - B.slamPos[0], P.z - B.slamPos[1]) < 2.5) hurtPlayer(1, B.x, B.z, B.c.root);
       }
       break;
     case 'slam':
@@ -6180,7 +6337,7 @@ function tickBoss() {
       break;
     case 'charge': {
       B.x += B.chargeDir[0] * 10 * DT; B.z += B.chargeDir[1] * 10 * DT;
-      if (Math.hypot(P.x - B.x, P.z - B.z) < 2.4) hurtPlayer(1, B.x - B.chargeDir[0], B.z - B.chargeDir[1]);
+      if (Math.hypot(P.x - B.x, P.z - B.z) < 2.4) hurtPlayer(1, B.x - B.chargeDir[0], B.z - B.chargeDir[1], B.c.root);
       const dc = Math.hypot(B.x - GROTTO_B.x, B.z - GROTTO_B.z);
       if (dc > GROTTO_B.r - 3.2) {
         // crash into the wall — dizzy, vulnerable
@@ -7033,8 +7190,27 @@ function forestH(x, z) {
   return h;
 }
 const inForestQ = (x, z) => x > 110 && !(x > 300 && z < -30);
+/* v7 ONE-GROUND-AUTHORITY (see p4 makeMeshField): forest physics ground ==
+   the rendered sheet's exact triangulation. FOREST_FINE is shared with
+   buildForestGround below — one predicate, one lattice, one truth. The
+   analytic forestH stays the SOURCE the lattice samples; nothing else may
+   read it for heights. */
+const FOREST_FINE = (x, z) => {
+  const rv = riverAt(x + 4, z + 4);
+  if (rv[0] < 24) return true;
+  for (let i = 0; i < FCLUSTERS.length; i++) {
+    const c = FCLUSTERS[i];
+    if (Math.hypot(x - c.x, z - c.z) < c.r + 8) return true;
+  }
+  for (let i = 0; i < FSPRINGS.length; i++) {
+    const s = FSPRINGS[i];
+    if (Math.hypot(x - s.x, z - s.z) < s.r + 10) return true;
+  }
+  return false;
+};
+const forestHMesh = makeMeshField(forestH, 110, -38, 2182, 1402, 8, FOREST_FINE);
 groundH = function (x, z) {
-  if (inForestQ(x, z)) return forestH(x, z);
+  if (inForestQ(x, z)) return forestHMesh(x, z);
   return _bhGroundH(x, z);
 };
 
@@ -7105,7 +7281,11 @@ window.__forestSolid = function (x, z) {
   // Cinder Pass: the only gate through the west wall
   if (x < FW.x0) {
     const hw = 15 + Math.max(0, x - 120) * 0.12;             // flares open eastward
-    return Math.abs(z - FW.passZ) > hw;
+    if (Math.abs(z - FW.passZ) > hw) return true;
+    // v7: the corridor's picket pines are REAL too — the early return here
+    // used to skip the trunk test, so pass trees rendered but never collided
+    // (John's "trees that don't collide"), exactly at the transition photos
+    return treeTrunkAt(x, z, 0.3);
   }
   if (x > FW.x1 || z < FW.z0 || z > FW.z1) return true;      // region walls
   if (Math.hypot(x - CROWN.x, z - CROWN.z) < 150) return true;   // plateau: unclimbable
@@ -7251,7 +7431,10 @@ function flatheW(prof, o) { latheW(fchunkFor(o.x, o.z), prof, o); }
 /* ── the ground sheet ── */
 (function buildForestGround() {
   const gc = (x, z) => {
-    const y = forestH(x, z);
+    // corners sampled through the MESH-FIELD: at lattice corners it returns
+    // the analytic height — except T-junction vertices, which snap to the
+    // coarse neighbor's edge (crack-free sheet, field == mesh everywhere)
+    const y = forestHMesh(x, z);
     const c = forestColor(x, z, y);
     return [c[0], c[1], c[2], y];
   };
@@ -7262,19 +7445,11 @@ function flatheW(prof, o) { latheW(fchunkFor(o.x, o.z), prof, o); }
     pushTriWV(md, x, c00[3], z, x + s, c11[3], z + s, x + s, c10[3], z, c00, c11, c10);
   };
   const STEP = 8;
-  const fine = (x, z) => {
-    const rv = riverAt(x + STEP / 2, z + STEP / 2);
-    if (rv[0] < 24) return true;
-    for (let i = 0; i < FCLUSTERS.length; i++) {
-      const c = FCLUSTERS[i];
-      if (Math.hypot(x - c.x, z - c.z) < c.r + 8) return true;
-    }
-    for (let i = 0; i < FSPRINGS.length; i++) {
-      const s = FSPRINGS[i];
-      if (Math.hypot(x - s.x, z - s.z) < s.r + 10) return true;
-    }
-    return false;
-  };
+  // v7: the fine-cell predicate is FOREST_FINE, shared with the groundH
+  // mesh-field — the sheet built here and the ground the sim walks are the
+  // same triangulation by construction. gc() samples analytic forestH at
+  // lattice corners only, where the mesh-field returns the identical value.
+  const fine = FOREST_FINE;
   for (let x = 110; x < 2180; x += STEP) {
     for (let z = -38; z < 1398; z += STEP) {
       if (fine(x, z)) {
@@ -7295,7 +7470,13 @@ function flatheW(prof, o) { latheW(fchunkFor(o.x, o.z), prof, o); }
   }
 })();
 
-/* ── every pine in the region (mesh from the same grid the collision reads) ── */
+/* ── every pine in the region (mesh from the same grid the collision reads) ──
+   v7: (1) trunks/canopies bake WARM — the standard bake's blue shade faces
+   read as saturated blue bark on the TV (John's photo). (2) bases sit on
+   groundH (the mesh-field), not analytic forestH — the tree stands ON the
+   ground you see. (3) every tree logs a render-audit record (chunk + vertex
+   ranges) so the gates can prove rendered forest == colliding forest. */
+window.__fmTreeAudit = [];
 (function buildForestTrees() {
   const ix0 = Math.floor(110 / TCELL), ix1 = Math.ceil(2180 / TCELL);
   const iz0 = Math.floor(-38 / TCELL), iz1 = Math.ceil(1398 / TCELL);
@@ -7304,25 +7485,34 @@ function flatheW(prof, o) { latheW(fchunkFor(o.x, o.z), prof, o); }
       const t = treeInfo(ix, iz);
       if (!t) continue;
       const md = fchunkFor(t.x, t.z);
-      const gy = forestH(t.x, t.z) - 0.25;
+      const gy = groundH(t.x, t.z) - 0.25;
       const j = hash2(ix + 31, iz - 7);
       const trunkC = mix3(t.bare ? C_TRUNK : C_TRUNK2, C_BLEACH, t.bare ? 0.55 + j * 0.2 : 0.12 + j * 0.1);
       const ry = j * 3.1;
+      const v0 = md.p.length / 3;
+      let vTrunk;
       if (t.bare) {
         // dead snag: bleached trunk, a couple of bone branches, no canopy
-        boxW(md, { x: t.x, y: gy, z: t.z, w: t.r * 0.8, d: t.r * 0.8, h: t.h * 0.92, tw: t.r * 0.25, td: t.r * 0.25, ry, noBottom: true, col: trunkC });
-        boxW(md, { x: t.x, y: gy + t.h * 0.55, z: t.z, w: 0.09 * t.s, d: 0.09 * t.s, h: 1.7 * t.s, rx: 1.15, ry: ry + 0.7, col: mix3(trunkC, [0, 0, 0], 0.12) });
-        boxW(md, { x: t.x, y: gy + t.h * 0.72, z: t.z, w: 0.08 * t.s, d: 0.08 * t.s, h: 1.3 * t.s, rx: -1.2, ry: ry + 2.4, col: trunkC });
+        boxW(md, { x: t.x, y: gy, z: t.z, w: t.r * 0.8, d: t.r * 0.8, h: t.h * 0.92, tw: t.r * 0.25, td: t.r * 0.25, ry, noBottom: true, warm: true, col: trunkC });
+        boxW(md, { x: t.x, y: gy + t.h * 0.55, z: t.z, w: 0.09 * t.s, d: 0.09 * t.s, h: 1.7 * t.s, rx: 1.15, ry: ry + 0.7, warm: true, col: mix3(trunkC, [0, 0, 0], 0.12) });
+        boxW(md, { x: t.x, y: gy + t.h * 0.72, z: t.z, w: 0.08 * t.s, d: 0.08 * t.s, h: 1.3 * t.s, rx: -1.2, ry: ry + 2.4, warm: true, col: trunkC });
+        vTrunk = md.p.length / 3;
       } else {
-        // heat-stressed pine: gray trunk, rust/olive needle cones
-        boxW(md, { x: t.x, y: gy, z: t.z, w: t.r * 0.8, d: t.r * 0.8, h: t.h * 0.5, tw: t.r * 0.45, td: t.r * 0.45, ry, noBottom: true, col: trunkC });
+        // heat-stressed pine: warm grey-brown trunk, rust/olive needle cones
+        boxW(md, { x: t.x, y: gy, z: t.z, w: t.r * 0.8, d: t.r * 0.8, h: t.h * 0.5, tw: t.r * 0.45, td: t.r * 0.45, ry, noBottom: true, warm: true, col: trunkC });
+        vTrunk = md.p.length / 3;
         const cA = j > 0.25 ? C_RUST : j > -0.35 ? C_RUST2 : C_OLIVE;
         const cB = mix3(cA, [0, 0, 0], 0.22);
         latheW(md, [[t.cr * 0.95, t.h * 0.3], [t.cr * 0.52, t.h * 0.62], [0, t.h * 0.8]],
-          { seg: 5, ex: 0.94, x: t.x, y: gy, z: t.z, ry, col: cA, cols: [cB, cA] });
+          { seg: 5, ex: 0.94, x: t.x, y: gy, z: t.z, ry, warm: true, col: cA, cols: [cB, cA] });
         latheW(md, [[t.cr * 0.6, t.h * 0.58], [0, t.h * 1.02]],
-          { seg: 5, ex: 0.94, x: t.x, y: gy, z: t.z, ry: ry + 0.6, col: mix3(cA, C_BLEACH, 0.18) });
+          { seg: 5, ex: 0.94, x: t.x, y: gy, z: t.z, ry: ry + 0.6, warm: true, col: mix3(cA, C_BLEACH, 0.18) });
       }
+      window.__fmTreeAudit.push({
+        ix, iz, x: t.x, z: t.z, r: t.r, cr: t.cr, h: t.h, s: t.s, bare: !!t.bare, gy,
+        key: Math.floor(t.x / FCH) + 'f' + Math.floor(t.z / FCH),
+        v0, vTrunk, v1: md.p.length / 3,
+      });
     }
   }
 })();
@@ -7349,7 +7539,7 @@ function riverPoint(dist) {
     const md = fchunkFor(lx, lz);
     const sc = 0.28 + rnd() * 0.55;
     latheW(md, [[sc, -0.1], [sc * 0.72, sc * 0.55], [0, sc * 0.8]],
-      { seg: 5, ex: 0.7 + rnd() * 0.5, x: lx, y: forestH(lx, lz), z: lz, ry: rnd() * 6,
+      { seg: 5, ex: 0.7 + rnd() * 0.5, x: lx, y: groundH(lx, lz), z: lz, ry: rnd() * 6,
         flat: true, col: rnd() > 0.5 ? C_FROCK : C_FROCK2 });
   }
   // dry pot-hole pools ringed in salt — where the last water stood
@@ -7358,7 +7548,7 @@ function riverPoint(dist) {
     const lx = p[0] + (rnd() - 0.5) * 4, lz = p[1] + (rnd() - 0.5) * 4;
     if (clearingAt(lx, lz)) continue;
     const md = fchunkFor(lx, lz);
-    const gy = forestH(lx, lz);
+    const gy = groundH(lx, lz);
     const r = 2.2 + rnd() * 1.6;
     latheW(md, [[0, 0.06], [r, 0.02]], { seg: 9, ex: 0.8 + rnd() * 0.3, x: lx, y: gy, z: lz, ry: rnd() * 3, flat: true, col: [0.5, 0.46, 0.4] });
     latheW(md, [[r * 0.94, 0.05], [r * 1.18, 0.09], [r * 1.3, 0.05]],
@@ -7366,65 +7556,137 @@ function riverPoint(dist) {
   }
 })();
 
-/* ── far tier: 4 quadrant impressions — coarse ground + canopy blobs.
-   Always drawn in the region; the near chunks fade in over them. ── */
-const farTier = [];
+/* ── far tier v7: TILED impressions, paired 1:1 with near chunks.
+   FIELD LESSON (four of John's TV photos): an impression drawn while its
+   ground is ALSO near-rendered is not "0.6 m under" it — a 40 m quad
+   bridges every concave feature (riverbed, spring bowls, the pass blend,
+   bay shore dips), closing over the real ground as a pale walk-through
+   shell, up to 3.3 m over the player's head at the pass mouth. Measured
+   live before this rewrite.
+   THE RULE (region-agnostic, both tiers): each far tile pairs with exactly
+   one near chunk, built on the near grid so no face straddles a pair
+   boundary, and draws ONLY when its paired near chunk is culled. Inside
+   the near ring there is never impression geometry; beyond it the far tier
+   still carries the horizon. The Brightharbor impression additionally
+   draws only for cameras east of the pass (its one job is the forest's
+   look-home — it must never appear inside the bay it impersonates). ── */
+/* TWO SCALES (draw-call budget, measured): from a region corner most 200 m
+   tiles legitimately share one frustum (~80 draw calls — 128 total vs the
+   80 budget). So the ring of 200 m paired tiles only serves the near-to-mid
+   band; beyond its activation ring a 400 m MEGA merge takes over
+   (activation = 387 near ring + the mega's real bounding radius — a
+   visible mega can never reach inside any near ring). The three layers are exactly complementary: near ∨ ring ∨ mega,
+   never two at once over the same ground. */
+const farTier = [];    // all far meshes (perf census + sweep gates)
+const farTiles = [];   // 200 m ring tiles: { key, bh, mesh, pair, megaKey }
+const farMegas = [];   // 800 m merges:    { key, bh, mesh, cx, cz, actR }
 (function buildFarTier() {
-  const quads = [[170, 1175, -38, 680], [1175, 2180, -38, 680], [170, 1175, 680, 1398], [1175, 2180, 680, 1398]];
-  for (const [qx0, qx1, qz0, qz1] of quads) {
-    const md = MD();
-    const S = 40;
-    for (let x = qx0; x < qx1 - 1; x += S) {
-      for (let z = qz0; z < qz1 - 1; z += S) {
-        const p = [[x, z], [x, z + S], [x + S, z + S], [x + S, z]].map(([px, pz]) => {
-          const y = forestH(px, pz) - 0.6;
-          return [px, y, pz];
-        });
-        const c = forestColor(x + S / 2, z + S / 2, p[0][1]);
-        const cc = [c[0], c[1], c[2]];
+  const tileMap = new Map();
+  const megaMap = new Map();
+  const tileFor = (key, bh, megaKey) => {
+    let t = tileMap.get(key + (bh ? 'B' : 'F'));
+    if (!t) { t = { key, bh: !!bh, md: MD(), mesh: null, pair: undefined, megaKey }; tileMap.set(key + (bh ? 'B' : 'F'), t); }
+    return t.md;
+  };
+  const megaFor = (x, z, bh) => {
+    const key = bh ? 'bay' : Math.floor(x / 400) + 'm' + Math.floor(z / 400);
+    let m = megaMap.get(key);
+    if (!m) {
+      m = { key, bh: !!bh, md: MD(), mesh: null,
+            cx: bh ? 0 : Math.floor(x / 400) * 400 + 200,
+            cz: bh ? 38 : Math.floor(z / 400) * 400 + 200,
+            actR: bh ? 350 : 953 };
+      megaMap.set(key, m);
+    }
+    return m.md;
+  };
+  const megaKeyOf = (x, z, bh) => bh ? 'bay' : Math.floor(x / 400) + 'm' + Math.floor(z / 400);
+  /* forest impression: coarse ground + canopy blobs, tiled on the 200 m
+     fchunk grid (cells 40 m — five per tile side, zero straddle) */
+  const S = 40;
+  for (let x = 160; x < 2200; x += S) {           // 40 m cells, 200-grid aligned — zero straddle
+    for (let z = -40; z < 1400; z += S) {
+      const key = Math.floor((x + S / 2) / FCH) + 'f' + Math.floor((z + S / 2) / FCH);
+      const p = [[x, z], [x, z + S], [x + S, z + S], [x + S, z]].map(([px, pz]) => {
+        const y = forestH(px, pz) - 0.6;
+        return [px, y, pz];
+      });
+      const c = forestColor(x + S / 2, z + S / 2, p[0][1]);
+      const cc = [c[0], c[1], c[2]];
+      for (const md of [tileFor(key, false, megaKeyOf(x + S / 2, z + S / 2, false)), megaFor(x + S / 2, z + S / 2, false)]) {
         pushTriWV(md, p[0][0], p[0][1], p[0][2], p[1][0], p[1][1], p[1][2], p[2][0], p[2][1], p[2][2], cc, cc, cc);
         pushTriWV(md, p[0][0], p[0][1], p[0][2], p[2][0], p[2][1], p[2][2], p[3][0], p[3][1], p[3][2], cc, cc, cc);
       }
     }
-    // canopy blobs: every other tree cell, one cone each
-    const ix0 = Math.floor(qx0 / TCELL), ix1 = Math.ceil(qx1 / TCELL);
-    const iz0 = Math.floor(qz0 / TCELL), iz1 = Math.ceil(qz1 / TCELL);
-    for (let ix = ix0; ix <= ix1; ix += 2) {
-      for (let iz = iz0; iz <= iz1; iz += 2) {
+  }
+  // canopy blobs: every other tree cell, one warm cone each, tiled by position
+  {
+    const ix0 = Math.floor(170 / TCELL), ix1 = Math.ceil(2180 / TCELL);
+    const iz0 = Math.floor(-38 / TCELL), iz1 = Math.ceil(1398 / TCELL);
+    for (let ix = ix0 + (ix0 % 2); ix <= ix1; ix += 2) {
+      for (let iz = iz0 + (iz0 % 2); iz <= iz1; iz += 2) {
         const t = treeInfo(ix, iz);
-        if (!t || t.bare) continue;
+        if (!t || t.bare || t.x < 160) continue;
         const gy = forestH(t.x, t.z) - 0.4;
         const cA = hash2(ix + 31, iz - 7) > 0 ? C_RUST : C_RUST2;
-        latheW(md, [[t.cr * 1.5, t.h * 0.25], [0, t.h * 0.95]],
-          { seg: 4, x: t.x, y: gy, z: t.z, col: cA });
+        for (const md of [tileFor(Math.floor(t.x / FCH) + 'f' + Math.floor(t.z / FCH), false, megaKeyOf(t.x, t.z, false)), megaFor(t.x, t.z, false)]) {
+          latheW(md, [[t.cr * 1.5, t.h * 0.25], [0, t.h * 0.95]],
+            { seg: 4, x: t.x, y: gy, z: t.z, warm: true, col: cA });
+        }
       }
     }
-    const m = mdMesh(md, WORLD_MAT, false);
-    m.matrixAutoUpdate = false; m.updateMatrix();
-    m.visible = false;
-    scene.add(m);
-    farTier.push(m);
   }
-  // Brightharbor from afar: a coarse west impression for the tower's look-home
-  const md = MD();
-  const S = 44;
-  for (let x = -110; x < 108; x += S) {
-    for (let z = -110; z < 180; z += S) {
-      const p = [[x, z], [x, z + S], [x + S, z + S], [x + S, z]].map(([px, pz]) => [px, _bhGroundH(px, pz) - 0.6, pz]);
-      const c = _bhGroundColor(x + S / 2, z + S / 2, p[0][1]);
+  /* Brightharbor impression: the tower's look-home, tiled on the bay's
+     80 m chunk grid (cells 40 m, boundary-aligned, zero straddle) */
+  const bhKey = (x, z) => Math.floor((x + 110) / 80) + '_' + Math.floor((z + 110) / 80);
+  for (let x = -110; x < 110; x += S) {
+    for (let z = -110; z < 186; z += S) {
+      const w = Math.min(S, 110 - x), d = Math.min(S, 186 - z);
+      const p = [[x, z], [x, z + d], [x + w, z + d], [x + w, z]].map(([px, pz]) => [px, _bhGroundH(px, pz) - 0.6, pz]);
+      const c = _bhGroundColor(x + w / 2, z + d / 2, p[0][1]);
       const cc = [c[0], c[1], c[2]];
-      pushTriWV(md, p[0][0], p[0][1], p[0][2], p[1][0], p[1][1], p[1][2], p[2][0], p[2][1], p[2][2], cc, cc, cc);
-      pushTriWV(md, p[0][0], p[0][1], p[0][2], p[2][0], p[2][1], p[2][2], p[3][0], p[3][1], p[3][2], cc, cc, cc);
+      for (const md of [tileFor(bhKey(x + 1, z + 1), true, 'bay'), megaFor(x, z, true)]) {
+        pushTriWV(md, p[0][0], p[0][1], p[0][2], p[1][0], p[1][1], p[1][2], p[2][0], p[2][1], p[2][2], cc, cc, cc);
+        pushTriWV(md, p[0][0], p[0][1], p[0][2], p[2][0], p[2][1], p[2][2], p[3][0], p[3][1], p[3][2], cc, cc, cc);
+      }
     }
   }
   // the lighthouse & the moonwheel pylons read even as silhouettes
-  latheW(md, [[2.0, 0], [1.4, 7.5], [1.7, 8.3], [0, 10.6]], { seg: 6, x: 44, y: _bhGroundH(44, -16), z: -16, col: C_WHITE });
-  boxW(md, { x: -38, y: _bhGroundH(-38, -78), z: -78, w: 3.4, d: 1.2, h: 8.6, tw: 2.6, col: C_STONE });
-  const bhFar = mdMesh(md, WORLD_MAT, false);
-  bhFar.matrixAutoUpdate = false; bhFar.updateMatrix();
-  bhFar.visible = false;
-  scene.add(bhFar);
-  farTier.push(bhFar);
+  for (const md of [tileFor(bhKey(44, -16), true, 'bay'), megaFor(44, -16, true)]) {
+    latheW(md, [[2.0, 0], [1.4, 7.5], [1.7, 8.3], [0, 10.6]], { seg: 6, x: 44, y: _bhGroundH(44, -16), z: -16, col: C_WHITE });
+  }
+  for (const md of [tileFor(bhKey(-38, -78), true, 'bay'), megaFor(-38, -78, true)]) {
+    boxW(md, { x: -38, y: _bhGroundH(-38, -78), z: -78, w: 3.4, d: 1.2, h: 8.6, tw: 2.6, col: C_STONE });
+  }
+  for (const t of tileMap.values()) {
+    if (!t.md.p.length) continue;
+    t.mesh = mdMesh(t.md, WORLD_MAT, false);
+    t.mesh.matrixAutoUpdate = false; t.mesh.updateMatrix();
+    t.mesh.visible = false;
+    scene.add(t.mesh);
+    t.md = null;
+    farTier.push(t.mesh);
+    farTiles.push(t);
+  }
+  for (const m of megaMap.values()) {
+    if (!m.md.p.length) continue;
+    m.mesh = mdMesh(m.md, WORLD_MAT, false);
+    m.mesh.matrixAutoUpdate = false; m.mesh.updateMatrix();
+    m.mesh.visible = false;
+    scene.add(m.mesh);
+    m.md = null;
+    // activation ring from the REAL extent: edge megas are partial tiles, so
+    // the generic half-diagonal starved corners of their mega and flooded
+    // them with ring tiles (86 draw calls at the hollow, measured)
+    m.mesh.geometry.computeBoundingSphere();
+    const bs = m.mesh.geometry.boundingSphere;
+    m.cx = bs.center.x; m.cz = bs.center.z;
+    m.actR = (m.bh ? 165 : 387) + bs.radius + 4;
+    farTier.push(m.mesh);
+    farMegas.push(m);
+    farTiles.push(m);   // sweep gates iterate __farTiles: megas carry no pair (skipped by pair checks)
+  }
+  window.__farTiles = farTiles;   // gate access: the pairing invariant is asserted live
 })();
 
 /* ── the sea-line: a pale silver shimmer on the west horizon, visible only
@@ -7462,7 +7724,7 @@ let fallsMesh = null;
         C_CHUTE = [0.93, 0.9, 0.81], C_STAIN = [0.82, 0.78, 0.68];
   // the broad cliff band behind everything: a curved rampart of the crown
   latheW(md, [[104, -6], [101, 22], [97.5, 44], [93, 58]],
-    { seg: 10, a0: faceA - 0.62, a1: faceA + 0.62, x: CROWN.x, y: forestH(CROWN.x + Math.cos(faceA) * 100, CROWN.z + Math.sin(faceA) * 100) - 2,
+    { seg: 10, a0: faceA - 0.62, a1: faceA + 0.62, x: CROWN.x, y: groundH(CROWN.x + Math.cos(faceA) * 100, CROWN.z + Math.sin(faceA) * 100) - 2,
       z: CROWN.z, flat: true, segJitter: 0.1,
       col: C_CLIFF, cols: [C_CLIFF2, C_CLIFF, C_CLIFF, C_CLIFF3] });
   // rock columns shoulder-to-shoulder along the wall
@@ -7470,7 +7732,7 @@ let fallsMesh = null;
     const a = faceA + i * 0.06;
     const r = 93 + Math.abs(i) * 2.4 + hash2(i, 3) * 3;
     const cx = CROWN.x + Math.cos(a) * r, cz = CROWN.z + Math.sin(a) * r;
-    const gy = forestH(cx, cz) - 2;
+    const gy = groundH(cx, cz) - 2;
     const w = 8 + hash2(i, 9) * 2.2;
     const hh = 44 + 16 * (1 - Math.abs(i) / 8) + hash2(i, 5) * 5;
     latheW(md, [[w, 0], [w * 0.84, hh * 0.42], [w * 0.62, hh * 0.82], [w * 0.3, hh]],
@@ -7481,7 +7743,7 @@ let fallsMesh = null;
   {
     const a = faceA;
     const cx = CROWN.x + Math.cos(a) * 86, cz = CROWN.z + Math.sin(a) * 86;
-    const gy = forestH(cx, cz) - 2;
+    const gy = groundH(cx, cz) - 2;
     boxW(md, { x: cx, y: gy, z: cz, w: 6.8, d: 1.8, h: 56, tw: 4.6, td: 1.2, ry: -a + Math.PI / 2, col: C_CHUTE });
     boxW(md, { x: cx, y: gy + 6, z: cz, w: 8.2, d: 1.3, h: 34, tw: 5.4, td: 0.9, ry: -a + Math.PI / 2, col: C_STAIN });
     // the LIP: a heavy overhang shelf at the very top
@@ -7504,7 +7766,7 @@ let fallsMesh = null;
     const a = toFore + i * 0.21;
     const r = BASIN.r - 1 + Math.abs(hash2(i, 11)) * 2.5;
     const bx = BASIN.x + Math.cos(a) * r, bz = BASIN.z + Math.sin(a) * r;
-    const gy = forestH(bx, bz) - 1.2;
+    const gy = groundH(bx, bz) - 1.2;
     const s = 3.3 + Math.abs(hash2(i, 7)) * 2.0 - Math.abs(i) * 0.14;
     latheW(md, [[s, 0], [s * 0.85, s * 1.1], [s * 0.4, s * 1.9], [0, s * 2.3]],
       { seg: 6, ex: 0.85, x: bx, y: gy, z: bz, ry: i * 1.7, flat: true, segJitter: 0.13,
@@ -7518,7 +7780,7 @@ let fallsMesh = null;
   for (let i = -6; i <= 6; i += 2) {
     const a = toFore + i * 0.18;
     const bx = BASIN.x + Math.cos(a) * (BASIN.r + 2.5), bz = BASIN.z + Math.sin(a) * (BASIN.r + 2.5);
-    const gy = forestH(bx, bz) - 0.6;
+    const gy = groundH(bx, bz) - 0.6;
     latheW(md, [[1.3, 0], [0.9, 1.1], [0, 1.7]], { seg: 5, x: bx, y: gy, z: bz, ry: i * 2.3, flat: true, segJitter: 0.1, col: C_FROCK2 });
   }
   fallsMesh = mdMesh(md, WORLD_MAT, false);
@@ -7532,7 +7794,7 @@ let towerMesh = null;
 (function buildTower() {
   const md = MD();
   const tx = TOWER.x, tz = TOWER.z;
-  const gy = forestH(tx, tz) - 0.2;
+  const gy = groundH(tx, tz) - 0.2;
   const TIMB = col(0x8a6a48), TIMB2 = col(0x6b5138), PLANK = col(0xa08258), PLANK2 = col(0x87693f);
   // legs + cross braces
   for (const [sx, sz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) {
@@ -7617,7 +7879,7 @@ let towerMesh = null;
 let cedarMesh = null, cedarGlow = null;
 (function buildCedar() {
   const md = MD();
-  const gy = forestH(CEDAR.x, CEDAR.z) - 0.6;
+  const gy = groundH(CEDAR.x, CEDAR.z) - 0.6;
   // v6 art pass: warm FLAT bark strata (the noon bake read slate-blue on the
   // shade side — an obelisk, not a tree)
   const BARK = [0.52, 0.42, 0.31], BARK2 = [0.41, 0.32, 0.24], BONE = [0.79, 0.72, 0.59];
@@ -7636,7 +7898,7 @@ let cedarMesh = null, cedarGlow = null;
     const a = CEDAR.doorA + 0.95 + i * (TAU - 1.9) / 6;
     const rx2 = CEDAR.x + Math.cos(a) * (CEDAR.r1 + 0.7), rz2 = CEDAR.z + Math.sin(a) * (CEDAR.r1 + 0.7);
     latheW(md, [[1.7 + hash2(i, 4) * 0.4, -0.4], [0.9, 2.4], [0, 5.2 + hash2(i, 8)]],
-      { seg: 5, ex: 0.6, x: rx2, y: forestH(rx2, rz2) - 0.4, z: rz2, ry: a, flat: true, segJitter: 0.12,
+      { seg: 5, ex: 0.6, x: rx2, y: groundH(rx2, rz2) - 0.4, z: rz2, ry: a, flat: true, segJitter: 0.12,
         col: i % 2 ? BARK : BARK2 });
     addColl(rx2, rz2, 0.9);
   }
@@ -7705,7 +7967,7 @@ function fCrate(x, z, ry, s2) {
 function fStump(x, z, s) {
   const y = groundH(x, z) - 0.15;
   flatheW([[0.55 * s, 0], [0.48 * s, 0.55 * s], [0.52 * s, 0.6 * s]],
-    { seg: 7, x, y, z, col: C_TRUNK2, cols: [C_TRUNK2, C_TRUNK, C_BLEACH] });
+    { seg: 7, x, y, z, warm: true, col: C_TRUNK2, cols: [C_TRUNK2, C_TRUNK, C_BLEACH] });
   addColl(x, z, 0.6 * s, y + 0.6 * s);
 }
 function fCairn(x, z) {
@@ -7754,9 +8016,9 @@ function fCairn(x, z) {
     const ta = si * 1.1 + 0.6;
     const tx = s.x + Math.cos(ta) * s.r * 0.85, tz = s.z + Math.sin(ta) * s.r * 0.85;
     const ty = groundH(tx, tz) - 0.2;
-    boxW(md, { x: tx, y: ty, z: tz, w: 0.3, d: 0.3, h: 3.4, tw: 0.18, td: 0.18, noBottom: true, col: mix3(C_TRUNK2, [0, 0, 0], 0.15) });
-    latheW(md, [[2.5, 2.6], [1.5, 4.6], [0, 6.2]], { seg: 6, ex: 0.95, x: tx, y: ty, z: tz, col: FERN, cols: [FERN2, FERN] });
-    latheW(md, [[1.7, 4.4], [0, 6.9]], { seg: 5, ex: 0.95, x: tx, y: ty, z: tz, ry: 0.5, col: mix3(FERN, [1, 1, 0.7], 0.15) });
+    boxW(md, { x: tx, y: ty, z: tz, w: 0.3, d: 0.3, h: 3.4, tw: 0.18, td: 0.18, noBottom: true, warm: true, col: mix3(C_TRUNK2, [0, 0, 0], 0.15) });
+    latheW(md, [[2.5, 2.6], [1.5, 4.6], [0, 6.2]], { seg: 6, ex: 0.95, x: tx, y: ty, z: tz, warm: true, col: FERN, cols: [FERN2, FERN] });
+    latheW(md, [[1.7, 4.4], [0, 6.9]], { seg: 5, ex: 0.95, x: tx, y: ty, z: tz, ry: 0.5, warm: true, col: mix3(FERN, [1, 1, 0.7], 0.15) });
     addColl(tx, tz, 0.55);
   }
   const m = mdMesh(md, WORLD_MAT, false);
@@ -7917,7 +8179,7 @@ function buildWaterwheel(cx, cz, ry, R, ruined) {
     const a = rnd() * TAU, d = c.r * (0.4 + rnd() * 0.5);
     const x = c.x + Math.cos(a) * d, z = c.z + Math.sin(a) * d;
     const gy = groundH(x, z) - 0.2;
-    fboxW({ x, y: gy, z, w: 0.34, d: 0.34, h: 6 + rnd() * 3, tw: 0.1, td: 0.1, ry: rnd() * 3, col: C_BLEACH });
+    fboxW({ x, y: gy, z, w: 0.34, d: 0.34, h: 6 + rnd() * 3, tw: 0.1, td: 0.1, ry: rnd() * 3, warm: true, col: C_BLEACH });
     addColl(x, z, 0.5);
   }
   // the papery nest bulb on the tallest snag
@@ -8275,7 +8537,7 @@ function tickBoarF(b) {
     if (!b.hitDone && Math.hypot(P.x - b.x, P.z - b.z) < 1.3) {
       if (P.fy - groundH(P.x, P.z) < 0.7) {
         b.hitDone = true;
-        hurtPlayer(2, b.x - b.dir[0], b.z - b.dir[1]);   // 2 HEARTS — it hits hard
+        hurtPlayer(2, b.x - b.dir[0], b.z - b.dir[1], b.c.root);   // 2 HEARTS — it hits hard
       } else if (!b.jumpCredit) {
         b.jumpCredit = true;                              // sailed clean over the rush
         boarChargesDodged++;
@@ -8386,7 +8648,7 @@ function tickHornet(h) {
   } else if (h.st === 'dive') {
     h.x += h.dir[0] * DT; h.y += h.dir[1] * DT; h.z += h.dir[2] * DT;
     if (Math.hypot(P.x - h.x, P.z - h.z) < 0.85 && Math.abs(h.y - (groundH(P.x, P.z) + 1.0)) < 1.0) {
-      hurtPlayer(1, h.x, h.z);
+      hurtPlayer(1, h.x, h.z, h.m.root);
       h.st = 'drift'; h.t = 0;
     }
     if (h.y < gy + 0.25 || h.t > 0.9) { h.st = 'drift'; h.t = 0; }
@@ -8554,6 +8816,42 @@ function tickFSalt() {
 /* ── SWELTER + checkpoints + the hum: the region's own tick ── */
 let swelterT = 0, humLatch = false, regionNow = 'bay';
 let springNear = -1, springsSaved = 0;
+/* ═══ SWELTER FEEDBACK (locked with John + Maria 8/16) ═══
+   1 WARNING BEFORE HARM — the heat vignette builds through the 20 s grace
+     period before the first tick (sawtooth: it refills toward each tick).
+   2 THE TICK TEACHES — sun glyph flashes on the hearts, an INSTRUCTIVE
+     line rotates (rate-limited ≈ once per 20 s of continued exposure,
+     never a single missable prompt, never merely descriptive), and a
+     sharp haptic buzz distinct from combat.
+   3 RELIEF IS CELEBRATED — shade entry while sweltering: cool wash, soft
+     chime, leaf glyph, sizzle cuts to the shade hush, gentle double-pulse.
+   4 STATE ALWAYS LEGIBLE — a small sun icon by the hearts fills toward the
+     next tick; in shade it flips to a leaf and fades. Color + buzz only. */
+const SW_LINES = [
+  'The open sun out here bites. Walk shade to shade.',
+  'TAKE SHELTER — TREES, ROCKS, SPRINGS.',
+  'The pines cast real shade. Use them.',
+  'Springs are safe. The sun cannot follow you in.',
+];
+let swLineIdx = 0, swLineCooldown = 0, swLineCount = 0, swTickCount = 0;
+let swGlyphT = 0;                       // hearts sun-glyph flash (render seconds)
+let swReliefT = 0, swReliefCount = 0;   // cool wash + leaf beat
+let swReliefPulse2 = 0;                 // second rumble of the relief double-pulse
+let swLeafT = 0;                        // leaf icon fade (render seconds)
+let swVignA = 0;                        // eased vignette level (render)
+const swelterExposed = () => regionNow === 'forest' && P.x > 320 && !P.shade && state === 'play';
+function triggerSwelterRelief() {
+  swReliefT = 1.4;
+  swLeafT = 3.2;
+  swReliefCount++;
+  SFX.relief();
+  rumble({ duration: 70, strong: 0.12, weak: 0.42 }, 'relief');
+  swReliefPulse2 = 16;                  // second gentle pulse ~0.27 s later
+}
+SFX.relief = function () { if (!AC) return; const t = AC.currentTime;
+  tone(1047, t, 0.5, 0.05, 'sine');
+  tone(1568, t + 0.09, 0.6, 0.035, 'sine');
+  tone(2093, t + 0.2, 0.7, 0.02, 'sine'); };
 function tickForest() {
   const inF = P.x > 110 && !roomAt(P.x, P.z);
   const reg = inF ? 'forest' : 'bay';
@@ -8572,21 +8870,34 @@ function tickForest() {
   /* SWELTER — open sun east of the pass camp drains 1 heart / 20 s.
      Canopy, rock shade, and the springs are fully safe. */
   const exposed = P.x > 320 && !P.shade && state === 'play';
+  if (swLineCooldown > 0) swLineCooldown--;
+  if (swReliefPulse2 > 0 && --swReliefPulse2 === 0) {
+    rumble({ duration: 70, strong: 0.12, weak: 0.42 }, 'relief');
+  }
   if (exposed) {
     swelterT++;
-    if (swelterT === 600 && SAVE && !SAVE.swelterSeen) {
-      SAVE.swelterSeen = true; storeSave();
-      showCaption('The open sun out here has WEIGHT. Shade — quick.', 3400);
-    }
     if (swelterT >= 1200) {
+      /* THE TICK TEACHES (rule 2) */
       swelterT = 0;
+      swTickCount++;
       P.hearts = Math.max(0, P.hearts - 1);
       SFX.drain();
       flashGlare(0.32, 0.7);
-      rumble({ duration: 150, strong: 0.2, weak: 0.4 });
+      swGlyphT = 1.15;                                        // sun glyph on the hearts
+      if (swLineCooldown <= 0) {                              // rotating instructive line
+        showCaption(SW_LINES[swLineIdx % SW_LINES.length], 3600);
+        swLineIdx++; swLineCount++;
+        swLineCooldown = 1140;                                // ready again just before the next tick
+        if (SAVE && !SAVE.swelterSeen) { SAVE.swelterSeen = true; storeSave(); }
+      }
+      rumble({ duration: 110, strong: 1.0, weak: 0.12 }, 'swelter');   // sharp buzz ≠ combat
       if (P.hearts <= 0) { startSunstruck(); return; }
     }
-  } else if (swelterT > 0) swelterT = Math.max(0, swelterT - 3);
+  } else {
+    /* RELIEF IS CELEBRATED (rule 3): the moment shade takes over mid-swelter */
+    if (P.shade && !P.prevShade && swelterT > 90 && state === 'play') triggerSwelterRelief();
+    if (swelterT > 0) swelterT = Math.max(0, swelterT - 3);
+  }
   /* shade springs: respawn anchors + save checkpoints */
   springNear = -1;
   for (let i = 0; i < FSPRINGS.length; i++) {
@@ -8695,7 +9006,28 @@ cullChunks = function (ccx, ccz) {
   window.__springsMesh.visible = forestVis;
   const dcg = (ccx - CEDAR.x) * (ccx - CEDAR.x) + (ccz - CEDAR.z) * (ccz - CEDAR.z);
   cedarGlow.visible = forestVis && dcg < 90000;
-  for (const m of farTier) m.visible = forestVis;
+  /* far tier v7: draw ONLY where nothing closer covers the same ground.
+     MEGA layer first (beyond its activation ring, structurally outside every
+     near ring), then the paired 200 m ring tiles fill near-to-mid where BOTH
+     the near chunk and the covering mega are culled. The bay impression
+     additionally requires the camera east of the pass: it must never appear
+     inside Brightharbor. */
+  for (let i = 0; i < farMegas.length; i++) {
+    const fm = farMegas[i];
+    const dx = fm.cx - ccx, dz = fm.cz - ccz;
+    fm.mesh.visible = !reveal && (dx * dx + dz * dz > fm.actR * fm.actR) && (fm.bh ? ccx > 170 : forestVis);
+  }
+  for (let i = 0; i < farTiles.length; i++) {
+    const ft = farTiles[i];
+    if (ft.actR) continue;   // megas handled above
+    if (ft.pair === undefined) {
+      ft.pair = (ft.bh ? chunkMap.get(ft.key) : fchunkMap.get(ft.key)) || null;
+      ft.mega = farMegas.find(m => m.key === ft.megaKey) || null;
+    }
+    const pairVis = !!(ft.pair && ft.pair.mesh && ft.pair.mesh.visible);
+    const megaVis = !!(ft.mega && ft.mega.mesh.visible);
+    ft.mesh.visible = !pairVis && !megaVis && !reveal && (ft.bh ? ccx > 170 : forestVis);
+  }
   const near2 = (x, z, r) => { const dx = x - ccx, dz = z - ccz; return dx * dx + dz * dz < r * r; };
   for (const ch of FCHEST_ALL) ch.group.visible = forestVis && near2(ch.x, ch.z, 80);
   seaLine.visible = forestVis && P.fy - groundH(P.x, P.z) > 8 && P.x > 400;
@@ -8718,10 +9050,95 @@ cullChunks = function (ccx, ccz) {
     const sx = P.x + Math.cos(a) * d, sz = P.z + Math.sin(a) * d;
     psShimmer.spawn(sx, groundH(sx, sz) + 0.4 + Math.random(), sz, 0, 0.6 + Math.random() * 0.4, 0, 1.6);
   }
+  updateSwelterFX(dtv, now);
   animateForest(dtv, now, ccx, ccz);
   syncForestTelemetry();
   extendDebugOnce();
 };
+
+/* ── swelter render-side: veils, sizzle level, state icon, glyph decay ── */
+const sunveilEl = el('sunveil'), reliefveilEl = el('reliefveil');
+const sunstatCv = el('sunstat'), sunstatCx = sunstatCv.getContext('2d');
+let _svLast = -1, _rvLast = -1, _iconSig = '';
+function updateSwelterFX(dtv, now) {
+  const exposed = swelterExposed();
+  /* rule 1: the vignette BUILDS through the grace period (sawtooth toward
+     each tick), with a floor so exposure always reads immediately */
+  const vt = exposed ? (0.18 + 0.72 * clamp(swelterT / 1200, 0, 1)) : 0;
+  swVignA += (vt - swVignA) * Math.min(1, dtv * (exposed ? 2.8 : 5));
+  if (swVignA < 0.012) swVignA = vt > 0 ? swVignA : 0;
+  const sv = Math.round(swVignA * 100) / 100;
+  if (sv !== _svLast) {
+    _svLast = sv;
+    sunveilEl.style.opacity = String(sv);
+    sunveilEl.classList.toggle('on', sv > 0.02);
+  }
+  // relief wash decays over ~1.4 s
+  if (swReliefT > 0) swReliefT = Math.max(0, swReliefT - dtv);
+  const rv = Math.round(clamp(swReliefT / 1.4, 0, 1) * 0.9 * 100) / 100;
+  if (rv !== _rvLast) { _rvLast = rv; reliefveilEl.style.opacity = String(rv); }
+  // sun glyph flash + leaf fade clocks
+  if (swGlyphT > 0) swGlyphT = Math.max(0, swGlyphT - dtv);
+  if (swLeafT > 0) swLeafT = Math.max(0, swLeafT - dtv);
+  // sizzle audio level for audioAmbient (rises with exposure, 0 in shade)
+  window.__swAudioLevel = exposed ? (0.3 + 0.7 * clamp(swelterT / 1200, 0, 1)) : 0;
+  /* rule 4: the state icon — sun filling toward the next tick / fading leaf */
+  const inSwelterLand = regionNow === 'forest' && P.x > 320 && state === 'play';
+  const mode = !inSwelterLand ? 'off' : (exposed ? 'sun' : (swLeafT > 0 ? 'leaf' : 'off'));
+  const fill = exposed ? clamp(swelterT / 1200, 0, 1) : 0;
+  const leafA = clamp(swLeafT / 3.2, 0, 1);
+  const sig = mode + '|' + Math.round(fill * 40) + '|' + Math.round(leafA * 24) + '|' + P.maxHearts;
+  if (sig !== _iconSig) {
+    _iconSig = sig;
+    sunstatCv.style.left = (26 + 8 + P.maxHearts * 34) + 'px';
+    drawSunStat(mode, fill, leafA);
+  }
+  window.__swIconMode = mode; window.__swIconFill = fill;
+}
+function drawSunStat(mode, fill, leafA) {
+  const g = sunstatCx;
+  g.clearRect(0, 0, 46, 46);
+  if (mode === 'off') return;
+  g.save();
+  g.translate(23, 23);
+  if (mode === 'sun') {
+    // rays + disc, dim → bright as the next tick approaches
+    const glow = 0.35 + 0.65 * fill;
+    g.strokeStyle = `rgba(255,${Math.round(190 - 60 * fill)},60,${0.5 + 0.5 * fill})`;
+    g.lineWidth = 2.4;
+    for (let i = 0; i < 8; i++) {
+      const a = i / 8 * TAU + fill * 0.6;
+      g.beginPath();
+      g.moveTo(Math.cos(a) * 12, Math.sin(a) * 12);
+      g.lineTo(Math.cos(a) * (15 + 3 * fill), Math.sin(a) * (15 + 3 * fill));
+      g.stroke();
+    }
+    g.beginPath(); g.arc(0, 0, 9.5, 0, TAU);
+    g.fillStyle = `rgba(80,50,20,0.55)`; g.fill();
+    // the FILL: the disc floods amber bottom-up toward the tick
+    g.beginPath(); g.arc(0, 0, 9.5, 0, TAU); g.clip();
+    g.fillStyle = `rgba(255,${Math.round(200 - 80 * fill)},50,${glow})`;
+    g.fillRect(-10, 9.5 - fill * 19, 20, fill * 19 + 0.5);
+    g.restore(); g.save(); g.translate(23, 23);
+    g.beginPath(); g.arc(0, 0, 9.5, 0, TAU);
+    g.strokeStyle = 'rgba(60,30,10,0.9)'; g.lineWidth = 1.6; g.stroke();
+  } else {
+    // leaf: cool green, fading out — safety acknowledged
+    g.globalAlpha = leafA;
+    g.rotate(-0.5);
+    g.fillStyle = '#69a35a';
+    g.strokeStyle = 'rgba(30,60,28,0.9)';
+    g.lineWidth = 1.6;
+    g.beginPath();
+    g.moveTo(0, 13);
+    g.bezierCurveTo(-11, 4, -8, -9, 0, -13);
+    g.bezierCurveTo(8, -9, 11, 4, 0, 13);
+    g.closePath(); g.fill(); g.stroke();
+    g.beginPath(); g.moveTo(0, 11); g.lineTo(0, -10);
+    g.strokeStyle = 'rgba(36,72,34,0.8)'; g.lineWidth = 1.2; g.stroke();
+  }
+  g.restore();
+}
 
 function animateForest(dtv, now, ccx, ccz) {
   const w = now / 1000;
@@ -8857,14 +9274,91 @@ function syncForestTelemetry() {
   T.riverLen = RIVER_LEN;
   T.fSolidHere = window.__forestSolid(P.x, P.z);
   T.onTowerDeck = Math.hypot(P.x - TOWER.x, P.z - TOWER.z) < 6 &&
-    P.fy > forestH(TOWER.x, TOWER.z) + 13;
+    P.fy > groundH(TOWER.x, TOWER.z) + 13;
   T.saveRegion = SAVE ? (SAVE.region || 'bay') : 'bay';
+  /* v7 gates: swelter feedback package + damage-visibility invariant */
+  T.swVign = swVignA;
+  T.swVignOn = sunveilEl.classList.contains('on');
+  T.swAudio = (typeof szGain !== 'undefined' && szGain) ? szGain.gain.value : 0;
+  T.swAudioLevel = window.__swAudioLevel || 0;
+  T.swGlyphT = swGlyphT;
+  T.swTicks = swTickCount;
+  T.swLineCount = swLineCount;
+  T.swLineIdx = swLineIdx;
+  T.swReliefs = swReliefCount;
+  T.swReliefT = swReliefT;
+  T.swIconMode = window.__swIconMode || 'off';
+  T.swIconFill = window.__swIconFill || 0;
+  T.swWilt = !!window.__swWilt;
+  T.lastRumble = window.__lastRumble ? window.__lastRumble.tag : null;
+  T.dmgSuppressed = dmgSuppressed;
+  T.lastDmgVis = lastDmgCheck.vis; T.lastDmgFrus = lastDmgCheck.frus;
+  T.farVisCount = 0;
+  for (let i = 0; i < farTiles.length; i++) if (farTiles[i].mesh.visible) T.farVisCount++;
 }
 
 /* ── debug additions (installed on the first frame after p7 boots) ── */
+let swWipePh = -1, swWipeNext = 0;   // Wick's brow-wipe scheduling (render time)
 function extendDebugOnce() {
   if (dbgDone || !window.__fmDebug || window.__fmDebug.overhead) { dbgDone = true; return; }
   dbgDone = true;
+  /* swelter tick glyph: a small sun flashed over the just-lost heart —
+     visually distinct from combat damage (glare flash, no glyph) */
+  const _drawHearts = drawHearts;
+  drawHearts = function () {
+    if (swGlyphT > 0) hudLastHearts = -1;      // live redraw beneath the flash
+    _drawHearts();
+    if (swGlyphT > 0) {
+      const g = heartsCx;
+      const x = 24 + Math.min(P.hearts, P.maxHearts - 1) * 34, y = 22;
+      const a = clamp(swGlyphT / 1.15, 0, 1);
+      const pulse = 0.65 + 0.35 * Math.sin(swGlyphT * 18);
+      g.save();
+      g.globalAlpha = a * pulse;
+      g.strokeStyle = '#ffb632'; g.lineWidth = 2.2;
+      for (let i = 0; i < 8; i++) {
+        const t = i / 8 * TAU;
+        g.beginPath();
+        g.moveTo(x + Math.cos(t) * 10, y + Math.sin(t) * 10);
+        g.lineTo(x + Math.cos(t) * 14, y + Math.sin(t) * 14);
+        g.stroke();
+      }
+      g.beginPath(); g.arc(x, y, 7.5, 0, TAU);
+      g.fillStyle = '#ffcf5e'; g.fill();
+      g.strokeStyle = '#8a4d10'; g.lineWidth = 1.5; g.stroke();
+      g.restore();
+    }
+  };
+  /* swelter wilt: Wick suffers visibly in open sun — light stoop always,
+     a brow wipe on the idle every few seconds */
+  const _animateWick = animateWick;
+  animateWick = function (dtv, now) {
+    _animateWick(dtv, now);
+    const c = wick;
+    const suffering = swelterExposed() && swelterT > 240 && !P.air && P.st !== 'atk' && P.st !== 'hit' && state === 'play';
+    window.__swWilt = suffering;
+    if (!suffering) { swWipePh = -1; return; }
+    const k = clamp((swelterT - 240) / 700, 0, 1);
+    c.torso.rotation.x += 0.07 * k;            // wilting under the weight
+    c.head.rotation.x += 0.06 * k;
+    c.shL.rotation.z += 0.05 * k; c.shR.rotation.z -= 0.05 * k;
+    if (P.st === 'idle') {
+      if (swWipePh < 0 && now > swWipeNext) swWipePh = 0;
+      if (swWipePh >= 0) {
+        swWipePh += dtv / 1.5;                 // a 1.5 s brow wipe
+        if (swWipePh >= 1) { swWipePh = -1; swWipeNext = now + 4200 + Math.random() * 2400; }
+        else {
+          const e = Math.sin(Math.PI * clamp(swWipePh, 0, 1));   // up and back down
+          c.shR.rotation.x = c.shR.rotation.x * (1 - e) + (-2.1) * e;
+          c.shR.rotation.z = c.shR.rotation.z * (1 - e) + (-0.28) * e;
+          c.elR.rotation.x = c.elR.rotation.x * (1 - e) + (-2.3) * e;
+          c.head.rotation.x += 0.1 * e;        // ducks into the wipe
+          c.head.rotation.z += 0.05 * e;
+        }
+      }
+    } else swWipePh = -1;
+    window.__swWipePh = swWipePh;
+  };
   Object.assign(window.__fmDebug, {
     /* layout-review overhead: reveal everything, kill fog and sky */
     overhead(on) {
