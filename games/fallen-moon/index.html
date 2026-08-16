@@ -322,6 +322,17 @@
     opacity: 1; pointer-events: none;
     transition: opacity 1.1s ease;
   }
+  /* night two: cinematic letterbox — slides OFF the instant control goes
+     live (the flood beat's only visual acknowledgment of the handoff) */
+  #cineBars { position: absolute; inset: 0; pointer-events: none; }
+  #cineBars .bar {
+    position: absolute; left: 0; right: 0; height: 72px; background: #06080c;
+    transition: transform 0.55s cubic-bezier(0.5, 0, 0.3, 1);
+  }
+  #cineBars .barT { top: 0; transform: translateY(-100%); }
+  #cineBars .barB { bottom: 0; transform: translateY(100%); }
+  #cineBars.on .barT { transform: translateY(0); }
+  #cineBars.on .barB { transform: translateY(0); }
 </style>
 <!-- Google Analytics — injected by scripts/inject-back-button.py at bundle time -->
 <script id="__arcade_ga" async src="https://www.googletagmanager.com/gtag/js?id=G-T7N4WEJJEL"></script>
@@ -398,6 +409,7 @@
 
   <div id="sunveil"></div>
   <div id="reliefveil"></div>
+  <div id="cineBars"><div class="bar barT"></div><div class="bar barB"></div></div>
   <div id="glare"></div>
   <div id="fadeBlack"></div>
 </div>
@@ -436,6 +448,8 @@ try {
 const TURBO = Math.min(30, Math.max(0, parseInt(QS.get('turbo') || '0', 10) || 0));
 
 const SAVE_KEY = 'fallenmoon_save_v1';
+const BUILD_TAG = 'FM-N2-TIDES-RETURN-1';   // night-two deploy marker
+window.__fmBuild = BUILD_TAG;
 
 /* ───────────────────────── math utils ───────────────────────── */
 const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
@@ -910,6 +924,17 @@ function defaultSave() {
     fallsHum: false,          // heard the hum at the sealed falls basin
     forestSeen: false,        // crossed Cinder Pass once (region title shown)
     swelterSeen: false,       // one-time swelter warning caption
+    /* PHASE 2 night two — THE FALLS HOLLOW & THE TIDE'S RETURN */
+    basinOpen: false,         // the rockfall parted (moon compass resonance)
+    glyph1: false, glyph2: false,   // the two water-glyph doors, re-lit
+    hChest: false,            // the Ben-bait salt hoard chest
+    hFossil: false,           // looked at the moonfish fossil
+    hMural: false,            // looked at the chain mural (kept ambiguous)
+    wyrmDone: false,          // the Silt Wyrm cured (dissolved into water)
+    floodSeen: false,         // watched the flood cinematic once (skippable after)
+    sailedOnce: false,        // has ever sailed
+    voyageDone: false,        // Pearl's maiden voyage happened
+    boatX: null, boatZ: null, boatAng: 0.9,   // where the wake-boat is moored
     lastShade: [8.2, 7.0],
   };
 }
@@ -939,6 +964,8 @@ function loadSave() {
     if (out.wallBurned) qMin = Math.max(qMin, 2);
     if (out.bossDone) qMin = Math.max(qMin, 3);
     if (out.sky >= 1 || out.ph >= 1) qMin = Math.max(qMin, 4);
+    /* night two: the same never-dead-end rule for the Half Shield arc */
+    if (out.sky >= 2 || out.ph >= 2) qMin = Math.max(qMin, 6);
     if (out.q < qMin) out.q = qMin;
     return out;
   } catch (e) { return null; }
@@ -1922,12 +1949,22 @@ function groundH(x, z) {
     const p = POOLS[i], dx = x - p.x, dz = z - p.z;
     h -= 1.0 * gauss(dx * dx + dz * dz, p.r * p.r * 1.6);
   }
-  // grotto interior floor flattens
+  // grotto interior floor flattens — RAISED above the returning sea (night
+  // two): the grotto keeps its head dry behind a stone causeway, so every
+  // v1 beat stays completable after the flood
   const da = Math.hypot(x - GROTTO_A.x, z - GROTTO_A.z);
   const db = Math.hypot(x - GROTTO_B.x, z - GROTTO_B.z);
   if (da < GROTTO_A.r + 4 || db < GROTTO_B.r + 4) {
     const t = smoothstep(1 - (Math.min(da - GROTTO_A.r, db - GROTTO_B.r)) / 4);
-    h = lerp(h, -3.1, clamp(t, 0, 1));
+    h = lerp(h, 0.65, clamp(t, 0, 1));
+  }
+  // the causeway: a stone ridge carrying the entrance walkway up out of the
+  // seabed — dry land after the tide comes home. It rises FAST out of the
+  // water so a boat can land at its toe and wade ashore in three steps.
+  if (z > 100 && z < 148 && Math.abs(x - 30) < 9) {
+    const t = smoothstep((z - 100) / 9);
+    const lat = smoothstep(1 - Math.abs(x - 30) / 9);
+    h = Math.max(h, lerp(h, 0.68, t * lat));
   }
   // rim rises wall the world — smooth dunes/headland, not spikes.
   // v5 CINDER PASS: the EAST rim dips to a walkable saddle around z≈38 —
@@ -2375,6 +2412,39 @@ function propBoat(x, z, ry, tilt, len) {
   addColl(x - Math.sin(ry) * L * 0.22, z - Math.cos(ry) * L * 0.22, 1.4);
   addColl(x, z, 1.5);
 }
+/* v8 THE TIDE'S RETURN: bay boats are DYNAMIC now — beached on the mud
+   until the Half Shield floods the bay home, then they right themselves
+   and ride at anchor. Geometry in a local frame; pose set by world state. */
+const bayBoats = [];
+function dynBoat(x, z, ry, tilt, len) {
+  const L = len || 4.6;
+  const md = MD();
+  latheW(md, [[0.0, -0.4], [L * 0.21, 0.0], [L * 0.24, 0.75], [L * 0.19, 1.05]],
+    { seg: 9, ex: 2.4, x: 0, y: 0.45, z: 0, ry: 0, col: C_WOOD, cols: [C_WOOD2, C_WOOD, C_WOODW] });
+  boxW(md, { x: 0, y: 1.38, z: 0, w: 0.12, d: L * 0.52, h: 0.12, col: C_WOOD2 });
+  // a thwart bench + a stub mast so the floating pose reads "boat", not shell
+  boxW(md, { x: 0, y: 0.85, z: 0, w: L * 0.2, d: 0.16, h: 0.06, ry: Math.PI / 2, col: C_WOODW });
+  const m = mdMesh(md, WORLD_MAT, false);
+  m.frustumCulled = false;
+  scene.add(m);
+  addColl(x + Math.sin(ry) * L * 0.22, z + Math.cos(ry) * L * 0.22, 1.4);
+  addColl(x - Math.sin(ry) * L * 0.22, z - Math.cos(ry) * L * 0.22, 1.4);
+  addColl(x, z, 1.5);
+  const b = { mesh: m, x, z, ry, tilt, len: L, gy: groundH(x, z), afloat: false, ph: x * 0.7 + z, liftT: -1 };
+  bayBoats.push(b);
+  poseBayBoat(b, false);
+  return b;
+}
+function poseBayBoat(b, afloat) {
+  b.afloat = afloat;
+  if (afloat) {
+    b.mesh.position.set(b.x, (window.__WL !== undefined ? window.__WL : -0.55) - 0.32, b.z);
+    b.mesh.rotation.set(0, b.ry, 0);
+  } else {
+    b.mesh.position.set(b.x, b.gy - 0.15, b.z);
+    b.mesh.rotation.set(0.14, b.ry, b.tilt + 0.42);
+  }
+}
 /* v3 spawn wreck: a proper beached ROWBOAT lying on its side — hull ON the
    ground, strakes arcing from the grounded gunwale up to the keel ridge,
    visible ribs on the open (south) side, sand drifted against her back.
@@ -2383,8 +2453,15 @@ function propBoat(x, z, ry, tilt, len) {
    spawnClear ≥ 0.5 (no geometry inside Wick's capsule at spawn). */
 const WAKE_STATS = { minRel: 99, spawnClear: 99 };
 const SPAWN_POS = { x: 8.2, z: 7.0 };
+let wakeWreckMesh = null;           // v8: the shelter that becomes the ship —
+const wakeWreckColl = [];           // its own mesh + colliders so the flood can swap it
+/* v8.1 draw-call hygiene: the wreck's WORLD state (dry = still on the mud) is
+   independent of whether it is drawn this frame. The mesh sits in the bay, so
+   the per-frame cull hides it from the forest (2 km away, 100% fogged); the
+   flag is what telemetry and the flood matrix mean by "the wreck is there". */
+let wakeWreckDry = true;
 function propWakeBoat() {
-  const md = chunkFor(WAKE_BOAT.x, WAKE_BOAT.z);
+  const md = MD();
   const x = WAKE_BOAT.x, z = WAKE_BOAT.z;
   // seat the whole hull on the LOWEST ground along her length — parts sink
   // into the sand (drifts hide it), nothing ever floats
@@ -2440,9 +2517,12 @@ function propWakeBoat() {
         Math.hypot(vx - SPAWN_POS.x, vz - SPAWN_POS.z));
     }
   }
-  addColl(x - 1.5, z + 0.15, 1.15);
-  addColl(x, z + 0.05, 1.25);
-  addColl(x + 1.5, z + 0.15, 1.15);
+  wakeWreckColl.push(addColl(x - 1.5, z + 0.15, 1.15));
+  wakeWreckColl.push(addColl(x, z + 0.05, 1.25));
+  wakeWreckColl.push(addColl(x + 1.5, z + 0.15, 1.15));
+  wakeWreckMesh = mdMesh(md, WORLD_MAT, false);
+  wakeWreckMesh.matrixAutoUpdate = false; wakeWreckMesh.updateMatrix();
+  scene.add(wakeWreckMesh);
 }
 function propWell(x, z) {
   const md = chunkFor(x, z);
@@ -2550,8 +2630,9 @@ function propWreck() {
     boxW(md2, { x: rx2 + 1.3, y: ry2 - 0.2, z: rz, w: 0.12, d: 0.16, h: hgt, rz: -0.5, ry: 0.75, col: C_WOOD2 });
     boxW(md2, { x: rx2, y: ry2 - 0.3, z: rz, w: 1.4, d: 0.14, h: 0.18, ry: 0.75, col: C_WOOD });
   }
-  addColl(x, z, 2.4); addColl(x + 2.2, z + 2.6, 1.6); addColl(x - 2, z - 2.4, 1.6);
+  wreckColl.push(addColl(x, z, 2.4), addColl(x + 2.2, z + 2.6, 1.6), addColl(x - 2, z - 2.4, 1.6));
 }
+const wreckColl = [];   // v8: the flood turns the hull walls into a landing deck
 function propMoonwheel() {
   const x = WHEEL_POS.x, z = WHEEL_POS.z;
   const md = chunkFor(x, z);
@@ -2642,7 +2723,7 @@ function propFence(x0, z0, x1, z1) {
 }
 
 /* ── the grotto: massif, interior domes, crack, mural ── */
-let grottoCapMesh = null;
+let grottoCapMesh = null, grottoDomeMesh = null;
 function buildGrotto() {
   // interior palette (v3: shared by the ring rocks too — their sun-model
   // bake read as huge flat BLUE slabs beside the mirror, John's photo bug)
@@ -2739,16 +2820,16 @@ function buildGrotto() {
     const gx = GROTTO_ENT.x;
     const jamb = [0.86, 0.78, 0.6], jambD = [0.62, 0.56, 0.45];
     for (const s of [-1, 1]) {
-      boxW(md, { x: gx + s * 3.55, y: -3.6, z: 133.9, w: 0.5, d: 1.7, h: 7.2, tw: 0.4, td: 1.2, ry: s * 0.12, col: jamb, colB: jambD });
-      boxW(md, { x: gx + s * 4.1, y: -3.6, z: 136.6, w: 0.6, d: 1.4, h: 5.4, tw: 0.45, td: 1.0, ry: s * 0.2, col: jambD });
+      boxW(md, { x: gx + s * 3.55, y: 0.15, z: 133.9, w: 0.5, d: 1.7, h: 9.8, tw: 0.4, td: 1.2, ry: s * 0.12, col: jamb, colB: jambD });
+      boxW(md, { x: gx + s * 4.1, y: 0.15, z: 136.6, w: 0.6, d: 1.4, h: 7.8, tw: 0.45, td: 1.0, ry: s * 0.2, col: jambD });
     }
     // portal stones + lintel
     for (const s of [-1, 1]) {
-      latheW(md, [[2.0, -3.2], [1.7, 2.8], [0.8, 6.8]], { seg: 6, ex: 0.8, x: gx + s * 4.4, y: 0, z: 134, ry: s, col: C_ROCK, cols: [C_ROCK2, C_ROCK] });
+      latheW(md, [[2.0, -3.2], [1.7, 2.8], [0.8, 6.8]], { seg: 6, ex: 0.8, x: gx + s * 4.4, y: 3.75, z: 134, ry: s, col: C_ROCK, cols: [C_ROCK2, C_ROCK] });
     }
-    boxW(md, { x: gx, y: 5.6, z: 134, w: 5.4, d: 1.6, h: 1.7, tw: 4.2, td: 1.1, col: C_ROCK2 });
+    boxW(md, { x: gx, y: 5.6 + 3.75, z: 134, w: 5.4, d: 1.6, h: 1.7, tw: 4.2, td: 1.1, col: C_ROCK2 });
     // a carved moon sigil over the lintel — this place matters
-    latheW(md, [[0.55, 0], [0.42, 0.14]], { seg: 10, x: gx, y: 6.4, z: 133.2, col: C_MOON });
+    latheW(md, [[0.55, 0], [0.42, 0.14]], { seg: 10, x: gx, y: 6.4 + 3.75, z: 133.2, col: C_MOON });
     // v3: the portal stones are solid too
     addColl(gx - 4.4, 134, 2.0); addColl(gx + 4.4, 134, 2.0);
   })();
@@ -2763,9 +2844,10 @@ function buildGrotto() {
     if (d > Math.PI) d = TAU - d;
     return d < half;
   };
+  const GROTTO_LIFT = 3.75;   // v8: the whole interior rode the floor up
   const domeIn = (cx, cz, R, crack, doors) => {
     latheW(mdDome, [[R + 1.5, -3.4], [R + 0.8, 1.5], [R * 0.62, 6.2], [0, 8.6]], {
-      seg: 14, x: cx, y: 0, z: cz, inward: true, flat: true, segJitter: 0.14,
+      seg: 14, x: cx, y: GROTTO_LIFT, z: cz, inward: true, flat: true, segJitter: 0.14,
       col: C_CAVE_MID, cols: [C_CAVE_LO, C_CAVE_MID, C_CAVE_HI],
       skip: (t0, t1, band) => {
         if (crack && band >= 2 && t0 > 3.5 && t0 < 4.0) return true;
@@ -2784,7 +2866,7 @@ function buildGrotto() {
   // the skylight crack's BACKDROP: a warm sun-shaft panel behind the hole,
   // so the gap reads as light stabbing in — never raw sky
   latheW(mdDome, [[GROTTO_A.r + 2.6, 5.4], [GROTTO_A.r + 1.9, 9.4]], {
-    seg: 5, a0: 3.5, a1: 4.5, x: GROTTO_A.x, y: 0, z: GROTTO_A.z,
+    seg: 5, a0: 3.5, a1: 4.5, x: GROTTO_A.x, y: GROTTO_LIFT, z: GROTTO_A.z,
     inward: true, flat: true, col: [1, 0.95, 0.78],
   });
   // corridor liner: flat-ambient wall planes behind the corridor rocks and a
@@ -2806,58 +2888,60 @@ function buildGrotto() {
         const ax = 41 + 12 * t0 + px * lat * side, az = 155.5 + 6 * t0 + pz * lat * side;
         const bx = 41 + 12 * t1 + px * lat * side, bz = 155.5 + 6 * t1 + pz * lat * side;
         const cc = mix3(s % 2 ? C_CAVE_MID : C_CAVE_LO, C_CAVE_HI, 0.15 + 0.2 * s);
-        quad(ax, -3.5, az, bx, -3.5, bz, bx, 8.6, bz, ax, 8.6, az, cc);
+        quad(ax, -3.5 + GROTTO_LIFT, az, bx, -3.5 + GROTTO_LIFT, bz, bx, 8.6 + GROTTO_LIFT, bz, ax, 8.6 + GROTTO_LIFT, az, cc);
       }
     }
-    // ceiling strip
+    // ceiling strip — overhangs both door arcs (the raised interior would
+    // otherwise slip a sky sliver over the tapered rock tips)
     for (let s = 0; s < 2; s++) {
-      const t0 = 0.12 + s * 0.38, t1 = t0 + 0.42;
-      const w = 7.4;
-      quad(41 + 12 * t0 - px * w, 7.4, 155.5 + 6 * t0 - pz * w,
-           41 + 12 * t1 - px * w, 7.4, 155.5 + 6 * t1 - pz * w,
-           41 + 12 * t1 + px * w, 7.4, 155.5 + 6 * t1 + pz * w,
-           41 + 12 * t0 + px * w, 7.4, 155.5 + 6 * t0 + pz * w, C_CAVE_HI);
+      const t0 = -0.18 + s * 0.62, t1 = t0 + 0.68;
+      const w = 8.6;
+      quad(41 + 12 * t0 - px * w, 7.4 + GROTTO_LIFT, 155.5 + 6 * t0 - pz * w,
+           41 + 12 * t1 - px * w, 7.4 + GROTTO_LIFT, 155.5 + 6 * t1 - pz * w,
+           41 + 12 * t1 + px * w, 7.4 + GROTTO_LIFT, 155.5 + 6 * t1 + pz * w,
+           41 + 12 * t0 + px * w, 7.4 + GROTTO_LIFT, 155.5 + 6 * t0 + pz * w, C_CAVE_HI);
     }
   })();
   const domeMesh = mdMesh(mdDome, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide }), false);
   domeMesh.matrixAutoUpdate = false; domeMesh.updateMatrix();
   scene.add(domeMesh);
+  grottoDomeMesh = domeMesh;   // v8.1: the cull rules need a handle (see grottoCapMesh)
   // corridor walls interior (flat ambient into the dome mesh)
   for (const t of [0.25, 0.5, 0.75]) {
     const wx = lerp(41, 53, t), wz = lerp(155.5, 161.5, t);
     const px = -(161.5 - 155.5) / 13.4, pz = (53 - 41) / 13.4;
-    latheW(mdDome, [[2.2, -3.4], [1.9, 3.2], [0.6, 6.5]], { seg: 6, flat: true, segJitter: 0.12, x: wx + px * 5.0, y: 0, z: wz + pz * 5.0, col: C_CAVE_MID, cols: [C_CAVE_LO, C_CAVE_HI] });
-    latheW(mdDome, [[2.2, -3.4], [1.9, 3.2], [0.6, 6.5]], { seg: 6, flat: true, segJitter: 0.12, x: wx - px * 5.0, y: 0, z: wz - pz * 5.0, col: C_CAVE_MID, cols: [C_CAVE_LO, C_CAVE_HI] });
+    latheW(mdDome, [[2.2, -3.4], [1.9, 3.2], [0.6, 6.5]], { seg: 6, flat: true, segJitter: 0.12, x: wx + px * 5.0, y: GROTTO_LIFT, z: wz + pz * 5.0, col: C_CAVE_MID, cols: [C_CAVE_LO, C_CAVE_HI] });
+    latheW(mdDome, [[2.2, -3.4], [1.9, 3.2], [0.6, 6.5]], { seg: 6, flat: true, segJitter: 0.12, x: wx - px * 5.0, y: GROTTO_LIFT, z: wz - pz * 5.0, col: C_CAVE_MID, cols: [C_CAVE_LO, C_CAVE_HI] });
   }
   // stalactites + floor stones in chamber A (flat ambient)
   const rnd = mulberry32(991);
   for (let i = 0; i < 8; i++) {
     const a = rnd() * TAU, d = 3 + rnd() * 9;
     const sx = GROTTO_A.x + Math.cos(a) * d, sz = GROTTO_A.z + Math.sin(a) * d;
-    latheW(mdDome, [[0.35 + rnd() * 0.3, 6.9], [0, 4.4 + rnd() * 1.5]], { seg: 5, flat: true, x: sx, y: 0, z: sz, col: C_CAVE_HI });
-    if (i < 5) latheW(mdDome, [[0.5 + rnd() * 0.4, -3.3], [0.2, -1.9 - rnd()]], { seg: 5, flat: true, x: GROTTO_A.x + Math.cos(a + 1) * (d + 2), y: 0, z: GROTTO_A.z + Math.sin(a + 1) * (d + 2), col: C_CAVE_MID });
+    latheW(mdDome, [[0.35 + rnd() * 0.3, 6.9], [0, 4.4 + rnd() * 1.5]], { seg: 5, flat: true, x: sx, y: GROTTO_LIFT, z: sz, col: C_CAVE_HI });
+    if (i < 5) latheW(mdDome, [[0.5 + rnd() * 0.4, -3.3], [0.2, -1.9 - rnd()]], { seg: 5, flat: true, x: GROTTO_A.x + Math.cos(a + 1) * (d + 2), y: GROTTO_LIFT, z: GROTTO_A.z + Math.sin(a + 1) * (d + 2), col: C_CAVE_MID });
   }
   // the skylight crack glows — a warm unlit patch where the sun stabs in
-  latheW(mdDome, [[1.3, 7.55], [0.4, 7.9]], { seg: 6, flat: true, x: MIRROR_POS.x - 2.2, y: 0, z: MIRROR_POS.z - 1.5, col: [1, 0.96, 0.82] });
+  latheW(mdDome, [[1.3, 7.55], [0.4, 7.9]], { seg: 6, flat: true, x: MIRROR_POS.x - 2.2, y: GROTTO_LIFT, z: MIRROR_POS.z - 1.5, col: [1, 0.96, 0.82] });
   // THE LORE MURAL — boss chamber east wall: the moon, chained, the chain leading DOWN.
   (function mural() {
     const md = mdDome;
     const wx = GROTTO_B.x + GROTTO_B.r - 1.2, wz = GROTTO_B.z;
     const C_OCRE = col(0xb39a6a), C_OCRE2 = col(0x8a744c), C_MOONPALE = col(0xcfd2c4);
     // moon disc (slightly proud of the wall, facing -x into the chamber)
-    latheW(md, [[0, 0], [2.2, 0.12], [2.3, 0.16]], { seg: 14, flat: true, x: wx, y: 3.2, z: wz, ry: 0, col: C_MOONPALE, cols: [C_MOONPALE, C_OCRE] });
+    latheW(md, [[0, 0], [2.2, 0.12], [2.3, 0.16]], { seg: 14, flat: true, x: wx, y: 3.2 + GROTTO_LIFT, z: wz, ry: 0, col: C_MOONPALE, cols: [C_MOONPALE, C_OCRE] });
     // the crack across the carved moon
-    boxW(md, { x: wx - 0.2, y: 3.2, z: wz, w: 0.06, d: 2.1, h: 0.2, rx: 0.4, col: C_OCRE2 });
+    boxW(md, { x: wx - 0.2, y: 3.2 + GROTTO_LIFT, z: wz, w: 0.06, d: 2.1, h: 0.2, rx: 0.4, col: C_OCRE2 });
     // chain links wrapping it and running down into the floor
     for (let i = 0; i < 7; i++) {
-      const ly = 3.2 - i * 1.0;
-      latheW(md, [[0.42, 0], [0.3, 0.1], [0.42, 0.2]], { seg: 6, ex: 0.5, flat: true, x: wx - 0.35, y: Math.max(-3.2, ly), z: wz + (i % 2 ? 0.22 : -0.22), col: C_OCRE2 });
-      if (ly < -3.0) break;
+      const ly = 3.2 + GROTTO_LIFT - i * 1.0;
+      latheW(md, [[0.42, 0], [0.3, 0.1], [0.42, 0.2]], { seg: 6, ex: 0.5, flat: true, x: wx - 0.35, y: Math.max(-3.2 + GROTTO_LIFT, ly), z: wz + (i % 2 ? 0.22 : -0.22), col: C_OCRE2 });
+      if (ly < -3.0 + GROTTO_LIFT) break;
     }
   })();
   // mirror pedestal rock
   const mdP = chunkFor(MIRROR_POS.x, MIRROR_POS.z);
-  latheW(mdP, [[0.9, -3.4], [0.7, -2.4], [0.5, -2.2]], { seg: 8, flat: true, x: MIRROR_POS.x, y: 0, z: MIRROR_POS.z, col: C_CAVE_MID });
+  latheW(mdP, [[0.9, -3.4], [0.7, -2.4], [0.5, -2.2]], { seg: 8, flat: true, x: MIRROR_POS.x, y: 3.75, z: MIRROR_POS.z, col: C_CAVE_MID });
 }
 
 /* ── cuttable kelp (patches rebuilt on cut) ── */
@@ -3147,11 +3231,11 @@ propHouse(-22, -40, -0.2, false);
 propHouse(6, -38, 0.15, false);
 propHouse(22, -28, -0.4, false);
 propWell(-8, -30);
-propBoat(PEARL_BOAT.x, PEARL_BOAT.z, 1.2, 0.2, 5.2);
-propBoat(-40, 2, 0.8, -0.15, 4.0);
-propBoat(26, 6, -1.0, 0.1, 4.4);
-propBoat(58, 30, 2.2, 0.2, 5.0);
-propBoat(-58, 40, 1.9, -0.2, 4.2);
+propBoat(PEARL_BOAT.x, PEARL_BOAT.z, 1.2, 0.2, 5.2);   // Pearl's prow: dry land, stays beached
+dynBoat(-40, 2, 0.8, -0.15, 4.0);
+dynBoat(26, 6, -1.0, 0.1, 4.4);
+dynBoat(58, 30, 2.2, 0.2, 5.0);
+dynBoat(-58, 40, 1.9, -0.2, 4.2);
 propQuay();
 propNet(-14, 6, 0.4); propNet(34, 2, -0.7); propNet(12, 16, 0.2);
 propBarrel(39, -14); propBarrel(40.4, -13.2); propBarrel(-10, -26);
@@ -4426,7 +4510,7 @@ let beamDown = null, beamOut = null;
    mouths and pools on the floor: a passage you can SEE, not walk-through rock. */
 let entGlow = null, corridorGlow = null;
 (function buildGrottoGlows() {
-  const gy = -3.05;
+  const gy = 0.7;   // v8: the interior floor rose above the returning sea
   {
     const md = MD();
     const c = [1, 0.93, 0.72];
@@ -4959,9 +5043,15 @@ function tickPlayer() {
 
   if (P.st === 'hit') {
     P.hitT -= DT;
+    // v8: a swing pressed during the stun BUFFERS instead of vanishing —
+    // hornet pressure was eating honest button presses (kid-hostile)
+    if (IN.atk && P.sword) P.queued = true;
     moveWithCollision(P.x + P.vx * DT, P.z + P.vz * DT);
     P.vx *= 0.86; P.vz *= 0.86;
-    if (P.hitT <= 0) P.st = 'idle';
+    if (P.hitT <= 0) {
+      P.st = 'idle';
+      if (P.queued && P.sword) { P.queued = false; startAttack(1); }
+    }
     return;
   }
   if (P.st === 'atk') {
@@ -5421,6 +5511,8 @@ const QUEST_TEXT = {
   2: 'RECOVER THE CRESCENT HORN — 0/8 PHASES RESTORED',
   3: 'CARRY THE CRESCENT TO THE MOONWHEEL',
   4: '1/8 PHASES RESTORED',
+  5: 'CARRY THE HALF SHIELD TO THE MOONWHEEL',
+  6: '2/8 PHASES RESTORED',
 };
 function setQuest(q) {
   QUEST.q = q;
@@ -5428,7 +5520,7 @@ function setQuest(q) {
   const t = QUEST_TEXT[q] || '';
   questEl.textContent = t;
   questEl.classList.toggle('on', !!t);
-  if (q === 4) setTimeout(() => questEl.classList.remove('on'), 9000);
+  if (q === 4 || q === 6) setTimeout(() => questEl.classList.remove('on'), 9000);
 }
 
 /* ── glare overlay ── */
@@ -6667,8 +6759,8 @@ function tickBossDefeat(t) {
     // ONE hint: the carving behind the arena — the moon, chained, the chain leading down.
     const mx = GROTTO_B.x + GROTTO_B.r - 1.2, mz = GROTTO_B.z;
     const k = smoothstep(clamp((t - 8.0) / 1.2, 0, 1));
-    cineCam(lerp(P.x + 2.6, mx - 8, k), lerp(groundH(P.x, P.z) + 1.7, 3.4, k), lerp(P.z + 2.6, mz, k),
-      mx, 3.0, mz);
+    cineCam(lerp(P.x + 2.6, mx - 8, k), lerp(groundH(P.x, P.z) + 1.7, 7.15, k), lerp(P.z + 2.6, mz, k),
+      mx, 6.75, mz);
     if (CINE.step === 3) { CINE.step = 4; SFX.yawn(); /* low weird tone */ }
   } else {
     itemGetT = -1;
@@ -7665,6 +7757,11 @@ const farMegas = [];   // 800 m merges:    { key, bh, mesh, cx, cz, actR }
     t.mesh.visible = false;
     scene.add(t.mesh);
     t.md = null;
+    // real extent, cached: the fog-wall cull needs the tile's own footprint,
+    // not the nominal grid cell (edge tiles are partial)
+    t.mesh.geometry.computeBoundingSphere();
+    { const bs = t.mesh.geometry.boundingSphere;
+      t.bx = bs.center.x; t.by = bs.center.y; t.bz = bs.center.z; t.br = bs.radius; }
     farTier.push(t.mesh);
     farTiles.push(t);
   }
@@ -7681,6 +7778,7 @@ const farMegas = [];   // 800 m merges:    { key, bh, mesh, cx, cz, actR }
     m.mesh.geometry.computeBoundingSphere();
     const bs = m.mesh.geometry.boundingSphere;
     m.cx = bs.center.x; m.cz = bs.center.z;
+    m.bx = bs.center.x; m.by = bs.center.y; m.bz = bs.center.z; m.br = bs.radius;
     m.actR = (m.bh ? 165 : 387) + bs.radius + 4;
     farTier.push(m.mesh);
     farMegas.push(m);
@@ -7759,34 +7857,57 @@ let fallsMesh = null;
     // a talus skirt where the pour-over used to boil
     latheW(md, [[7.5, -1.5], [4.5, 1.6], [0, 3.2]], { seg: 7, ex: 1.3, x: cx + Math.cos(a) * 3, y: gy - 0.5, z: cz + Math.sin(a) * 3, ry: -a, flat: true, segJitter: 0.12, col: C_CLIFF2 });
   }
-  // THE ROCKFALL — fresh boulders sealing the plunge-pool basin. Marched
-  // along the same circle the collision seals (one source of truth).
-  const toFore = Math.atan2(1165 - BASIN.z, 1900 - BASIN.x);
-  for (let i = -5; i <= 5; i++) {
-    const a = toFore + i * 0.21;
-    const r = BASIN.r - 1 + Math.abs(hash2(i, 11)) * 2.5;
-    const bx = BASIN.x + Math.cos(a) * r, bz = BASIN.z + Math.sin(a) * r;
-    const gy = groundH(bx, bz) - 1.2;
-    const s = 3.3 + Math.abs(hash2(i, 7)) * 2.0 - Math.abs(i) * 0.14;
-    latheW(md, [[s, 0], [s * 0.85, s * 1.1], [s * 0.4, s * 1.9], [0, s * 2.3]],
-      { seg: 6, ex: 0.85, x: bx, y: gy, z: bz, ry: i * 1.7, flat: true, segJitter: 0.13,
-        col: i % 2 ? C_FROCK : C_FROCK2, cols: [C_FROCK2, C_FROCK, C_CLIFF3] });
-    // pale fresh-broken faces — these stones fell RECENTLY
-    if (i % 2 === 0) {
-      boxW(md, { x: bx, y: gy + s * 0.8, z: bz, w: s * 0.5, d: s * 0.4, h: s * 0.7, ry: i, rx: 0.4, col: C_CHUTE });
-    }
-  }
-  // second smaller course of rubble at their feet
-  for (let i = -6; i <= 6; i += 2) {
-    const a = toFore + i * 0.18;
-    const bx = BASIN.x + Math.cos(a) * (BASIN.r + 2.5), bz = BASIN.z + Math.sin(a) * (BASIN.r + 2.5);
-    const gy = groundH(bx, bz) - 0.6;
-    latheW(md, [[1.3, 0], [0.9, 1.1], [0, 1.7]], { seg: 5, x: bx, y: gy, z: bz, ry: i * 2.3, flat: true, segJitter: 0.1, col: C_FROCK2 });
-  }
   fallsMesh = mdMesh(md, WORLD_MAT, false);
   fallsMesh.matrixAutoUpdate = false; fallsMesh.updateMatrix();
   fallsMesh.visible = false;
   scene.add(fallsMesh);
+})();
+
+/* THE ROCKFALL — fresh boulders sealing the plunge-pool basin. Marched along
+   the same circle the collision seals (one source of truth). Night two: its
+   OWN meshes — sealed vs PARTED (the moon compass resonates the stones
+   aside); applyWorldState picks which one stands. */
+let rockfallMesh = null, rockfallOpenMesh = null;
+(function buildRockfall() {
+  const C_CLIFF3 = [0.72, 0.65, 0.53], C_CHUTE = [0.93, 0.9, 0.81];
+  const toFore = Math.atan2(1165 - BASIN.z, 1900 - BASIN.x);
+  const build = (parted) => {
+    const md = MD();
+    for (let i = -5; i <= 5; i++) {
+      let a = toFore + i * 0.21;
+      let r = BASIN.r - 1 + Math.abs(hash2(i, 11)) * 2.5;
+      let sink = 0;
+      if (parted) {
+        // the gap: the middle stones stand ASIDE — shoved outward along the
+        // ring and half-sunk, leaving a walkable mouth into the basin
+        if (Math.abs(i) <= 1) { a += (i >= 0 ? 1 : -1) * 0.62; r += 2.8; sink = 1.6; }
+        else if (Math.abs(i) === 2) { a += (i > 0 ? 1 : -1) * 0.24; r += 1.2; sink = 0.5; }
+      }
+      const bx = BASIN.x + Math.cos(a) * r, bz = BASIN.z + Math.sin(a) * r;
+      const gy = groundH(bx, bz) - 1.2 - sink;
+      const s = 3.3 + Math.abs(hash2(i, 7)) * 2.0 - Math.abs(i) * 0.14;
+      latheW(md, [[s, 0], [s * 0.85, s * 1.1], [s * 0.4, s * 1.9], [0, s * 2.3]],
+        { seg: 6, ex: 0.85, x: bx, y: gy, z: bz, ry: i * 1.7, flat: true, segJitter: 0.13,
+          col: i % 2 ? C_FROCK : C_FROCK2, cols: [C_FROCK2, C_FROCK, C_CLIFF3] });
+      if (i % 2 === 0) {
+        boxW(md, { x: bx, y: gy + s * 0.8, z: bz, w: s * 0.5, d: s * 0.4, h: s * 0.7, ry: i, rx: 0.4, col: C_CHUTE });
+      }
+    }
+    for (let i = -6; i <= 6; i += 2) {
+      const a = toFore + i * 0.18;
+      if (parted && Math.abs(i) <= 2) continue;   // rubble cleared from the mouth
+      const bx = BASIN.x + Math.cos(a) * (BASIN.r + 2.5), bz = BASIN.z + Math.sin(a) * (BASIN.r + 2.5);
+      const gy = groundH(bx, bz) - 0.6;
+      latheW(md, [[1.3, 0], [0.9, 1.1], [0, 1.7]], { seg: 5, x: bx, y: gy, z: bz, ry: i * 2.3, flat: true, segJitter: 0.1, col: C_FROCK2 });
+    }
+    const m = mdMesh(md, WORLD_MAT, false);
+    m.matrixAutoUpdate = false; m.updateMatrix();
+    m.visible = false;
+    scene.add(m);
+    return m;
+  };
+  rockfallMesh = build(false);
+  rockfallOpenMesh = build(true);
 })();
 
 /* THE FIRE-WATCH TOWER — climbable by real stairs (collider tops) */
@@ -8610,7 +8731,9 @@ function tickHornet(h) {
   if (h.dead) return;
   h.t += DT;
   const gy = groundH(h.x, h.z);
-  if (inShadeAt(h.x, h.z) && h.st !== 'pop') { popHornet(h); return; }   // imp family: shade fizzles them
+  // imp family: shade fizzles them — except the FALLS HOLLOW nests, whose
+  // own ember glow sustains them in the dark (the boss-arena imp precedent)
+  if (h.area !== 'hollow' && inShadeAt(h.x, h.z) && h.st !== 'pop') { popHornet(h); return; }
   const d2p = Math.hypot(P.x - h.x, P.z - h.z);
   const faceP = () => { h.face = Math.atan2(P.x - h.x, P.z - h.z); };
   if (h.st === 'drift') {
@@ -8915,9 +9038,11 @@ function tickForest() {
       break;
     }
   }
-  /* the sealed falls basin HUMS when you reach the rockfall */
+  /* the sealed falls basin HUMS when you reach the rockfall (until the
+     resonance beat is about to open it — night two takes over from there) */
   const dh = Math.hypot(P.x - HUM_SPOT.x, P.z - HUM_SPOT.z);
-  if (dh < 13 && !humLatch) {
+  if (window.__n2WillOpen && window.__n2WillOpen()) { /* resonance owns the spot */ }
+  else if (dh < 13 && !humLatch) {
     humLatch = true;
     SFX.hum();
     showCaption('The stones here fell recently. Something under there hums.', 4200);
@@ -8983,6 +9108,7 @@ window.__forestApplySave = function () {
 /* ── per-frame: visibility, fog, animation, telemetry (rides cullChunks,
    which updateVisuals calls right after it finishes the base fog) ── */
 const FOGF = { col: col(0xe9d2ab), near: 160, far: 1250 };
+const _fogFwd = new THREE.Vector3();      // hoisted: the fog-wall cull's camera basis
 const FDBG = { reveal: false, overhead: false };
 let fT = 0, fClock = performance.now(), dbgDone = false;
 const FCHEST_ALL = [millChest, ferryChest, fgrottoChest, cedarChest];
@@ -9001,6 +9127,12 @@ cullChunks = function (ccx, ccz) {
     c.mesh.visible = (dx * dx + dz * dz) < (c.r2 || 27225);
   }
   fallsMesh.visible = forestVis;
+  {
+    const drx = BASIN.x - ccx, drz = BASIN.z - ccz;
+    const rfNear = drx * drx + drz * drz < 200 * 200;
+    rockfallMesh.visible = forestVis && rfNear && !window.__basinOpenNow;
+    rockfallOpenMesh.visible = forestVis && rfNear && !!window.__basinOpenNow;
+  }
   towerMesh.visible = forestVis;
   cedarMesh.visible = forestVis;
   window.__springsMesh.visible = forestVis;
@@ -9012,10 +9144,29 @@ cullChunks = function (ccx, ccz) {
      the near chunk and the covering mega are culled. The bay impression
      additionally requires the camera east of the pass: it must never appear
      inside Brightharbor. */
+  /* v8.1: past the fog WALL a far-tier mesh renders as 100% fog colour and
+     nothing else — linear fog saturates at fog.far, so those meshes paint
+     exactly the band the fog already paints. Culling them costs no pixel and
+     bought the falls-hollow vista its headroom back. Conservative on purpose:
+     measured against the region's fully-ramped far plane (the bay's is 185 m,
+     so this never fires there) and against the mesh's real bounding sphere.
+     The test uses VIEW depth, not ground distance: three.js fogs by
+     -mvPosition.z, so a mesh out at the corner of a 66° frustum is far less
+     fogged than its map distance suggests. Nearest depth of the bounding
+     sphere, with the camera basis taken fresh (updateCamera already ran). */
+  const fogWall = (FDBG.overhead || reveal) ? Infinity : FOGF.far;
+  camera.updateMatrixWorld();
+  camera.getWorldDirection(_fogFwd);
+  const cpx = camera.position.x, cpy = camera.position.y, cpz = camera.position.z;
+  const pastFogWall = (o) => {
+    const depth = (o.bx - cpx) * _fogFwd.x + (o.by - cpy) * _fogFwd.y + (o.bz - cpz) * _fogFwd.z;
+    return depth - o.br > fogWall;
+  };
   for (let i = 0; i < farMegas.length; i++) {
     const fm = farMegas[i];
     const dx = fm.cx - ccx, dz = fm.cz - ccz;
-    fm.mesh.visible = !reveal && (dx * dx + dz * dz > fm.actR * fm.actR) && (fm.bh ? ccx > 170 : forestVis);
+    fm.mesh.visible = !reveal && (dx * dx + dz * dz > fm.actR * fm.actR) &&
+      !pastFogWall(fm) && (fm.bh ? ccx > 170 : forestVis);
   }
   for (let i = 0; i < farTiles.length; i++) {
     const ft = farTiles[i];
@@ -9026,7 +9177,8 @@ cullChunks = function (ccx, ccz) {
     }
     const pairVis = !!(ft.pair && ft.pair.mesh && ft.pair.mesh.visible);
     const megaVis = !!(ft.mega && ft.mega.mesh.visible);
-    ft.mesh.visible = !pairVis && !megaVis && !reveal && (ft.bh ? ccx > 170 : forestVis);
+    ft.mesh.visible = !pairVis && !megaVis && !reveal && !pastFogWall(ft) &&
+      (ft.bh ? ccx > 170 : forestVis);
   }
   const near2 = (x, z, r) => { const dx = x - ccx, dz = z - ccz; return dx * dx + dz * dz < r * r; };
   for (const ch of FCHEST_ALL) ch.group.visible = forestVis && near2(ch.x, ch.z, 80);
@@ -9200,6 +9352,11 @@ function animateForest(dtv, now, ccx, ccz) {
     if (!vis) continue;
     h.m.root.position.set(h.x, h.y, h.z);
     h.m.root.rotation.y = h.face || 0;
+    /* v8.1 draw-call hygiene: the ground blob is a DODGING cue — it only has
+       to exist while the dive is readable. Past 22 m it is a couple of pixels
+       under a bug you cannot fight yet, and the falls hollow parks four
+       hornets in one vista (4 extra calls for nothing). */
+    h.m.shadow.visible = near2(h.x, h.z, 22);
     h.m.shadow.position.y = groundH(h.x, h.z) - h.y + 0.04;
     h.m.wings.rotation.x = -0.05 + Math.sin(now / 1000 * 95 + h.sx) * 0.5;
     if (h.st === 'tele') {
@@ -9417,6 +9574,2773 @@ for (const c of chunks) {
 }
 </script>
 <script>
+/* ═══════════════════ p6c — PHASE 2 night two: THE FALLS HOLLOW & THE TIDE'S RETURN ═══════════════════
+   Behind the rockfall: a water-carved cathedral (light-through-dry-channels
+   puzzles, ember-hornet nests, the chain mural, a moonfish fossil). Coiled
+   in the last basin: THE SILT WYRM, wearing the HALF SHIELD. Cure it, carry
+   the Shield home, slot it — and THE TIDE COMES HOME: the bay floods back
+   to ocean, the wake-boat floats, and SAILING v1 begins.
+
+   ARCHITECTURE: extends by wrapping (the p6b pattern) — groundH, solids,
+   shade, areas, interactions, swings, ticks, camera, cinematics. ONE ground
+   authority everywhere (makeMeshField; rendered == physics). Every piece of
+   world state derives in __tideApplySave, bidirectionally.               */
+
+/* ───────────────────────── geography (locked) ───────────────────────── */
+const WL = -0.55;                        // the design waterline of the returned sea
+window.__WL = WL;
+const SEA_EDGE = { x: 0, z: 40, r: 112 };   // soft boundary of sailable water
+
+/* the hollow: chambers strung like beads under the crown plateau */
+const H_THROAT = { ax: 1946, az: 1201, bx: 1964, bz: 1224, hw: 2.7 };
+const H1 = { x: 1972, z: 1236, r: 15 };      // Gallery of the First Pool
+const COR12 = { ax: 1981, az: 1245, bx: 2003, bz: 1261, hw: 2.4 };
+const HDOOR1 = { x: 1992, z: 1253, r: 2.6 };
+const H2 = { x: 2012, z: 1270, r: 14 };      // the Chandelier Vault
+const H2B = { x: 1994, z: 1284, r: 5.5 };    // the Ben-bait side chamber
+const COR2B = { ax: 2003, az: 1277, bx: 1996, bz: 1283, hw: 1.8 };
+const COR23 = { ax: 2021, az: 1279, bx: 2037, bz: 1296, hw: 2.4 };
+const HDOOR2 = { x: 2029, z: 1287.5, r: 2.6 };
+const H3 = { x: 2046, z: 1306, r: 16 };      // the Last Basin — the Wyrm's coil
+const HGAP = { ax: 1923, az: 1178, bx: 1940, bz: 1194, hw: 3.0 };   // through the parted rockfall
+const H_ANCHOR = { x: 1958, z: 1216 };       // sunstruck wake spot (throat)
+const HM1 = { x: 1969, z: 1231 };            // mirror-shell one (H1)
+const HM2 = { x: 2009, z: 1265 };            // mirror-shell two (H2)
+const HRELAY = { x: 2021, z: 1279 };         // the fixed relay shell
+const HMURAL = { x: 2058.6, z: 1310.5 };     // the chain mural (H3 east wall)
+const HFOSSIL = { x: 1990.2, z: 1288.6 };    // the moonfish fossil (H2b wall)
+const HPOOL = { x: 2050, z: 1301, r: 4 };    // the last pool — wet again after the cure
+const SLABS = [                              // stone slabs: the Wyrm cannot swim through stone
+  [2040, 1298, 2.4], [2052, 1312, 2.3], [2042.5, 1314.5, 2.2],
+  [2055, 1299.5, 2.2], [2047.5, 1291, 2.3],
+];
+
+/* hollow floors: a slow descent, bead to bead */
+const H_BASE = forestH(BASIN.x, BASIN.z);
+const H1Y = H_BASE - 4, H2Y = H_BASE - 8, H2BY = H_BASE - 7.6, H3Y = H_BASE - 12;
+
+function segT(x, z, s) {   // param + lateral distance along a walk segment
+  const dx = s.bx - s.ax, dz = s.bz - s.az;
+  const L2 = dx * dx + dz * dz;
+  const t = ((x - s.ax) * dx + (z - s.az) * dz) / L2;
+  const lat = Math.hypot(x - (s.ax + dx * t), z - (s.az + dz * t));
+  return [t, lat];
+}
+function hollowOpenCore(x, z) {
+  // the always-carved air: throat + chambers + corridors (doors plug separately)
+  if (Math.hypot(x - H1.x, z - H1.z) < H1.r + 0.8) return true;
+  if (Math.hypot(x - H2.x, z - H2.z) < H2.r + 0.8) return true;
+  if (Math.hypot(x - H2B.x, z - H2B.z) < H2B.r + 0.8) return true;
+  if (Math.hypot(x - H3.x, z - H3.z) < H3.r + 0.8) return true;
+  for (const s of [H_THROAT, COR12, COR2B, COR23]) {
+    const [t, lat] = segT(x, z, s);
+    if (t > -0.04 && t < 1.04 && lat < s.hw) return true;
+  }
+  return false;
+}
+function basinWalkAt(x, z) {
+  if (Math.hypot(x - BASIN.x, z - BASIN.z) < BASIN.r - 1.4) return true;
+  const [t, lat] = segT(x, z, HGAP);
+  return t > -0.05 && t < 1.05 && lat < HGAP.hw;
+}
+let basinOpenNow = false;               // derived from the save in __tideApplySave
+window.__basinOpenNow = false;
+function hollowDoorPlugAt(x, z) {
+  if (!(SAVE && SAVE.glyph1) && Math.hypot(x - HDOOR1.x, z - HDOOR1.z) < HDOOR1.r) return true;
+  if (!(SAVE && SAVE.glyph2) && Math.hypot(x - HDOOR2.x, z - HDOOR2.z) < HDOOR2.r) return true;
+  return false;
+}
+/* ── SOLID authority: plugs first, then carve, then night-one's answer ── */
+const _n1ForestSolid = window.__forestSolid;
+window.__forestSolid = function (x, z) {
+  if (hollowDoorPlugAt(x, z)) return true;
+  // while sealed, the rockfall overrides EVERY carve — the throat must not
+  // cut a slot through the ring (night-one's fuzzer holds the line here)
+  if (!basinOpenNow && Math.hypot(x - BASIN.x, z - BASIN.z) < BASIN.r) return true;
+  if (hollowOpenCore(x, z)) return false;
+  if (basinOpenNow && basinWalkAt(x, z)) return false;
+  return _n1ForestSolid(x, z);
+};
+
+/* ── the hollow floor field (ONE ground authority, mesh == physics) ── */
+function inHollowFieldQ(x, z) {
+  // membership with margin: open air + 2.5 m of wall base
+  if (Math.hypot(x - H1.x, z - H1.z) < H1.r + 3.3) return true;
+  if (Math.hypot(x - H2.x, z - H2.z) < H2.r + 3.3) return true;
+  if (Math.hypot(x - H2B.x, z - H2B.z) < H2B.r + 3.3) return true;
+  if (Math.hypot(x - H3.x, z - H3.z) < H3.r + 3.3) return true;
+  for (const s of [H_THROAT, COR12, COR2B, COR23]) {
+    const [t, lat] = segT(x, z, s);
+    if (t > -0.06 && t < 1.06 && lat < s.hw + 2.5) return true;
+  }
+  return false;
+}
+window.__hollowAt = (x, z) => inHollowFieldQ(x, z) ||
+  Math.hypot(x - BASIN.x, z - BASIN.z) < BASIN.r + 4;
+function hollowFloorRaw(x, z) {
+  // weighted blend of the features' floors; the throat hands terrain back
+  // to the forest analytically (continuous at the basin seam)
+  let wSum = 0, hSum = 0;
+  const add = (w, h) => { if (w > 0) { wSum += w; hSum += h * w; } };
+  const cham = (c, floor) => {
+    const d = Math.hypot(x - c.x, z - c.z);
+    if (d < c.r + 3.3) {
+      const w = smoothstep(clamp((c.r + 1.5 - d) / 3.0 + 1, 0, 1));
+      // a gentle dish toward the middle
+      let h = floor - 0.7 * smoothstep(1 - d / c.r);
+      add(Math.max(w, 0.001), h);
+    }
+  };
+  cham(H1, H1Y); cham(H2, H2Y); cham(H2B, H2BY); cham(H3, H3Y);
+  const corr = (s, ya, yb) => {
+    const [t, lat] = segT(x, z, s);
+    if (t > -0.06 && t < 1.06 && lat < s.hw + 3.0) {
+      const w = smoothstep(clamp((s.hw + 1.0 - lat) / 2.6 + 1, 0, 1));
+      add(Math.max(w, 0.001) * 1.35, lerp(ya, yb, smoothstep(clamp(t, 0, 1))));
+    }
+  };
+  // throat: starts ON the forest terrain (minus a worn threshold step)
+  {
+    const [t, lat] = segT(x, z, H_THROAT);
+    if (t > -0.06 && t < 1.06 && lat < H_THROAT.hw + 3.0) {
+      const w = smoothstep(clamp((H_THROAT.hw + 1.0 - lat) / 2.6 + 1, 0, 1));
+      const inset = 0.18 * smoothstep(clamp(t * 6, 0, 1));
+      add(Math.max(w, 0.001) * 1.6, lerp(forestH(x, z) - inset, H1Y, smoothstep(clamp(t, 0, 1))));
+    }
+  }
+  corr(COR12, H1Y, H2Y); corr(COR2B, H2Y, H2BY); corr(COR23, H2Y, H3Y);
+  if (wSum <= 0) return forestH(x, z);
+  let h = hSum / wSum;
+  // texture: faint flowstone ripples
+  h += vnoise(x * 0.3, z * 0.3) * 0.1;
+  // H3: the silt basin — dune ripples, the pool dish, and the STONE SLABS
+  const d3 = Math.hypot(x - H3.x, z - H3.z);
+  if (d3 < H3.r + 2) {
+    const m = smoothstep((H3.r + 2 - d3) / 3);
+    h += vnoise(x * 0.6 + 4, z * 0.6) * 0.12 * m;
+    const dp = Math.hypot(x - HPOOL.x, z - HPOOL.z);
+    if (dp < HPOOL.r + 1.5) h -= 0.55 * smoothstep((HPOOL.r + 1.5 - dp) / 2.2) * m;
+    for (let i = 0; i < SLABS.length; i++) {
+      const s = SLABS[i];
+      const ds = Math.hypot(x - s[0], z - s[1]);
+      if (ds < s[2] + 0.7) h = Math.max(h, H3Y + 0.55 * smoothstep((s[2] + 0.35 - ds) / 0.7));
+    }
+  }
+  return h;
+}
+const hollowHMesh = makeMeshField(hollowFloorRaw, 1930, 1186, 2078, 1338, 4, () => true);
+const _n1GroundH = groundH;
+groundH = function (x, z) {
+  if (x > 1930 && x < 2078 && z > 1186 && z < 1338 && inHollowFieldQ(x, z)) return hollowHMesh(x, z);
+  return _n1GroundH(x, z);
+};
+function inHollowAt(x, z) {
+  return (hollowOpenCore(x, z) || hollowDoorPlugAt(x, z)) &&
+    !(Math.hypot(x - BASIN.x, z - BASIN.z) < BASIN.r);
+}
+function onSlabAt(x, z) {
+  for (let i = 0; i < SLABS.length; i++) {
+    if (Math.hypot(x - SLABS[i][0], z - SLABS[i][1]) < SLABS[i][2] * 0.88) return true;
+  }
+  return false;
+}
+
+/* ── shade / respawn / areas ── */
+const _n1InShadeAt = inShadeAt;
+inShadeAt = function (x, z) {
+  if (inHollowAt(x, z)) return true;      // the hollow is deep cool dark
+  return _n1InShadeAt(x, z);
+};
+const _n1NearestShade = nearestShadeSpot;
+nearestShadeSpot = function (x, z) {
+  if (inHollowAt(x, z)) return { x: H_ANCHOR.x, z: H_ANCHOR.z };
+  if (SAVE && SAVE.sky >= 2) {
+    // flooded world: never wake underwater — fall back to a dry shore spot
+    const s = _n1NearestShade(x, z);
+    if (_n1GroundH(s.x, s.z) < WL + 0.05) return { x: 4, z: -2 };
+    return s;
+  }
+  return _n1NearestShade(x, z);
+};
+const _n1AreaAt = areaAt;
+areaAt = function (x, z) {
+  if (inHollowAt(x, z)) return 'hollow';
+  return _n1AreaAt(x, z);
+};
+
+/* ── flooded helper ── */
+const flooded = () => !!(SAVE && SAVE.sky >= 2);
+function waterDepthAt(x, z) {
+  if (!flooded()) return 0;
+  if (x > 100 || z < -60) return 0;                  // the sea lives in the bay
+  const g = _n1GroundH(x, z);
+  return Math.max(0, WL - g);
+}
+</script>
+<script>
+/* ═══════════ p6c/2 — building THE FALLS HOLLOW ═══════════ */
+const C_HCAVE_LO = col(0x6a5c4a), C_HCAVE_MID = col(0x51493f), C_HCAVE_HI = col(0x3b3733);
+const C_FLOW = col(0x9c8f76), C_FLOW2 = col(0x7d7159), C_HSILT = col(0xb3a685),
+      C_HSLAB = col(0x8b857a), C_GLYPH = col(0x3a4a52), C_HCHAN = col(0x5c5244);
+
+function hollowColor(x, z, y) {
+  const n = vnoise(x * 0.32, z * 0.32), f = vnoise(x * 0.85 + 5, z * 0.85);
+  // flowstone floor: pale banded stone, ancient waterlines following depth
+  mix3(C_FLOW, C_FLOW2, clamp(0.5 + n * 0.6 + f * 0.25, 0, 1), _gc);
+  if (Math.abs(Math.sin(y * 2.2 + n)) > 0.86) mix3(_gc, C_HCHAN, 0.5, _gc);
+  // the carved beam channels: darker grooves along the corridors
+  for (const s of [COR12, COR23]) {
+    const [t, lat] = segT(x, z, s);
+    if (t > -0.2 && t < 1.1 && lat < 0.55) mix3(_gc, C_GLYPH, 0.55 * (1 - lat / 0.55), _gc);
+  }
+  // H3: silt basin — the Wyrm's ground reads DIFFERENT from stone
+  const d3 = Math.hypot(x - H3.x, z - H3.z);
+  if (d3 < H3.r + 1.5) {
+    const m = smoothstep((H3.r + 1.5 - d3) / 2.5);
+    mix3(_gc, f > 0.2 ? C_HSILT : mix3(C_HSILT, [0, 0, 0], 0.12), m * 0.9, _gc);
+    if (Math.abs(vnoise(x * 1.4, z * 1.4)) < 0.06) mix3(_gc, C_FLOW2, 0.5 * m, _gc);
+    for (let i = 0; i < SLABS.length; i++) {
+      const ds = Math.hypot(x - SLABS[i][0], z - SLABS[i][1]);
+      if (ds < SLABS[i][2]) mix3(_gc, C_HSLAB, 0.92, _gc);
+    }
+    const dp = Math.hypot(x - HPOOL.x, z - HPOOL.z);
+    if (dp < HPOOL.r) mix3(_gc, col(0x6d7a70), 0.6 * m, _gc);
+  }
+  // dry plunge pool in H1
+  const dp1 = Math.hypot(x - 1975, z - 1230);
+  if (dp1 < 3.6) mix3(_gc, col(0x83907f), 0.55, _gc);
+  return _gc;
+}
+
+/* the floor sheet — same triangulation as the physics field, by construction */
+let hollowFloorMesh = null;
+(function buildHollowFloor() {
+  const md = MD();
+  const gc = (x, z) => {
+    const y = hollowHMesh(x, z);
+    const c = hollowColor(x, z, y);
+    return [c[0], c[1], c[2], y];
+  };
+  const cell = (x, z, s) => {
+    const c00 = gc(x, z), c10 = gc(x + s, z), c01 = gc(x, z + s), c11 = gc(x + s, z + s);
+    pushTriWV(md, x, c00[3], z, x, c01[3], z + s, x + s, c11[3], z + s, c00, c01, c11);
+    pushTriWV(md, x, c00[3], z, x + s, c11[3], z + s, x + s, c10[3], z, c00, c11, c10);
+  };
+  for (let x = 1930; x < 2078; x += 4) {
+    for (let z = 1186; z < 1338; z += 4) {
+      // build where any corner is in the field (walls cover the fringe)
+      if (!(inHollowFieldQ(x, z) || inHollowFieldQ(x + 4, z) || inHollowFieldQ(x, z + 4) || inHollowFieldQ(x + 4, z + 4))) continue;
+      // skip the coplanar sliver at the throat mouth (forest sheet owns it)
+      const [t] = segT(x + 2, z + 2, H_THROAT);
+      if (t < 0.02 && Math.hypot(x + 2 - H1.x, z + 2 - H1.z) > H1.r + 4) continue;
+      const h = 2;
+      cell(x, z, h); cell(x + h, z, h); cell(x, z + h, h); cell(x + h, z + h, h);
+    }
+  }
+  hollowFloorMesh = mdMesh(md, WORLD_MAT, false);
+  hollowFloorMesh.matrixAutoUpdate = false; hollowFloorMesh.updateMatrix();
+  hollowFloorMesh.visible = false;
+  scene.add(hollowFloorMesh);
+})();
+
+/* walls marched along the SAME boundary the collision answers (v4 law) */
+let hollowWallMesh = null, hollowDomeMesh = null;
+(function buildHollowWalls() {
+  const md = MD();
+  const wallRock = (x, z, R0, seedv) => {
+    const y = groundH(x, z) - 1.4;
+    latheW(md, [[R0, 0], [R0 * 1.08, 3.2], [R0 * 0.5, 7.8], [0, 10]],
+      { seg: 6, ex: 0.88, x, y, z, ry: seedv * 2.13, flat: true, segJitter: 0.13,
+        col: C_HCAVE_MID, cols: [C_HCAVE_LO, C_HCAVE_MID, C_HCAVE_HI] });
+  };
+  const intrudes = (x, z, R0) => {
+    const open = (px, pz) => hollowOpenCore(px, pz) || (Math.hypot(px - BASIN.x, pz - BASIN.z) < BASIN.r - 1.4);
+    if (open(x, z)) return true;
+    for (let p = 0; p < 6; p++) {
+      const a = p / 6 * TAU;
+      if (open(x + Math.cos(a) * R0 * 0.6, z + Math.sin(a) * R0 * 0.6)) return true;
+    }
+    return false;
+  };
+  const tryRock = (x, z, R0, seedv) => {
+    if (intrudes(x, z, R0)) return;
+    if (hollowDoorPlugAt(x, z)) return;         // never a rock where a door stands
+    wallRock(x, z, R0, seedv);
+  };
+  const marchCircle = (c, rOpen) => {
+    const n = Math.ceil((TAU * (rOpen + 2.0)) / 2.1);
+    for (let i = 0; i < n; i++) {
+      const a = i / n * TAU;
+      const R0 = 1.4 + (hash2((c.x * 7 + i) | 0, (c.z + i * 3) | 0) * 0.5 + 0.5) * 0.65;
+      const rr = rOpen + R0 * 1.0;
+      tryRock(c.x + Math.cos(a) * rr, c.z + Math.sin(a) * rr, R0, i + a);
+    }
+  };
+  const marchSeg = (s) => {
+    const len = Math.hypot(s.bx - s.ax, s.bz - s.az);
+    const ux = (s.bx - s.ax) / len, uz = (s.bz - s.az) / len;
+    const px = -uz, pz = ux;
+    const n = Math.ceil(len / 1.9);
+    for (let i = 0; i <= n; i++) {
+      const t = i / n;
+      for (const sg of [-1, 1]) {
+        const R0 = 1.3 + (hash2((i * 7 + sg * 3) | 0, (s.ax + s.bz) | 0) * 0.5 + 0.5) * 0.6;
+        const off = s.hw + R0 * 1.0;
+        tryRock(s.ax + ux * len * t + px * off * sg, s.az + uz * len * t + pz * off * sg, R0, i * 2 + sg);
+      }
+    }
+  };
+  marchCircle(H1, H1.r + 0.8); marchCircle(H2, H2.r + 0.8);
+  marchCircle(H2B, H2B.r + 0.8); marchCircle(H3, H3.r + 0.8);
+  marchSeg(H_THROAT); marchSeg(COR12); marchSeg(COR2B); marchSeg(COR23);
+  hollowWallMesh = mdMesh(md, WORLD_MAT, false);
+  hollowWallMesh.matrixAutoUpdate = false; hollowWallMesh.updateMatrix();
+  hollowWallMesh.visible = false;
+  scene.add(hollowWallMesh);
+
+  /* the CATHEDRAL: inward domes + corridor liners, flat-authored strata */
+  const mdD = MD();
+  const inSkipArc = (t0, a, half) => {
+    let d = Math.abs(((t0 - a) % TAU + TAU) % TAU);
+    if (d > Math.PI) d = TAU - d;
+    return d < half;
+  };
+  const domeIn = (c, floor, R, doors, crackA) => {
+    latheW(mdD, [[R + 1.6, -0.5], [R + 0.9, 3.6], [R * 0.6, 7.6], [0, 10.2]], {
+      seg: 14, x: c.x, y: floor, z: c.z, inward: true, flat: true, segJitter: 0.14,
+      col: C_HCAVE_MID, cols: [C_HCAVE_LO, C_HCAVE_MID, C_HCAVE_HI],
+      skip: (t0, t1, band) => {
+        if (crackA !== undefined && band >= 2 && inSkipArc(t0, crackA, 0.24)) return true;
+        for (const d of doors) if (band < d[1] && inSkipArc(t0, d[0], 0.32)) return true;
+        return false;
+      },
+    });
+  };
+  const angOf = (c, s) => Math.atan2((s.az + s.bz) / 2 - c.z, (s.ax + s.bx) / 2 - c.x);
+  domeIn(H1, H1Y, H1.r, [[angOf(H1, H_THROAT), 2], [angOf(H1, COR12), 2]], 3.9);
+  domeIn(H2, H2Y, H2.r, [[angOf(H2, COR12), 2], [angOf(H2, COR23), 2], [angOf(H2, COR2B), 1]], 2.6);
+  domeIn(H2B, H2BY, H2B.r + 1.2, [[angOf(H2B, COR2B), 1]]);
+  domeIn(H3, H3Y, H3.r, [[angOf(H3, COR23), 2]], 5.3);
+  // corridor liners: wall strips + ceiling
+  const liner = (s, ya, yb) => {
+    const len = Math.hypot(s.bx - s.ax, s.bz - s.az);
+    const ux = (s.bx - s.ax) / len, uz = (s.bz - s.az) / len;
+    const px = -uz, pz = ux;
+    const quad = (ax, ay, az, bx, by, bz, cx, cy, cz, dx, dy, dz, c) => {
+      mdD.p.push(ax, ay, az, bx, by, bz, cx, cy, cz, ax, ay, az, cx, cy, cz, dx, dy, dz);
+      for (let i = 0; i < 6; i++) mdD.c.push(c[0], c[1], c[2]);
+    };
+    for (const side of [-1, 1]) {
+      for (let k = 0; k < 3; k++) {
+        const t0 = 0.02 + k * 0.33, t1 = t0 + 0.4;
+        const lat = s.hw + 2.4 + hash2(k, side + 3) * 0.4;
+        const y0 = lerp(ya, yb, t0), y1 = lerp(ya, yb, t1);
+        const cc = mix3(k % 2 ? C_HCAVE_MID : C_HCAVE_LO, C_HCAVE_HI, 0.12 + 0.2 * k);
+        quad(s.ax + ux * len * t0 + px * lat * side, y0 - 0.5, s.az + uz * len * t0 + pz * lat * side,
+             s.ax + ux * len * t1 + px * lat * side, y1 - 0.5, s.az + uz * len * t1 + pz * lat * side,
+             s.ax + ux * len * t1 + px * lat * side, y1 + 7.4, s.az + uz * len * t1 + pz * lat * side,
+             s.ax + ux * len * t0 + px * lat * side, y0 + 7.4, s.az + uz * len * t0 + pz * lat * side, cc);
+      }
+    }
+    for (let k = 0; k < 2; k++) {
+      // overhang the ends: no sky slit where liner meets the chamber domes
+      const t0 = -0.18 + k * 0.68, t1 = t0 + 0.72;
+      const w = s.hw + 5.4;
+      const y0 = lerp(ya, yb, clamp(t0, 0, 1)), y1 = lerp(ya, yb, clamp(t1, 0, 1));
+      quad(s.ax + ux * len * t0 - px * w, y0 + 6.4, s.az + uz * len * t0 - pz * w,
+           s.ax + ux * len * t1 - px * w, y1 + 6.4, s.az + uz * len * t1 - pz * w,
+           s.ax + ux * len * t1 + px * w, y1 + 6.4, s.az + uz * len * t1 + pz * w,
+           s.ax + ux * len * t0 + px * w, y0 + 6.4, s.az + uz * len * t0 + pz * w, C_HCAVE_HI);
+    }
+  };
+  liner(COR12, H1Y, H2Y); liner(COR2B, H2Y, H2BY); liner(COR23, H2Y, H3Y);
+  // the throat: ceiling closes over as you descend into the hill
+  {
+    const s = H_THROAT;
+    const len = Math.hypot(s.bx - s.ax, s.bz - s.az);
+    const ux = (s.bx - s.ax) / len, uz = (s.bz - s.az) / len;
+    const px = -uz, pz = ux;
+    for (let k = 0; k < 2; k++) {
+      const t0 = 0.3 + k * 0.36, t1 = t0 + 0.4;
+      const w = s.hw + 4.2;
+      const y0 = lerp(H_BASE, H1Y, t0) + 6.4, y1 = lerp(H_BASE, H1Y, t1) + 6.4;
+      mdD.p.push(s.ax + ux * len * t0 - px * w, y0, s.az + uz * len * t0 - pz * w,
+                 s.ax + ux * len * t1 - px * w, y1, s.az + uz * len * t1 - pz * w,
+                 s.ax + ux * len * t1 + px * w, y1, s.az + uz * len * t1 + pz * w,
+                 s.ax + ux * len * t0 - px * w, y0, s.az + uz * len * t0 - pz * w,
+                 s.ax + ux * len * t1 + px * w, y1, s.az + uz * len * t1 + pz * w,
+                 s.ax + ux * len * t0 + px * w, y0, s.az + uz * len * t0 + pz * w);
+      for (let i = 0; i < 6; i++) mdD.c.push(C_HCAVE_HI[0], C_HCAVE_HI[1], C_HCAVE_HI[2]);
+    }
+  }
+  // stalactites in H1 + H2, petrified drip columns
+  const rnd = mulberry32(20260816);
+  for (const [c, floor] of [[H1, H1Y], [H2, H2Y], [H3, H3Y]]) {
+    for (let i = 0; i < 7; i++) {
+      const a = rnd() * TAU, d = 3 + rnd() * (c.r - 5);
+      const sx = c.x + Math.cos(a) * d, sz = c.z + Math.sin(a) * d;
+      latheW(mdD, [[0.32 + rnd() * 0.3, 8.0], [0, 5.2 + rnd() * 1.6]], { seg: 5, flat: true, x: sx, y: floor, z: sz, col: C_HCAVE_HI });
+    }
+  }
+  hollowDomeMesh = mdMesh(mdD, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide }), false);
+  hollowDomeMesh.matrixAutoUpdate = false; hollowDomeMesh.updateMatrix();
+  hollowDomeMesh.visible = false;
+  scene.add(hollowDomeMesh);
+})();
+
+/* props: flowstone terraces, petrified waterwheels, chandeliers, the mural,
+   the fossil, dressing — one merged mesh */
+let hollowPropMesh = null, hollowGlowMesh = null;
+(function buildHollowProps() {
+  const md = MD();
+  const rnd = mulberry32(881);
+  // flowstone terraces: stacked rimmed discs down H1's walls (dry cascades)
+  for (let i = 0; i < 5; i++) {
+    const a = 2.2 + i * 0.5;
+    const x = H1.x + Math.cos(a) * (H1.r - 2.2), z = H1.z + Math.sin(a) * (H1.r - 2.2);
+    const y = groundH(x, z);
+    latheW(md, [[1.6 - i * 0.14, 0.1 + i * 0.42], [1.3 - i * 0.14, 0.34 + i * 0.42], [0, 0.4 + i * 0.42]],
+      { seg: 8, ex: 0.9, x, y, z, flat: true, segJitter: 0.08, col: C_FLOW, cols: [C_FLOW2, C_FLOW] });
+  }
+  // the dry FIRST POOL in H1: a salt-ringed bed
+  latheW(md, [[3.4, 0.02], [3.9, 0.1], [4.15, 0.04]], { seg: 10, flat: true, x: 1975, y: groundH(1975, 1230), z: 1230, col: C_SALT });
+  // petrified waterwheels of the older civilization: stone wheels half-sunk
+  const stoneWheel = (x, z, ry, R) => {
+    const y = groundH(x, z);
+    for (let i = 0; i < 10; i++) {
+      const a = i / 10 * TAU;
+      boxW(md, { x, y: y + R * 0.55 + Math.sin(a) * R * 0.8 * 0.5, z, w: 0.1, d: 0.42, h: 0.8, ry, rz: a, flat: true, col: i % 2 ? C_HSLAB : C_FLOW2 });
+    }
+    latheW(md, [[0.4, -0.3], [0.4, 0.5]], { seg: 7, flat: true, x, y: y + R * 0.55, z, col: C_FLOW2 });
+    addColl(x, z, 1.0);
+  };
+  stoneWheel(H2.x - 8, H2.z + 6, 0.6, 1.9);
+  stoneWheel(H2.x + 5, H2.z - 9, -0.4, 1.5);
+  // fallen glyph tablets along COR12 (dressing that teaches the language)
+  for (let i = 0; i < 3; i++) {
+    const t = 0.2 + i * 0.28;
+    const x = lerp(COR12.ax, COR12.bx, t) + (i % 2 ? 1.5 : -1.5);
+    const z = lerp(COR12.az, COR12.bz, t) + (i % 2 ? -1.1 : 1.1);
+    boxW(md, { x, y: groundH(x, z), z, w: 0.5, d: 0.08, h: 0.8, rx: 0.5 + rnd() * 0.4, ry: rnd() * 3, flat: true, col: C_FLOW2 });
+  }
+  /* THE CHAIN MURAL (H3 east wall): the moon LOWERED into the sea on chains */
+  {
+    const wx = HMURAL.x, wz = HMURAL.z;
+    const fy = H3Y;
+    const C_OCRE = col(0xb39a6a), C_OCRE2 = col(0x8a744c), C_MOONPALE = col(0xd2d5c6), C_SEAREL = col(0x6a8290);
+    const face = Math.atan2(H3.z - wz, H3.x - wx);   // faces the arena
+    // the moon disc, high on the wall
+    latheW(md, [[0, 0], [1.9, 0.1], [2.0, 0.14]], { seg: 14, flat: true, x: wx, y: fy + 5.6, z: wz, ry: 0, col: C_MOONPALE, cols: [C_MOONPALE, C_OCRE] });
+    // TWO chains, from above the moon down INTO the carved sea
+    for (const so of [-1, 1]) {
+      for (let i = 0; i < 8; i++) {
+        const ly = fy + 6.6 - i * 0.78;
+        latheW(md, [[0.34, 0], [0.24, 0.09], [0.34, 0.18]], { seg: 6, ex: 0.5, flat: true, x: wx - 0.3, y: ly, z: wz + so * (0.9 + (i % 2) * 0.2), col: C_OCRE2 });
+      }
+    }
+    // the carved SEA: relief wave bands under the moon
+    for (let i = 0; i < 4; i++) {
+      boxW(md, { x: wx - 0.15, y: fy + 1.9 - i * 0.42, z: wz, w: 0.09, d: 2.6 - i * 0.3, h: 0.22, ry: face + Math.PI / 2, flat: true, col: i % 2 ? C_SEAREL : mix3(C_SEAREL, [0, 0, 0], 0.25) });
+    }
+    // figures at the shore, arms raised — lowering it? mourning it? unsaid.
+    for (const fo of [-2.2, -1.5, 1.7, 2.4]) {
+      boxW(md, { x: wx - 0.12, y: fy + 0.8, z: wz + fo, w: 0.07, d: 0.16, h: 0.62, flat: true, col: C_OCRE });
+      boxW(md, { x: wx - 0.12, y: fy + 1.36, z: wz + fo, w: 0.05, d: 0.1, h: 0.14, flat: true, col: C_OCRE });
+    }
+  }
+  /* the MOONFISH FOSSIL (H2b): a spiral fish swimming in the stone */
+  {
+    const fx = HFOSSIL.x, fz = HFOSSIL.z;
+    const fy = H2BY + 1.4;
+    const C_BONE = col(0xcfc6ad);
+    for (let i = 0; i < 9; i++) {
+      const a = i / 9 * 3.6 - 0.6;
+      const r = 0.85 - i * 0.07;
+      boxW(md, { x: fx + Math.cos(a) * 0.2, y: fy + Math.sin(a) * r * 0.8, z: fz + Math.cos(a + 1.2) * r, w: 0.05, d: 0.3 - i * 0.02, h: 0.08, rx: a, flat: true, col: C_BONE });
+    }
+    latheW(md, [[0, 0], [0.28, 0.06]], { seg: 7, flat: true, x: fx, y: fy + 0.3, z: fz + 0.7, ry: 0, col: C_BONE });   // the eye whorl
+    boxW(md, { x: fx, y: fy - 0.15, z: fz - 0.85, w: 0.07, d: 0.4, h: 0.5, rx: 0.9, flat: true, col: C_BONE });        // tail fan
+  }
+  // salt hoard dressing in H2b
+  for (let i = 0; i < 5; i++) {
+    const a = rnd() * TAU, d = 1.5 + rnd() * 2.6;
+    const x = H2B.x + Math.cos(a) * d, z = H2B.z + Math.sin(a) * d;
+    latheW(md, [[0, 0], [0.24, 0.16], [0.13, 0.55 + rnd() * 0.3], [0, 0.8 + rnd() * 0.3]],
+      { seg: 5, x, y: groundH(x, z) - 0.05, z, ry: rnd() * TAU, flat: true, col: i % 2 ? C_SALT : mix3(C_SALT, C_FLOW, 0.4) });
+  }
+  hollowPropMesh = mdMesh(md, WORLD_MAT, false);
+  hollowPropMesh.matrixAutoUpdate = false; hollowPropMesh.updateMatrix();
+  hollowPropMesh.visible = false;
+  scene.add(hollowPropMesh);
+
+  /* glow tier: light shafts, chandeliers' inner fire, channel glow, glyphs */
+  const mdG = MD();
+  const warm = [1, 0.95, 0.78];
+  // H1 skylight crack + shaft to the first mirror
+  const crackA1 = 3.9;
+  const c1x = H1.x + Math.cos(crackA1) * H1.r * 0.55, c1z = H1.z + Math.sin(crackA1) * H1.r * 0.55;
+  for (const off of [[-0.4, 0], [0, 0.4]]) {
+    pushQuad(mdG, [c1x - off[0], H1Y + 8.6, c1z - off[1]], [c1x + off[0], H1Y + 8.6, c1z + off[1]],
+      [HM1.x + off[0] * 0.6, H1Y + 0.4, HM1.z + off[1] * 0.6], [HM1.x - off[0] * 0.6, H1Y + 0.4, HM1.z - off[1] * 0.6], warm);
+  }
+  lathe(mdG, [[0, 0.1], [1.6, 0.02]], { seg: 9, x: HM1.x, y: H1Y, z: HM1.z, col: warm });
+  // H2 crack + shaft to mirror two
+  const crackA2 = 2.6;
+  const c2x = H2.x + Math.cos(crackA2) * H2.r * 0.5, c2z = H2.z + Math.sin(crackA2) * H2.r * 0.5;
+  for (const off of [[-0.35, 0], [0, 0.35]]) {
+    pushQuad(mdG, [c2x - off[0], H2Y + 8.4, c2z - off[1]], [c2x + off[0], H2Y + 8.4, c2z + off[1]],
+      [HM2.x + off[0] * 0.6, H2Y + 0.4, HM2.z + off[1] * 0.6], [HM2.x - off[0] * 0.6, H2Y + 0.4, HM2.z - off[1] * 0.6], warm);
+  }
+  lathe(mdG, [[0, 0.1], [1.4, 0.02]], { seg: 8, x: HM2.x, y: H2Y, z: HM2.z, col: warm });
+  // H3: one thin cold shaft on the mural
+  pushQuad(mdG, [HMURAL.x - 2, H3Y + 9.4, HMURAL.z - 0.5], [HMURAL.x - 2, H3Y + 9.4, HMURAL.z + 0.5],
+    [HMURAL.x - 0.4, H3Y + 3.4, HMURAL.z + 0.7], [HMURAL.x - 0.4, H3Y + 3.4, HMURAL.z - 0.7], [0.75, 0.82, 0.9]);
+  // salt-crystal CHANDELIERS in H2 — hanging clusters that catch the shafts
+  for (const [cx2, cz2, s] of [[H2.x - 3, H2.z - 4, 1.2], [H2.x + 4, H2.z + 3, 1.0], [H2.x - 6, H2.z + 5, 0.8]]) {
+    const hy = H2Y + 7.2;
+    for (let i = 0; i < 5; i++) {
+      const a = i / 5 * TAU;
+      const px2 = cx2 + Math.cos(a) * 0.6 * s, pz2 = cz2 + Math.sin(a) * 0.6 * s;
+      lathe(mdG, [[0, 0], [0.14 * s, -0.3 * s], [0.05 * s, -1.1 * s - (i % 2) * 0.4], [0, -1.4 * s]],
+        { seg: 5, x: px2, y: hy, z: pz2, col: [0.85, 0.92, 1.0] });
+    }
+    lathe(mdG, [[0.2 * s, 0], [0.3 * s, -0.25 * s]], { seg: 6, x: cx2, y: hy + 0.1, z: cz2, col: [0.7, 0.78, 0.9] });
+  }
+  hollowGlowMesh = mdMesh(mdG, new THREE.MeshBasicMaterial({
+    vertexColors: true, transparent: true, opacity: 0.28,
+    blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide, fog: false,
+  }), false);
+  hollowGlowMesh.matrixAutoUpdate = false; hollowGlowMesh.updateMatrix();
+  hollowGlowMesh.visible = false;
+  scene.add(hollowGlowMesh);
+})();
+
+/* ── the two glyph doors: carved slabs that SINK when their glyph re-lights ── */
+function buildGlyphDoor(door, s) {
+  const g = new THREE.Group();
+  const md = MD();
+  const ry = Math.atan2(s.bz - s.az, s.bx - s.ax) + Math.PI / 2;
+  // the slab: a rounded stone door filling the corridor
+  latheW(md, [[2.5, 0], [2.35, 2.6], [1.6, 4.6], [0, 5.4]],
+    { seg: 8, ex: 0.32, x: 0, y: 0, z: 0, ry, flat: true, segJitter: 0.08,
+      col: C_FLOW2, cols: [C_HCAVE_LO, C_FLOW2, C_FLOW] });
+  // the carved WATER-GLYPH: a spiral wave, dark until lit
+  const mdGl = MD();
+  for (let i = 0; i < 8; i++) {
+    const a = i / 8 * 4.4;
+    const r = 0.3 + i * 0.14;
+    box(mdGl, { x: Math.cos(a) * r * 0.8, y: 2.1 + Math.sin(a) * r * 0.6, z: 0, w: 0.09, d: 0.05, h: 0.24, rx: a * 0.4, col: [0.4, 0.9, 1.0] });
+  }
+  box(mdGl, { x: 0, y: 1.1, z: 0, w: 0.5, d: 0.05, h: 0.1, col: [0.4, 0.9, 1.0] });
+  const glyph = mdMesh(mdGl, new THREE.MeshBasicMaterial({
+    vertexColors: true, transparent: true, opacity: 0.1,
+    blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+  }), false);
+  glyph.rotation.y = ry;
+  glyph.position.set(Math.cos(ry) * 0.4, 0, -Math.sin(ry) * 0.4);
+  glyph.frustumCulled = false;
+  const slab = mdMesh(md, WORLD_MAT, false);
+  slab.frustumCulled = false;
+  g.add(slab); g.add(glyph);
+  g.position.set(door.x, groundH(door.x, door.z) - 0.2, door.z);
+  g.visible = false;
+  scene.add(g);
+  return { group: g, glyph, baseY: groundH(door.x, door.z) - 0.2, sinkT: -1, open: false };
+}
+const glyphDoor1 = buildGlyphDoor(HDOOR1, COR12);
+const glyphDoor2 = buildGlyphDoor(HDOOR2, COR23);
+
+/* ── the mirror-shells (the grotto's language, grown up) ── */
+function buildHollowMirror(pos, floorY, fixedAngle) {
+  const g = new THREE.Group();
+  const md = MD();
+  const nacre = [0.74, 0.78, 0.77], nacre2 = [0.6, 0.67, 0.7];
+  for (let i = 0; i < 7; i++) {
+    const a = (i - 3) * 0.22;
+    box(md, { x: 0, y: 0.35, z: 0, w: 0.13, d: 0.045, h: 1.25, tw: 0.28, td: 0.028, rz: a, col: i % 2 ? nacre : nacre2 });
+  }
+  lathe(md, [[0.26, 0.1], [0.18, 0.5]], { seg: 6, col: [0.5, 0.48, 0.44] });
+  const m = mdMesh(md, TOON);
+  m.frustumCulled = false;
+  g.add(m);
+  g.position.set(pos.x, groundH(pos.x, pos.z) + 0.1, pos.z);
+  g.visible = false;
+  scene.add(g);
+  addColl(pos.x, pos.z, 0.55);
+  return { group: g, angle: fixedAngle !== undefined ? fixedAngle : 2.4, fixed: fixedAngle !== undefined };
+}
+const hm1 = buildHollowMirror(HM1, H1Y);
+hm1.target = Math.atan2(HDOOR1.z - HM1.z, HDOOR1.x - HM1.x);
+const hm2 = buildHollowMirror(HM2, H2Y);
+hm2.target = Math.atan2(HRELAY.z - HM2.z, HRELAY.x - HM2.x);
+const hmRelay = buildHollowMirror(HRELAY, H2Y, Math.atan2(HDOOR2.z - HRELAY.z, HDOOR2.x - HRELAY.x));
+hm1.group.rotation.y = -hm1.angle;
+hm2.group.rotation.y = -hm2.angle;
+hmRelay.group.rotation.y = -hmRelay.angle;
+
+/* reflected beams: pivots at each shell, aimed by their angle */
+function buildHollowBeam(pos, floorY, L) {
+  const md = MD();
+  const c = [1, 1, 1];
+  for (const off of [[0, 0.4], [0.4, 0]]) {
+    pushQuad(md, [0.3, 1.25 - off[1] * 0.5, -off[0]], [0.3, 1.25 + off[1] * 0.5, off[0]],
+      [L, 0.95 + off[1], off[0] * 2], [L, 0.95 - off[1], -off[0] * 2], c);
+  }
+  const m = mdMesh(md, BEAM_MAT.clone(), false);
+  m.material.opacity = 0;
+  m.frustumCulled = false;
+  m.position.set(pos.x, groundH(pos.x, pos.z) + 0.1, pos.z);
+  m.visible = false;
+  scene.add(m);
+  return m;
+}
+const hBeam1 = buildHollowBeam(HM1, H1Y, Math.hypot(HDOOR1.x - HM1.x, HDOOR1.z - HM1.z) + 1);
+const hBeam2 = buildHollowBeam(HM2, H2Y, Math.hypot(HRELAY.x - HM2.x, HRELAY.z - HM2.z) + 0.6);
+const hBeamR = buildHollowBeam(HRELAY, H2Y, Math.hypot(HDOOR2.x - HRELAY.x, HDOOR2.z - HRELAY.z) + 1);
+hBeamR.rotation.y = -hmRelay.angle;
+
+/* ── the Ben-bait chest + hollow salt (rides the forest fSalt systems) ── */
+const hollowChest = { x: 1992.6, z: 1286.2, opened: false, lid: null, group: null };
+{
+  const m = buildChestMesh(hollowChest.x, hollowChest.z, 2.4);
+  hollowChest.group = m.group; hollowChest.lid = m.lid;
+  hollowChest.group.visible = false;
+}
+FCHESTS.push({ ch: hollowChest, key: 'hChest', salt: 6, big: 'SALT HOARD',
+  small: 'Six crystals, saved where the sun has never been.' });
+for (const p of [[1991.5, 1281.5], [1996.5, 1283.2], [1995.4, 1287.8]]) {
+  const m = new THREE.Mesh(SALT_GEO, SALT_MAT);
+  m.frustumCulled = false;
+  m.visible = false;
+  m.position.set(p[0], groundH(p[0], p[1]) + 0.16, p[1]);
+  scene.add(m);
+  fSalt.push({ x: p[0], z: p[1], got: false, mesh: m, baseY: groundH(p[0], p[1]) + 0.16, ph: p[0] * 0.3, chimed: false });
+}
+
+/* ── hornet nests: two fight beats (H1 gallery + H2 vault) — ONE pair each,
+   the forest's own tuning: brutal but survivable in a closed chamber ── */
+for (const [x, z, pair] of [
+  [1976, 1242, 20], [1981, 1244, 20],
+  [2016, 1263, 22], [2020, 1267, 22],
+]) {
+  const h = {
+    m: buildEmberHornet(), sx: x, sz: z, x, z, y: groundH(x, z) + 2.2, face: 0,
+    st: 'drift', t: Math.random() * 2, dir: [0, 0, 0], dead: false, pair,
+    area: 'hollow',
+  };
+  h.m.root.position.set(h.x, h.y, h.z);
+  h.m.root.visible = false;
+  scene.add(h.m.root);
+  HORNETS.push(h);
+}
+</script>
+<script>
+/* ═══════════ p6c/3 — THE SILT WYRM (the Silverrun's spirit, sun-mad) ═══════════ */
+SFX.wyrmRumble = function () { if (!AC) return; const t = AC.currentTime;
+  noiseBurst(t, 0.7, 0.13, 140, 60, 0.8, 'lowpass');
+  tone(44, t, 0.6, 0.16, 'sine', null, 36); };
+SFX.wyrmErupt = function () { if (!AC) return; const t = AC.currentTime;
+  noiseBurst(t, 0.5, 0.3, 500, 150, 0.9, 'lowpass');
+  tone(60, t, 0.5, 0.3, 'sine', null, 40);
+  noiseBurst(t + 0.08, 0.3, 0.2, 1400, 500, 1.2); };
+SFX.wyrmCry = function () { if (!AC) return; const t = AC.currentTime;
+  tone(180, t, 1.1, 0.16, 'sawtooth', null, 90);
+  tone(365, t + 0.1, 0.9, 0.07, 'sawtooth', null, 180);
+  noiseBurst(t, 0.6, 0.1, 900, 300, 1.4); };
+SFX.waterBow = function () { if (!AC) return; const t = AC.currentTime;
+  noiseBurst(t, 1.6, 0.12, 700, 1600, 0.7, 'lowpass');
+  [392, 494, 587, 784].forEach((f, i) => tone(f, t + 0.3 + i * 0.28, 1.2, 0.05, 'sine')); };
+
+function buildHalfShieldItem() {
+  const g = new THREE.Group();
+  const md = MD();
+  const C_MG = [0.85, 0.9, 0.92], C_MG2 = [0.68, 0.76, 0.82];
+  // a half-disc shield: flat face, ribbed back, a bright straight rim where
+  // the moon broke — unmistakably ONE HALF of something round
+  const R = 0.62, n = 9;
+  for (let i = 0; i < n; i++) {
+    const a0 = -Math.PI / 2 + i / n * Math.PI, a1 = -Math.PI / 2 + (i + 1) / n * Math.PI;
+    pushQuad(md, [0, 0, 0], [0, 0, 0],
+      [Math.cos(a0) * R, Math.sin(a0) * R, 0], [Math.cos(a1) * R, Math.sin(a1) * R, 0],
+      i % 2 ? C_MG : C_MG2);
+    pushQuad(md, [0, 0, -0.07], [Math.cos(a1) * R, Math.sin(a1) * R, -0.07],
+      [Math.cos(a0) * R, Math.sin(a0) * R, -0.07], [0, 0, -0.07], i % 2 ? C_MG2 : C_MG);
+  }
+  box(md, { x: 0, y: -0.31, z: -0.035, w: 0.035, d: 0.045, h: 0.62, col: [0.95, 0.97, 1.0] });   // the broken rim
+  for (let i = 0; i < 3; i++) {
+    box(md, { x: 0.12 + i * 0.14, y: -0.26, z: -0.06, w: 0.02, d: 0.02, h: 0.52 - i * 0.13, col: C_MG2 });
+  }
+  const m = mdMesh(md, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide }));
+  m.frustumCulled = false;
+  g.add(m);
+  // moonglass halo
+  const halo = new THREE.Mesh(new THREE.PlaneGeometry(2.0, 2.0), new THREE.MeshBasicMaterial({
+    map: DOT_TEX, transparent: true, opacity: 0.3, blending: THREE.AdditiveBlending, depthWrite: false,
+  }));
+  halo.frustumCulled = false;
+  g.add(halo);
+  g.userData.halo = halo;
+  return g;
+}
+const shieldItem = buildHalfShieldItem();
+shieldItem.visible = false;
+scene.add(shieldItem);
+
+function buildSiltWyrm() {
+  const root = new THREE.Group();
+  const mat = TOON.clone();
+  const silt = [0.66, 0.6, 0.47], silt2 = [0.55, 0.49, 0.38], plate = [0.48, 0.45, 0.4],
+        jaw = [0.42, 0.38, 0.32];
+  // HEAD: a river-worn boulder skull with a stone jaw and the brow mount
+  const head = new THREE.Group();
+  const mdH = MD();
+  lathe(mdH, [[0, -0.9], [0.85, -0.4], [1.0, 0.35], [0.75, 0.95], [0, 1.25]], { seg: 7, ex: 1.15, col: silt });
+  box(mdH, { x: 0, y: -0.25, z: 1.05, w: 0.55, d: 0.5, h: 0.35, tw: 0.35, td: 0.3, rx: 0.25, col: jaw });   // jaw
+  for (const s of [-1, 1]) {
+    box(mdH, { x: s * 0.55, y: 0.45, z: 0.55, w: 0.16, d: 0.22, h: 0.3, rz: s * 0.4, col: plate });          // brow ridges
+    box(mdH, { x: s * 0.8, y: -0.1, z: 0.1, w: 0.2, d: 0.34, h: 0.5, rz: s * 0.9, col: silt2 });             // cheek fins
+  }
+  const headM = mdMesh(mdH, mat); headM.frustumCulled = false;
+  head.add(headM);
+  // ember eyes (calm at the cure)
+  const mdE = MD();
+  for (const s of [-1, 1]) box(mdE, { x: s * 0.34, y: 0.28, z: 0.86, w: 0.11, d: 0.05, h: 0.09, col: [1, 0.62, 0.2] });
+  const eyeGlow = mdMesh(mdE, new THREE.MeshBasicMaterial({
+    vertexColors: true, transparent: true, opacity: 0.95, blending: THREE.AdditiveBlending, depthWrite: false,
+  }), false);
+  eyeGlow.frustumCulled = false;
+  head.add(eyeGlow);
+  // THE HALF SHIELD as a brow-plate
+  const brow = buildHalfShieldItem();
+  brow.scale.setScalar(1.15);
+  brow.position.set(0, 0.95, 0.55);
+  brow.rotation.x = -0.7;
+  head.add(brow);
+  root.add(head);
+  // SEGMENTS: tumbled stone vertebrae with silt frills
+  const segs = [];
+  for (let i = 0; i < 6; i++) {
+    const sg = new THREE.Group();
+    const mdS = MD();
+    const r = 0.85 - i * 0.09;
+    lathe(mdS, [[0, -r * 1.1], [r, 0], [0, r * 1.1]], { seg: 6, ex: 1.25, col: i % 2 ? silt : silt2 });
+    box(mdS, { x: 0, y: r * 0.8, z: 0, w: 0.34 - i * 0.03, d: 0.1, h: 0.5 - i * 0.05, rx: -0.3, col: plate });  // dorsal plate
+    const m = mdMesh(mdS, mat); m.frustumCulled = false;
+    sg.add(m);
+    sg.visible = false;
+    root.add(sg);
+    segs.push(sg);
+  }
+  // hit flash ghost on the head
+  const mdF = MD();
+  lathe(mdF, [[0, -1.0], [1.05, 0], [0, 1.3]], { seg: 7, ex: 1.15, col: [1, 1, 1] });
+  const flashM = mdMesh(mdF, new THREE.MeshBasicMaterial({ color: 0xfff2dc, transparent: true, opacity: 0.6, depthWrite: false }), false);
+  flashM.frustumCulled = false; flashM.visible = false;
+  head.add(flashM);
+  const shadow = blobShadow(1.1);
+  root.add(shadow);
+  root.visible = false;
+  scene.add(root);
+  /* THE WAKE: the visibility contract while it swims — a travelling silt
+     hump + dust. Its own root so the damage-visibility check has a source. */
+  const wakeRoot = new THREE.Group();
+  const mdW = MD();
+  lathe(mdW, [[1.7, -0.25], [1.1, 0.42], [0, 0.62]], { seg: 8, ex: 1.5, flat: true, col: [0.74, 0.68, 0.54] });
+  lathe(mdW, [[0.5, 0.55], [0.2, 0.95], [0, 1.0]], { seg: 5, flat: true, col: [0.6, 0.55, 0.44] });   // the dorsal plate cutting the silt
+  const wakeM = mdMesh(mdW, new THREE.MeshBasicMaterial({ vertexColors: true }));
+  wakeM.frustumCulled = false;
+  wakeRoot.add(wakeM);
+  wakeRoot.visible = false;
+  scene.add(wakeRoot);
+  return { root, head, headM, eyeGlow, brow, segs, flashM, shadow, mat, wakeRoot };
+}
+
+/* dust devils — phase 3's wandering hazards (always plainly visible) */
+function buildDustDevil() {
+  const root = new THREE.Group();
+  const md = MD();
+  for (let i = 0; i < 5; i++) {
+    const y = i * 0.55, r = 0.25 + i * 0.16;
+    lathe(md, [[r * 0.8, y], [r, y + 0.3], [r * 0.85, y + 0.55]], { seg: 6, flat: true, col: [0.8, 0.74, 0.6] });
+  }
+  const m = mdMesh(md, new THREE.MeshBasicMaterial({
+    vertexColors: true, transparent: true, opacity: 0.55, depthWrite: false, side: THREE.DoubleSide,
+  }), false);
+  m.frustumCulled = false;
+  root.add(m);
+  const shadow = blobShadow(0.5);
+  root.add(shadow);
+  root.visible = false;
+  scene.add(root);
+  return { root, m };
+}
+
+const WYRM_HP = 72;
+const WYRM = {
+  c: null, active: false, defeated: false, shieldGiven: false,
+  phase: 0, st: 'sleep', t: 0, hp: WYRM_HP, hpMax: WYRM_HP,
+  x: H3.x + 2, z: H3.z - 3, ang: 2.4, flash: 0,
+  bodyHits: 0, browHits: 0, trail: [], slabT: 0, missStreak: 0,
+  eruptX: 0, eruptZ: 0, sweepA: 0, sweepDone: false, devils: [],
+  cureT: 0, poolWet: false, barShown: false,
+};
+WYRM.c = buildSiltWyrm();
+for (let i = 0; i < 2; i++) WYRM.devils.push({ m: buildDustDevil(), x: 0, z: 0, tx: 0, tz: 0, on: false, t: 0 });
+function wyrmPhaseHp(ph) { return ph <= 1 ? WYRM_HP : ph === 2 ? 48 : 24; }
+
+/* the wyrm's own HP bar — the standing boss convention, shared DOM */
+let wyrmBarW = -1, wyrmFlashTimer = 0;
+function refreshWyrmBar(hitFlash) {
+  const want = WYRM.active && !WYRM.defeated;
+  if (want !== WYRM.barShown) {
+    WYRM.barShown = want;
+    bossBarEl.classList.toggle('on', want);
+    if (want) bossNameEl.textContent = 'THE SILT WYRM';
+    if (!want) bossBarEl.classList.remove('hit');
+    wyrmBarW = -1;
+  }
+  if (!want) return;
+  const w = Math.round(clamp(WYRM.hp / WYRM.hpMax, 0, 1) * 1000) / 10;
+  if (w !== wyrmBarW) {
+    wyrmBarW = w;
+    bossFillEl.style.width = `calc((100% - 4px) * ${w / 100})`;
+  }
+  if (hitFlash) {
+    bossBarEl.classList.add('hit');
+    clearTimeout(wyrmFlashTimer);
+    wyrmFlashTimer = setTimeout(() => bossBarEl.classList.remove('hit'), 130);
+  }
+}
+function calmWyrmEyes(t) {
+  const colA = WYRM.c.eyeGlow.geometry.attributes.color;
+  for (let i = 0; i < colA.count; i++) {
+    colA.setXYZ(i, lerp(1.0, 0.3, t), lerp(0.62, 0.55, t), lerp(0.2, 0.65, t));
+  }
+  colA.needsUpdate = true;
+}
+function keepInWyrmArena(o, margin) {
+  const dx = o.x - H3.x, dz = o.z - H3.z;
+  const d = Math.hypot(dx, dz);
+  const mx = H3.r - margin;
+  if (d > mx) { o.x = H3.x + dx / d * mx; o.z = H3.z + dz / d * mx; }
+}
+/* the wyrm cannot swim through stone: hump movement respects the slabs */
+function wyrmSwimStep(tx, tz, sp) {
+  const W = WYRM;
+  const d = Math.hypot(tx - W.x, tz - W.z) || 1;
+  let nx = W.x + (tx - W.x) / d * sp * DT, nz = W.z + (tz - W.z) / d * sp * DT;
+  if (onSlabAt(nx, nz)) {
+    // slide around the slab edge
+    const a = Math.atan2(nz - W.z, nx - W.x) + 0.9;
+    nx = W.x + Math.cos(a) * sp * DT; nz = W.z + Math.sin(a) * sp * DT;
+    if (onSlabAt(nx, nz)) return;
+  }
+  W.x = nx; W.z = nz;
+  keepInWyrmArena(W, 2.0);
+  W.ang = Math.atan2(tx - W.x, tz - W.z);
+}
+function dealWyrmDamage(n) {
+  const W = WYRM;
+  if (!W.active || W.defeated) return;
+  W.hp = Math.max(0, W.hp - n);
+  refreshWyrmBar(true);
+  if (W.hp <= 0) { startCine('wyrmCure'); return; }
+  const thr = W.phase === 1 ? 48 : W.phase === 2 ? 24 : 0;
+  if (W.phase < 3 && W.hp <= thr && W.st !== 'roar') {
+    W.st = 'roar'; W.t = 0;
+    SFX.wyrmCry(); CAM.shake = 0.35;
+  }
+}
+function hitWyrmBody() {
+  const W = WYRM;
+  W.bodyHits++;
+  W.flash = 0.18;
+  SFX.hit();
+  P.hitstop = 3;
+  CAM.shake = 0.12;
+  rumble({ duration: 80, strong: 0.4, weak: 0.3 });
+  burst(psSpark, W.x, groundH(W.x, W.z) + 1.4, W.z, 10, 2.0, 1.5, 0.4);
+  if (SAVE && !SAVE.bossHint2) {
+    SAVE.bossHint2 = true; storeSave();
+    showCaption('Its BROW glows when it reels — hit the moonglass!', 3600);
+  }
+  dealWyrmDamage(2);
+}
+function hitWyrmBrow() {
+  const W = WYRM;
+  W.browHits++;
+  W.flash = 0.22;
+  SFX.clawHit();
+  SFX.chime(1.8);
+  P.hitstop = 5;
+  CAM.shake = 0.22;
+  rumble({ duration: 130, strong: 0.65, weak: 0.4 });
+  burst(psSpark, W.x, groundH(W.x, W.z) + 2.0, W.z, 16, 2.4, 2.0, 0.5);
+  burst(psSparkle, W.x, groundH(W.x, W.z) + 2.2, W.z, 10, 1.4, 1.2, 0.8);
+  if (W.st === 'daze') W.t = Math.min(W.t, 1.4);   // a touch more window
+  dealWyrmDamage(12);
+}
+function tickWyrm() {
+  const W = WYRM;
+  if (!W.c || W.defeated) return;
+  const inArena = Math.hypot(P.x - H3.x, P.z - H3.z) < H3.r + 1;
+  if (!W.active) {
+    if (inArena) {
+      // proximity ALWAYS wakes a reachable guardian — the v4 law
+      W.active = true;
+      if (W.phase === 0) W.phase = 1;
+      W.hp = wyrmPhaseHp(W.phase);
+      W.st = 'wakeup'; W.t = 0;
+      W.trail.length = 0;
+      SFX.wyrmCry(); SFX.wyrmRumble();
+      CAM.shake = 0.32;
+      rumble({ duration: 420, strong: 0.7, weak: 0.7 });
+      refreshWyrmBar(false);
+    }
+    return;
+  }
+  W.t += DT;
+  if (W.flash > 0) W.flash -= DT;
+  const d2p = Math.hypot(P.x - W.x, P.z - W.z);
+  const pOnSlab = onSlabAt(P.x, P.z) && !P.air;
+  switch (W.st) {
+    case 'wakeup':
+      if (W.t > 1.7) { W.st = 'dive'; W.t = 0; }
+      break;
+    case 'dive':      // slides under the silt
+      if (W.t > 0.7) { W.st = 'swim'; W.t = 0; W.slabT = 0; SFX.burrow(); }
+      break;
+    case 'swim': {
+      // the signature: it swims the dry silt like water. Wake = the contract.
+      wyrmSwimStep(P.x, P.z, W.phase === 3 ? 5.6 : 4.6);
+      if ((simTick & 3) === 0) {
+        W.trail.push([W.x, W.z]);
+        if (W.trail.length > 26) W.trail.shift();
+      }
+      if ((simTick % 5) === 0) {
+        psDust.spawn(W.x, groundH(W.x, W.z) + 0.5, W.z, (Math.random() - 0.5) * 1.2, 1.1, (Math.random() - 0.5) * 1.2, 0.55);
+      }
+      if ((simTick % 50) === 0) SFX.wyrmRumble();
+      if (pOnSlab) {
+        W.slabT += DT;
+        if (W.slabT > 2.2 && d2p < 5.5) {
+          // it strikes the STONE — reels, brow bare. Terrain-reading pays.
+          W.st = 'slamRock'; W.t = 0;
+          W.eruptX = P.x; W.eruptZ = P.z;
+          SFX.wyrmErupt();
+        }
+      } else {
+        W.slabT = 0;
+        if (d2p < 1.7 && W.t > 1.1) {
+          W.st = 'erupt'; W.t = 0;
+          W.eruptX = P.x; W.eruptZ = P.z;
+          SFX.wyrmRumble();
+          rumble({ duration: 200, strong: 0.5, weak: 0.7 });
+        }
+      }
+      if (W.t > 7 && d2p > 3) W.t = 1.0;   // keep hunting
+      break;
+    }
+    case 'erupt':
+      // the swirl converges — HALF A SECOND to move or jump
+      if ((simTick & 1) === 0) {
+        const a = Math.random() * TAU;
+        psDust.spawn(W.eruptX + Math.cos(a) * 1.4, groundH(W.eruptX, W.eruptZ) + 0.3, W.eruptZ + Math.sin(a) * 1.4,
+          -Math.cos(a) * 1.6, 0.8, -Math.sin(a) * 1.6, 0.4);
+      }
+      if (W.t > 0.52) {
+        W.x = W.eruptX; W.z = W.eruptZ;
+        // the wake IS the contract: it stands at the strike point, on screen,
+        // before any damage may land (matrixWorld fresh for the frustum test)
+        W.c.wakeRoot.position.set(W.x, groundH(W.x, W.z) - 0.12, W.z);
+        W.c.wakeRoot.visible = true;
+        W.c.wakeRoot.updateMatrixWorld(true);
+        SFX.wyrmErupt();
+        CAM.shake = 0.4;
+        rumble({ duration: 260, strong: 0.85, weak: 0.5 });
+        burst(psDust, W.x, groundH(W.x, W.z) + 0.6, W.z, 26, 3.0, 2.6, 0.9);
+        const hitD = Math.hypot(P.x - W.x, P.z - W.z);
+        if (hitD < 2.1 && P.fy - groundH(P.x, P.z) < 0.8 && !onSlabAt(P.x, P.z)) {
+          hurtPlayer(1, W.x, W.z, W.c.wakeRoot);
+          W.missStreak = 0;
+        } else W.missStreak++;
+        W.st = 'surface'; W.t = 0;
+      }
+      break;
+    case 'slamRock':
+      if (W.t > 0.4) {
+        W.x = W.eruptX + 1.6; W.z = W.eruptZ + 1.2;
+        keepInWyrmArena(W, 2.0);
+        SFX.thump(true);
+        CAM.shake = 0.5;
+        rumble({ duration: 300, strong: 0.9, weak: 0.6 });
+        burst(psDust, W.x, groundH(W.x, W.z) + 0.8, W.z, 30, 3.2, 2.6, 0.9);
+        burst(psSpark, W.x, groundH(W.x, W.z) + 1.6, W.z, 12, 2.2, 1.8, 0.5);
+        W.st = 'daze'; W.t = 0;   // the long window
+        SFX.wyrmCry();
+      }
+      break;
+    case 'surface': {
+      // body out of the silt, slithering — ALWAYS chippable
+      if (W.t > (W.missStreak >= 2 ? 0.3 : 2.0)) {
+        if (W.missStreak >= 2) { W.st = 'daze'; W.t = 0; W.missStreak = 0; SFX.wyrmCry(); }
+        else if (W.phase >= 2 && !W.sweepDone && d2p < 6) { W.st = 'sweepTele'; W.t = 0; SFX.click(); }
+        else { W.st = 'dive'; W.t = 0; W.sweepDone = false; }
+      }
+      break;
+    }
+    case 'sweepTele':
+      if (W.t > 0.5) {
+        W.st = 'sweep'; W.t = 0;
+        W.sweepA = 0; W.sweepDone = true;
+        SFX.wyrmErupt();
+        rumble({ duration: 220, strong: 0.6, weak: 0.5 });
+      }
+      break;
+    case 'sweep': {
+      // the tail scythes a ring — JUMP it
+      W.sweepA = W.t / 0.85 * TAU;
+      if (W.t > 0.12 && W.t < 0.8) {
+        const rr = 4.4;
+        if (Math.abs(d2p - rr) < 1.4 && P.fy - groundH(P.x, P.z) < 0.62) {
+          hurtPlayer(1, W.x, W.z, W.c.root);
+        }
+      }
+      if (W.t > 0.9) { W.st = 'surface'; W.t = 1.2; }
+      break;
+    }
+    case 'daze':
+      // reeling upright, the brow-plate BLAZING — the big-damage window
+      if (W.t > 2.9) { W.st = 'dive'; W.t = 0; }
+      break;
+    case 'roar':
+      if (W.t > 1.5) {
+        W.phase++;
+        W.hp = wyrmPhaseHp(W.phase);
+        refreshWyrmBar(false);
+        W.st = 'dive'; W.t = 0;
+        if (W.phase === 3) SFX.wyrmCry();
+      }
+      break;
+  }
+  // phase-3 dust devils
+  if (W.phase === 3 && W.st !== 'roar') {
+    for (const dv of W.devils) {
+      if (!dv.on) {
+        dv.on = true; dv.t = 0;
+        const a = Math.random() * TAU;
+        dv.x = H3.x + Math.cos(a) * 9; dv.z = H3.z + Math.sin(a) * 9;
+        dv.tx = H3.x + (Math.random() - 0.5) * 18; dv.tz = H3.z + (Math.random() - 0.5) * 18;
+      }
+      dv.t += DT;
+      const dd = Math.hypot(dv.tx - dv.x, dv.tz - dv.z);
+      if (dd < 1) { dv.tx = H3.x + (Math.random() - 0.5) * 20; dv.tz = H3.z + (Math.random() - 0.5) * 20; }
+      else { dv.x += (dv.tx - dv.x) / dd * 2.3 * DT; dv.z += (dv.tz - dv.z) / dd * 2.3 * DT; }
+      keepInWyrmArena(dv, 1.4);
+      if (Math.hypot(P.x - dv.x, P.z - dv.z) < 1.15 && P.fy - groundH(P.x, P.z) < 1.2) {
+        hurtPlayer(1, dv.x, dv.z, dv.m.root);
+      }
+    }
+  } else {
+    for (const dv of W.devils) dv.on = false;
+  }
+}
+/* what the sword can reach — wired into the master swing chain below */
+function wyrmSwingHits() {
+  const W = WYRM;
+  if (!W.active || W.defeated) return false;
+  const exposed = W.st === 'surface' || W.st === 'daze' || W.st === 'sweep' || W.st === 'sweepTele' ||
+                  W.st === 'wakeup' || W.st === 'roar' || W.st === 'slamRock';
+  if (!exposed) return false;
+  if (W.st === 'daze' && inSwingArc(W.x, W.z, 3.4, 1.4)) { hitWyrmBrow(); return true; }
+  if (inSwingArc(W.x, W.z, 3.6, 1.4)) { hitWyrmBody(); return true; }
+  return false;
+}
+
+/* render-frame animation */
+function animateWyrm(dtv, now) {
+  const W = WYRM;
+  if (!W.c) return;
+  const near = Math.hypot(camera.position.x - H3.x, camera.position.z - H3.z) < 70;
+  const gy = groundH(W.x, W.z);
+  const w = now / 1000;
+  const swimming = W.st === 'swim' || W.st === 'dive' || W.st === 'erupt' || W.st === 'slamRock';
+  // the wake (the visibility contract): hump + shadow while it swims
+  const wakeOn = near && W.active && !W.defeated && (W.st === 'swim' || W.st === 'erupt' || W.st === 'slamRock');
+  W.c.wakeRoot.visible = wakeOn;
+  if (wakeOn) {
+    if (W.st === 'erupt') {
+      // the swirl CONVERGES on the strike point — danger reads at your feet
+      const ek = clamp(W.t / 0.52, 0, 1);
+      W.c.wakeRoot.position.set(lerp(W.x, W.eruptX, ek), gy - 0.12 + ek * 0.25, lerp(W.z, W.eruptZ, ek));
+    } else {
+      W.c.wakeRoot.position.set(W.x, gy - 0.12 + Math.sin(w * 7) * 0.05, W.z);
+    }
+    W.c.wakeRoot.rotation.y = W.ang;
+  }
+  // the body: hidden under the silt while swimming, arcs out when exposed
+  const bodyOn = near && !( swimming && W.active && !W.defeated ) && W.st !== 'gone' && W.st !== 'cure';
+  W.c.root.visible = bodyOn && (W.active || W.st === 'sleep');
+  if (state === 'cine' && CINE.id === 'wyrmCure') W.c.root.visible = near && W.st !== 'gone';
+  if (W.c.root.visible) animateWyrmBody(now);
+  // the brow-plate glow through the daze window
+  const vulnB = W.active && !W.defeated && W.st === 'daze';
+  W.c.brow.userData.halo.material.opacity = vulnB ? 0.55 + 0.3 * Math.sin(now / 90) : 0.18 + 0.08 * Math.sin(now / 480);
+  W.c.flashM.visible = W.flash > 0 && W.c.root.visible;
+  if (W.flash > 0) W.c.flashM.material.opacity = 0.35 + Math.sin(now / 26) * 0.25;
+  // dust devils
+  for (const dv of W.devils) {
+    const on = dv.on && near;
+    dv.m.root.visible = on;
+    if (on) {
+      dv.m.root.position.set(dv.x, groundH(dv.x, dv.z), dv.z);
+      dv.m.m.rotation.y = now / 90;
+      if (!LOWFX && Math.random() < 0.3) {
+        psDust.spawn(dv.x, groundH(dv.x, dv.z) + 0.4 + Math.random() * 1.6, dv.z,
+          (Math.random() - 0.5) * 1.4, 0.6, (Math.random() - 0.5) * 1.4, 0.4);
+      }
+    }
+  }
+  refreshWyrmBar(false);
+}
+function animateWyrmBody(now) {
+  const W = WYRM;
+  const gy = groundH(W.x, W.z);
+  const w = now / 1000;
+  W.c.root.position.set(W.x, gy, W.z);
+  W.c.root.rotation.y = W.ang;
+  const H = W.c.head;
+  if (W.st === 'sleep') {
+    // coiled in the last basin, brow-plate up: a mound that breathes
+    H.position.set(0, 0.7 + Math.sin(w * 0.9) * 0.04, 0.4);
+    H.rotation.x = 0.5;
+    for (let i = 0; i < W.c.segs.length; i++) {
+      const sg = W.c.segs[i];
+      sg.visible = W.c.root.visible;
+      const a = 2.4 + i * 0.85;
+      sg.position.set(Math.cos(a) * (1.9 + i * 0.12), 0.35 - i * 0.02, Math.sin(a) * (1.9 + i * 0.12) + 0.4);
+    }
+  } else if (W.st === 'wakeup' || W.st === 'roar' || W.st === 'daze' || W.st === 'surface' ||
+             W.st === 'sweep' || W.st === 'sweepTele' || W.defeated) {
+    const rear = W.st === 'daze' ? 3.1 : W.st === 'wakeup' || W.st === 'roar' ? 2.8 : 1.7;
+    const wob = W.st === 'daze' ? Math.sin(w * 9) * 0.22 : Math.sin(w * 2.2) * 0.08;
+    H.position.set(wob * 0.4, rear + Math.sin(w * 1.7) * 0.12, 0.3);
+    H.rotation.x = W.st === 'daze' ? -0.5 + wob * 0.3 : -0.15;
+    H.rotation.z = wob * 0.4;
+    for (let i = 0; i < W.c.segs.length; i++) {
+      const sg = W.c.segs[i];
+      sg.visible = W.c.root.visible;
+      const tp = W.trail.length > i * 4 + 3 ? W.trail[W.trail.length - 1 - (i * 4 + 3)] : null;
+      // a converged trail (it hunted a standing target) would stack the
+      // spine into a totem — fall back to the serpentine arc instead
+      if (tp && Math.hypot(tp[0] - W.x, tp[1] - W.z) > 1.0 + i * 0.55) {
+        // segments live in root space (root carries rotation.y = ang): unrotate
+        const wx2 = tp[0] - W.x, wz2 = tp[1] - W.z;
+        const cA = Math.cos(W.ang), sA = Math.sin(W.ang);
+        sg.position.set(wx2 * cA - wz2 * sA,
+          Math.max(0.2, 1.5 - i * 0.28) + Math.sin(w * 3 + i) * 0.08,
+          wx2 * sA + wz2 * cA);
+      } else {
+        const a = W.ang + Math.PI + i * 0.5;
+        sg.position.set(Math.sin(a) * (1.2 + i * 0.75), Math.max(0.2, 1.3 - i * 0.24), Math.cos(a) * (1.2 + i * 0.75));
+      }
+    }
+  }
+  W.c.shadow.position.y = 0.04;
+}
+</script>
+<script>
+/* ═══════════ p6c/4 — THE TIDE COMES HOME: sky step 2, the sea, the flood ═══════════ */
+
+/* sky step 2: another eighth toward dusk */
+const SKY2 = { zen: col(0x7590c2), hor: col(0xeab183), fog: col(0xdfc0a0), world: [0.885, 0.83, 0.845], hemi: 0.3, sunI: 0.66 };
+const _z2 = [0, 0, 0], _h2 = [0, 0, 0];
+function setSkyBlend2(k) {
+  k = clamp(k, 0, 1);
+  SKY.t = 1 + k;                       // >1 = step-2 territory (p7 fog reads it)
+  mix3(SKY1.zen, SKY2.zen, k, _z2);
+  mix3(SKY1.hor, SKY2.hor, k, _h2);
+  const pos = skyDome.geometry.attributes.position, colA = skyDome.geometry.attributes.color;
+  for (let i = 0; i < pos.count; i++) {
+    const vy = pos.getY(i) / 430;
+    const kk = Math.pow(clamp(1 - Math.max(0, vy), 0, 1), 2.1);
+    colA.setXYZ(i,
+      _z2[0] + (_h2[0] - _z2[0]) * kk,
+      _z2[1] + (_h2[1] - _z2[1]) * kk,
+      _z2[2] + (_h2[2] - _z2[2]) * kk);
+  }
+  colA.needsUpdate = true;
+  const f = mix3(SKY1.fog, SKY2.fog, k);
+  scene.fog.color.setRGB(f[0], f[1], f[2]);
+  const w = mix3(SKY1.world, SKY2.world, k);
+  WORLD_MAT.color.setRGB(w[0], w[1], w[2]);
+  hemiLight.intensity = lerp(SKY1.hemi, SKY2.hemi, k);
+  sunLight.intensity = lerp(SKY1.sunI, SKY2.sunI, k);
+  sunLight.color.setRGB(1, lerp(0.84, 0.78, k), lerp(0.68, 0.58, k));
+  sunDisc.position.set(lerp(130, 158, k), lerp(300, 238, k), lerp(30, 12, k));
+}
+
+/* the SECOND star */
+let starMesh2 = null, star2CoreMat = null, star2FlareMat = null, star2Op = 0;
+window.starMesh2 = null;
+(function buildStar2() {
+  starMesh2 = new THREE.Group();
+  star2CoreMat = new THREE.MeshBasicMaterial({
+    map: DOT_TEX, transparent: true, opacity: 0, fog: false,
+    blending: THREE.AdditiveBlending, depthWrite: false,
+  });
+  const core = new THREE.Mesh(new THREE.PlaneGeometry(7.2, 7.2), star2CoreMat);
+  core.frustumCulled = false;
+  starMesh2.add(core);
+  star2FlareMat = new THREE.MeshBasicMaterial({
+    map: DOT_TEX, transparent: true, opacity: 0, fog: false,
+    blending: THREE.AdditiveBlending, depthWrite: false,
+  });
+  const flare = new THREE.Mesh(new THREE.PlaneGeometry(15, 2.2), star2FlareMat);
+  flare.frustumCulled = false;
+  starMesh2.add(flare);
+  starMesh2.position.set(58, 92, 238);   // higher and to the west of the first
+  starMesh2.lookAt(0, 0, 0);
+  starMesh2.visible = false;
+  skyGrp.add(starMesh2);
+  window.starMesh2 = starMesh2;
+})();
+function setStarOp2(v) {
+  star2Op = v;
+  star2CoreMat.opacity = v;
+  star2FlareMat.opacity = v * 0.26;
+  starMesh2.visible = v > 0.01;
+}
+
+/* ── THE SEA: flat banded alpha plane snug to the coastline ── */
+let bayWaterMesh = null, seaGlintMesh = null, swellLineMesh = null, seaFarMesh = null;
+let foamFrontMesh = null;
+(function buildSea() {
+  const md = MD();
+  const bandCol = (g) => {
+    const d = WL - g;
+    return d < 0.5 ? [0.34, 0.6, 0.58] : d < 1.1 ? [0.22, 0.47, 0.54] :
+           d < 1.8 ? [0.14, 0.36, 0.48] : [0.09, 0.26, 0.4];
+  };
+  const S = 8;
+  for (let x = -100; x < 102; x += S) {
+    for (let z = -60; z < 186; z += S) {
+      const g = [ _n1GroundH(x, z), _n1GroundH(x + S, z), _n1GroundH(x, z + S), _n1GroundH(x + S, z + S) ];
+      if (Math.min(g[0], g[1], g[2], g[3]) > WL + 0.35) continue;      // dry cell
+      if (massifAt(x + S / 2, z + S / 2) && !grottoOpenAt(x + S / 2, z + S / 2, true)) continue;
+      const c00 = bandCol(g[0]), c10 = bandCol(g[1]), c01 = bandCol(g[2]), c11 = bandCol(g[3]);
+      md.p.push(x, 0, z, x, 0, z + S, x + S, 0, z + S);
+      md.c.push(...c00, ...c01, ...c11);
+      md.p.push(x, 0, z, x + S, 0, z + S, x + S, 0, z);
+      md.c.push(...c00, ...c11, ...c10);
+    }
+  }
+  bayWaterMesh = mdMesh(md, new THREE.MeshBasicMaterial({
+    vertexColors: true, transparent: true, opacity: 0.88, depthWrite: false,
+  }), false);
+  bayWaterMesh.renderOrder = 2;
+  bayWaterMesh.position.y = WL;
+  bayWaterMesh.frustumCulled = false;
+  bayWaterMesh.visible = false;
+  scene.add(bayWaterMesh);
+  /* sparse highlight quads: the glints */
+  const mdG = MD();
+  const rnd = mulberry32(414);
+  let placed = 0;
+  for (let i = 0; i < 300 && placed < 64; i++) {
+    const x = (rnd() * 2 - 1) * 95, z = -20 + rnd() * 190;
+    if (_n1GroundH(x, z) > WL - 0.4) continue;
+    if (massifAt(x, z)) continue;
+    const w = 0.5 + rnd() * 1.3, a = rnd() * TAU;
+    const c = [0.85 + rnd() * 0.15, 0.92, 0.95];
+    pushQuad(mdG, [x - Math.cos(a) * w, 0.02, z - Math.sin(a) * w], [x + Math.cos(a) * w, 0.02, z + Math.sin(a) * w],
+      [x + Math.cos(a) * w, 0.02, z + Math.sin(a) * w * 0.2 + 0.14], [x - Math.cos(a) * w, 0.02, z - Math.sin(a) * w * 0.2 + 0.14], c);
+    placed++;
+  }
+  seaGlintMesh = mdMesh(mdG, new THREE.MeshBasicMaterial({
+    vertexColors: true, transparent: true, opacity: 0.3,
+    blending: THREE.AdditiveBlending, depthWrite: false,
+  }), false);
+  seaGlintMesh.renderOrder = 3;
+  seaGlintMesh.position.y = WL;
+  seaGlintMesh.frustumCulled = false;
+  seaGlintMesh.visible = false;
+  scene.add(seaGlintMesh);
+  /* the SOFT SEA BOUNDARY's line: brighter swells arcing across the mouth */
+  const mdS = MD();
+  for (let i = 0; i < 26; i++) {
+    const a0 = -0.62 + i / 26 * 1.24, a1 = -0.62 + (i + 1) / 26 * 1.24;   // the southern arc — the bay mouth
+    const p0 = [SEA_EDGE.x + Math.sin(a0) * SEA_EDGE.r, SEA_EDGE.z + Math.cos(a0) * SEA_EDGE.r];
+    const p1 = [SEA_EDGE.x + Math.sin(a1) * SEA_EDGE.r, SEA_EDGE.z + Math.cos(a1) * SEA_EDGE.r];
+    if (_n1GroundH(p0[0], p0[1]) > WL - 0.5) continue;
+    const c = i % 2 ? [0.9, 0.96, 0.98] : [0.7, 0.85, 0.9];
+    pushQuad(mdS, [p0[0], 0.1, p0[1]], [p1[0], 0.1, p1[1]], [p1[0], 0.55, p1[1]], [p0[0], 0.55, p0[1]], c);
+    pushQuad(mdS, [p0[0] - 1.4, 0.06, p0[1] - 1.4], [p1[0] - 1.4, 0.06, p1[1] - 1.4], [p1[0], 0.3, p1[1]], [p0[0], 0.3, p0[1]], c);
+  }
+  swellLineMesh = mdMesh(mdS, new THREE.MeshBasicMaterial({
+    vertexColors: true, transparent: true, opacity: 0.45, depthWrite: false, side: THREE.DoubleSide,
+  }), false);
+  swellLineMesh.renderOrder = 3;
+  swellLineMesh.position.y = WL;
+  swellLineMesh.frustumCulled = false;
+  swellLineMesh.visible = false;
+  scene.add(swellLineMesh);
+  /* the tower's look-home far water (opaque, under the near plane) */
+  const mdF = MD();
+  const cF = [0.16, 0.38, 0.5];
+  mdF.p.push(-100, 0, -55, -100, 0, 182, 100, 0, 182, -100, 0, -55, 100, 0, 182, 100, 0, -55);
+  for (let i = 0; i < 6; i++) mdF.c.push(cF[0], cF[1], cF[2]);
+  seaFarMesh = mdMesh(mdF, new THREE.MeshBasicMaterial({ vertexColors: true }), false);
+  seaFarMesh.position.y = WL - 0.18;
+  seaFarMesh.frustumCulled = false;
+  seaFarMesh.visible = false;
+  scene.add(seaFarMesh);
+  /* the FOAM FRONT: the silver line that rushes home in the cinematic */
+  const mdFf = MD();
+  for (let x = -96; x < 96; x += 6) {
+    const c = ((x / 6) | 0) % 2 ? [0.96, 0.98, 1.0] : [0.82, 0.9, 0.94];
+    pushQuad(mdFf, [x, 0.05, -1.5], [x + 6, 0.05, -1.5], [x + 6, 0.5, 0.8], [x, 0.5, 0.8], c);
+    pushQuad(mdFf, [x, 0.02, -4.5], [x + 6, 0.02, -4.5], [x + 6, 0.12, -1.4], [x, 0.12, -1.4], [0.7, 0.82, 0.88]);
+  }
+  foamFrontMesh = mdMesh(mdFf, new THREE.MeshBasicMaterial({
+    vertexColors: true, transparent: true, opacity: 0.85, depthWrite: false, side: THREE.DoubleSide,
+  }), false);
+  foamFrontMesh.frustumCulled = false;
+  foamFrontMesh.visible = false;
+  scene.add(foamFrontMesh);
+})();
+
+/* the cartographer's map gains the NEW blue line (he was wrong, the good way) */
+let cartNewLine = null;
+(function buildCartLine() {
+  const md = MD();
+  const c = [0.25, 0.5, 0.85];
+  // a hand-drawn stroke arcing across his wall map (cart room wall at x≈330.75, z≈-222)
+  for (let i = 0; i < 6; i++) {
+    const t = i / 6, t1 = (i + 1) / 6;
+    const y0 = 1.25 + Math.sin(t * 2.6) * 0.18, y1 = 1.25 + Math.sin(t1 * 2.6) * 0.18;
+    pushQuad(md, [330.2 + t * 1.1, y0, -221.93], [330.2 + t1 * 1.1, y1, -221.93],
+      [330.2 + t1 * 1.1, y1 + 0.035, -221.93], [330.2 + t * 1.1, y0 + 0.035, -221.93], c);
+  }
+  cartNewLine = mdMesh(md, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide }), false);
+  cartNewLine.visible = false;
+  scene.add(cartNewLine);
+})();
+
+/* ── THE SAILBOAT: the wake-boat, righted and alive ── */
+let sailboat = null, sailboatColl = null;
+const BOAT = { x: 8.5, z: 6.0, ang: 0.9, spd: 0, vx: 0, vz: 0, heel: 0, sailK: 0, bobPh: 0, edgeCd: 0, groundCd: 0 };
+(function buildSailboat() {
+  const g = new THREE.Group();
+  const md = MD();
+  const C_HULL = mix3(C_WOOD, [0, 0, 0], 0.12), C_HULL2 = mix3(C_WOOD2, [0, 0, 0], 0.15);
+  // the same little rowboat — patched, floating, proud
+  latheW(md, [[0.0, -0.42], [1.05, 0.0], [1.15, 0.62], [0.98, 0.88]],
+    { seg: 9, ex: 2.15, x: 0, y: 0.3, z: 0, ry: Math.PI / 2, col: C_HULL, cols: [C_HULL2, C_HULL, C_WOODW] });
+  // interior floor + thwarts
+  boxW(md, { x: 0, y: 0.42, z: 0, w: 0.66, d: 1.7, h: 0.06, col: mix3(C_WOODW, [0, 0, 0], 0.1) });
+  boxW(md, { x: 0, y: 0.62, z: -0.5, w: 0.72, d: 0.16, h: 0.07, col: C_WOODW });   // helm seat
+  boxW(md, { x: 0, y: 0.62, z: 0.75, w: 0.6, d: 0.14, h: 0.07, col: C_WOODW });    // bow seat (Pearl's)
+  // patches: pale new boards over the old wounds
+  boxW(md, { x: 0.62, y: 0.55, z: 0.4, w: 0.06, d: 0.5, h: 0.3, rz: 0.5, col: mix3(C_WOODW, C_SAND, 0.4) });
+  boxW(md, { x: -0.6, y: 0.5, z: -0.6, w: 0.06, d: 0.4, h: 0.26, rz: -0.55, col: mix3(C_WOODW, C_SAND, 0.35) });
+  // mast + boom
+  boxW(md, { x: 0, y: 0.45, z: 0.28, w: 0.06, d: 0.06, h: 2.6, col: C_HULL2 });
+  boxW(md, { x: 0, y: 1.06, z: -0.32, w: 0.045, d: 0.65, h: 0.045, col: C_HULL2 });
+  // tiller
+  boxW(md, { x: 0, y: 0.66, z: -1.15, w: 0.035, d: 0.4, h: 0.035, rx: -0.5, col: C_HULL2 });
+  const hull = mdMesh(md, WORLD_MAT, false);
+  hull.frustumCulled = false;
+  g.add(hull);
+  // THE SAIL — a patched lugsail; scale.y follows the full-sail hold
+  const mdS = MD();
+  pushQuad(mdS, [0, 1.05, 0.26], [0, 1.05, -0.9], [0, 2.75, -0.55], [0, 2.9, 0.26], [0.9, 0.87, 0.78]);
+  pushQuad(mdS, [0.005, 1.5, -0.2], [0.005, 1.5, -0.62], [0.005, 1.95, -0.55], [0.005, 1.95, -0.24], [0.72, 0.68, 0.6]);   // a patch
+  const sail = mdMesh(mdS, new THREE.MeshBasicMaterial({
+    vertexColors: true, side: THREE.DoubleSide,
+  }), false);
+  sail.frustumCulled = false;
+  sail.scale.y = 0.12;                          // furled at rest
+  g.add(sail);
+  const shadow = blobShadow(1.1);
+  shadow.position.y = 0.1;
+  g.add(shadow);
+  g.visible = false;
+  scene.add(g);
+  sailboat = { group: g, sail, shadow };
+  sailboatColl = addColl(BOAT.x, BOAT.z, 1.5);
+  sailboatColl.off = true;
+})();
+
+/* flood-only platforms: the shipwreck's deck becomes a landing you can
+   disembark onto (the wreck chest rides up onto it) */
+const wreckDeckColl = [addColl(WRECK.x, WRECK.z, 2.2, WL + 0.28), addColl(WRECK.x - 1.2, WRECK.z + 1.6, 1.6, WL + 0.28)];
+for (const c of wreckDeckColl) { c.plat = true; c.off = true; }
+
+/* ── content relocation tables (bidirectional) ── */
+for (const s of saltPickups) { s.ox = s.x; s.oz = s.z; }
+for (const cr of crabs) { cr.osx = cr.sx; cr.osz = cr.sz; }
+for (const w2 of wisps) { w2.osx = w2.sx; w2.osz = w2.sz; }
+/* spread wide along the strand: the 33 m creature cull must never see more
+   than a couple of clusters at once (the flood must not break the frame) */
+/* …and the wake-boat's mooring pocket (x 0–14, z −6..8) stays CLEAR:
+   Pearl waits there, the joy-beat lives there, nothing hunts there */
+const CRAB_BEACH = [
+  [-64, -8], [-34, -3], [24, -3], [46, -6], [68, -11],
+  [-60, -30], [62, -26], [-78, -22], [78, -26],
+];
+const WISP_SHALLOWS = [
+  [-62, 4], [-56, 6], [-59, 2], [-32, 7], [-26, 8], [-29, 5],
+  [26, 7], [32, 8], [29, 5], [62, 4], [56, 6], [59, 2],
+];
+function shorewardOf(x, z) {
+  let zz = z;
+  for (let i = 0; i < 300 && _n1GroundH(x, zz) < WL + 0.22; i++) zz -= 0.8;
+  return [x, Math.max(-20, zz - 0.6)];
+}
+const chestHome = { x: chest.x, z: chest.z };
+const pearlHome = { x: pearl.x, z: pearl.z, baseY: pearl.baseY, ry: pearl.char.root.rotation.y };
+const PEARL_SHORE = { x: 3.2, z: -1.8 };
+
+/* ═══ THE ONE DERIVATION — every night-two fact flows from the save ═══ */
+window.__tideApplySave = function () {
+  const S = SAVE || defaultSave();
+  const wet = S.sky >= 2;
+  /* the basin + hollow */
+  basinOpenNow = !!S.basinOpen;
+  window.__basinOpenNow = basinOpenNow;
+  glyphDoor1.open = !!S.glyph1; glyphDoor1.sinkT = -1;
+  glyphDoor1.group.position.y = glyphDoor1.baseY - (S.glyph1 ? 5.6 : 0);
+  glyphDoor1.glyph.material.opacity = S.glyph1 ? 0.9 : 0.1;
+  glyphDoor2.open = !!S.glyph2; glyphDoor2.sinkT = -1;
+  glyphDoor2.group.position.y = glyphDoor2.baseY - (S.glyph2 ? 5.6 : 0);
+  glyphDoor2.glyph.material.opacity = S.glyph2 ? 0.9 : 0.1;
+  hm1.angle = S.glyph1 ? hm1.target : 2.4; hm1.group.rotation.y = -hm1.angle;
+  hm2.angle = S.glyph2 ? hm2.target : 5.1; hm2.group.rotation.y = -hm2.angle;
+  hBeam1.material.opacity = 0; hBeam2.material.opacity = 0; hBeamR.material.opacity = 0;
+  hollowChest.opened = !!S.hChest;
+  hollowChest.lid.rotation.x = S.hChest ? -1.9 : 0;
+  /* THE WYRM — fully re-derived; a finished save must never leak a cured
+     wyrm into a fresh adventure (the v6 law) */
+  const W = WYRM;
+  W.defeated = !!S.wyrmDone;
+  W.shieldGiven = !!S.wyrmDone;
+  W.active = false;
+  W.bodyHits = 0; W.browHits = 0; W.t = 0; W.flash = 0; W.trail.length = 0;
+  W.hpMax = WYRM_HP; W.missStreak = 0; W.slabT = 0;
+  for (const dv of W.devils) { dv.on = false; dv.m.root.visible = false; }
+  W.poolWet = !!S.wyrmDone;
+  if (S.wyrmDone) {
+    W.phase = 3; W.hp = 0; W.st = 'gone';
+    W.c.root.visible = false; W.c.wakeRoot.visible = false;
+    W.c.brow.visible = false;
+    calmWyrmEyes(1);
+  } else {
+    W.phase = 0; W.hp = WYRM_HP; W.st = 'sleep';
+    W.x = H3.x + 2; W.z = H3.z - 3; W.ang = 2.4;
+    W.c.brow.visible = true;
+    calmWyrmEyes(0);
+  }
+  refreshWyrmBar(false);
+  /* the Half Shield item: floating in the wet pool, carried, or slotted */
+  P.carryShield = S.q === 5;
+  shieldItem.visible = false;
+  if (S.wyrmDone && S.q === 4) {
+    // cured but not yet taken: it floats where the Wyrm dissolved
+    shieldItem.visible = true;
+    shieldItem.scale.setScalar(1.3);
+    shieldItem.position.set(HPOOL.x, groundH(HPOOL.x, HPOOL.z) + 0.75, HPOOL.z);
+    shieldItem.rotation.set(-0.9, 0.6, 0);
+  }
+  /* the sky — step 2 overrides p7's step-1 setting */
+  if (S.sky >= 2) {
+    setSkyBlend(1); setSkyBlend2(1);
+    shadeGrow = 1;
+    setStarOp(0.95); setStarOp2(0.95);
+    rebuildShadePools();
+    wheelRing.rotation.z = -Math.PI / 2;
+    // both relics ride their sockets
+    crescentItem.visible = true; crescentItem.scale.setScalar(0.8);
+    const wy = _n1GroundH(WHEEL_POS.x, WHEEL_POS.z) + 4.2;
+    const seat = (ang) => [WHEEL_POS.x + Math.cos(ang) * 3.1 * Math.cos(wheelRing.rotation.y), wy + Math.sin(ang) * 3.1, WHEEL_POS.z - Math.cos(ang) * 3.1 * Math.sin(wheelRing.rotation.y)];
+    const c1 = seat(Math.PI / 2 - Math.PI / 2);
+    crescentItem.position.set(c1[0], c1[1], c1[2]);
+    const c2 = seat(Math.PI / 2 - Math.PI / 4);
+    shieldItem.visible = true;
+    shieldItem.scale.setScalar(0.9);
+    shieldItem.position.set(c2[0], c2[1], c2[2]);
+    shieldItem.rotation.set(0, wheelRing.rotation.y + Math.PI / 2, 0);
+  } else if (star2Op > 0) { setStarOp2(0); }
+  /* THE SEA ITSELF */
+  bayWaterMesh.visible = wet;
+  bayWaterMesh.position.y = WL;
+  seaGlintMesh.visible = wet;
+  swellLineMesh.visible = wet;
+  seaFarMesh.visible = false;            // cull rules own it per-frame
+  foamFrontMesh.visible = false;
+  if (wet) { tidepoolFilled = true; tidewater.visible = false; }   // subsumed by the real sea
+  /* boats */
+  for (const b of bayBoats) { b.liftT = -1; poseBayBoat(b, wet); }
+  wakeWreckDry = !wet;
+  wakeWreckMesh.visible = wakeWreckDry;
+  for (const c of wakeWreckColl) c.off = wet;
+  sailboat.group.visible = wet;
+  sailboat.sail.scale.y = 0.12;
+  P.sailing = false;
+  if (wet) {
+    BOAT.x = (typeof S.boatX === 'number' && waterDepthAt(S.boatX, S.boatZ) > 0.3) ? S.boatX : 8.5;
+    BOAT.z = (typeof S.boatX === 'number' && waterDepthAt(S.boatX, S.boatZ) > 0.3) ? S.boatZ : 6.0;
+    BOAT.ang = typeof S.boatAng === 'number' ? S.boatAng : 0.9;
+    BOAT.spd = 0;
+    sailboat.group.position.set(BOAT.x, WL - 0.42, BOAT.z);
+    sailboat.group.rotation.set(0, BOAT.ang, 0);
+    sailboatColl.off = false;
+    sailboatColl.x = BOAT.x; sailboatColl.z = BOAT.z;
+  } else {
+    sailboatColl.off = true;
+  }
+  for (const c of wreckDeckColl) c.off = !wet;
+  for (const c of wreckColl) c.off = wet;   // the drowned hull is a deck now, not a wall
+  /* the old seabed content finds the new shoreline */
+  if (wet) {
+    for (const s of saltPickups) {
+      const p = shorewardOf(s.ox, s.oz);
+      s.x = p[0]; s.z = p[1];
+      s.baseY = _n1GroundH(s.x, s.z) + 0.16;
+      s.mesh.position.set(s.x, s.baseY, s.z);
+    }
+    crabs.forEach((cr, i) => {
+      if (cr.area !== 'bay') return;
+      const b = CRAB_BEACH[i % CRAB_BEACH.length];
+      cr.sx = b[0]; cr.sz = b[1];
+    });
+    wisps.forEach((w2, i) => {
+      if (w2.area !== 'bay') return;
+      const b = WISP_SHALLOWS[i % WISP_SHALLOWS.length];
+      w2.sx = b[0]; w2.sz = b[1];
+    });
+    chest.x = WRECK.x + 0.6; chest.z = WRECK.z + 0.4;
+    chest.group.position.set(chest.x, WL + 0.3, chest.z);
+    pearl.x = PEARL_SHORE.x; pearl.z = PEARL_SHORE.z;
+    pearl.baseY = _n1GroundH(pearl.x, pearl.z);
+    pearl.char.root.position.set(pearl.x, pearl.baseY, pearl.z);
+    pearl.char.root.rotation.y = 0.35;   // watching the sea
+  } else {
+    for (const s of saltPickups) {
+      s.x = s.ox; s.z = s.oz;
+      s.baseY = _n1GroundH(s.x, s.z) + 0.16;
+      s.mesh.position.set(s.x, s.baseY, s.z);
+    }
+    crabs.forEach((cr) => { if (cr.area === 'bay') { cr.sx = cr.osx; cr.sz = cr.osz; } });
+    wisps.forEach((w2) => { if (w2.area === 'bay') { w2.sx = w2.osx; w2.sz = w2.osz; } });
+    chest.x = chestHome.x; chest.z = chestHome.z;
+    chest.group.position.set(chest.x, _n1GroundH(chest.x, chest.z) + 0.05, chest.z);
+    pearl.x = pearlHome.x; pearl.z = pearlHome.z;
+    pearl.baseY = pearlHome.baseY;
+    pearl.char.root.position.set(pearl.x, pearl.baseY, pearl.z);
+    pearl.char.root.rotation.y = pearlHome.ry;
+  }
+  // creatures snap to their (possibly moved) spawns
+  for (const cr of crabs) {
+    if (cr.area !== 'bay') continue;
+    cr.x = cr.sx; cr.z = cr.sz;
+    cr.c.root.position.set(cr.x, _n1GroundH(cr.x, cr.z), cr.z);
+  }
+  for (const w2 of wisps) {
+    if (w2.area !== 'bay' || w2.dead) continue;
+    w2.x = w2.sx; w2.z = w2.sz; w2.y = _n1GroundH(w2.x, w2.z) + 1.8;
+    w2.m.root.position.set(w2.x, w2.y, w2.z);
+  }
+  /* kelp: gone under where the sea stands */
+  for (const patch of kelpPatches) {
+    patch.flooded = wet && _n1GroundH(patch.cx, patch.cz) < WL - 0.05;
+  }
+  cartNewLine.visible = wet;
+  /* a flooded save must never wake underwater */
+  if (wet && SAVE && Array.isArray(SAVE.lastShade) && _n1GroundH(SAVE.lastShade[0], SAVE.lastShade[1]) < WL + 0.05) {
+    SAVE.lastShade = [4, -2];
+  }
+  /* live-beat state resets */
+  FLOODLIVE.active = false; FLOODLIVE.boatDone = wet; FLOODLIVE.pearlSaid = false;
+  FLOODLIVE.riseK = wet ? 1 : 0;
+  AUTORUN.active = false; AUTORUN.player = false;
+  VOYAGE.active = false; VOYAGE.aboard = false;
+  el('cineBars').classList.remove('on');
+  if (CAM.mode === 'handoff') CAM.mode = 'follow';
+};
+</script>
+<script>
+/* ═══════════ p6c/5 — cinematics: the resonance, the cure, THE TIDE (seamless) ═══════════ */
+function cineSeen(id) { try { return localStorage.getItem('fm_seen_' + id) === '1'; } catch (e) { return false; } }
+function markCineSeen(id) { try { localStorage.setItem('fm_seen_' + id, '1'); } catch (e) {} }
+
+/* the wet pool + the wave-form bow (built once, driven by the cure) */
+let hollowPoolMesh = null, waveBowMesh = null;
+(function buildCureProps() {
+  const md = MD();
+  const c1 = col(0x2e7392), c2 = col(0x55a3b5);
+  const n = 14;
+  for (let s = 0; s < n; s++) {
+    const a0 = s / n * TAU, a1 = (s + 1) / n * TAU;
+    const cc = s % 2 ? c1 : c2;
+    md.p.push(HPOOL.x, 0, HPOOL.z,
+      HPOOL.x + Math.cos(a1) * HPOOL.r * 0.95, 0, HPOOL.z + Math.sin(a1) * HPOOL.r * 0.95,
+      HPOOL.x + Math.cos(a0) * HPOOL.r * 0.95, 0, HPOOL.z + Math.sin(a0) * HPOOL.r * 0.95);
+    md.c.push(cc[0], cc[1], cc[2], c1[0], c1[1], c1[2], c1[0], c1[1], c1[2]);
+  }
+  hollowPoolMesh = mdMesh(md, new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.9 }), false);
+  hollowPoolMesh.position.y = H3Y - 2;
+  hollowPoolMesh.frustumCulled = false;
+  hollowPoolMesh.visible = false;
+  scene.add(hollowPoolMesh);
+  // the bow: a curling water arc, the river's spirit saying thank you
+  const mdW = MD();
+  const cw = [0.5, 0.78, 0.85];
+  for (let i = 0; i < 9; i++) {
+    const t = i / 8, t1 = (i + 1) / 8;
+    const a = t * 2.1, a1 = t1 * 2.1;
+    const r = 2.6;
+    pushQuad(mdW, [Math.sin(a) * r, 0.4 + (1 - Math.cos(a)) * r * 0.8, -0.4], [Math.sin(a1) * r, 0.4 + (1 - Math.cos(a1)) * r * 0.8, -0.4],
+      [Math.sin(a1) * r, 0.4 + (1 - Math.cos(a1)) * r * 0.8, 0.4], [Math.sin(a) * r, 0.4 + (1 - Math.cos(a)) * r * 0.8, 0.4],
+      i % 2 ? cw : [0.65, 0.88, 0.92]);
+  }
+  waveBowMesh = mdMesh(mdW, new THREE.MeshBasicMaterial({
+    vertexColors: true, transparent: true, opacity: 0.75, depthWrite: false, side: THREE.DoubleSide,
+  }), false);
+  waveBowMesh.frustumCulled = false;
+  waveBowMesh.visible = false;
+  scene.add(waveBowMesh);
+})();
+
+/* ── AUTORUN: the authored run that is secretly the player's own ── */
+const AUTORUN = { active: false, player: false, path: [], idx: 0, ease: 0, tookAt: 0, startedAt: 0 };
+const RUN_PATH = [[-30, -64], [-20, -46], [-11, -30], [-3, -14], [3, -4], [5, 2]];
+function autorunInject() {
+  const A = AUTORUN;
+  if (!A.active) return;
+  // any REAL input takes the wheel instantly (and permanently)
+  const realMag = Math.hypot(IN.mx, IN.my);
+  if (realMag > 0.16 || IN.jump || IN.atk) {
+    A.player = true; A.active = false; A.tookAt = simTick;
+    if (CAM.mode === 'handoff') HANDOFF.fast = true;
+    return;
+  }
+  let wx = 0, wz = 0, sprint = true;
+  if (A.idx < A.path.length) {
+    const wp = A.path[A.idx];
+    const d = Math.hypot(wp[0] - P.x, wp[1] - P.z);
+    if (d < 1.6) { A.idx++; return; }
+    wx = (wp[0] - P.x) / d; wz = (wp[1] - P.z) / d;
+  } else {
+    // path done: ease to a walk, then stop — the "wait… is this me?" beat
+    A.ease += DT;
+    if (A.ease > 1.4) { A.active = false; return; }
+    sprint = false;
+    wx = Math.sin(P.heading) * (1 - A.ease / 1.4) * 0.6;
+    wz = Math.cos(P.heading) * (1 - A.ease / 1.4) * 0.6;
+  }
+  // world direction → the same camera-relative stick a thumb would push
+  const cy = CAM.yaw, s = Math.sin(cy), c = Math.cos(cy);
+  IN.my = wx * s + wz * c;
+  IN.mx = wx * c - wz * s;
+  IN.sprintHeld = sprint;
+}
+
+/* ── HANDOFF: one continuous camera from authored frame into follow-cam ── */
+const HANDOFF = { k: 0, from: [0, 0, 0], look: [0, 0, 0], fast: false, fired: false, startTick: 0, doneTick: 0 };
+window.__handoffRumbles = 0;
+const _hv = new THREE.Vector3();
+function beginHandoff() {
+  HANDOFF.k = 0; HANDOFF.fast = false; HANDOFF.fired = false;
+  HANDOFF.startTick = simTick; HANDOFF.doneTick = 0;
+  HANDOFF.from = [camera.position.x, camera.position.y, camera.position.z];
+  HANDOFF.look = FC.lookD.slice();
+  CAM.mode = 'handoff';
+  CAM.yaw = Math.atan2(P.x - WHEEL_POS.x, P.z - WHEEL_POS.z) + Math.PI; // roughly behind the downhill run
+  CAM.yaw = P.heading + Math.PI;
+  CAM.pitch = 0.4;
+  CAM.ready = false;
+  CINE.id = null;
+  setState('play');
+  AUTORUN.active = true; AUTORUN.player = false;
+  AUTORUN.path = RUN_PATH.slice(); AUTORUN.idx = 0; AUTORUN.ease = 0;
+  AUTORUN.startedAt = simTick;
+}
+function handoffCamera(dtv) {
+  // run the REAL follow logic (it keeps CAM.x/y/z live), then blend the
+  // rendered camera from the authored frame into it — no cut anywhere
+  CAM.mode = 'follow';
+  updateCamera(dtv);
+  CAM.mode = 'handoff';
+  HANDOFF.k = Math.min(1, HANDOFF.k + dtv / (HANDOFF.fast ? 0.6 : 2.1));
+  const k = smoothstep(HANDOFF.k);
+  const fx = camera.position.x, fy2 = camera.position.y, fz = camera.position.z;
+  camera.position.set(
+    lerp(HANDOFF.from[0], fx, k), lerp(HANDOFF.from[1], fy2, k), lerp(HANDOFF.from[2], fz, k));
+  // look: from the tide frame's gaze into the follow gaze
+  const tx = P.x + Math.sin(P.heading) * 0.35, tz = P.z + Math.cos(P.heading) * 0.35;
+  _hv.set(lerp(HANDOFF.look[0], tx, k), lerp(HANDOFF.look[1], P.fy + 1.25, k), lerp(HANDOFF.look[2], tz, k));
+  camera.lookAt(_hv);
+  if (HANDOFF.k >= 1 && !HANDOFF.fired) {
+    HANDOFF.fired = true;
+    HANDOFF.doneTick = simTick;
+    CAM.mode = 'follow';
+    // the tell is HAPTIC: one soft pulse — you have the wheel
+    rumble({ duration: 90, strong: 0.12, weak: 0.42 }, 'handoff');
+    window.__handoffRumbles++;
+    el('cineBars').classList.remove('on');
+  }
+}
+
+/* ── the tide-rush world animation (independent of game state: seamless) ── */
+const FLOODANIM = { on: false, t: 0, splashed: false };
+const FLOODLIVE = { active: false, t: 0, boatDone: false, boatLift: -1, pearlSaid: false, riseK: 0 };
+function floodSetFlags() {
+  QUEST.phases = 2;
+  SAVE.ph = 2; SAVE.sky = 2; SAVE.floodSeen = true;
+  storeSave();
+  setQuest(6);
+  markCineSeen('flood');
+  /* the world relocations happen NOW (off-screen while the camera holds the
+     bay): shoreline salt, beach crabs, shallow wisps, Pearl to the shore,
+     the wreck chest up onto its deck, kelp under, tidepool subsumed */
+  tidepoolFilled = true; tidewater.visible = false;
+  for (const s of saltPickups) {
+    const p = shorewardOf(s.ox, s.oz);
+    s.x = p[0]; s.z = p[1];
+    s.baseY = _n1GroundH(s.x, s.z) + 0.16;
+    s.mesh.position.set(s.x, s.baseY, s.z);
+  }
+  crabs.forEach((cr, i) => {
+    if (cr.area !== 'bay') return;
+    const b = CRAB_BEACH[i % CRAB_BEACH.length];
+    cr.sx = b[0]; cr.sz = b[1]; cr.x = b[0]; cr.z = b[1];
+    cr.c.root.position.set(cr.x, _n1GroundH(cr.x, cr.z), cr.z);
+  });
+  wisps.forEach((w2, i) => {
+    if (w2.area !== 'bay') return;
+    const b = WISP_SHALLOWS[i % WISP_SHALLOWS.length];
+    w2.sx = b[0]; w2.sz = b[1]; w2.x = b[0]; w2.z = b[1];
+    w2.y = _n1GroundH(w2.x, w2.z) + 1.8;
+  });
+  chest.x = WRECK.x + 0.6; chest.z = WRECK.z + 0.4;
+  chest.group.position.set(chest.x, WL + 0.3, chest.z);
+  for (const c of wreckDeckColl) c.off = false;
+  for (const c of wreckColl) c.off = true;
+  pearl.x = PEARL_SHORE.x; pearl.z = PEARL_SHORE.z;
+  pearl.baseY = _n1GroundH(pearl.x, pearl.z);
+  pearl.char.root.position.set(pearl.x, pearl.baseY, pearl.z);
+  for (const patch of kelpPatches) {
+    patch.flooded = _n1GroundH(patch.cx, patch.cz) < WL - 0.05;
+  }
+  cartNewLine.visible = true;
+  for (const b of bayBoats) b.liftT = -1;   // they lift as the foam reaches them
+  bayWaterMesh.visible = true;
+  seaGlintMesh.visible = true;
+  swellLineMesh.visible = true;
+  BOAT.x = 8.5; BOAT.z = 6.0; BOAT.ang = 0.9;
+  SAVE.boatX = BOAT.x; SAVE.boatZ = BOAT.z; SAVE.boatAng = BOAT.ang;
+  FLOODLIVE.active = true; FLOODLIVE.t = 0; FLOODLIVE.boatDone = false;
+  FLOODLIVE.boatLift = -1; FLOODLIVE.pearlSaid = false; FLOODLIVE.riseK = 0;
+}
+
+/* ── THE FLOOD — one continuous camera, then the world hands you the run ── */
+const FC = { camD: [0, 0, 0], lookD: [0, 0, 0] };
+function tickFloodCine(t) {
+  const wx = WHEEL_POS.x, wz = WHEEL_POS.z;
+  const wy = _n1GroundH(wx, wz) + 4.2;
+  /* skip (only after first viewing): everything lands in its end state */
+  if (cineSeen('flood') && t > 0.9 && IN.confirm) {
+    floodSetFlags();
+    window.__tideApplySave();
+    FLOODLIVE.riseK = 1; FLOODLIVE.boatDone = true; FLOODLIVE.active = false;
+    P.x = -20; P.z = -46; P.fy = groundH(P.x, P.z); P.heading = 2.6;
+    el('cineBars').classList.remove('on');
+    endCine();
+    return;
+  }
+  /* ONE camera path, C0-continuous throughout:
+     A(socket close) → B(wheel wide) → C(over the bay) → D(tide frame) */
+  const A = [wx + 5.2, wy + 1.2, wz + 6.4], LA = [wx, wy + 3.1, wz];
+  const B = [wx + 7.2, wy + 0.6, wz + 9.2], LB = [wx, wy + 1.5, wz];
+  const C = [wx - 8.5, wy + 3.4, wz + 2.5], LC = [wx + 28, wy - 5.5, wz + 48];
+  const D = [wx - 5.5, wy + 2.7, wz + 6.8], LD = [8, WL + 0.6, 12];
+  // capture the live camera BEFORE the first authored frame — no entry cut
+  if (CINE.step === 0 && t < 0.6 && !FC.entryTaken) {
+    FC.entryTaken = true;
+    FC.entry = [camera.position.x, camera.position.y, camera.position.z];
+    FC.entryLook = [P.x, P.fy + 1.25, P.z];
+  }
+  let p, l;
+  if (t < 3.4) {
+    const k = smoothstep(clamp(t / 3.4, 0, 1));
+    p = [lerp(A[0], B[0], k), lerp(A[1], B[1], k), lerp(A[2], B[2], k)];
+    l = [lerp(LA[0], LB[0], k), lerp(LA[1], LB[1], k), lerp(LA[2], LB[2], k)];
+    // NO cut on entry either: ease in from wherever the live camera stood
+    if (FC.entry && t < 0.9) {
+      const ek = smoothstep(t / 0.9);
+      p = [lerp(FC.entry[0], p[0], ek), lerp(FC.entry[1], p[1], ek), lerp(FC.entry[2], p[2], ek)];
+      l = [lerp(FC.entryLook[0], l[0], ek), lerp(FC.entryLook[1], l[1], ek), lerp(FC.entryLook[2], l[2], ek)];
+    }
+  } else if (t < 6.6) {
+    const k = smoothstep(clamp((t - 3.4) / 3.2, 0, 1));
+    p = [lerp(B[0], C[0], k), lerp(B[1], C[1], k), lerp(B[2], C[2], k)];
+    l = [lerp(LB[0], LC[0], k), lerp(LB[1], LC[1], k), lerp(LB[2], LC[2], k)];
+  } else {
+    const k = smoothstep(clamp((t - 6.6) / 2.6, 0, 1));
+    p = [lerp(C[0], D[0], k), lerp(C[1], D[1], k), lerp(C[2], D[2], k)];
+    l = [lerp(LC[0], LD[0], k), lerp(LC[1], LD[1], k), lerp(LC[2], LD[2], k)];
+  }
+  cineCam(p[0], p[1], p[2], l[0], l[1], l[2]);
+  FC.camD = p; FC.lookD = l;
+  /* the beats along it */
+  const seat = (ang) => [wx + Math.cos(ang) * 3.1 * Math.cos(wheelRing.rotation.y), wy + Math.sin(ang) * 3.1, wz - Math.cos(ang) * 3.1 * Math.sin(wheelRing.rotation.y)];
+  if (t < 1.6) {
+    // the Half Shield leaves Wick's hands and seats into the top socket
+    if (CINE.step === 0) {
+      CINE.step = 1;
+      P.carryShield = false;
+      shieldItem.visible = true;
+      SFX.chime(0.7);
+    }
+    const k = smoothstep(clamp(t / 1.5, 0, 1));
+    const sy = groundH(P.x, P.z) + 1.6;
+    const s2 = seat(Math.PI / 2);
+    shieldItem.scale.setScalar(lerp(0.62, 0.9, k));
+    shieldItem.position.set(lerp(P.x, s2[0], k), lerp(sy, s2[1], k) + Math.sin(k * Math.PI) * 1.5, lerp(P.z, s2[2], k));
+    shieldItem.rotation.set(0, wheelRing.rotation.y + Math.PI / 2, (1 - k) * 2.2);
+    if (t > 1.45 && CINE.step === 1) {
+      CINE.step = 2;
+      SFX.chime(1.4);
+      burst(psSparkle, s2[0], s2[1], s2[2], 18, 1.5, 1.0, 1.1);
+    }
+  } else if (t < 3.6) {
+    // the second notch
+    if (CINE.step === 2) { CINE.step = 3; SFX.grind(); rumble({ duration: 600, strong: 0.5, weak: 0.8 }); }
+    const k = smoothstep(clamp((t - 1.7) / 1.7, 0, 1));
+    wheelRing.rotation.z = -(Math.PI / 4) - k * (Math.PI / 4);
+    const sS = seat(Math.PI / 2 - k * Math.PI / 4);
+    shieldItem.position.set(sS[0], sS[1], sS[2]);
+    const sC = seat(Math.PI / 4 - k * Math.PI / 4);
+    crescentItem.position.set(sC[0], sC[1], sC[2]);
+    CAM.shake = 0.05;
+    if (t > 3.35 && CINE.step === 3) {
+      CINE.step = 4;
+      SFX.bell();
+      rumble({ duration: 900, strong: 0.9, weak: 0.9 });
+      CAM.shake = 0.28;
+    }
+  } else if (t < 6.6) {
+    // the sky takes its second step; the SECOND star arrives
+    const k = smoothstep(clamp((t - 3.6) / 2.6, 0, 1));
+    setSkyBlend2(k);
+    setStarOp2(clamp((t - 5.1) / 1.3, 0, 1) * 0.95);
+    if (CINE.step === 4 && t > 5.2) { CINE.step = 5; SFX.night(); }
+  } else {
+    // THE HORIZON: a silver line, rushing in
+    if (CINE.step === 5) {
+      CINE.step = 6;
+      floodSetFlags();
+      FLOODANIM.on = true; FLOODANIM.t = 0; FLOODANIM.splashed = false;
+      SFX.waterFill();
+    }
+    if (t >= 9.2) beginHandoff();   // …and suddenly you're just IN CHARGE
+  }
+}
+
+/* ── the basin resonance: one beat, the stones part ── */
+function tickBasinCine(t) {
+  if (cineSeen('basin') && t > 0.8 && IN.confirm) {
+    if (!SAVE.basinOpen) {
+      SAVE.basinOpen = true; storeSave();
+      basinOpenNow = true; window.__basinOpenNow = true;
+    }
+    endCine();
+    return;
+  }
+  const bx = 1931.5, bz = 1185.5;   // the rockfall face
+  const gy = _n1GroundH(HUM_SPOT.x, HUM_SPOT.z);
+  const k = smoothstep(clamp(t / 5.4, 0, 1));
+  cineCam(
+    lerp(P.x - Math.sin(P.heading) * 2.6, HUM_SPOT.x - 6.5, k), gy + lerp(1.7, 2.6, k), lerp(P.z - Math.cos(P.heading) * 2.6, HUM_SPOT.z - 7.5, k),
+    bx, gy + lerp(1.4, 2.2, k), bz);
+  if (CINE.step === 0 && t > 0.7) {
+    CINE.step = 1;
+    SFX.glassPulse(1);
+    // the compass answers the hum: a mote stream from the sword to the stones
+    for (let i = 0; i < 12; i++) {
+      const tt = i / 11;
+      psSparkle.spawn(lerp(P.x, bx, tt * 0.5), gy + 1.2 + Math.sin(tt * Math.PI) * 1.2, lerp(P.z, bz, tt * 0.5),
+        (bx - P.x) * 0.16, 0.3, (bz - P.z) * 0.16, 0.9);
+    }
+  }
+  if (CINE.step === 1 && t > 1.7) { CINE.step = 2; SFX.hum(); CAM.shake = 0.12; }
+  if (CINE.step === 2 && t > 2.9) {
+    CINE.step = 3;
+    SAVE.basinOpen = true; storeSave();
+    basinOpenNow = true; window.__basinOpenNow = true;
+    SFX.grind(); SFX.thump(true);
+    CAM.shake = 0.5;
+    rumble({ duration: 700, strong: 0.9, weak: 0.7 });
+    burst(psDust, bx, gy + 1.2, bz, 30, 3.2, 2.6, 1.0);
+    burst(psSpark, bx, gy + 1.8, bz, 10, 2.2, 1.8, 0.5);
+  }
+  if (CINE.step === 3 && t > 4.4) {
+    CINE.step = 4;
+    // a cool breath out of the dark — the falls' held breath
+    burst(psSparkle, bx + 2, gy + 1.4, bz + 2, 14, 1.2, 0.8, 1.2);
+    SFX.chime(0.6);
+  }
+  if (t > 6.2) { markCineSeen('basin'); endCine(); }
+}
+
+/* ── the cure: the Wyrm dissolves into the first free water in a year ── */
+function tickWyrmCure(t) {
+  const W = WYRM;
+  if (cineSeen('wyrmCure') && t > 0.9 && IN.confirm) {
+    finishWyrmCure();
+    endCine();
+    return;
+  }
+  const gy = groundH(W.x, W.z);
+  // one slow continuous arc, front → side, while the river stands down
+  const a0 = W.ang + Math.PI + 0.2, a1 = W.ang + Math.PI - 1.3;
+  const k = smoothstep(clamp(t / 9.6, 0, 1));
+  const aa = lerp(a0, a1, k);
+  const rr = lerp(8.5, 6.2, k);
+  cineCam(W.x + Math.sin(aa) * rr, gy + lerp(2.4, 3.4, k), W.z + Math.cos(aa) * rr,
+    W.x, gy + lerp(2.0, 0.9, k), W.z);
+  if (CINE.step === 0) {
+    CINE.step = 1;
+    W.defeated = true;
+    SAVE.wyrmDone = true; storeSave();
+    refreshWyrmBar(false);
+    SFX.wyrmCry();
+  }
+  calmWyrmEyes(clamp(t / 1.6, 0, 1));
+  if (CINE.step === 1 && t > 2.0) {
+    CINE.step = 2;
+    SFX.waterFill();
+    W.poolWet = true;
+  }
+  if (t > 2.0 && t < 5.6) {
+    // DISSOLVE: the body melts into water where it stands
+    const dk = clamp((t - 2.0) / 3.2, 0, 1);
+    W.c.root.scale.y = 1 - dk * 0.92;
+    W.c.root.scale.x = 1 + dk * 0.25; W.c.root.scale.z = 1 + dk * 0.25;
+    hollowPoolMesh.visible = true;
+    hollowPoolMesh.position.y = groundH(HPOOL.x, HPOOL.z) + 0.15 + dk * 0.25;
+    if ((simTick % 3) === 0) {
+      burst(psSparkle, W.x + (Math.random() - 0.5) * 3, gy + 1.2, W.z + (Math.random() - 0.5) * 3, 4, 1.6, 1.8, 0.9);
+    }
+  }
+  if (CINE.step === 2 && t > 5.6) {
+    CINE.step = 3;
+    W.c.root.visible = false;
+    W.st = 'gone';
+    waveBowMesh.visible = true;
+    waveBowMesh.position.set(HPOOL.x, groundH(HPOOL.x, HPOOL.z) + 0.3, HPOOL.z);
+    waveBowMesh.rotation.y = Math.atan2(P.x - HPOOL.x, P.z - HPOOL.z);
+    SFX.waterBow();
+  }
+  if (t > 5.6 && t < 8.4) {
+    // THE BOW: a wave-form rises, curls toward Wick, holds… and settles
+    const bk = clamp((t - 5.6) / 1.4, 0, 1);
+    const down = clamp((t - 7.4) / 1.0, 0, 1);
+    waveBowMesh.scale.set(1, smoothstep(bk) * (1 - smoothstep(down) * 0.9) + 0.1, 1);
+    waveBowMesh.rotation.x = smoothstep(bk) * 0.35;      // it LEANS — a bow
+    if ((simTick % 4) === 0) {
+      burst(psSparkle, HPOOL.x, groundH(HPOOL.x, HPOOL.z) + 1.6, HPOOL.z, 3, 1.2, 1.0, 0.7);
+    }
+  }
+  if (CINE.step === 3 && t > 7.0) {
+    CINE.step = 4;
+    // the Half Shield drifts down to the water
+    shieldItem.visible = true;
+    shieldItem.scale.setScalar(1.3);
+    W.c.brow.visible = false;
+  }
+  if (CINE.step >= 4 && t < 9.8) {
+    const sk = smoothstep(clamp((t - 7.0) / 2.2, 0, 1));
+    shieldItem.position.set(HPOOL.x, lerp(gy + 3.4, groundH(HPOOL.x, HPOOL.z) + 0.75, sk), HPOOL.z);
+    shieldItem.rotation.set(lerp(-0.2, -0.9, sk), 0.6, 0);
+  }
+  if (t > 10.6) {
+    finishWyrmCure();
+    endCine();
+  }
+}
+function finishWyrmCure() {
+  const W = WYRM;
+  W.defeated = true; W.st = 'gone'; W.active = false;
+  W.c.root.visible = false; W.c.wakeRoot.visible = false;
+  W.c.root.scale.set(1, 1, 1);
+  W.c.brow.visible = false;
+  W.poolWet = true;
+  waveBowMesh.visible = false;
+  hollowPoolMesh.visible = true;
+  hollowPoolMesh.position.y = groundH(HPOOL.x, HPOOL.z) + 0.4;
+  shieldItem.visible = true;
+  shieldItem.scale.setScalar(1.3);
+  shieldItem.position.set(HPOOL.x, groundH(HPOOL.x, HPOOL.z) + 0.75, HPOOL.z);
+  shieldItem.rotation.set(-0.9, 0.6, 0);
+  refreshWyrmBar(false);
+  if (!SAVE.wyrmDone) { SAVE.wyrmDone = true; storeSave(); }
+  markCineSeen('wyrmCure');
+}
+
+/* wire the new ids into the cinematic dispatcher */
+const _n1StartCine = startCine;
+startCine = function (id) {
+  if (id === 'sunstruck' && WYRM.active && !WYRM.defeated) {
+    // sunstruck checkpoint: the wyrm re-arms at the CURRENT phase
+    WYRM.st = 'sleep'; WYRM.t = 0;
+    WYRM.hp = wyrmPhaseHp(WYRM.phase);
+    WYRM.active = false;
+    WYRM.x = H3.x + 2; WYRM.z = H3.z - 3;
+    WYRM.trail.length = 0;
+    for (const dv of WYRM.devils) dv.on = false;
+    refreshWyrmBar(false);
+  }
+  _n1StartCine(id);
+  if (id === 'basin' || id === 'wyrmCure' || id === 'flood') {
+    CAM.mode = 'cine';
+    dlgBox.classList.remove('on');
+    if (id === 'flood') { el('cineBars').classList.add('on'); FC.entryTaken = false; }
+  }
+};
+const _n1TickCine = tickCine;
+tickCine = function () {
+  if (CINE.id === 'basin') { CINE.t += DT; tickBasinCine(CINE.t); return; }
+  if (CINE.id === 'wyrmCure') { CINE.t += DT; tickWyrmCure(CINE.t); return; }
+  if (CINE.id === 'flood') { CINE.t += DT; tickFloodCine(CINE.t); return; }
+  _n1TickCine();
+};
+</script>
+<script>
+/* ═══════════ p6c/6 — SAILING v1, the maiden voyage, and all the wiring ═══════════ */
+SFX.splashSm = function () { if (!AC) return;
+  noiseBurst(AC.currentTime, 0.12, 0.07, 900, 400, 0.9, 'lowpass'); };
+SFX.creakBoat = function () { if (!AC) return; const t = AC.currentTime;
+  noiseBurst(t, 0.18, 0.05, 260, 140, 1.3, 'lowpass');
+  tone(120, t + 0.02, 0.2, 0.03, 'triangle', null, 85); };
+
+const psSpray = makePS(90, 0.16, 0xeaf6fa, false, true);   // bow spray + wakes
+
+DLG.pearlBeg = { name: 'PEARL', lines: [
+  'You’re going OUT THERE? On the actual WATER?',
+  'Take me. Please. I’ve only ever seen it gone.',
+], onDone: () => { startVoyage(); } };
+
+const VOYAGE = { active: false, aboard: false, idx: 0, saidA: false, saidB: false };
+const VOYAGE_PATH = [
+  [0, 26], [-24, 52], [-40, 86], [-20, 112], [8, 124], [26, 112], [30, 88], [18, 48], [10, 16], [8.5, 6.5],
+];
+function boardBoat() {
+  P.sailing = true;
+  P.x = BOAT.x; P.z = BOAT.z; P.fy = WL + 0.45; P.air = false; P.jvy = 0;
+  P.vx = 0; P.vz = 0; P.st = 'idle'; P.sprint = false;
+  BOAT.spd = 0;
+  sailboatColl.off = true;
+  SFX.creakBoat(); SFX.splashSm();
+  rumble({ duration: 90, strong: 0.15, weak: 0.3 });
+  if (SAVE && !SAVE.sailedOnce) { SAVE.sailedOnce = true; storeSave(); }
+}
+function startVoyage() {
+  boardBoat();
+  VOYAGE.active = true; VOYAGE.aboard = true;
+  VOYAGE.idx = 0; VOYAGE.saidA = false; VOYAGE.saidB = false;
+  showCaption('Pearl climbs in before you can answer.', 2600);
+}
+function endVoyage() {
+  VOYAGE.active = false;
+  VOYAGE.aboard = false;
+  SAVE.voyageDone = true; storeSave();
+  pearl.x = PEARL_SHORE.x; pearl.z = PEARL_SHORE.z;
+  pearl.baseY = _n1GroundH(pearl.x, pearl.z);
+  pearl.char.root.position.set(pearl.x, pearl.baseY, pearl.z);
+  pearl.char.root.rotation.y = 0.35;
+  showCaption('“Again tomorrow. EVERY tomorrow.” — the sea is yours now.', 3600);
+}
+function disembarkSpot() {
+  // a dry (or platform) footing within stepping reach of the hull
+  for (let r = 1.7; r <= 4.1; r += 0.8) {
+    for (let i = 0; i < 12; i++) {
+      const a = BOAT.ang + i * (TAU / 12);
+      const px2 = BOAT.x + Math.sin(a) * r, pz2 = BOAT.z + Math.cos(a) * r;
+      if (worldSolidAt(px2, pz2)) continue;
+      const sy = supportYAt(px2, pz2, WL + 2.5);
+      if (sy > WL - 0.35 && sy < WL + 2.0) return { x: px2, z: pz2, y: sy };
+    }
+  }
+  return null;
+}
+function disembark() {
+  const s = disembarkSpot();
+  if (!s) return;
+  P.sailing = false;
+  P.x = s.x; P.z = s.z; P.fy = Math.max(s.y, _n1GroundH(s.x, s.z)); P.air = false;
+  P.vx = 0; P.vz = 0; P.st = 'idle';
+  sailboatColl.off = false;
+  sailboatColl.x = BOAT.x; sailboatColl.z = BOAT.z;
+  SAVE.boatX = BOAT.x; SAVE.boatZ = BOAT.z; SAVE.boatAng = BOAT.ang;
+  storeSave();
+  SFX.splashSm();
+}
+let seaEdgeCd = 0, seaEdgeHits = 0;
+function tickSailing() {
+  const B = BOAT;
+  // ✕ at the helm: context first (COME ASHORE), exactly like on foot
+  if (IN.atk && !VOYAGE.active) {
+    const ctx = currentInteract();
+    if (ctx) { doInteract(ctx); return; }
+  }
+  let tgt = 0, full = false;
+  if (VOYAGE.active) {
+    // the guided lap: gentle autopilot; ✕ skips to the mooring
+    const wp = VOYAGE_PATH[VOYAGE.idx];
+    if (IN.confirm && VOYAGE.idx > 0) {
+      const last = VOYAGE_PATH[VOYAGE_PATH.length - 1];
+      B.x = last[0]; B.z = last[1]; B.spd = 0;
+      VOYAGE.idx = VOYAGE_PATH.length;
+    } else if (wp) {
+      const d = Math.hypot(wp[0] - B.x, wp[1] - B.z);
+      if (d < 3.2) VOYAGE.idx++;
+      else {
+        B.ang = angLerp(B.ang, Math.atan2(wp[0] - B.x, wp[1] - B.z), 0.028);
+        tgt = 4.6;
+      }
+      if (VOYAGE.idx === 2 && !VOYAGE.saidA) {
+        VOYAGE.saidA = true;
+        showCaption('“It doesn’t end. Wick, the water just doesn’t END.”', 4200);
+        SFX.talk();
+      }
+      if (VOYAGE.idx === 5 && !VOYAGE.saidB) {
+        VOYAGE.saidB = true;
+        showCaption('“When you find the rest of the moon — come get me first.”', 4200);
+        SFX.talk();
+      }
+    }
+    if (VOYAGE.idx >= VOYAGE_PATH.length) endVoyage();
+  } else {
+    const mag = moveVec();
+    if (mag > 0.1) {
+      const want = Math.atan2(_mv[0], _mv[1]);
+      B.ang = angLerp(B.ang, want, 0.042);
+      full = IN.sprintHeld;
+      tgt = full ? 7.6 : 3.4;      // ○ held = FULL SAIL, the sprint of the sea
+    }
+  }
+  B.spd += (tgt - B.spd) * (tgt > B.spd ? 0.022 : 0.04);
+  if (B.spd > 0.05) {
+    let nx = B.x + Math.sin(B.ang) * B.spd * DT;
+    let nz = B.z + Math.cos(B.ang) * B.spd * DT;
+    // the hull respects the world: colliders, rock, and DEPTH
+    const c = collide(nx, nz, 1.15, WL);
+    const r = resolveSolid(B.x, B.z, c[0], c[1]);
+    nx = r[0]; nz = r[1];
+    const bowX = nx + Math.sin(B.ang) * 1.35, bowZ = nz + Math.cos(B.ang) * 1.35;
+    if (waterDepthAt(nx, nz) < 0.26 || waterDepthAt(bowX, bowZ) < 0.2) {
+      // soft grounding: keep what slides, shed the speed
+      if (waterDepthAt(nx, B.z) > 0.26 && waterDepthAt(nx + Math.sin(B.ang) * 1.3, B.z) > 0.2) nz = B.z;
+      else if (waterDepthAt(B.x, nz) > 0.26 && waterDepthAt(B.x, nz + Math.cos(B.ang) * 1.3) > 0.2) nx = B.x;
+      else { nx = B.x; nz = B.z; }
+      B.spd *= 0.86;
+      if (B.spd > 1.5 && (simTick % 14) === 0) SFX.splashSm();
+    }
+    // THE SOFT SEA BOUNDARY: swells turn you home
+    const de = Math.hypot(nx - SEA_EDGE.x, nz - SEA_EDGE.z);
+    if (de > SEA_EDGE.r) {
+      const push = (de - SEA_EDGE.r) + 0.5;
+      nx -= (nx - SEA_EDGE.x) / de * push * 0.25;
+      nz -= (nz - SEA_EDGE.z) / de * push * 0.25;
+      B.spd *= 0.9;
+      B.bobPh += 0.4;                       // the swell heaves the hull
+      if (seaEdgeCd <= 0) {
+        seaEdgeCd = 480;
+        seaEdgeHits++;
+        showCaption('The open sea wants a better keel. Someday.', 3600);
+        SFX.splash();
+        rumble({ duration: 220, strong: 0.3, weak: 0.55 });
+      }
+    }
+    B.x = nx; B.z = nz;
+  }
+  if (seaEdgeCd > 0) seaEdgeCd--;
+  B.sailK = full && tgt > 0 ? Math.min(1, B.sailK + DT * 2.4) : Math.max(0.12, B.sailK - DT * 1.8);
+  B.heel = angLerp(B.heel, clamp((B.spd / 7.6) * 0.14, 0, 0.2), 0.06);
+  // the player IS the boat while sailing (telemetry, camera, areas)
+  P.x = B.x; P.z = B.z; P.fy = WL + 0.45; P.air = false;
+  P.heading = B.ang;
+  P.st = 'idle'; P.sprint = false;
+  // live save fields (stored on disembark / pause)
+  if (SAVE) { SAVE.boatX = B.x; SAVE.boatZ = B.z; SAVE.boatAng = B.ang; }
+  // bow spray + wake
+  if (B.spd > 2.6 && (simTick % (B.spd > 6 ? 2 : 5)) === 0) {
+    const bx = B.x + Math.sin(B.ang) * 1.3, bz = B.z + Math.cos(B.ang) * 1.3;
+    psSpray.spawn(bx + (Math.random() - 0.5) * 0.7, WL + 0.25, bz + (Math.random() - 0.5) * 0.7,
+      Math.sin(B.ang) * 1.2 + (Math.random() - 0.5) * 1.6, 1.4 + Math.random(), Math.cos(B.ang) * 1.2 + (Math.random() - 0.5) * 1.6, 0.5);
+    psSpray.spawn(B.x - Math.sin(B.ang) * 1.4, WL + 0.12, B.z - Math.cos(B.ang) * 1.4,
+      -Math.sin(B.ang) * 2.2, 0.5, -Math.cos(B.ang) * 2.2, 0.7);
+  }
+  if (B.spd > 6.5 && (simTick % 40) === 0) SFX.splashSm();
+}
+
+/* ── the flood joy-beat (playable, no fail state) ── */
+function tickFloodLive() {
+  const F = FLOODLIVE;
+  if (!flooded()) return;
+  if (F.active && !F.boatDone) {
+    F.t += DT;
+    if (!FLOODANIM.on && F.riseK < 1) F.riseK = Math.min(1, F.riseK + DT / 24);
+    const near = Math.hypot(P.x - WAKE_BOAT.x, P.z - WAKE_BOAT.z) < 26;
+    if (F.boatLift < 0 && (near || F.t > 42) && F.riseK > 0.45 && !FLOODANIM.on) {
+      // THE WAKE-BOAT — dead on the mud since frame one — lifts, rights, bobs
+      F.boatLift = 0.0001;
+      wakeWreckDry = false;
+      wakeWreckMesh.visible = false;
+      for (const c of wakeWreckColl) c.off = true;
+      sailboat.group.visible = true;
+      SFX.splash(); SFX.chime(0.9);
+      burst(psSpray, BOAT.x, WL + 0.3, BOAT.z, 24, 2.4, 2.0, 0.8);
+      burst(psSparkle, BOAT.x, WL + 0.5, BOAT.z, 16, 1.6, 1.4, 1.0);
+      rumble({ duration: 300, strong: 0.3, weak: 0.6 });
+    }
+  }
+  if (!F.pearlSaid && Math.hypot(P.x - pearl.x, P.z - pearl.z) < 7.5) {
+    F.pearlSaid = true;
+    showCaption('“It came BACK. Wick — the sea came BACK!”', 4200);
+    SFX.talk();
+  }
+}
+
+/* ── hollow puzzles: the mirrors, the glyph doors ── */
+const HMIRRORS = [
+  { m: hm1, id: 'hmirror1', door: glyphDoor1, doorPos: HDOOR1, key: 'glyph1', beam: hBeam1, burnT: 0, delta: 9 },
+  { m: hm2, id: 'hmirror2', door: glyphDoor2, doorPos: HDOOR2, key: 'glyph2', beam: hBeam2, burnT: 0, delta: 9 },
+];
+function tickHollowMirrors() {
+  const ctx = state === 'play' ? currentInteract() : null;
+  for (const HM of HMIRRORS) {
+    if (SAVE && SAVE[HM.key]) { HM.delta = 0; continue; }
+    const nearM = ctx && ctx.id === HM.id;
+    if (nearM && IN.atkHeld && state === 'play') {
+      HM.m.angle += 0.75 * DT;
+      if (HM.m.angle > TAU) HM.m.angle -= TAU;
+      HM.m.group.rotation.y = -HM.m.angle;
+    }
+    let da = HM.m.angle - HM.m.target;
+    da = ((da % TAU) + TAU) % TAU; if (da > Math.PI) da -= TAU;
+    if (!(nearM && IN.atkHeld) && Math.abs(da) < 0.4) {
+      HM.m.angle = angLerp(HM.m.angle, HM.m.target, 0.05);
+      HM.m.group.rotation.y = -HM.m.angle;
+      da = HM.m.angle - HM.m.target;
+      da = ((da % TAU) + TAU) % TAU; if (da > Math.PI) da -= TAU;
+    }
+    HM.delta = da;
+    const lit = Math.abs(da) < 0.17;
+    if (lit) {
+      HM.burnT += DT;
+      if (HM.burnT > 0.3 && Math.random() < 0.35) {
+        burst(psSpark, HM.doorPos.x, groundH(HM.doorPos.x, HM.doorPos.z) + 1.8, HM.doorPos.z, 3, 0.9, 1.4, 0.5);
+      }
+      if (HM.burnT >= 1.0 && HM.door.sinkT < 0) {
+        // the water-glyph RE-LIGHTS: the way down remembers
+        HM.door.sinkT = 0;
+        SFX.chime(1.1); SFX.grind();
+        rumble({ duration: 420, strong: 0.5, weak: 0.6 });
+      }
+    } else HM.burnT = Math.max(0, HM.burnT - DT * 2);
+  }
+}
+function tickGlyphDoors() {
+  for (const HM of HMIRRORS) {
+    const D = HM.door;
+    if (D.sinkT < 0) continue;
+    if (SAVE && SAVE[HM.key]) { D.sinkT = -1; continue; }
+    D.sinkT += DT;
+    D.group.position.y = D.baseY - smoothstep(clamp(D.sinkT / 1.6, 0, 1)) * 5.6;
+    D.glyph.material.opacity = 0.9;
+    if ((simTick & 3) === 0) {
+      burst(psDust, HM.doorPos.x, groundH(HM.doorPos.x, HM.doorPos.z) + 0.4, HM.doorPos.z, 4, 1.4, 1.0, 0.5);
+    }
+    if (D.sinkT > 1.45) {
+      SAVE[HM.key] = true; storeSave();
+      D.open = true; D.sinkT = -1;
+      SFX.thump(false);
+    }
+  }
+}
+
+/* ── the region tick ── */
+let hollowSeenSession = false, dunkCaption = false, lastDry = [4, -2];
+function tickTide() {
+  if (state !== 'play') return;
+  /* the resonance: with the Crescent thread alive, the forecourt answers */
+  if (SAVE && !SAVE.basinOpen && QUEST.q >= 2 && !P.sailing) {
+    if (Math.hypot(P.x - HUM_SPOT.x, P.z - HUM_SPOT.z) < 11) {
+      startCine('basin');
+      return;
+    }
+  }
+  if (inHollowAt(P.x, P.z) && !hollowSeenSession) {
+    hollowSeenSession = true;
+    showCaption('THE FALLS HOLLOW', 4200);
+  }
+  tickWyrm();
+  tickHollowMirrors();
+  tickGlyphDoors();
+  tickFloodLive();
+  if (P.carryShield && (simTick % 780) === 0) SFX.hum();   // it hums, going home
+  /* wading: ankles yes, depths no */
+  if (!P.sailing && flooded()) {
+    const d = waterDepthAt(P.x, P.z);
+    if (d < 0.28 || P.fy > WL + 0.12) { lastDry[0] = P.x; lastDry[1] = P.z; dunkCaption = false; }
+    if (d > 0.02 && d < 0.62 && P.fy <= WL + 0.12 && Math.hypot(P.vx, P.vz) > 1 && (simTick % 9) === 0) {
+      psSpray.spawn(P.x, WL + 0.06, P.z, (Math.random() - 0.5) * 1.2, 0.8, (Math.random() - 0.5) * 1.2, 0.4);
+      if ((simTick % 27) === 0) SFX.splashSm();
+    }
+    if (d > 0.8 && P.fy < WL + 0.35 && !P.air) {
+      // a dunk, never a death: back to the last dry footing
+      SFX.splash();
+      burst(psSpray, P.x, WL + 0.2, P.z, 18, 2.0, 1.6, 0.7);
+      P.x = lastDry[0]; P.z = lastDry[1];
+      P.fy = supportYAt(P.x, P.z, P.fy + 1); P.air = false; P.jvy = 0;
+      P.vx = 0; P.vz = 0;
+      if (!dunkCaption) {
+        dunkCaption = true;
+        showCaption('Too deep to wade. The boat knows the way.', 3200);
+      }
+    }
+  }
+}
+
+/* ── the master wraps ── */
+const _n1TickPlayer = tickPlayer;
+tickPlayer = function () {
+  if (AUTORUN.active) autorunInject();
+  if (P.sailing) tickSailing();
+  else _n1TickPlayer();
+  tickTide();
+};
+const _n1MoveWC = moveWithCollision;
+moveWithCollision = function (nx, nz) {
+  if (!P.sailing && flooded() && waterDepthAt(P.x, P.z) <= 0.62) {
+    if (waterDepthAt(nx, nz) > 0.62) {
+      if (waterDepthAt(nx, P.z) <= 0.62) nz = P.z;
+      else if (waterDepthAt(P.x, nz) <= 0.62) nx = P.x;
+      else { nx = P.x; nz = P.z; }
+    }
+  }
+  _n1MoveWC(nx, nz);
+};
+const _n1TickCrab = tickCrab;
+tickCrab = function (cr) {
+  const ox = cr.x, oz = cr.z;
+  _n1TickCrab(cr);
+  if (flooded() && !cr.dead && waterDepthAt(cr.x, cr.z) > 0.25) { cr.x = ox; cr.z = oz; }
+};
+const _n1TickWisp = tickWisp;
+tickWisp = function (w2) {
+  if (flooded() && !w2.dead && w2.st !== 'pop' && waterDepthAt(w2.x, w2.z) > 1.5) {
+    popWisp(w2);      // they fizz over open water — the sea is yours alone
+    return;
+  }
+  _n1TickWisp(w2);
+};
+const _n1SwingHits2 = swingHits;
+swingHits = function () {
+  let any = _n1SwingHits2();
+  if (wyrmSwingHits()) any = true;
+  return any;
+};
+const _n1ObjPoint = objectivePoint;
+objectivePoint = function () {
+  if (QUEST.q === 4 && SAVE) {
+    if (!SAVE.basinOpen) return { x: HUM_SPOT.x, z: HUM_SPOT.z };
+    if (!SAVE.glyph1) return { x: HM1.x, z: HM1.z };
+    if (!SAVE.glyph2) return { x: HM2.x, z: HM2.z };
+    if (!SAVE.wyrmDone) return { x: H3.x, z: H3.z };
+    return { x: HPOOL.x, z: HPOOL.z };
+  }
+  if (QUEST.q === 5) return { x: WHEEL_POS.x, z: WHEEL_POS.z };
+  if (QUEST.q >= 6) return null;
+  return _n1ObjPoint();
+};
+window.__n2WillOpen = () => !!(SAVE && !SAVE.basinOpen && QUEST.q >= 2);
+
+const _n1UpdateCamera = updateCamera;
+updateCamera = function (dtv) {
+  if (CAM.mode === 'handoff') { handoffCamera(dtv); return; }
+  if (P.sailing && CAM.mode === 'follow') { sailCamera(dtv); return; }
+  _n1UpdateCamera(dtv);
+};
+function sailCamera(dtv) {
+  // wider, lower, behind the boat; right stick still owns the orbit
+  let manual = false;
+  if (state === 'play') {
+    const sx = clamp(IN.cx, -1, 1), sy = clamp(IN.cy, -1, 1);
+    if (sx || sy) { CAM.yaw -= sx * 3.1 * dtv; CAM.pitch += sy * 2.0 * dtv; manual = true; }
+    if (CAMIN.mdx || CAMIN.mdy) { CAM.yaw -= CAMIN.mdx * 0.0034; CAM.pitch += CAMIN.mdy * 0.0026; manual = true; }
+    if (CAMIN.tdx || CAMIN.tdy) { CAM.yaw -= CAMIN.tdx * 0.0085; CAM.pitch += CAMIN.tdy * 0.0065; manual = true; }
+  }
+  CAMIN.mdx = CAMIN.mdy = CAMIN.tdx = CAMIN.tdy = 0;
+  if (manual || CAMIN.touching) CAM.stickAge = 0; else CAM.stickAge += dtv;
+  CAM.pitch = clamp(CAM.pitch, PITCH_MIN, PITCH_MAX);
+  if (CAM.stickAge > 3 && BOAT.spd > 1.2) {
+    CAM.yaw = angLerp(CAM.yaw, BOAT.ang + Math.PI, Math.min(1, dtv * 0.7));
+  }
+  const dist = 6.8;
+  const ty = WL + 1.35;
+  const cp = Math.cos(CAM.pitch), spv = Math.sin(CAM.pitch);
+  const dx = Math.sin(CAM.yaw) * cp, dz = Math.cos(CAM.yaw) * cp;
+  let dd = dist;
+  for (let s = 0.25; s <= 1.0; s += 0.15) {
+    const sx2 = BOAT.x + dx * dd * s, sz2 = BOAT.z + dz * dd * s;
+    if (worldSolidAt(sx2, sz2)) { dd = Math.max(2.4, dd * (s - 0.15)); break; }
+  }
+  const cx = BOAT.x + dx * dd, cz = BOAT.z + dz * dd;
+  let cy = ty + spv * dd;
+  cy = Math.max(cy, WL + 0.9);
+  const k = CAM.ready ? Math.min(1, dtv * (manual ? 15 : 5)) : 1;
+  CAM.x += (cx - CAM.x) * k; CAM.y += (cy - CAM.y) * k; CAM.z += (cz - CAM.z) * k;
+  CAM.ready = true;
+  camera.position.set(CAM.x, CAM.y, CAM.z);
+  CAM.shake = Math.max(0, CAM.shake - dtv * 1.6);
+  _hv.set(BOAT.x + Math.sin(BOAT.ang) * 1.2, ty, BOAT.z + Math.cos(BOAT.ang) * 1.2);
+  camera.lookAt(_hv);
+}
+
+/* ── interactions ── */
+const _n1Interact = currentInteract;
+currentInteract = function () {
+  const near = (x, z, r) => Math.hypot(P.x - x, P.z - z) < r;
+  if (P.sailing) {
+    if (VOYAGE.active) return null;
+    if (BOAT.spd < 2.4 && disembarkSpot()) return { id: 'ashore', label: '✕ COME ASHORE' };
+    return null;
+  }
+  if (QUEST.q === 5 && P.carryShield && near(WHEEL_POS.x, WHEEL_POS.z, 5.2)) {
+    return { id: 'wheel2', label: '✕ PLACE THE HALF SHIELD' };
+  }
+  if (inHollowAt(P.x, P.z)) {
+    if (WYRM.active && !WYRM.defeated) return null;    // no reading mid-fight
+    if (SAVE && !SAVE.glyph1 && near(HM1.x, HM1.z, 2.5)) return { id: 'hmirror1', label: 'HOLD ✕ — TURN THE SHELL' };
+    if (SAVE && SAVE.glyph1 && !SAVE.glyph2 && near(HM2.x, HM2.z, 2.5)) return { id: 'hmirror2', label: 'HOLD ✕ — TURN THE SHELL' };
+    if (SAVE && SAVE.wyrmDone && QUEST.q === 4 && near(HPOOL.x, HPOOL.z, 3.4)) return { id: 'shield', label: '✕ TAKE THE HALF SHIELD' };
+    if (near(HFOSSIL.x, HFOSSIL.z, 2.2)) return { id: 'fossil', label: '✕ LOOK' };
+    if (SAVE && SAVE.wyrmDone && near(HMURAL.x - 1.2, HMURAL.z, 2.8)) return { id: 'mural', label: '✕ LOOK' };
+  }
+  const base = _n1Interact();
+  if (base) return base;
+  // the boat is a BIG target — every small prompt wins over her
+  if (flooded() && FLOODLIVE.boatDone && near(BOAT.x, BOAT.z, 4.6) && !inHollowAt(P.x, P.z)) {
+    return { id: 'board', label: SAVE && !SAVE.voyageDone ? '✕ BOARD — PEARL IS WAITING' : '✕ BOARD THE BOAT' };
+  }
+  return null;
+};
+const _n1DoInteract = doInteract;
+doInteract = function (ctx) {
+  if (ctx.id === 'board') {
+    if (SAVE && !SAVE.voyageDone) startDialog('pearlBeg', pearl);
+    else boardBoat();
+  } else if (ctx.id === 'ashore') {
+    disembark();
+  } else if (ctx.id === 'wheel2') {
+    startCine('flood');
+  } else if (ctx.id === 'shield') {
+    shieldItem.visible = false;
+    P.carryShield = true;
+    itemGetT = 0;
+    itemToast('THE HALF SHIELD', 'Second of eight. They say the tide follows it home.');
+    SFX.itemGet();
+    burst(psSparkle, P.x, P.fy + 1.4, P.z, 18, 1.4, 1.2, 1.0);
+    setQuest(5);
+  } else if (ctx.id === 'fossil') {
+    SFX.page();
+    startMicro({
+      cam: [HFOSSIL.x - 2.4, groundH(HFOSSIL.x - 2, HFOSSIL.z) + 1.5, HFOSSIL.z - 0.6],
+      look: [HFOSSIL.x, H2BY + 1.6, HFOSSIL.z],
+      dur: 2.2, at: 0.6,
+      caption: 'A moonfish, swimming in stone. It outswam a drier age than this one.', ms: 3800,
+      onFire() { if (SAVE && !SAVE.hFossil) { SAVE.hFossil = true; storeSave(); } },
+    });
+  } else if (ctx.id === 'mural') {
+    SFX.hum();
+    startMicro({
+      cam: [HMURAL.x - 7.5, H3Y + 3.4, HMURAL.z + 1.2],
+      look: [HMURAL.x, H3Y + 4.6, HMURAL.z],
+      dur: 2.6, at: 0.6,
+      caption: 'The moon — lowered into the sea, on chains. To rest? The carver never said.', ms: 4400,
+      onFire() { if (SAVE && !SAVE.hMural) { SAVE.hMural = true; storeSave(); } },
+    });
+  } else {
+    _n1DoInteract(ctx);
+  }
+};
+
+/* ── render frame: hollow + sea + boat + carried shield + telemetry ── */
+let hFogT = 0, tideClock = performance.now(), camPrev = null;
+const HOLLOW_FOG = { col: col(0x2b2f31), near: 14, far: 78 };
+const _n1CullChunks = cullChunks;
+cullChunks = function (ccx, ccz) {
+  _n1CullChunks(ccx, ccz);
+  const now = performance.now();
+  const dtv = Math.min(0.1, (now - tideClock) / 1000);
+  tideClock = now;
+  const near2 = (x, z, r) => { const dx = x - ccx, dz = z - ccz; return dx * dx + dz * dz < r * r; };
+  /* hollow visibility + fog */
+  const hVis = near2(H2.x, H2.z, 150);
+  hollowFloorMesh.visible = hVis;
+  hollowWallMesh.visible = hVis;
+  hollowDomeMesh.visible = hVis;
+  hollowPropMesh.visible = hVis;
+  hollowGlowMesh.visible = hVis;
+  glyphDoor1.group.visible = hVis && near2(HDOOR1.x, HDOOR1.z, 60);
+  glyphDoor2.group.visible = hVis && near2(HDOOR2.x, HDOOR2.z, 60);
+  hm1.group.visible = hVis && near2(HM1.x, HM1.z, 55);
+  hm2.group.visible = hVis && near2(HM2.x, HM2.z, 55);
+  hmRelay.group.visible = hVis && near2(HRELAY.x, HRELAY.z, 55);
+  hollowChest.group.visible = hVis && near2(hollowChest.x, hollowChest.z, 45);
+  hollowPoolMesh.visible = WYRM.poolWet && hVis && near2(HPOOL.x, HPOOL.z, 70);
+  const inH = inHollowAt(P.x, P.z) && state !== 'title';
+  hFogT += ((inH ? 1 : 0) - hFogT) * Math.min(1, dtv * 2.6);
+  if (hFogT > 0.01) {
+    scene.fog.color.setRGB(
+      lerp(scene.fog.color.r, HOLLOW_FOG.col[0], hFogT),
+      lerp(scene.fog.color.g, HOLLOW_FOG.col[1], hFogT),
+      lerp(scene.fog.color.b, HOLLOW_FOG.col[2], hFogT));
+    scene.fog.near = lerp(scene.fog.near, HOLLOW_FOG.near, hFogT);
+    scene.fog.far = lerp(scene.fog.far, HOLLOW_FOG.far, hFogT);
+  }
+  /* beams follow the shells; glyphs breathe */
+  if (hVis) {
+    for (const HM of HMIRRORS) {
+      const done = SAVE && SAVE[HM.key];
+      HM.beam.visible = !done && near2(HM.m.group.position.x, HM.m.group.position.z, 60);
+      if (HM.beam.visible) {
+        HM.beam.rotation.y = -HM.m.angle;
+        HM.beam.material.opacity = Math.abs(HM.delta) < 0.17 ? 0.32 : (Math.abs(HM.delta) < 0.7 ? 0.1 : 0.02);
+      }
+      HM.door.glyph.material.opacity = done ? 0.55 + Math.sin(now / 500) * 0.15
+        : Math.abs(HM.delta) < 0.17 ? 0.5 + HM.burnT * 0.4 : 0.1;
+    }
+    hBeamR.visible = near2(HRELAY.x, HRELAY.z, 60) && !(SAVE && SAVE.glyph2);
+    if (hBeamR.visible) hBeamR.material.opacity = Math.abs(hm2.delta) < 0.17 ? 0.3 : 0.02;
+    hollowGlowMesh.material.opacity = 0.24 + Math.sin(now / 900) * 0.05;
+  }
+  animateWyrm(dtv, now);
+  cartNewLine.visible = flooded() && near2(330.7, -221, 30);
+  /* v8.1 draw-call hygiene: the BAY's always-on props (the beached boats, the
+     wake-wreck, the bay shade pools) used to be culled only inside the flooded
+     branch — or not at all — so all six kept drawing from the far side of the
+     forest, 1.8 km away and 100% fogged. Cull them by the same bay/forest line
+     the sea uses; nothing within the bay's own 185 m fog changes. */
+  for (const b of bayBoats) b.mesh.visible = near2(b.x, b.z, 110);
+  wakeWreckMesh.visible = wakeWreckDry && ccx < 320;
+  if (poolMesh) poolMesh.visible = ccx < 320;
+  /* the sea */
+  const wet = flooded() || FLOODANIM.on;
+  if (wet) {
+    if (FLOODANIM.on) {
+      FLOODANIM.t += dtv;
+      const k = smoothstep(clamp(FLOODANIM.t / 3.4, 0, 1));
+      bayWaterMesh.position.y = WL - 2.0 * (1 - k) - 0.28;
+      const fz = lerp(150, 3, k);
+      foamFrontMesh.visible = k < 0.99;
+      foamFrontMesh.position.set(0, Math.max(bayWaterMesh.position.y + 0.1, WL - 0.4), fz);
+      foamFrontMesh.material.opacity = 0.85 * (1 - Math.max(0, k - 0.85) / 0.15);
+      // boats lift as the water passes them
+      for (const b of bayBoats) {
+        if (b.liftT < 0 && fz < b.z + 2) { b.liftT = 0; SFX.splashSm(); }
+      }
+      if (!FLOODANIM.splashed && fz < 122) {
+        FLOODANIM.splashed = true;
+        // the grotto mouth drinks the tide
+        burst(psSpray, 30, WL + 0.4, 116, 26, 2.6, 2.2, 0.9);
+        SFX.splash();
+      }
+      if (FLOODANIM.t > 4.6) { FLOODANIM.on = false; FLOODLIVE.active = true; }
+    } else {
+      bayWaterMesh.position.y = WL - (1 - FLOODLIVE.riseK) * 0.22 + Math.sin(now / 1400) * 0.035;
+      foamFrontMesh.visible = false;
+    }
+    bayWaterMesh.visible = ccx < 320;
+    seaGlintMesh.visible = bayWaterMesh.visible;
+    seaGlintMesh.position.y = bayWaterMesh.position.y + 0.02;
+    seaGlintMesh.material.opacity = 0.2 + 0.14 * Math.sin(now / 800);
+    swellLineMesh.visible = bayWaterMesh.visible && near2(0, 132, 165);
+    swellLineMesh.position.y = bayWaterMesh.position.y;
+    swellLineMesh.material.opacity = 0.32 + 0.18 * Math.sin(now / 620);
+    seaFarMesh.visible = flooded() && ccx > 260;
+    /* boat lift animations */
+    for (const b of bayBoats) {
+      if (b.liftT >= 0 && b.liftT < 1.4) {
+        b.liftT += dtv;
+        const k = smoothstep(clamp(b.liftT / 1.4, 0, 1));
+        const over = Math.sin(clamp(b.liftT / 1.4, 0, 1) * Math.PI) * 0.18;
+        b.mesh.position.set(b.x, lerp(b.gy - 0.15, WL - 0.32, k) + over, b.z);
+        b.mesh.rotation.set(lerp(0.14, 0, k), b.ry, lerp(b.tilt + 0.42, 0, k));
+        if (b.liftT >= 1.4) poseBayBoat(b, true);
+      } else if (b.afloat) {
+        b.mesh.position.y = WL - 0.32 + Math.sin(now / 1300 + b.ph) * 0.05;
+        b.mesh.rotation.z = Math.sin(now / 1700 + b.ph) * 0.03;
+      }
+    }
+    /* the wake-boat righting itself (the joy-beat's crown) */
+    if (FLOODLIVE.boatLift >= 0 && !FLOODLIVE.boatDone) {
+      FLOODLIVE.boatLift += dtv;
+      const k = smoothstep(clamp(FLOODLIVE.boatLift / 2.4, 0, 1));
+      sailboat.group.position.set(BOAT.x, lerp(WL - 1.1, WL - 0.42, k) + Math.sin(k * Math.PI) * 0.16, BOAT.z);
+      sailboat.group.rotation.set(0, BOAT.ang, (1 - k) * 1.15);
+      if ((now % 200) < 40) psSpray.spawn(BOAT.x + (Math.random() - 0.5) * 2, WL + 0.15, BOAT.z + (Math.random() - 0.5) * 2, 0, 1.2, 0, 0.5);
+      if (FLOODLIVE.boatLift >= 2.4) {
+        FLOODLIVE.boatDone = true;
+        sailboatColl.off = false;
+        sailboatColl.x = BOAT.x; sailboatColl.z = BOAT.z;
+      }
+    } else if (sailboat.group.visible) {
+      if (P.sailing) {
+        sailboat.group.position.set(BOAT.x, WL - 0.42 + Math.sin((BOAT.bobPh += dtv * (2 + BOAT.spd * 0.35))) * 0.06, BOAT.z);
+        sailboat.group.rotation.set(Math.sin(BOAT.bobPh * 0.7) * 0.02 + BOAT.spd * 0.012, BOAT.ang, -BOAT.heel);
+      } else {
+        sailboat.group.position.set(BOAT.x, WL - 0.42 + Math.sin(now / 1200) * 0.05, BOAT.z);
+        sailboat.group.rotation.set(0, BOAT.ang, Math.sin(now / 1600) * 0.025);
+      }
+      sailboat.sail.scale.y += (((P.sailing && BOAT.sailK > 0.5) ? 1 : 0.12) - sailboat.sail.scale.y) * Math.min(1, dtv * 3);
+    }
+    sailboat.shadow.visible = false;    // no blob shadow on water
+  } else {
+    bayWaterMesh.visible = false; seaGlintMesh.visible = false;
+    swellLineMesh.visible = false; seaFarMesh.visible = false; foamFrontMesh.visible = false;
+  }
+  if (!SIM_FREEZE) psSpray.update(dtv);
+  /* the carried Half Shield rides Wick's back */
+  if (P.carryShield && (state === 'play' || state === 'dialog' || state === 'pause')) {
+    shieldItem.visible = true;
+    shieldItem.scale.setScalar(0.62);
+    shieldItem.position.set(
+      P.x - Math.sin(P.heading) * 0.3,
+      P.fy + 1.12,
+      P.z - Math.cos(P.heading) * 0.3);
+    shieldItem.rotation.set(0, P.heading + Math.PI, 0.12);
+  }
+  /* Pearl rides the bow on the maiden voyage */
+  if (VOYAGE.aboard) {
+    pearl.x = BOAT.x + Math.sin(BOAT.ang) * 0.75;
+    pearl.z = BOAT.z + Math.cos(BOAT.ang) * 0.75;
+    pearl.baseY = sailboat.group.position.y + 0.62;
+    pearl.char.root.position.set(pearl.x, pearl.baseY, pearl.z);
+    pearl.char.root.rotation.y = BOAT.ang;
+  }
+  /* camera-step telemetry (the no-cuts gate reads this) */
+  if (!camPrev) camPrev = [camera.position.x, camera.position.y, camera.position.z];
+  const cs = Math.hypot(camera.position.x - camPrev[0], camera.position.y - camPrev[1], camera.position.z - camPrev[2]);
+  camPrev[0] = camera.position.x; camPrev[1] = camera.position.y; camPrev[2] = camera.position.z;
+  window.__camStep = cs;
+  extendTideDebugOnce();
+  syncTideTelemetry();
+};
+
+/* Wick sits the helm while sailing (over the base animation) */
+const _n1AnimateWick = animateWick;
+animateWick = function (dtv, now) {
+  _n1AnimateWick(dtv, now);
+  if (!P.sailing) { wickShadow.visible = true; return; }
+  wickShadow.visible = false;
+  const c = wick;
+  c.root.position.set(
+    BOAT.x - Math.sin(BOAT.ang) * 0.45,
+    sailboat.group.position.y + 0.3,
+    BOAT.z - Math.cos(BOAT.ang) * 0.45);
+  c.root.rotation.y = BOAT.ang;
+  poseHumanoid(c, 'idle', 0, 0, { armsOverride: true });
+  poseSit(c, 1);
+  // helm hands: right on the tiller, left on the gunwale; full sail leans in
+  const lean = BOAT.sailK > 0.5 ? 0.22 : 0.06;
+  c.torso.rotation.x = lean;
+  c.shR.rotation.x = -0.35; c.shR.rotation.z = -0.5; c.elR.rotation.x = -0.6;
+  c.shL.rotation.x = -0.2; c.shL.rotation.z = 0.35; c.elL.rotation.x = -0.4;
+  swordToHand(false);
+};
+
+/* ── telemetry ── */
+function syncTideTelemetry() {
+  const T = window.__fm;
+  if (!T) return;
+  T.basinOpen = !!(SAVE && SAVE.basinOpen);
+  T.inHollow = inHollowAt(P.x, P.z);
+  T.glyph1 = !!(SAVE && SAVE.glyph1);
+  T.glyph2 = !!(SAVE && SAVE.glyph2);
+  T.hm1Delta = HMIRRORS[0].delta; T.hm2Delta = HMIRRORS[1].delta;
+  T.hChest = hollowChest.opened;
+  T.hFossil = !!(SAVE && SAVE.hFossil);
+  T.hMural = !!(SAVE && SAVE.hMural);
+  T.wyrmActive = WYRM.active; T.wyrmPhase = WYRM.phase; T.wyrmSt = WYRM.st;
+  T.wyrmHp = WYRM.hp; T.wyrmHpMax = WYRM.hpMax;
+  T.wyrmBody = WYRM.bodyHits; T.wyrmBrow = WYRM.browHits;
+  T.wyrmDone = !!(SAVE && SAVE.wyrmDone);
+  T.wyrmX = WYRM.x; T.wyrmZ = WYRM.z;
+  {
+    // probe without disturbing the dmg-vis gate's last-hit record
+    const sv = lastDmgCheck.vis, sf = lastDmgCheck.frus;
+    T.wyrmWakeVis = WYRM.c.wakeRoot.visible && damageSourceRendered(WYRM.c.wakeRoot);
+    lastDmgCheck.vis = sv; lastDmgCheck.frus = sf;
+  }
+  T.wyrmBodyVis = WYRM.c.root.visible;
+  T.wyrmStrikeable = WYRM.active && !WYRM.defeated &&
+    (WYRM.st === 'swim' || WYRM.st === 'erupt' || WYRM.st === 'slamRock' ||
+     WYRM.st === 'sweep' || WYRM.st === 'sweepTele' || WYRM.st === 'surface' || WYRM.st === 'daze');
+  T.onSlab = onSlabAt(P.x, P.z);
+  T.carryShield = !!P.carryShield;
+  T.flood = flooded();
+  T.waterY = bayWaterMesh.visible ? bayWaterMesh.position.y : null;
+  T.waterDepthHere = waterDepthAt(P.x, P.z);
+  T.sailing = !!P.sailing;
+  T.boatX = BOAT.x; T.boatZ = BOAT.z; T.boatAng = BOAT.ang; T.boatSpd = BOAT.spd;
+  T.sailK = BOAT.sailK;
+  T.boatFloating = FLOODLIVE.boatDone;
+  T.seaEdgeHits = seaEdgeHits;
+  T.voyageActive = VOYAGE.active; T.pearlAboard = VOYAGE.aboard;
+  T.voyageDone = !!(SAVE && SAVE.voyageDone);
+  T.voyA = !!VOYAGE.saidA; T.voyB = !!VOYAGE.saidB;
+  T.wakeWreckVis = wakeWreckDry;
+  T.floodCine = CINE.id === 'flood' ? CINE.t : null;
+  T.handoffK = CAM.mode === 'handoff' ? HANDOFF.k : (HANDOFF.fired ? 1 : 0);
+  T.handoffMode = CAM.mode;
+  T.handoffRumbles = window.__handoffRumbles;
+  T.handoffStartTick = HANDOFF.startTick; T.handoffDoneTick = HANDOFF.doneTick;
+  T.autorun = AUTORUN.active; T.autorunPlayer = AUTORUN.player;
+  T.camStep = window.__camStep || 0;
+  T.barsOn = el('cineBars').classList.contains('on');
+  T.star2On = star2Op > 0.05;
+  T.floodSeen = !!(SAVE && SAVE.floodSeen);
+  T.sailedOnce = !!(SAVE && SAVE.sailedOnce);
+  T.poolWet = WYRM.poolWet;
+  T.riseK = FLOODLIVE.riseK;
+}
+
+/* ── debug additions (lazy — __fmDebug is born in p7) ── */
+let tideDbgDone = false;
+function extendTideDebugOnce() {
+  if (tideDbgDone || !window.__fmDebug) return;
+  tideDbgDone = true;
+  Object.assign(window.__fmDebug, {
+    boat(x, z, ang) {
+      BOAT.x = x; BOAT.z = z; if (ang !== undefined) BOAT.ang = ang;
+      sailboat.group.position.set(x, WL - 0.42, z);
+      if (!P.sailing) { sailboatColl.x = x; sailboatColl.z = z; }
+    },
+    hollowInfo() {
+      return {
+        base: Math.round(H_BASE * 100) / 100, h1: H1Y, h2: H2Y, h3: H3Y,
+        slabs: SLABS.length, open: basinOpenNow,
+      };
+    },
+  });
+}
+</script>
+<script>
 /* ═══════════════════ p7 — flow, HUD, telemetry, main loop ═══════════════════ */
 
 let simTick = 0;
@@ -9565,6 +12489,9 @@ function applyWorldState() {
   rebuildSalt();
   /* the Parched Forest derives too */
   if (window.__forestApplySave) window.__forestApplySave();
+  /* night two: the Falls Hollow, the flood, and the boat derive last —
+     the tide hook may override sky/wheel state for sky step 2 */
+  if (window.__tideApplySave) window.__tideApplySave();
   /* quest line */
   if (SAVE) setQuest(S.q);
   else { QUEST.q = 0; questEl.textContent = ''; questEl.classList.remove('on'); }
@@ -9914,6 +12841,7 @@ window.__fmDebug = {
   skyProbe(on) {
     skyDome.visible = !on; sunDisc.visible = !on;
     if (starMesh) starMesh.visible = !on;
+    if (window.starMesh2) starMesh2.visible = !on && (SAVE && SAVE.sky >= 2);
     if (on) {
       renderer.setClearColor(0xff00ff, 1);
       scene.fog.near = 1e7; scene.fog.far = 1e7 + 1;
@@ -9986,7 +12914,8 @@ function updateVisuals(dtv, now) {
   // fog: grotto vs open sky
   const inG = inGrottoAt(P.x, P.z) && state !== 'title';
   grottoT += (( inG ? 1 : 0) - grottoT) * Math.min(1, dtv * 2.4);
-  const sf = mix3(SKY0.fog, SKY1.fog, SKY.t);
+  const sf = SKY.t <= 1 ? mix3(SKY0.fog, SKY1.fog, SKY.t)
+                        : mix3(SKY1.fog, SKY2.fog, Math.min(1, SKY.t - 1));   // step 2 (night two)
   mix3(sf, FOG_GROTTO.col, grottoT, _fogC);
   scene.fog.color.setRGB(_fogC[0], _fogC[1], _fogC[2]);
   scene.fog.near = lerp(FOG0.near, FOG_GROTTO.near, grottoT);
@@ -10018,8 +12947,11 @@ function updateVisuals(dtv, now) {
     if (pearlStar) pearlStar.visible = near2(330, -140, 25) && SAVE && SAVE.sky >= 1;
     wheelRing.visible = near2(WHEEL_POS.x, WHEEL_POS.z, 135);
     if (grottoCapMesh) grottoCapMesh.visible = near2(46, 155, 165);
-    tidewater.visible = tidepoolFilled && near2(REFILL_POOL.x, REFILL_POOL.z, 110);
-    for (const patch of kelpPatches) if (patch.mesh) patch.mesh.visible = near2(patch.cx, patch.cz, 55);
+    // v8.1: the cave INTERIOR had no gate at all and drew from the far side of
+    // the forest — same 165 m radius as its cap, which covers standing inside
+    if (grottoDomeMesh) grottoDomeMesh.visible = near2(46, 155, 165);
+    tidewater.visible = tidepoolFilled && !(SAVE && SAVE.sky >= 2) && near2(REFILL_POOL.x, REFILL_POOL.z, 110);   // the real sea subsumes it
+    for (const patch of kelpPatches) if (patch.mesh) patch.mesh.visible = !patch.flooded && near2(patch.cx, patch.cz, 55);
     // v3: collectible salt crystals — bob, spin, sparkle (distance-culled)
     for (const s of saltPickups) {
       if (s.got) { s.mesh.visible = false; continue; }
