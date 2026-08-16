@@ -8,11 +8,24 @@ non-negotiables.
 ## Repo map (siblings of this repo)
 
 Each game is a SINGLE self-contained HTML file in its own repo under
-`~/Documents/Projects/stephensgames/`:
-`fightinggame` (Phaser Wars), `meteorblaster`, `blockquarry`, `ghostpatrol`,
-`screamrocket`, `sportsgame` (Ninth Inning — index.html and baseball.html
-must stay byte-identical), `hissandrun`. This repo (`gameconsole`) is the
+`~/Developer/stephensgames/` (moved off iCloud 2026-08-16 — the old
+`~/Documents/Projects/stephensgames/` path is dead, and iCloud is not
+readable from an agent sandbox). This repo (`gameconsole`) is the
 launcher shell; its root is the web root on Render.
+
+Present locally: `fallenmoon`, `shatteredsun`, `phaserwars2`,
+`powderpeak`, `nyancatracing`.
+
+STILL IN iCLOUD, not yet moved (their ship pipeline is blocked until
+they are moved here or re-cloned from `jbstephens/<name>`):
+`fightinggame` (Phaser Wars), `meteorblaster`, `blockquarry`,
+`ghostpatrol`, `screamrocket`, `sportsgame` (Ninth Inning — index.html
+and baseball.html must stay byte-identical), `hissandrun`,
+`islandforge`, `broforce`, `candybattle`.
+
+The authoritative game list is `games.json` (15 entries), not this map.
+Fallen Moon additionally builds `index.html` from `test/src/p*.html`
+via `bash test/build.sh` — never hand-edit its index.html.
 
 ## Ship pipeline (always this order)
 
