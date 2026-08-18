@@ -448,7 +448,7 @@ try {
 const TURBO = Math.min(30, Math.max(0, parseInt(QS.get('turbo') || '0', 10) || 0));
 
 const SAVE_KEY = 'fallenmoon_save_v1';
-const BUILD_TAG = 'FM-P3-LAMPROOM-1';   // deploy marker (build-unique)
+const BUILD_TAG = 'FM-P3-BOATHOME-1';   // deploy marker (build-unique)
 window.__fmBuild = BUILD_TAG;
 
 /* ───────────────────────── math utils ───────────────────────── */
@@ -956,7 +956,8 @@ function defaultSave() {
     garSeen: false,           // one-time teaching caption for the first reef gar
     lampLit: false,           // Finn's lamp room — lit once the sun moves
     tbc2Seen: false, tbc3Seen: false,   // end cards shown once each
-    lastShade: [8.2, 7.0],
+    lastPos: null,            // where you ACTUALLY were — what CONTINUE resumes to
+    lastShade: [8.2, 7.0],    // the SUNSTRUCK respawn anchor, and only that
   };
 }
 let SAVE = null;   // null = no save on disk (fresh page)
@@ -11275,7 +11276,50 @@ window.__tideApplySave = function () {
   VOYAGE.active = false; VOYAGE.aboard = false;
   el('cineBars').classList.remove('on');
   if (CAM.mode === 'handoff') CAM.mode = 'follow';
+  rescueStrandedBoat();
 };
+
+/* SHE MUST ALWAYS BE BOARDABLE.
+   Boarding needs you within 4.6m of the hull, and disembark only ever sets
+   you down on dry footing — so the boat can only end up out of reach one
+   way: you QUIT while aboard. Then the save keeps her wherever she was
+   floating, you resume ashore, and there is no way to call her back. John
+   hit exactly this: moored at (15.5, 55.6) in 1.96m of water with NO dry
+   footing within twelve metres, while the quest told him to salvage a keel
+   that needs the boat to reach. A hard soft-lock, from one interrupted sail.
+   So on every load: if she cannot be boarded from anywhere, walk outward
+   until we find water she still floats in that DOES have a footing beside
+   it, and moor her there. Nearest valid spot, so she stays as close to
+   where you left her as the bay allows. */
+function boatMooringOK(bx, bz) {
+  for (let r = 1.7; r <= 4.1; r += 0.8) {
+    for (let i = 0; i < 12; i++) {
+      const a = i * (TAU / 12);
+      const px = bx + Math.sin(a) * r, pz = bz + Math.cos(a) * r;
+      if (worldSolidAt(px, pz)) continue;
+      const sy = supportYAt(px, pz, WL + 2.5);
+      if (sy > WL - 0.35 && sy < WL + 2.0) return true;
+    }
+  }
+  return false;
+}
+function rescueStrandedBoat() {
+  if (!flooded() || !FLOODLIVE.boatDone) return;
+  if (boatMooringOK(BOAT.x, BOAT.z)) return;          // already reachable
+  for (let r = 2; r <= 120; r += 2) {
+    for (let i = 0; i < 32; i++) {
+      const a = i * (TAU / 32);
+      const px = BOAT.x + Math.sin(a) * r, pz = BOAT.z + Math.cos(a) * r;
+      if (waterDepthAt(px, pz) < 0.4) continue;        // she must still float
+      if (!boatMooringOK(px, pz)) continue;
+      BOAT.x = px; BOAT.z = pz;
+      sailboat.group.position.set(BOAT.x, WL - 0.42, BOAT.z);
+      sailboatColl.x = BOAT.x; sailboatColl.z = BOAT.z; sailboatColl.off = false;
+      if (SAVE) { SAVE.boatX = BOAT.x; SAVE.boatZ = BOAT.z; storeSave(); }
+      return;
+    }
+  }
+}
 </script>
 <script>
 /* ═══════════ p6c/5 — cinematics: the resonance, the cure, THE TIDE (seamless) ═══════════ */
@@ -19106,9 +19150,35 @@ function titleCam(now) {
 }
 
 /* ── apply a save (CONTINUE) — the derivation itself lives in applyWorldState ── */
+/* WHERE YOU ACTUALLY WERE.
+   lastShade is the SUNSTRUCK respawn anchor — the shade you wake in after
+   fainting — and it is written in exactly three places: the sunstruck
+   cinematic, touching a forest spring, and the flood. Nothing in ordinary
+   Brightharbor play touches it. Resuming a save from it therefore pinned
+   you to the last forest spring you walked past: John touched spring #1,
+   walked the whole way home, sailed for an evening, quit, and came back
+   700m deep in the Parched Forest. His save showed it exactly —
+   region 'bay', boat moored at [16,56], lastShade [700,340] = FSPRINGS[1].
+   So CONTINUE now resumes at lastPos, recorded from real play, and
+   lastShade goes back to being only what its name says. */
+let posSaveT = 0;
+function recordLastPos() {
+  if (!SAVE || state !== 'play') return;
+  if (P.sailing) return;                                   // never resume adrift
+  if (typeof roomAt === 'function' && roomAt(P.x, P.z)) return;   // resume outdoors
+  posSaveT += DT;
+  if (posSaveT < 2.5) return;
+  posSaveT = 0;
+  const p = SAVE.lastPos;
+  if (p && Math.hypot(p[0] - P.x, p[1] - P.z) < 1.5) return;      // no idle churn
+  SAVE.lastPos = [P.x, P.z];
+  storeSave();
+}
 function applySave() {
   applyWorldState();
-  P.x = SAVE.lastShade[0]; P.z = SAVE.lastShade[1];
+  const rp = (SAVE.lastPos && isFinite(SAVE.lastPos[0]) && isFinite(SAVE.lastPos[1]))
+    ? SAVE.lastPos : SAVE.lastShade;      // old saves fall back, and still work
+  P.x = rp[0]; P.z = rp[1];
   P.fy = groundH(P.x, P.z); P.air = false; P.jvy = 0;
   P.heading = Math.PI;
   P.st = 'idle'; P.vx = 0; P.vz = 0; P.iframes = 0;
@@ -19434,6 +19504,7 @@ function tickSim() {
       tickHomeChest();
       tickRoomChests(); tickLightChest(); tickClock(); tickBoat();   // v4.5
       tickSalt();
+      recordLastPos();
       if (IN.pause) { setState('pause'); pauseFocus = 0; refreshPause(); SFX.menu(); }
       break;
     }
