@@ -448,7 +448,7 @@ try {
 const TURBO = Math.min(30, Math.max(0, parseInt(QS.get('turbo') || '0', 10) || 0));
 
 const SAVE_KEY = 'fallenmoon_save_v1';
-const BUILD_TAG = 'FM-P3-THRESHOLD-1';   // deploy marker (build-unique)
+const BUILD_TAG = 'FM-P3-DRYBILGE-1';   // deploy marker (build-unique)
 window.__fmBuild = BUILD_TAG;
 
 /* ───────────────────────── math utils ───────────────────────── */
@@ -11048,7 +11048,15 @@ const BOAT = { x: 8.5, z: 6.0, ang: 0.9, spd: 0, vx: 0, vz: 0, heel: 0, sailK: 0
   // the helmsman faced across it. dynBoat (ry: 0) is the reference.
   latheW(md, [[0.0, -0.42], [1.05, 0.0], [1.15, 0.62], [0.98, 0.88]],
     { seg: 9, ex: 2.15, x: 0, y: 0.3, z: 0, ry: 0, col: C_HULL, cols: [C_HULL2, C_HULL, C_WOODW] });
-  // interior floor + thwarts
+  // interior floor + thwarts — the floor is now a full bilge LINER, wide and
+  // long enough to reach the hull walls: in a swell trough the transparent
+  // water plane clipped up through the old narrow plate and the boat filled
+  // with ocean to the gunwales. The inside of a boat is never blue.
+  const BILGE = mix3(C_WOODW, [0, 0, 0], 0.1);
+  // boxW takes HALF extents (the 0.72 helm seat spans most of the beam)
+  boxW(md, { x: 0, y: 0.38, z: 0,     w: 0.84, d: 1.1,  h: 0.1, col: BILGE });
+  boxW(md, { x: 0, y: 0.38, z: 1.55,  w: 0.52, d: 0.55, h: 0.1, col: BILGE });
+  boxW(md, { x: 0, y: 0.38, z: -1.55, w: 0.52, d: 0.55, h: 0.1, col: BILGE });
   boxW(md, { x: 0, y: 0.42, z: 0, w: 0.66, d: 1.7, h: 0.06, col: mix3(C_WOODW, [0, 0, 0], 0.1) });
   boxW(md, { x: 0, y: 0.62, z: -0.5, w: 0.72, d: 0.16, h: 0.07, col: C_WOODW });   // helm seat
   boxW(md, { x: 0, y: 0.62, z: 0.75, w: 0.6, d: 0.14, h: 0.07, col: C_WOODW });    // bow seat (Pearl's)
@@ -13103,6 +13111,11 @@ const WG_CELL = LOWFX ? 11.5 : 7.0;
 const WG_SPAN = (WG_N - 1) * WG_CELL;
 let waveMesh = null, wavePos = null, waveCol = null, waveMat = null, waveIdx = null;
 let waveKeyI = 1e9, waveKeyJ = 1e9;
+/* the shoal field depends only on (x,z), and the grid's vertex positions
+   change only when the origin snaps a cell — so amp/off are cached per
+   snap instead of recomputed per vertex per frame (~18k hypots/frame gone,
+   the single largest steady cost the crossing added). */
+let waveAmpC = new Float32Array(WG_N * WG_N), waveOffC = new Float32Array(WG_N * WG_N);
 (function buildWaveGrid() {
   const n = WG_N * WG_N;
   wavePos = new Float32Array(n * 3);
@@ -13130,6 +13143,12 @@ let waterClarity = 0;              // 0 normal → 1 the clear water over the mo
    dropped from the index — rebuilt only when the grid's origin moves. */
 const bayWaterCell = (cx, cz) => cx > -104 && cx < 106 && cz > -64 && cz < 190;
 function rebuildWaveIndex(x0, z0) {
+  for (let j = 0; j < WG_N; j++) {
+    for (let i = 0; i < WG_N; i++) {
+      const sh = seaShoalAt(x0 + i * WG_CELL, z0 + j * WG_CELL);
+      waveAmpC[j * WG_N + i] = sh.amp; waveOffC[j * WG_N + i] = sh.off;
+    }
+  }
   let o = 0;
   for (let j = 0; j < WG_N - 1; j++) {
     for (let i = 0; i < WG_N - 1; i++) {
@@ -13155,10 +13174,23 @@ function updateWaveGrid() {
     prevH = 0;
     for (let i = 0; i < WG_N; i++, o += 3) {
       const x = x0 + i * WG_CELL;
-      const sh = seaShoalAt(x, z);
-      const a = sh.amp, off = sh.off;
+      const a = waveAmpC[j * WG_N + i], off = waveOffC[j * WG_N + i];
       const bs = a <= 0.002 ? 0 : bigSetHeight(x, z);
       let h = a <= 0.002 ? 0 : (swellRawAt(x, z, seaClock) + bs) * a;
+      /* THE WATER YIELDS TO THE HULL. The hull rides the analytic swell but
+         the rendered sea is this 7m grid — between vertices the interpolated
+         plane sits HIGHER than a steep trough's true floor, so the surface
+         sliced through the boat and Wick's legs flickered blue ("the boat
+         fills with water... a little dramatic"). Vertices near the hull now
+         blend down to the exact height she is riding, minus a hand's width
+         of freeboard, so the sea meets her waterline and never her deck. */
+      if (P.sailing) {
+        const bd = Math.hypot(x - BOAT.x, z - BOAT.z);
+        if (bd < 9) {
+          const k = smoothstep(clamp((9 - bd) / 6, 0, 1));
+          h = lerp(h, SEAFX.heave - 0.14, k);
+        }
+      }
       /* the rim rings flatten to the far sheet's level as well as its
          colour — displaced rim verts over a flat floor tore sawtooth gaps
          along the grid's edge, marching as the origin snapped */
@@ -15391,7 +15423,7 @@ cullChunks = function (ccx, ccz) {
        coplanar-fights it at the mouth. */
   /* THE DROWNED MOON: only ever seen from above it */
   const dMoon = Math.hypot(ccx - MOON_SITE.x, ccz - MOON_SITE.z);
-  const moonVis = west && dMoon < 900;
+  const moonVis = west && dMoon < 900 && (waterClarity > 0.01 || CINE.id === 'crossing');
   moonMesh.visible = moonVis; moonChainMesh.visible = moonVis;
   moonSiltMesh.visible = west && dMoon < MOON_BOWL_R + 320;
   /* the chime reef: bells that ring in the swell — the sound of the place */
@@ -17689,7 +17721,9 @@ function fApplySky(force) {
   const mag = 1 + 0.55 * fSunK;
   SHADOW_DIR[0] = Math.cos(a) * mag;
   SHADOW_DIR[1] = Math.sin(a) * mag;
-  if (force || Math.abs(fSunK - fPoolK) > 0.01) { fPoolK = fSunK; rebuildShadePools(); }
+  /* a rebuild every ~5s is invisible on a 6-minute arc; every ~1.2s was a
+     steady GC hitch on the Pi, forever, once the arc went live */
+  if (force || Math.abs(fSunK - fPoolK) > 0.04) { fPoolK = fSunK; rebuildShadePools(); }
 }
 function fSunTargetFog() {
   mix3(SKY2.fog, SKY3.fog, fSkyK, _ffB);
@@ -18445,7 +18479,7 @@ cullChunks = function (ccx, ccz) {
   const near2 = (x, z, r) => { const dx = x - ccx, dz = z - ccz; return dx * dx + dz * dz < r * r; };
 
   /* ── the works: one culled chunk ── */
-  const fVis = near2(F2.x, F2.z, 150);
+  const fVis = near2(F2.x, F2.z, 150) && (inFoundryAt(P.x, P.z) || near2(FDOOR.x, FDOOR.z, 40));
   fFloorMesh.visible = fVis;
   fWallMesh.visible = fVis;
   fDomeMesh.visible = fVis;
