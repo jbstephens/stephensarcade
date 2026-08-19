@@ -448,7 +448,7 @@ try {
 const TURBO = Math.min(30, Math.max(0, parseInt(QS.get('turbo') || '0', 10) || 0));
 
 const SAVE_KEY = 'fallenmoon_save_v1';
-const BUILD_TAG = 'FM-P4-WINDHOME-3';   // deploy marker (build-unique)
+const BUILD_TAG = 'FM-P4-RULES-1';   // deploy marker (build-unique)
 window.__fmBuild = BUILD_TAG;
 
 /* ───────────────────────── math utils ───────────────────────── */
@@ -1833,6 +1833,56 @@ function buildMoonfish() {
 }
 </script>
 <script>
+/* ═══════════ THE WORLD RULES — shared registries + the beam march ═══════════
+   Rule 1: every part that owns ground/solid DESCRIBES that ownership in
+   __WORLD_REG (the wrap chain still dispatches; the registry lets the
+   harness prove there are no unowned gaps and no undeclared overlaps).
+   Rule 2: every threshold is a portal object in __PORTALS.
+   Rule 4: every floating vessel is a hull in __HULLS.
+   Rule 3: beams take their LENGTH from the world — beamHitDist marches the
+   live groundH (the full wrap chain, so every region comes free), and
+   beamHitDistIn marches an interior's own open-air predicate.
+   Guard-init everywhere: part order must never matter for the registries. */
+window.__WORLD_REG = window.__WORLD_REG || [];
+window.__PORTALS = window.__PORTALS || [];
+window.__HULLS = window.__HULLS || [];
+/* distance along (dx,dy,dz) from (ox,oy,oz) at which the centreline dips
+   below groundH+0.3 — ~8 m march, hit refined by bisection to ~0.5 m.
+   Cheap enough to call for every beam every few frames. groundH is read at
+   CALL time, so this always sees the final wrapped chain. */
+function beamHitDist(ox, oy, oz, dx, dy, dz, maxLen) {
+  let t0 = 0;
+  for (let t = 8; t <= maxLen; t += 8) {
+    if (oy + dy * t < groundH(ox + dx * t, oz + dz * t) + 0.3) {
+      let lo = t0, hi = t;
+      for (let i = 0; i < 4; i++) {
+        const m = (lo + hi) / 2;
+        if (oy + dy * m < groundH(ox + dx * m, oz + dz * m) + 0.3) hi = m; else lo = m;
+      }
+      return hi;
+    }
+    t0 = t;
+  }
+  return maxLen;
+}
+/* interior variant: stop where the open air ends (2 m march, ~0.5 m refine) */
+function beamHitDistIn(openFn, ox, oz, dx, dz, maxLen) {
+  let t0 = 0;
+  for (let t = 2; t <= maxLen; t += 2) {
+    if (!openFn(ox + dx * t, oz + dz * t)) {
+      let lo = t0, hi = t;
+      for (let i = 0; i < 2; i++) {
+        const m = (lo + hi) / 2;
+        if (openFn(ox + dx * m, oz + dz * m)) lo = m; else hi = m;
+      }
+      return hi;
+    }
+    t0 = t;
+  }
+  return maxLen;
+}
+</script>
+<script>
 /* ═══════════════════ p4 — the world: Brightharbor & the Dry Bay ═══════════════════
    Merged BufferGeometry chunks, MeshBasicMaterial + baked vertex colors.
    Hard noon light with colored teal shade, painterly toon-stepped bake.       */
@@ -2213,20 +2263,34 @@ function grottoOpenAt(x, z, ignorePlug) {
   }
   return false;
 }
-/* the rock footprint: the three mound caps + the entrance throat flanks */
+/* the rock footprint: the two mound caps + the entrance throat flanks.
+   v9 SOLID == RENDERED (the census defects): the solid footprint is now the
+   SAME ellipse the cap lathes draw (x semi-axis CAP_R, z semi-axis
+   CAP_R*CAP_EX — latheW's `ex`), sized to the skirt at walkable ground.
+   The old circles (22.65/20.55) stood up to 3.3 m outside the rendered
+   rock on the z axis — the "walk through walls on faith" collars.
+   The THIRD disc at (46,158) r16.35 — its cap was deleted in v3, its solid
+   stayed — was PURE INVISIBLE ROCK. It is gone: caps A+B alone cover every
+   flank of the corridor with metres to spare (verified by the boundary
+   probe + fuzz), and the little south cove it walled off is now honest
+   open seabed between the two rendered mounds. */
+const CAP_EX = 0.9;                          // caps' latheW ex — z is squashed
+const CAP_RA = 21 * 1.02, CAP_RB = 19 * 1.02;   // skirt radius at walkable ground
 const MASSIF = [
-  [GROTTO_A.x, GROTTO_A.z, 22.65],
-  [GROTTO_B.x, GROTTO_B.z, 20.55],
-  [46, 158, 16.35],
+  [GROTTO_A.x, GROTTO_A.z, CAP_RA],
+  [GROTTO_B.x, GROTTO_B.z, CAP_RB],
 ];
 function massifAt(x, z) {
   for (let i = 0; i < MASSIF.length; i++) {
     const c = MASSIF[i];
-    const dx = x - c[0], dz = z - c[1];
-    if (dx * dx + dz * dz < c[2] * c[2]) return true;
+    const dx = (x - c[0]) / c[2], dz = (z - c[1]) / (c[2] * CAP_EX);
+    if (dx * dx + dz * dz < 1) return true;
   }
-  // entrance throat: solid rock flanks the portal stretch of the walkway
-  if (distSeg(x, z, GROTTO_ENT.x, 132, GROTTO_ENT.x, ENT_WALK.bz) < ENT_WALK.hw + 3.4) return true;
+  // entrance throat: solid rock flanks the portal stretch of the walkway.
+  // v9: clamped to z ≥ 131.2 — the old round south end of this capsule stuck
+  // out past the flare as a free-standing invisible fin in the open bay
+  if (z > 131.2 &&
+      distSeg(x, z, GROTTO_ENT.x, 132, GROTTO_ENT.x, ENT_WALK.bz) < ENT_WALK.hw + 3.4) return true;
   return false;
 }
 function grottoSolidAt(x, z) {
@@ -2783,13 +2847,31 @@ function buildGrotto() {
      face sits ON the collision boundary; any candidate that would poke
      into open air, or whose center falls outside the solid footprint, is
      skipped. Collision and geometry share one source of truth. ── */
+  // v9: every placed wall rock is RECORDED so the boundary probe can prove
+  // the solid boundary is faced with real rock (render derives from authority)
+  const REC = window.__grottoRocks = [];
   const wallRock = (x, z, R0, seedv) => {
     const md = chunkFor(x, z);
     const y = groundH(x, z) - 1.5;
+    REC.push({ x, z, R0 });
     // flat-authored cave strata, not the noon bake — these live in the dark
     latheW(md, [[R0, 0], [R0 * 1.1, 3.5], [R0 * 0.55, 8.5], [0, 11]],
       { seg: 7, ex: 0.88, x, y, z, ry: seedv * 2.13, flat: true, segJitter: 0.12,
         col: C_CAVE_MID, cols: [C_CAVE_LO, C_CAVE_MID, C_CAVE_HI] });
+  };
+  // warm daylight twin for the mouth — the funnel flare and the cap-gap
+  // flanks face the bay at noon; cave strata would read as soot there.
+  // FLAT-AUTHORED like every big rock since v3: fed to the noon bake, these
+  // large facets came back as huge flat BLUE slabs on their shade sides
+  // (John's original ring-rock photo bug, re-confirmed by tonight's shots).
+  const C_MROCK_LO = mix3(C_ROCK2, C_ROCK, 0.3), C_MROCK_HI = mix3(C_ROCK, [1, 1, 1], 0.08);
+  const mouthRock = (x, z, R0, seedv) => {
+    const md = chunkFor(x, z);
+    const y = groundH(x, z) - 1.5;
+    REC.push({ x, z, R0 });
+    latheW(md, [[R0, 0], [R0 * 1.1, 3.4], [R0 * 0.55, 7.8], [0, 10.2]],
+      { seg: 7, ex: 0.88, x, y, z, ry: seedv * 2.13, flat: true, segJitter: 0.12,
+        col: C_ROCK, cols: [C_MROCK_LO, C_ROCK, C_MROCK_HI] });
   };
   const intrudes = (x, z, R0) => {
     if (grottoOpenAt(x, z, true)) return true;
@@ -2799,10 +2881,10 @@ function buildGrotto() {
     }
     return false;
   };
-  const tryRock = (x, z, R0, seedv) => {
+  const tryRock = (x, z, R0, seedv, sunlit) => {
     if (!massifAt(x, z)) return;          // never a rock the region won't back
     if (intrudes(x, z, R0)) return;       // never a rock in walkable air
-    wallRock(x, z, R0, seedv);
+    (sunlit ? mouthRock : wallRock)(x, z, R0, seedv);
   };
   const marchCircle = (cx, cz, rOpen) => {
     const n = Math.ceil((TAU * (rOpen + 2.0)) / 2.0);
@@ -2830,29 +2912,88 @@ function buildGrotto() {
   marchCircle(GROTTO_A.x, GROTTO_A.z, GROTTO_A.r + 0.8);
   marchCircle(GROTTO_B.x, GROTTO_B.z, GROTTO_B.r + 0.8);
   marchSeg(COR_WALK.ax, COR_WALK.az, COR_WALK.bx, COR_WALK.bz, COR_WALK.hw);
-  marchSeg(GROTTO_ENT.x, 132.2, GROTTO_ENT.x, ENT_WALK.bz, ENT_WALK.hw);
+  /* ── v9 THE FUNNEL, marched at its TRUE half-width (census defect 1).
+     The old straight march used the fixed hw from z 132.2 in, so the flaring
+     stretch (z 123 → 131.5, hw = 2.8 + (131.5−z)·0.55) kept its collision
+     but rendered nothing: invisible walls a body-radius before any rock.
+     Same predicate in, rocks out — tryRock skips any candidate the solid
+     region won't back, so the march can safely run the whole funnel. ── */
+  for (let z = 123.6; z <= ENT_WALK.bz; z += 1.35) {
+    const fhw = ENT_WALK.hw + Math.max(0, 131.5 - z) * 0.55;
+    for (const s of [-1, 1]) {
+      const R0 = 1.35 + (hash2((z * 5 + s * 3) | 0, 91) * 0.5 + 0.5) * 0.6;
+      // inside the drip line the throat stays cave rock; the flare is sunlit
+      tryRock(GROTTO_ENT.x + s * (fhw + R0 * 1.02), z, R0, z * 2 + s, z < 133.2);
+    }
+  }
+  /* ── v9 THE CAP-GAP FLANKS: the mouth is a bite out of cap A's lathe
+     (mouthSkip), but the cap's SOLID ellipse still stands across the bite —
+     it read as bare air you bounced off. March the same ellipse across the
+     skipped arc so the reveal's walls are real, sunlit rock. ── */
+  for (let a = Math.PI * 1.30; a <= Math.PI * 1.705; a += 0.055) {
+    const rx = CAP_RA, rz = CAP_RA * CAP_EX;
+    const bx = GROTTO_A.x + Math.cos(a) * rx, bz = GROTTO_A.z + Math.sin(a) * rz;
+    // outward ellipse normal → tuck the rock's face onto the solid boundary
+    let nx = Math.cos(a) / rx, nz = Math.sin(a) / rz;
+    const nl = Math.hypot(nx, nz) || 1; nx /= nl; nz /= nl;
+    const R0 = 1.5 + (hash2(Math.round(a * 100), 17) * 0.5 + 0.5) * 0.7;
+    tryRock(bx - nx * R0 * 1.02, bz - nz * R0 * 1.02, R0, a * 3, true);
+  }
   // exterior mound caps (seen from the bay) — grounded, dune-scale.
   // chamber A's cap leaves a gap over the entrance (south) for the mouth.
   // v3: the caps live in their OWN DoubleSide mesh — every shell face a
   // sightline can reach from inside renders as rock, never as raw sky
   // (the flat-blue bug was backface-culled cap interiors showing the dome).
-  const mouthSkip = (t0, t1, band) => band < 2 && t0 > Math.PI * 1.32 && t0 < Math.PI * 1.68;
+  /* v9: mouth/door bites are judged by segment MIDPOINT so each gap sits
+     symmetric about its axis (t0-only testing skewed the mouth a full
+     segment east — 18 m of unrendered cap edge on the east flank) */
   const mdCaps = MD();
   // NOTE: v2 had a THIRD cap over the corridor at (46,158) — its shaded west
   // flank protruded INTO chamber A and read as a giant flat blue slab beside
   // the mirror (John's photo). Caps A+B already roof the corridor, so it's
-  // gone; only its SOLID footprint remains.
-  for (const cap of [[GROTTO_A.x, GROTTO_A.z, 21, true], [GROTTO_B.x, GROTTO_B.z, 19]]) {
-    latheW(mdCaps, [[cap[2] * 1.05, -2.5], [cap[2], 4.5], [cap[2] * 0.62, 10.5], [0, 13.5]],
-      { seg: 12, ex: 0.9, x: cap[0], y: 0, z: cap[1], col: C_ROCK, cols: [C_ROCK2, C_ROCK, C_ROCK2],
-        skip: cap[3] ? mouthSkip : null });
+  // gone — and since v9 its solid footprint is gone with it (census: it was
+  // pure invisible rock; A+B's solid ellipses seal the corridor alone).
+  /* v9: the skirt is VERTICAL through every walkable ground height (−2.5 →
+     2.4) at exactly the MASSIF ellipse radius, and seg is up from 12 to 24
+     (a 12-gon chord sat up to 0.72 m inside the solid ellipse — an
+     invisible skin thicker than the player's body). Rendered == solid.
+     Two more census truths land here:
+     — each cap gets a DOOR ARC where the corridor crosses its shell (the
+       old skirt stood straight across the corridor's walkable air — the
+       gray wall between the chambers you could walk through);
+     — the skirt band is FLAT-AUTHORED warm stone: fed to the noon bake,
+       its vertical southwest faces came out slate BLUE (the flat-blue-slab
+       failure mode, again). */
+  const arcHit = (mid, at, half) => {
+    let d = Math.abs(((mid - at) % TAU + TAU) % TAU);
+    if (d > Math.PI) d = TAU - d;
+    return d < half;
+  };
+  const C_SKIRT = mix3(C_ROCK, C_ROCK2, 0.55);
+  // corridor crossing angles on each cap's ellipse (lathe parameter space)
+  for (const cap of [[GROTTO_A.x, GROTTO_A.z, 21, true, 0.507], [GROTTO_B.x, GROTTO_B.z, 19, false, 0.4636 + Math.PI + 0.04]]) {
+    const R = cap[2];
+    const mouthArc = (mid) => cap[3] && mid > Math.PI * 1.32 && mid < Math.PI * 1.68;
+    const doorArc = (mid) => arcHit(mid, cap[4], 0.17);
+    // the skirt — flat warm stone up to the mound's true shoulder (4.5):
+    // both lower bands are near-vertical, and near-vertical + noon bake =
+    // slate-blue slabs. Holed at the mouth + the corridor door.
+    latheW(mdCaps, [[R * 1.02, -2.5], [R * 1.02, 2.4], [R, 4.5]],
+      { seg: 24, ex: CAP_EX, x: cap[0], y: 0, z: cap[1], flat: true, segJitter: 0.07,
+        col: C_SKIRT, cols: [C_SKIRT, mix3(C_SKIRT, C_ROCK, 0.45)],
+        skip: (t0, t1) => mouthArc((t0 + t1) / 2) || doorArc((t0 + t1) / 2) });
+    // the mound above (noon-baked as always)
+    latheW(mdCaps, [[R, 4.5], [R * 0.62, 10.5], [0, 13.5]],
+      { seg: 24, ex: CAP_EX, x: cap[0], y: 0, z: cap[1], col: C_ROCK, cols: [C_ROCK, C_ROCK2],
+        skip: (t0, t1, band) => band < 1 && mouthArc((t0 + t1) / 2) });
     // interior LINER: flat dark cave strata facing inward, so any sightline
     // that reaches the shell from inside reads rock — never the noon bake's
     // blue-slate shadow side, never raw sky
-    latheW(mdCaps, [[cap[2] * 1.02, -2.6], [cap[2] * 0.97, 4.4], [cap[2] * 0.6, 10.3], [0, 13.1]],
-      { seg: 12, ex: 0.9, x: cap[0], y: 0, z: cap[1], inward: true, flat: true, segJitter: 0.12,
-        col: [0.34, 0.31, 0.29], cols: [[0.43, 0.37, 0.31], [0.34, 0.31, 0.29], [0.26, 0.24, 0.23]],
-        skip: cap[3] ? mouthSkip : null });
+    latheW(mdCaps, [[R * 1.0, -2.6], [R * 0.995, 2.3], [R * 0.97, 4.4], [R * 0.6, 10.3], [0, 13.1]],
+      { seg: 24, ex: CAP_EX, x: cap[0], y: 0, z: cap[1], inward: true, flat: true, segJitter: 0.12,
+        col: [0.34, 0.31, 0.29], cols: [[0.43, 0.37, 0.31], [0.43, 0.37, 0.31], [0.34, 0.31, 0.29], [0.26, 0.24, 0.23]],
+        skip: (t0, t1, band) => (band < 3 && mouthArc((t0 + t1) / 2)) ||
+                                (band < 2 && doorArc((t0 + t1) / 2)) });
     // (footprints live in the static MASSIF table — the single authority)
   }
   grottoCapMesh = mdMesh(mdCaps, new THREE.MeshBasicMaterial({ vertexColors: true }), false);
@@ -2869,16 +3010,28 @@ function buildGrotto() {
     const gx = GROTTO_ENT.x;
     const jamb = [0.86, 0.78, 0.6], jambD = [0.62, 0.56, 0.45];
     for (const s of [-1, 1]) {
-      boxW(md, { x: gx + s * 3.55, y: 0.15, z: 133.9, w: 0.5, d: 1.7, h: 9.8, tw: 0.4, td: 1.2, ry: s * 0.12, col: jamb, colB: jambD });
-      boxW(md, { x: gx + s * 4.1, y: 0.15, z: 136.6, w: 0.6, d: 1.4, h: 7.8, tw: 0.45, td: 1.0, ry: s * 0.2, col: jambD });
+      // v9: warm bake — the standard bake's blue shade branch striped the
+      // jambs' inner faces slate blue against the warm throat
+      boxW(md, { x: gx + s * 3.55, y: 0.15, z: 133.9, w: 0.5, d: 1.7, h: 9.8, tw: 0.4, td: 1.2, ry: s * 0.12, col: jamb, colB: jambD, warm: true });
+      boxW(md, { x: gx + s * 4.1, y: 0.15, z: 136.6, w: 0.6, d: 1.4, h: 7.8, tw: 0.45, td: 1.0, ry: s * 0.2, col: jambD, warm: true });
     }
-    // portal stones + lintel
+    // portal stones + lintel — flat-authored warm stone (baked, their shade
+    // sides read as pale blue slabs from inside the throat)
     for (const s of [-1, 1]) {
-      latheW(md, [[2.0, -3.2], [1.7, 2.8], [0.8, 6.8]], { seg: 6, ex: 0.8, x: gx + s * 4.4, y: 3.75, z: 134, ry: s, col: C_ROCK, cols: [C_ROCK2, C_ROCK] });
+      latheW(md, [[2.0, -3.2], [1.7, 2.8], [0.8, 6.8]], { seg: 6, ex: 0.8, x: gx + s * 4.4, y: 3.75, z: 134, ry: s, flat: true, segJitter: 0.09, col: C_ROCK, cols: [mix3(C_ROCK2, C_ROCK, 0.3), C_ROCK] });
     }
-    boxW(md, { x: gx, y: 5.6 + 3.75, z: 134, w: 5.4, d: 1.6, h: 1.7, tw: 4.2, td: 1.1, col: C_ROCK2 });
+    boxW(md, { x: gx, y: 5.6 + 3.75, z: 134, w: 5.4, d: 1.6, h: 1.7, tw: 4.2, td: 1.1, col: C_ROCK2, warm: true });
     // a carved moon sigil over the lintel — this place matters
     latheW(md, [[0.55, 0], [0.42, 0.14]], { seg: 10, x: gx, y: 6.4 + 3.75, z: 133.2, col: C_MOON });
+    // v9 floor cue (Rule 2 — a threshold reads underfoot from BOTH sides):
+    // worn paving slabs across the walkway through the portal stones
+    for (let i = 0; i < 5; i++) {
+      const sz = 131.6 + i * 1.45;
+      const sw = 2.35 - Math.abs(i - 2) * 0.22, jig = hash2(i * 3, 7) * 0.22;
+      boxW(md, { x: gx + jig, y: groundH(gx, sz) - 0.04, z: sz, w: sw, d: 0.58, h: 0.09,
+        tw: sw * 0.92, td: 0.5, ry: hash2(i, 11) * 0.06,
+        col: i % 2 ? C_STONE : C_STONE2, noBottom: true, warm: true });
+    }
     // v3: the portal stones are solid too
     addColl(gx - 4.4, 134, 2.0); addColl(gx + 4.4, 134, 2.0);
   })();
@@ -3081,6 +3234,14 @@ const wallKelp = makeKelpPatch([
   [45.7, 156.9, 2.6], [47.2, 158.7, 2.7], [48.0, 159.5, 2.5],
 ], 'wall');
 const wallColl = [addColl(45.8, 157.1, 1.6), addColl(47.4, 158.9, 1.6), addColl(48.6, 160.2, 1.4)];
+/* ── RULE 2: every threshold is a portal object. The grotto's two doorways
+   register here so the harness can enumerate and walk them instead of
+   trusting them. Guard-init — part order must not matter. ── */
+window.__PORTALS = window.__PORTALS || [];
+window.__PORTALS.push(
+  { name: 'grotto-mouth', x: GROTTO_ENT.x, z: 134, openNow: () => true },
+  { name: 'grotto-kelp-plug', x: KELPWALL.x, z: KELPWALL.z, openNow: () => !!wallKelp.stalks[0].cut },
+);
 
 /* ── shade pool overlay (grows at dusk) ── */
 const POOL_MAT = new THREE.MeshBasicMaterial({
@@ -4672,6 +4833,53 @@ function rebuildSalt() {   // name kept for the pickup path in p6
 const crescentItem = buildCrescentItem();
 crescentItem.visible = false;
 scene.add(crescentItem);
+</script>
+<script>
+/* ═══════════ RULES CORE registrations for p4 (pure addition) ═══════════
+   Rule 1: p4's three ground/solid owners describe themselves. `over` names
+   the earlier owners a region deliberately sits on top of — the harness
+   treats any OTHER overlap as an undeclared fork of the truth. The ground
+   ref is p4's own final field (captured BEFORE later parts wrap groundH),
+   so the harness can check the live chain still answers with p4's truth
+   on p4's points. */
+const __regBayGround = groundH;
+window.__WORLD_REG.push(
+  { name: 'brightharbor', kind: 'ground', over: [],
+    owns: (x, z) => x >= -110 && x <= 110 && z >= -110 && z <= 186,
+    ground: (x, z) => __regBayGround(x, z),
+    note: 'the village, the dry bay and the east pass shoulder — the BAY_FINE lattice rect; base of the wrap chain' },
+  { name: 'grotto', kind: 'ground', over: ['brightharbor'],
+    owns: (x, z) => massifAt(x, z) || grottoOpenAt(x, z, true),
+    ground: (x, z) => __regBayGround(x, z),
+    note: 'the massif + carved air; solid = massifAt minus grottoOpenAt, walls marched from the same boundary' },
+  { name: 'rooms-strip', kind: 'ground', over: [],
+    owns: (x, z) => x > 300 && z < -30,
+    ground: (x, z) => __regBayGround(x, z),
+    note: 'off-world interiors + portrait stage at x≈330; solid is per-room clamps (interiorResolve), never worldSolidAt' },
+);
+/* Rule 3 for the grotto mirror: the reflected beam stops where the carved
+   air ends, so an off-target aim paints the wall it actually hits instead
+   of lancing through rock. The kelp plug is IGNORED on purpose: the aimed
+   beam must still reach (and read as burning) the kelp wall pre-burn. */
+const GROTTO_BEAM_L = Math.hypot(KELPWALL.x - MIRROR_POS.x, KELPWALL.z - MIRROR_POS.z) + 1.5;
+const _grottoBeamOpen = (x, z) => grottoOpenAt(x, z, true) || !massifAt(x, z);
+let _grottoBeamT = 1;
+function grottoClampBeam() {
+  if (!beamOut || !beamOut.visible || beamOut.material.opacity <= 0) return;
+  const a = mirror.angle;
+  const hit = beamHitDistIn(_grottoBeamOpen, MIRROR_POS.x, MIRROR_POS.z,
+    Math.cos(a), Math.sin(a), GROTTO_BEAM_L);
+  const t = Math.max(0.08, Math.min(1, hit / GROTTO_BEAM_L));
+  if (Math.abs(t - _grottoBeamT) < 0.01) return;
+  _grottoBeamT = t;
+  /* the beam is two quads = 4 tris; the far verts of each quad sit at
+     soup slots 2,4 (c twice) and 5 (d) — only their local x (the length
+     axis) moves */
+  const p = beamOut.geometry.getAttribute('position');
+  const fx = GROTTO_BEAM_L * t;
+  for (const vi of [2, 4, 5, 8, 10, 11]) p.array[vi * 3] = fx;
+  p.needsUpdate = true;
+}
 </script>
 <script>
 /* ═══════════════════ p5 — entities, player, camera, combat feel ═══════════════════ */
@@ -7249,6 +7457,22 @@ const FSPRINGS = [
 ];
 /* the Great Cedar — hollow; ring solid + door gap share these numbers */
 const CEDAR = { x: 1300, z: 210, r0: 2.7, r1: 4.4, doorA: -2.25, doorHalf: 0.6 };
+/* the cedar's door gap, snapped to the trunk lathe's segment grid: the SAME
+   spans buildCedar skips are the spans collision opens (census #6 — the old
+   t0+0.14 probe left the rendered gap up to half a segment off the collision
+   gap: a see-through-but-solid sliver at one jamb). gapLo/gapHi are radians
+   relative to doorA; skip + solid both read them. */
+const CEDAR_SEG = 12;                          // seg count of BOTH trunk lathes
+(function alignCedarGap() {
+  const span = TAU / CEDAR_SEG;
+  let lo = 1e9, hi = -1e9;
+  for (let s = 0; s < CEDAR_SEG; s++) {
+    let da = (((s + 0.5) * span - CEDAR.doorA) % TAU + TAU) % TAU;
+    if (da > Math.PI) da -= TAU;
+    if (Math.abs(da) < CEDAR.doorHalf) { lo = Math.min(lo, da - span / 2); hi = Math.max(hi, da + span / 2); }
+  }
+  CEDAR.gapLo = lo; CEDAR.gapHi = hi;
+})();
 const TOWER = { x: 1100, z: 810, deckY: 15.2 };
 const WARDEN_POS = { x: 1095.5, z: 803.5 };
 /* extra authored shade (rock shadows, tower roof, grotto alcoves, seal) */
@@ -7428,6 +7652,42 @@ function canopyAt(x, z) {
   return eachTreeNear(x, z, t => !t.bare && Math.hypot(x - t.x, z - t.z) < t.cr);
 }
 
+/* ───── wall solids: straight rendered walls own their space as rotated
+   boxes, not circle chains (census #8: circle-guarded corners let a player
+   walk through visible stone). Each entry's center/half-extents/rotation
+   are the SAME numbers the builder hands boxW (Rule 1: one truth). The
+   test is boxW's own local frame (_rot ry inverse). ───── */
+const FWALLS = [];
+function addWall(x, z, hw, hd, ry) {
+  FWALLS.push({ x, z, hw, hd, c: Math.cos(ry || 0), s: Math.sin(ry || 0) });
+}
+function fWallAt(x, z) {
+  for (let i = 0; i < FWALLS.length; i++) {
+    const w = FWALLS[i], dx = x - w.x, dz = z - w.z;
+    if (Math.abs(dx * w.c - dz * w.s) < w.hw && Math.abs(dx * w.s + dz * w.c) < w.hd) return true;
+  }
+  return false;
+}
+
+/* ───── the rockfall's stones own their space (census #9): the same march
+   that renders each boulder records its footprint ellipse (radius sampled
+   at waist height, ex-squashed, ry-rotated). Sealed and parted lists are
+   filled by buildRockfall; which one stands follows __basinOpenNow, the
+   same flag that picks the mesh. ───── */
+function rockfallStoneAt(x, z) {
+  const RS = window.__rockfallStones;
+  if (!RS) return false;
+  if (Math.abs(x - BASIN.x) > 28 || Math.abs(z - BASIN.z) > 28) return false;
+  const list = window.__basinOpenNow ? RS.parted : RS.sealed;
+  for (let i = 0; i < list.length; i++) {
+    const s = list[i], dx = x - s.x, dz = z - s.z;
+    if (dx * dx + dz * dz > s.a * s.a) continue;
+    const u = dx * s.c - dz * s.sn, v = dx * s.sn + dz * s.c;
+    if ((u * u) / (s.a * s.a) + (v * v) / (s.b * s.b) < 1) return true;
+  }
+  return false;
+}
+
 /* ───────────────────────── SOLID authority for the region ───────────────────────── */
 window.__forestSolid = function (x, z) {
   if (x <= 98) return false;
@@ -7443,7 +7703,8 @@ window.__forestSolid = function (x, z) {
   }
   if (x > FW.x1 || z < FW.z0 || z > FW.z1) return true;      // region walls
   if (Math.hypot(x - CROWN.x, z - CROWN.z) < 150) return true;   // plateau: unclimbable
-  if (Math.hypot(x - BASIN.x, z - BASIN.z) < BASIN.r) return true;   // THE SEAL (night two opens it)
+  if (!window.__basinOpenNow && Math.hypot(x - BASIN.x, z - BASIN.z) < BASIN.r) return true;   // THE SEAL (night two opens it)
+  if (rockfallStoneAt(x, z)) return true;                    // the boulders themselves, both states
   // the Great Cedar's hollow ring (door gap shared with the mesh)
   {
     const dx = x - CEDAR.x, dz = z - CEDAR.z;
@@ -7451,10 +7712,12 @@ window.__forestSolid = function (x, z) {
     if (d > CEDAR.r0 && d < CEDAR.r1) {
       let da = Math.atan2(dz, dx) - CEDAR.doorA;
       da = ((da % TAU) + TAU) % TAU; if (da > Math.PI) da -= TAU;
-      if (Math.abs(da) > CEDAR.doorHalf) return true;
+      // the gap the lathe actually leaves open (segment-grid aligned)
+      if (da < CEDAR.gapLo || da > CEDAR.gapHi) return true;
     }
   }
   if (Math.hypot(x - TOWER.x, z - TOWER.z) < 3.0) return true;   // under-deck braces
+  if (fWallAt(x, z)) return true;                            // mill/ferry/hamlet/seam walls
   if (treeTrunkAt(x, z, 0.3)) return true;                   // every pine trunk is real
   return false;
 };
@@ -7933,8 +8196,17 @@ let rockfallMesh = null, rockfallOpenMesh = null;
 (function buildRockfall() {
   const C_CLIFF3 = [0.72, 0.65, 0.53], C_CHUTE = [0.93, 0.9, 0.81];
   const toFore = Math.atan2(1165 - BASIN.z, 1900 - BASIN.x);
+  /* census #9: the boulders had NO colliders of their own — parted stones
+     were pushable-into, and the cleared mouth still blocked at the old disc
+     rim. The march below now records every stone's footprint (waist-height
+     radius, ex-squash, ry) into the lists rockfallStoneAt reads, and the
+     mouth arc it cleared for p6c's basinWalkAt. One march, three truths. */
+  const stones = { sealed: [], parted: [] };
+  window.__rockfallStones = stones;
+  window.__rockfallArc = { a: toFore, half: 5 * 0.21 + 0.25 };   // the march's reach + one stone's shoulder
   const build = (parted) => {
     const md = MD();
+    const rec = parted ? stones.parted : stones.sealed;
     for (let i = -5; i <= 5; i++) {
       let a = toFore + i * 0.21;
       let r = BASIN.r - 1 + Math.abs(hash2(i, 11)) * 2.5;
@@ -7951,8 +8223,12 @@ let rockfallMesh = null, rockfallOpenMesh = null;
       latheW(md, [[s, 0], [s * 0.85, s * 1.1], [s * 0.4, s * 1.9], [0, s * 2.3]],
         { seg: 6, ex: 0.85, x: bx, y: gy, z: bz, ry: i * 1.7, flat: true, segJitter: 0.13,
           col: i % 2 ? C_FROCK : C_FROCK2, cols: [C_FROCK2, C_FROCK, C_CLIFF3] });
+      // footprint at waist height (ground sits 1.2+sink above the lathe base);
+      // 0.93 splits the 6-gon's vertex-vs-edge error both ways
+      const rEff = lerp(s, s * 0.85, clamp((1.2 + sink + 1.0) / (s * 1.1), 0, 1)) * 0.93;
+      rec.push({ x: bx, z: bz, a: rEff, b: rEff * 0.85, c: Math.cos(i * 1.7), sn: Math.sin(i * 1.7) });
       if (i % 2 === 0) {
-        boxW(md, { x: bx, y: gy + s * 0.8, z: bz, w: s * 0.5, d: s * 0.4, h: s * 0.7, ry: i, rx: 0.4, col: C_CHUTE });
+        boxW(md, { x: bx, y: gy + s * 0.8, z: bz, w: s * 0.5, d: s * 0.4, h: s * 0.7, ry: i, rx: 0.4, col: C_CHUTE, warm: true });   // the cool bake blue-shifts this pale cap into sky-blue wedges
       }
     }
     for (let i = -6; i <= 6; i += 2) {
@@ -7961,6 +8237,7 @@ let rockfallMesh = null, rockfallOpenMesh = null;
       const bx = BASIN.x + Math.cos(a) * (BASIN.r + 2.5), bz = BASIN.z + Math.sin(a) * (BASIN.r + 2.5);
       const gy = groundH(bx, bz) - 0.6;
       latheW(md, [[1.3, 0], [0.9, 1.1], [0, 1.7]], { seg: 5, x: bx, y: gy, z: bz, ry: i * 2.3, flat: true, segJitter: 0.1, col: C_FROCK2 });
+      rec.push({ x: bx, z: bz, a: 1.0, b: 1.0, c: 1, sn: 0 });   // hip-high rubble, round
     }
     const m = mdMesh(md, WORLD_MAT, false);
     m.matrixAutoUpdate = false; m.updateMatrix();
@@ -8068,7 +8345,9 @@ let cedarMesh = null, cedarGlow = null;
   const BARK = [0.52, 0.42, 0.31], BARK2 = [0.41, 0.32, 0.24], BONE = [0.79, 0.72, 0.59];
   const doorSkip = (t0, t1, band) => {
     if (band > 1) return false;
-    let da = ((t0 + 0.14 - CEDAR.doorA) % TAU + TAU) % TAU;
+    // census #6: probe the segment's CENTER, not t0+0.14 — the skipped spans
+    // are exactly the [gapLo, gapHi] alignCedarGap derived for collision
+    let da = (((t0 + t1) / 2 - CEDAR.doorA) % TAU + TAU) % TAU;
     if (da > Math.PI) da -= TAU;
     return Math.abs(da) < CEDAR.doorHalf;
   };
@@ -8269,8 +8548,13 @@ function buildWaterwheel(cx, cz, ry, R, ruined) {
   fboxW({ x: c.x + W, y: gy - 0.2, z: c.z, w: 0.3, d: D, h: 1.8, col: C_STONE2 });
   fboxW({ x: c.x, y: gy - 0.2, z: c.z - D, w: W, d: 0.3, h: 2.2, col: C_STONE });
   fboxW({ x: c.x - 1.2, y: gy - 0.2, z: c.z + D, w: W - 1.6, d: 0.3, h: 1.5, col: C_STONE2 });   // front wall w/ door gap east
-  addColl(c.x - W, c.z, 0.9); addColl(c.x + W, c.z, 0.9);
-  addColl(c.x - 1, c.z - D, 1.6); addColl(c.x - 1.2, c.z + D, 1.4);
+  // census #8: the shell's four walls collide as the boxes they render
+  // (the old 2-4 circles let a player corner through visible stone);
+  // half-extents are the boxW numbers above + 0.15 thickness margin
+  addWall(c.x - W, c.z, 0.45, D, 0);                 // west wall
+  addWall(c.x + W, c.z, 0.45, D, 0);                 // east wall
+  addWall(c.x, c.z - D, W, 0.45, 0);                 // back wall
+  addWall(c.x - 1.2, c.z + D, W - 1.6, 0.45, 0);     // front wall — door gap east stays true
   // fallen roof beams + the millstone
   fboxW({ x: c.x + 0.4, y: gy + 0.1, z: c.z - 0.6, w: 0.14, d: 0.14, h: 3.4, rx: 1.35, ry: 0.4, col: C_WOOD2 });
   fboxW({ x: c.x - 1.1, y: gy + 0.1, z: c.z + 0.4, w: 0.12, d: 0.12, h: 2.8, rx: 1.5, ry: -0.8, col: C_WOOD });
@@ -8301,8 +8585,10 @@ function buildWaterwheel(cx, cz, ry, R, ruined) {
   fboxW({ x: c.x + 3.2, y: gy + 0.2, z: c.z - 2.6, w: 0.07, d: 0.07, h: 3.6, rx: 0.5, ry: 0.3, col: C_WOOD });
   // the ferry rope, dead on the silt, and its far post
   fboxW({ x: c.x - 6, y: groundH(c.x - 6, c.z + 5), z: c.z + 5, w: 0.16, d: 0.16, h: 1.9, col: C_WOOD2 });
-  addColl(c.x, c.z, 3.2); addColl(c.x + Math.cos(ry) * 3.6, c.z - Math.sin(ry) * 3.6, 1.6);
-  addColl(c.x - Math.cos(ry) * 3.6, c.z + Math.sin(ry) * 3.6, 1.6);
+  // census #8: the hull collides as the rotated box it renders (the old
+  // three circles left both bow corners walk-through) — same 4.4 x 2.1
+  // half-extents and ry the hull boxW uses
+  addWall(c.x, c.z, 4.4, 2.1, ry);
 })();
 
 /* ── the drying-rack hamlet ── */
@@ -8316,7 +8602,7 @@ function buildWaterwheel(cx, cz, ry, R, ruined) {
     }
     fboxW({ x: x + dxr * 1.2, y: gy, z: z + dzr * 1.2, w: 1.7, d: 0.12, h: 0.9, ry, col: C_WOOD2 });   // low back
     fboxW({ x: x + dxr * 0.5, y: gy + 1.85, z: z + dzr * 0.5, w: 1.75, d: 1.5, h: 0.12, ry, rx: 0.42, col: C_ROOF2, colB: C_ROOF });
-    addColl(x + dxr * 1.2, z + dzr * 1.2, 1.0);
+    addWall(x + dxr * 1.2, z + dzr * 1.2, 1.7, 0.3, ry);   // the low back, full width (census #8)
   };
   leanTo(c.x - 8, c.z - 4, 0.4);
   leanTo(c.x + 6, c.z - 7, -0.7);
@@ -8334,7 +8620,7 @@ function buildWaterwheel(cx, cz, ry, R, ruined) {
   const gy = groundH(c.x + 2, c.z + 9);
   fboxW({ x: c.x + 2, y: gy, z: c.z + 9, w: 1.8, d: 1.4, h: 0.8, ry: 0.3, rz: 0.12, col: C_STONE2 });
   fboxW({ x: c.x + 2.3, y: gy + 0.6, z: c.z + 9.2, w: 2.0, d: 1.6, h: 0.2, ry: 0.35, rz: 0.3, col: C_ROOF2 });
-  addColl(c.x + 2, c.z + 9, 2.0);
+  addWall(c.x + 2, c.z + 9, 1.9, 1.5, 0.3);   // the fallen shell + its slid roof (census #8)
   // the well they dug when the river died — dry too
   flatheW([[0.85, 0], [0.8, 0.7], [0.65, 0.75]], { seg: 8, x: c.x - 9, y: groundH(c.x - 9, c.z + 4) - 0.1, z: c.z + 4, col: C_STONE, cols: [C_STONE, C_STONE2] });
   addColl(c.x - 9, c.z + 4, 1.05);
@@ -8388,7 +8674,9 @@ function buildWaterwheel(cx, cz, ry, R, ruined) {
   const s = FCLUSTERS.find(q => q.id === 'seam');
   const gy = groundH(s.x, s.z) - 0.5;
   fboxW({ x: s.x, y: gy, z: s.z + 4, w: 6.5, d: 1.6, h: 5.5, tw: 5.5, td: 2.6, shz: -1.2, col: C_FROCK, colB: C_FROCK2 });
-  addColl(s.x, s.z + 4, 2.2); addColl(s.x - 4, s.z + 4, 2.2); addColl(s.x + 4, s.z + 4, 2.2);
+  // census #8: one box for the whole 13m face — the old three-circle chain
+  // had walk-through scallops between circles and open tips past them
+  addWall(s.x, s.z + 4, 6.5, 1.7, 0);
   for (let i = 0; i < 6; i++) {
     const x = s.x - 5 + i * 2, z = s.z + 2.4 + hash2(i, 2) * 0.5;
     flatheW([[0, 0], [0.3, 0.2], [0.16, 0.7], [0, 0.95]], { seg: 5, x, y: groundH(x, z), z, ry: i, col: i % 2 ? C_SALT : mix3(C_SALT, C_CLAY, 0.3) });
@@ -9171,6 +9459,7 @@ function tickForest() {
      resonance beat is about to open it — night two takes over from there) */
   const dh = Math.hypot(P.x - HUM_SPOT.x, P.z - HUM_SPOT.z);
   if (window.__n2WillOpen && window.__n2WillOpen()) { /* resonance owns the spot */ }
+  else if (window.__basinOpenNow) { /* the stones are parted: nothing hums under an open door */ }
   else if (dh < 13 && !humLatch) {
     humLatch = true;
     SFX.hum();
@@ -9703,6 +9992,24 @@ for (const c of chunks) {
 }
 </script>
 <script>
+/* ═══════════ RULES CORE registrations for p6b (pure addition) ═══════════ */
+const __regForestGround = groundH;    // p6b's final field, captured pre-p6c
+window.__WORLD_REG.push({
+  name: 'forest', kind: 'ground', over: ['brightharbor'],
+  owns: (x, z) => inForestQ(x, z),
+  ground: (x, z) => __regForestGround(x, z),
+  note: 'the Parched Forest heightfield (forestHMesh); solid = __forestSolid; later owners (hollow, crown/stair, river) declare themselves over this',
+});
+/* Rule 2: the Great Cedar's door — always-open threshold through the
+   trunk annulus (the gap the lathe skips is the gap collision opens) */
+window.__PORTALS.push({
+  name: 'cedar-door',
+  x: CEDAR.x + Math.cos(CEDAR.doorA) * ((CEDAR.r0 + CEDAR.r1) / 2),
+  z: CEDAR.z + Math.sin(CEDAR.doorA) * ((CEDAR.r0 + CEDAR.r1) / 2),
+  openNow: () => true,
+});
+</script>
+<script>
 /* ═══════════════════ p6c — PHASE 2 night two: THE FALLS HOLLOW & THE TIDE'S RETURN ═══════════════════
    Behind the rockfall: a water-carved cathedral (light-through-dry-channels
    puzzles, ember-hornet nests, the chain mural, a moonfish fossil). Coiled
@@ -9768,15 +10075,44 @@ function hollowOpenCore(x, z) {
   return false;
 }
 function basinWalkAt(x, z) {
-  if (Math.hypot(x - BASIN.x, z - BASIN.z) < BASIN.r - 1.4) return true;
+  const d = Math.hypot(x - BASIN.x, z - BASIN.z);
+  if (d < BASIN.r - 1.4) return true;
+  /* census #9: the mouth is the ARC the rockfall march cleared, the whole
+     way to the old disc rim — rubble that visually remains re-asserts
+     itself through rockfallStoneAt BEFORE this carve is consulted */
+  if (d < BASIN.r) {
+    const RA = window.__rockfallArc;
+    if (RA) {
+      let da = ((Math.atan2(z - BASIN.z, x - BASIN.x) - RA.a) % TAU + TAU) % TAU;
+      if (da > Math.PI) da -= TAU;
+      if (Math.abs(da) < RA.half) return true;
+    }
+  }
   const [t, lat] = segT(x, z, HGAP);
   return t > -0.05 && t < 1.05 && lat < HGAP.hw;
 }
 let basinOpenNow = false;               // derived from the save in __tideApplySave
 window.__basinOpenNow = false;
+/* the two glyph-door slabs (built later in this part; null while building —
+   which reads as "a door stands", exactly the sealed default) */
+let glyphDoorsLive = null;
+const GDOOR_H = 5.4;                    // the slab lathe's own profile top
+function glyphPlugSolidNow(idx) {
+  if (SAVE && SAVE[idx ? 'glyph2' : 'glyph1']) return false;   // open and latched
+  const D = glyphDoorsLive && glyphDoorsLive[idx];
+  if (!D) return true;
+  if (D.sinkT >= 0) {
+    /* Rule 6 (census #11): the plug follows the VISIBLE slab — passable the
+       moment the rendered top has sunk to knee height, not at sink-end when
+       the save flag lands 0.3s later */
+    const top = D.group.position.y + GDOOR_H - (D.baseY + 0.2);   // above the floor
+    return top > 0.55;
+  }
+  return true;
+}
 function hollowDoorPlugAt(x, z) {
-  if (!(SAVE && SAVE.glyph1) && Math.hypot(x - HDOOR1.x, z - HDOOR1.z) < HDOOR1.r) return true;
-  if (!(SAVE && SAVE.glyph2) && Math.hypot(x - HDOOR2.x, z - HDOOR2.z) < HDOOR2.r) return true;
+  if (glyphPlugSolidNow(0) && Math.hypot(x - HDOOR1.x, z - HDOOR1.z) < HDOOR1.r) return true;
+  if (glyphPlugSolidNow(1) && Math.hypot(x - HDOOR2.x, z - HDOOR2.z) < HDOOR2.r) return true;
   return false;
 }
 /* ── SOLID authority: plugs first, then carve, then night-one's answer ── */
@@ -9786,6 +10122,9 @@ window.__forestSolid = function (x, z) {
   // while sealed, the rockfall overrides EVERY carve — the throat must not
   // cut a slot through the ring (night-one's fuzzer holds the line here)
   if (!basinOpenNow && Math.hypot(x - BASIN.x, z - BASIN.z) < BASIN.r) return true;
+  // the boulders themselves (sealed OR parted) — before any carve, so the
+  // widened mouth can never cut through a stone that visually remains
+  if (rockfallStoneAt(x, z)) return true;
   if (hollowOpenCore(x, z)) return false;
   if (basinOpenNow && basinWalkAt(x, z)) return false;
   return _n1ForestSolid(x, z);
@@ -10249,8 +10588,9 @@ function buildGlyphDoor(door, s) {
   const g = new THREE.Group();
   const md = MD();
   const ry = Math.atan2(s.bz - s.az, s.bx - s.ax) + Math.PI / 2;
-  // the slab: a rounded stone door filling the corridor
-  latheW(md, [[2.5, 0], [2.35, 2.6], [1.6, 4.6], [0, 5.4]],
+  // the slab: a rounded stone door filling the corridor (top = GDOOR_H —
+  // the plug reads the same number to track the sink)
+  latheW(md, [[2.5, 0], [2.35, 2.6], [1.6, 4.6], [0, GDOOR_H]],
     { seg: 8, ex: 0.32, x: 0, y: 0, z: 0, ry, flat: true, segJitter: 0.08,
       col: C_FLOW2, cols: [C_HCAVE_LO, C_FLOW2, C_FLOW] });
   // the carved WATER-GLYPH: a spiral wave, dark until lit
@@ -10278,6 +10618,7 @@ function buildGlyphDoor(door, s) {
 }
 const glyphDoor1 = buildGlyphDoor(HDOOR1, COR12);
 const glyphDoor2 = buildGlyphDoor(HDOOR2, COR23);
+glyphDoorsLive = [glyphDoor1, glyphDoor2];   // the plug now tracks the rendered slabs
 
 /* ── the mirror-shells (the grotto's language, grown up) ── */
 function buildHollowMirror(pos, floorY, fixedAngle) {
@@ -12651,6 +12992,54 @@ function extendTideDebugOnce() {
 }
 </script>
 <script>
+/* ═══════════ RULES CORE registrations for p6c (pure addition) ═══════════ */
+const __regHollowGround = groundH;    // p6c's final chain, captured pre-p6d
+window.__WORLD_REG.push({
+  name: 'hollow', kind: 'ground', over: ['forest'],
+  owns: (x, z) => x > 1930 && x < 2078 && z > 1186 && z < 1338 && inHollowFieldQ(x, z),
+  ground: (x, z) => __regHollowGround(x, z),
+  note: 'the Falls Hollow floor field (hollowHMesh); solid = plugs → basin seal → carve → night-one. NOTE: the stair/crown (p6g) sits OVER two chambers and answers for its own y-band.',
+});
+/* Rule 2: the hollow's three thresholds. openNow reads the SAVE (intent);
+   the live chain answers solid from the derived plugs — the invariant
+   sweep checks the two never disagree. */
+window.__PORTALS.push(
+  { name: 'basin-gap',
+    x: (HGAP.ax + HGAP.bx) / 2, z: (HGAP.az + HGAP.bz) / 2,
+    openNow: () => !!window.__basinOpenNow },
+  { name: 'glyph-door-1', x: HDOOR1.x, z: HDOOR1.z,
+    openNow: () => !!(SAVE && SAVE.glyph1) },
+  { name: 'glyph-door-2', x: HDOOR2.x, z: HDOOR2.z,
+    openNow: () => !!(SAVE && SAVE.glyph2) },
+);
+/* Rule 3 for the hollow mirrors: each reflected beam stops where the carved
+   air ends, so a half-turned shell paints the gallery wall, not the rock
+   beyond it. Doors plug SEPARATELY from the carve, so an aimed beam still
+   reaches (and reads as re-lighting) its glyph door. */
+const _hBeamMeta = [
+  { m: hBeam1, px: HM1.x, pz: HM1.z, L: Math.hypot(HDOOR1.x - HM1.x, HDOOR1.z - HM1.z) + 1, ang: () => hm1.angle, t: 1 },
+  { m: hBeam2, px: HM2.x, pz: HM2.z, L: Math.hypot(HRELAY.x - HM2.x, HRELAY.z - HM2.z) + 0.6, ang: () => hm2.angle, t: 1 },
+  { m: hBeamR, px: HRELAY.x, pz: HRELAY.z, L: Math.hypot(HDOOR2.x - HRELAY.x, HDOOR2.z - HRELAY.z) + 1, ang: () => hmRelay.angle, t: 1 },
+];
+function hollowClampBeams() {
+  for (let i = 0; i < _hBeamMeta.length; i++) {
+    const B = _hBeamMeta[i];
+    if (!B.m.visible || B.m.material.opacity <= 0) continue;
+    const a = B.ang();
+    const hit = beamHitDistIn(hollowOpenCore, B.px, B.pz, Math.cos(a), Math.sin(a), B.L);
+    const t = Math.max(0.1, Math.min(1, hit / B.L));
+    if (Math.abs(t - B.t) < 0.01) continue;
+    B.t = t;
+    /* same wedge layout as the grotto beam: far verts at soup slots
+       2,4,5 and 8,10,11; only local x (the length axis) moves */
+    const p = B.m.geometry.getAttribute('position');
+    const fx = B.L * t;
+    for (const vi of [2, 4, 5, 8, 10, 11]) p.array[vi * 3] = fx;
+    p.needsUpdate = true;
+  }
+}
+</script>
+<script>
 /* ═══════════════════════════════════════════════════════════════════════
    PHASE 3, PART ONE — THE CROSSING & THE HOURLESS ISLES (the world)
 
@@ -13185,11 +13574,39 @@ function rebuildWaveIndex(x0, z0) {
   waveMesh.geometry.index.needsUpdate = true;
   waveMesh.geometry.setDrawRange(0, o);
 }
+/* RULE 4 — WATER NEVER ENTERS A HULL. The grid consults the hull registry:
+   FULL clamp (k = 1) within hull.r + one grid cell (WG_CELL is 11.5 under
+   LOWFX — the console's mode — so the coarse lattice is covered), smooth
+   blend beyond. Pooled scratch: zero allocation in the vertex loop. */
+const _HUL_MAX = 4;
+const _hulX = new Float32Array(_HUL_MAX), _hulZ = new Float32Array(_HUL_MAX),
+      _hulY = new Float32Array(_HUL_MAX), _hulRIn = new Float32Array(_HUL_MAX),
+      _hulROut = new Float32Array(_HUL_MAX);
+let _hulN = 0;
+function refreshHullClamp(cx, cz) {
+  _hulN = 0;
+  const HS = window.__HULLS;
+  if (!HS) return;
+  for (let i = 0; i < HS.length && _hulN < _HUL_MAX; i++) {
+    const H = HS[i];
+    try {
+      if (!H.afloat()) continue;
+      const hx = H.x(), hz = H.z();
+      if (Math.abs(hx - cx) > WG_SPAN / 2 + 24 || Math.abs(hz - cz) > WG_SPAN / 2 + 24) continue;
+      _hulX[_hulN] = hx; _hulZ[_hulN] = hz;
+      _hulY[_hulN] = H.waterlineY() - WL;         // relative to WL, like h
+      _hulRIn[_hulN] = H.r + WG_CELL;
+      _hulROut[_hulN] = H.r + WG_CELL + 6;
+      _hulN++;
+    } catch (e) {}
+  }
+}
 function updateWaveGrid() {
   const ci = Math.round(camera.position.x / WG_CELL), cj = Math.round(camera.position.z / WG_CELL);
   const cx = ci * WG_CELL, cz = cj * WG_CELL;
   const x0 = cx - WG_SPAN / 2, z0 = cz - WG_SPAN / 2;
   if (ci !== waveKeyI || cj !== waveKeyJ) { waveKeyI = ci; waveKeyJ = cj; rebuildWaveIndex(x0, z0); }
+  refreshHullClamp(cx, cz);
   let o = 0;
   let prevH = 0;
   for (let j = 0; j < WG_N; j++) {
@@ -13206,12 +13623,23 @@ function updateWaveGrid() {
          sliced through the boat and Wick's legs flickered blue ("the boat
          fills with water... a little dramatic"). Vertices near the hull now
          blend down to the exact height she is riding, minus a hand's width
-         of freeboard, so the sea meets her waterline and never her deck. */
-      if (P.sailing) {
-        const bd = Math.hypot(x - BOAT.x, z - BOAT.z);
-        if (bd < 9) {
-          const k = smoothstep(clamp((9 - bd) / 6, 0, 1));
-          h = lerp(h, SEAFX.heave - 0.14, k);
+         of freeboard, so the sea meets her waterline and never her deck.
+         Rule 4 generalised this from `if (P.sailing)` to EVERY registered
+         hull — sailing, moored, drifting — with a hard ceiling in the blend
+         band so a partial blend (the big-set term included) can never
+         resurrect a crest above the gunwale between a clamped vertex and a
+         free one. */
+      for (let hi = 0; hi < _hulN; hi++) {
+        const bd = Math.hypot(x - _hulX[hi], z - _hulZ[hi]);
+        const rOut = _hulROut[hi];
+        if (bd >= rOut) continue;
+        const rIn = _hulRIn[hi], ty = _hulY[hi];
+        if (bd <= rIn) { h = ty; }
+        else {
+          const k = smoothstep((rOut - bd) / (rOut - rIn));
+          h = lerp(h, ty, k);
+          const ceil = ty + (bd - rIn) * 0.30;
+          if (h > ceil) h = ceil;
         }
       }
       /* the rim rings flatten to the far sheet's level as well as its
@@ -15705,6 +16133,31 @@ function extendSeaDebugOnce() {
     seaGround(x, z) { return { g: groundH(x, z), depth: waterDepthAt(x, z), solid: worldSolidAt(x, z) }; },
   });
 }
+</script>
+<script>
+/* ═══════════ RULES CORE registrations for p6d (pure addition) ═══════════ */
+const __regSeaGround = groundH;    // p6d's final chain, captured pre-p6e
+window.__WORLD_REG.push({
+  name: 'sea', kind: 'ground', over: ['brightharbor'],
+  owns: (x, z) => x < -86 && (inSeaQ(x, z) || inChanQ(x, z)),
+  ground: (x, z) => __regSeaGround(x, z),
+  note: 'the open ocean, the channel and every isle (seaHMesh + chanHMesh); solid = isleSolidAt west of −104. The Foundry (p6e) declares itself over this.',
+});
+/* Rule 4: the sailboat is a hull WHENEVER she is afloat — sailing, moored,
+   or waiting where the flood left her. waterlineY reads her LIVE group y
+   (moored bob and sailing heave both included) plus 0.04 of freeboard —
+   the same water-meets-waterline the old sailing-only clamp used. The
+   SUNKEN WRECK is deliberately NOT a hull: water belongs inside it. */
+window.__HULLS.push({
+  name: 'sailboat', r: 4.5,
+  afloat: () => !!(flooded() && FLOODLIVE.boatDone),
+  underway: () => !!(P.sailing || VOYAGE.active),
+  x: () => BOAT.x, z: () => BOAT.z,
+  waterlineY: () => sailboat.group.position.y + 0.04,
+  /* mooring law (Rule 6): she floats in ≥1.3 m or she is re-moored */
+  depthOk: () => waterDepthAt(BOAT.x, BOAT.z) >= 1.3,
+  rescue: () => rescueStrandedBoat(),
+});
 </script>
 <script>
 /* ═══════════════════════════════════════════════════════════════════════
@@ -18720,6 +19173,43 @@ function animateTortoise(dtv, now, near) {
   refreshTortBar(false);
 }
 
+/* ── census #25: p6d bakes a dark S_SOOT "doorway" slab into the 'kiln'
+   chunk right at the door face (boxW at FOUNDRY_DOOR, w 1.55 / d 0.3 / h
+   4.2 at z-0.35). With the bronze leaves OPEN it still renders: blackness
+   through an open door, masked only by the throat's own dark. The PROPER
+   fix belongs in p6d — bake that slab into its own togglable mesh — but
+   p6d is not this part's to edit, so we locate the slab's 36 vertices by
+   position at runtime, park them under the threshold while the gate
+   stands open, and restore them when a NEW GAME reseals the doors. ── */
+let fSootSlab = null;   // { att, idx, orig, parked } | 'missing'
+function fParkSootSlab(open) {
+  if (fSootSlab === 'missing') return;
+  if (!fSootSlab) {
+    let ch = null;
+    for (let i = 0; i < seaChunks.length; i++) if (seaChunks[i].id === 'kiln') ch = seaChunks[i];
+    const att = ch && ch.mesh && ch.mesh.geometry.getAttribute('position');
+    if (!att) { fSootSlab = 'missing'; return; }
+    const yD = seaHMesh(FOUNDRY_DOOR.x, FOUNDRY_DOOR.z);   // the y the builder used
+    const idx = [];
+    for (let i = 0; i < att.count; i++) {
+      const px = att.getX(i), pz = att.getZ(i), py = att.getY(i);
+      if (px > FOUNDRY_DOOR.x - 1.6 && px < FOUNDRY_DOOR.x + 1.6 &&
+          pz > FOUNDRY_DOOR.z - 0.7 && pz < FOUNDRY_DOOR.z - 0.02 &&
+          py > yD - 0.1 && py < yD + 4.3) idx.push(i);
+    }
+    if (idx.length < 24 || idx.length > 48) { fSootSlab = 'missing'; return; }   // p6d moved it — do nothing
+    const orig = new Float32Array(idx.length);
+    for (let i = 0; i < idx.length; i++) orig[i] = att.getY(idx[i]);
+    fSootSlab = { att, idx, orig, yPark: yD - 2.5, parked: false };
+  }
+  const S = fSootSlab;
+  if (open === S.parked) return;
+  for (let i = 0; i < S.idx.length; i++) S.att.setY(S.idx[i], open ? S.yPark : S.orig[i]);
+  S.att.needsUpdate = true;
+  S.parked = open;
+  window.__sootSlabParked = { found: S.idx.length, parked: S.parked };
+}
+
 /* ═══ THE ONE DERIVATION — every phase-three fact flows from the save,
    both ways. A completed save taken to NEW GAME must put the bell back on
    the tortoise, relock every door, shut the chest, and pin the sun. ═══ */
@@ -18739,6 +19229,7 @@ function isleDeriveWorld(S) {
   if (window.__foundryDoorColl) window.__foundryDoorColl.off = fGateOpenNow;
   fGateL.rotation.y = fGateOpenNow ? 1.95 : 0;
   fGateR.rotation.y = fGateOpenNow ? -1.95 : 0;
+  fParkSootSlab(fGateOpenNow);   // census #25: p6d's baked soot slab follows the gate
   fGateSaid = false;
   /* the AIM shell + the channel */
   fShell.angle = S.fGlyph1 ? fShell.target : 2.4;
@@ -18935,6 +19426,95 @@ function extendIsleDebugOnce() {
 }
 </script>
 <script>
+/* ═══════════ RULES CORE registrations for p6e (pure addition — this block
+   is appended; nothing above it is edited) ═══════════ */
+const __regFoundryGround = groundH;    // p6e's final chain, captured pre-p6f
+window.__WORLD_REG.push({
+  name: 'foundry', kind: 'ground', over: ['sea'],
+  owns: (x, z) => fInBox(x, z) && inFoundryFieldQ(x, z),
+  ground: (x, z) => __regFoundryGround(x, z),
+  note: 'the Foundry works cut into Kiln Isle (foundry floor field); solid = fMassifAt with plugs first, carve second',
+});
+/* Rule 2: the works’ two doors. openNow reads the SAVE (intent); the
+   live chain answers from the derived plug state (fGateOpenNow /
+   fResOpenNow) — the invariant sweep checks they never disagree. The
+   resonance door also opens TRANSIENTLY on a sustained tone, which
+   fResOpenNow carries and SAVE.fGlyph3 makes permanent. */
+window.__PORTALS.push(
+  { name: 'foundry-gate', x: FGATE.x, z: FGATE.z,
+    openNow: () => !!(SAVE && SAVE.watchBell) },
+  { name: 'resonance-door', x: FGLYPH3.x, z: FGLYPH3.z,
+    openNow: () => !!(fResOpenNow || (SAVE && SAVE.fGlyph3)) },
+);
+</script>
+<script>
+/* ═══════════ RULES CORE — Rule 2 readability patch (pure addition).
+   The rules suite's own portal screenshots caught BOTH faces of the
+   bronze doors reading as featureless slabs at walking distance (the
+   panel relief is too shallow for a baked-color material up close).
+   Straps, end studs and a pale meeting-seam stripe are ADDED onto the
+   existing leaves; the leaf groups themselves are untouched, so the
+   open-gate swing carries the new detail for free. ═══════════ */
+(function dressFoundryGate() {
+  if (!fGateL || !fGateR) return;
+  const dress = (node, sgn) => {
+    const md = MD();
+    const cx = -sgn * 0.72;
+    for (const zf of [0.12, -0.12]) {                 // both faces of the leaf
+      for (const yy of [0.55, 1.95, 3.35]) {
+        boxF(md, { x: cx, y: yy, z: zf, w: 0.68, d: 0.025, h: 0.16, col: C_BRONZE, colB: C_BRONZE2 });
+        for (const ex of [-0.56, 0.56]) {
+          boxF(md, { x: cx + ex, y: yy + 0.03, z: zf * 1.25, w: 0.045, d: 0.02, h: 0.09, col: C_BRONZE2 });
+        }
+      }
+    }
+    /* the meeting seam: a pale worn stripe down the free edge — the one
+       line the eye needs to read "two leaves that part" from either side */
+    boxF(md, { x: cx - sgn * 0.66, y: 0.1, z: 0, w: 0.035, d: 0.15,
+      h: 4.1, col: mix3(C_BRONZE, [1, 1, 1], 0.35) });
+    const m = mdMesh(md, WORLD_MAT, false);
+    m.frustumCulled = false;
+    node.add(m);
+  };
+  dress(fGateL, -1); dress(fGateR, 1);
+})();
+</script>
+<script>
+/* ═══════════ RULES CORE — Rule 2, the way OUT (pure addition).
+   p6d bakes the bluff's cut face as a box that reaches ~7 m into the
+   throat, so from INSIDE the works the open doorway hides behind that
+   baked rear face: walkable, but it reads as wall — the exact failure
+   Rule 2 exists for (caught by the rules suite's own B-side screenshot).
+   p6d's chunk is not this part's to re-carve, so the opening is made to
+   READ instead: a door of daylight painted on the occluding face, exactly
+   over the walk line, shown only while the gate stands open. It hangs on
+   fGateGroup, so p6e's own culling and the save derivation carry it. ═══ */
+let fWayOutGlow = null;
+(function buildWayOutGlow() {
+  if (!fGateGroup) return;
+  const md = MD();
+  const zi = -3.95;                 // just proud of the baked face's rear
+  const warm = [1.0, 0.93, 0.7], core = [1.0, 0.98, 0.86];
+  /* the doorway: a soft outer wash and a brighter core, floor to lintel */
+  pushQuad(md, [-1.9, 0.0, zi], [1.9, 0.0, zi], [1.7, 4.35, zi], [-1.7, 4.35, zi], warm);
+  pushQuad(md, [-1.05, 0.05, zi - 0.02], [1.05, 0.05, zi - 0.02],
+    [0.95, 3.9, zi - 0.02], [-0.95, 3.9, zi - 0.02], core);
+  /* and its spill lying on the floor toward the walker (deeper inside the
+     throat is MORE-negative local z) */
+  pushQuad(md, [-1.6, 0.02, zi], [1.6, 0.02, zi], [2.4, 0.02, zi - 5.5], [-2.4, 0.02, zi - 5.5], warm);
+  fWayOutGlow = mdMesh(md, new THREE.MeshBasicMaterial({
+    vertexColors: true, transparent: true, opacity: 0.42,
+    blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide, fog: false,
+  }), false);
+  fWayOutGlow.frustumCulled = false;
+  fWayOutGlow.visible = false;
+  fGateGroup.add(fWayOutGlow);
+})();
+window.__worldStateHooks.push(function (S) {
+  if (fWayOutGlow) fWayOutGlow.visible = !!S.watchBell;
+});
+</script>
+<script>
 /* ═══════════════════════════════════════════════════════════════════════
    THE LAMP ROOM — a lighthouse that finally has a reason
 
@@ -19049,31 +19629,44 @@ const lampRoom = {
    turning about the tower, cheap enough to leave on forever: no shadow map,
    no light, just geometry that sweeps. Drawn from the real lamp height on
    the real tower so it lines up from the bay AND from the isles. */
+const LAMP_LEN = 300, LAMP_W0 = 0.35, LAMP_W1 = 4.6, LAMP_DROP = 5.5;
+let lampBeamMat = null, lampBeams = null, lampClampF = 0;
 (function buildLampBeam() {
   const bx = LIGHTHOUSE.x, bz = LIGHTHOUSE.z;
   const by = groundH(bx, bz) - 0.3 + 8.95;
-  const md = MD();
   /* A LIGHTHOUSE BEAM, NOT A LASER BAR. The first cut was 620m long and 26m
      wide at the far end, additive and bright — from the shore it read as a
      solid glowing girder lying across the horizon. What sells a beam is a
      NARROW shaft that fades out long before it ends, tilted down onto the
      water, faint enough to be atmosphere. Two wedges crossed in an X so it
-     reads from any bearing without a cone's triangles. */
-  const LEN = 300, W0 = 0.35, W1 = 4.6, DROP = 5.5;
+     reads from any bearing without a cone's triangles.
+     RULE 3 — light is occluded by the world: each direction is its OWN
+     mesh, and its far verts are pulled in to beamHitDist against the live
+     terrain every few frames (rewritten in place — scale.z would distort
+     the 5.5 m drop), so the inland half of the sweep dies on the headland
+     instead of lancing through it. */
+  const LEN = LAMP_LEN, W0 = LAMP_W0, W1 = LAMP_W1, DROP = LAMP_DROP;
+  lampBeamMat = new THREE.MeshBasicMaterial({
+    vertexColors: true, transparent: true, opacity: 0.0,
+    blending: THREE.AdditiveBlending, depthWrite: false, depthTest: true,
+    side: THREE.DoubleSide,
+  });
+  lampBeam = new THREE.Group();
+  lampBeams = [];
   for (const dir of [1, -1]) {
+    const md = MD();
     const near = [1.0, 0.95, 0.78], far = [1.0, 0.88, 0.55];
     const fz = LEN * dir, fy = -DROP;
     // horizontal blade
     pushQuad(md, [-W0, 0, 0], [W0, 0, 0], [W1, fy, fz], [-W1, fy, fz], near, far);
     // vertical blade
     pushQuad(md, [0, -W0, 0], [0, W0, 0], [0, fy + W1 * 0.6, fz], [0, fy - W1 * 0.6, fz], near, far);
+    const m = mdMesh(md, lampBeamMat, false);
+    m.renderOrder = 4;
+    m.frustumCulled = false;
+    lampBeam.add(m);
+    lampBeams.push({ mesh: m, dir, t: 1 });
   }
-  lampBeam = mdMesh(md, new THREE.MeshBasicMaterial({
-    vertexColors: true, transparent: true, opacity: 0.0,
-    blending: THREE.AdditiveBlending, depthWrite: false, depthTest: true,
-    side: THREE.DoubleSide,
-  }), false);
-  lampBeam.renderOrder = 4;
   lampBeam.position.set(bx, by, bz);
   lampBeam.frustumCulled = false;
   lampBeam.visible = false;
@@ -19090,6 +19683,40 @@ const lampRoom = {
   lampGlowMesh.visible = false;
   scene.add(lampGlowMesh);
 })();
+
+/* Rule 3: pull one direction's far verts in to a clamped fraction t of the
+   full length. The wedge is 2 quads = 4 tris; each quad's far verts sit at
+   soup slots 2,4 (c twice) and 5 (d). The drop and the taper both scale
+   with t so the centreline's slope — and therefore the hit distance the
+   march computed against it — stays true. */
+function lampSetBeamFar(B, t) {
+  if (Math.abs(t - B.t) < 0.01) return;
+  B.t = t;
+  const a = B.mesh.geometry.getAttribute('position');
+  const p = a.array;
+  const fz = LAMP_LEN * t * B.dir, fy = -LAMP_DROP * t;
+  const w = LAMP_W0 + (LAMP_W1 - LAMP_W0) * t;
+  // horizontal blade: c = (±w, fy, fz)
+  p[6] = w; p[7] = fy; p[8] = fz;
+  p[12] = w; p[13] = fy; p[14] = fz;
+  p[15] = -w; p[16] = fy; p[17] = fz;
+  // vertical blade: c/d = (0, fy ± w·0.6, fz)
+  p[24] = 0; p[25] = fy + w * 0.6; p[26] = fz;
+  p[30] = 0; p[31] = fy + w * 0.6; p[32] = fz;
+  p[33] = 0; p[34] = fy - w * 0.6; p[35] = fz;
+  a.needsUpdate = true;
+}
+function lampClampBeams() {
+  const bx = LIGHTHOUSE.x, bz = LIGHTHOUSE.z;
+  const by = lampBeam.position.y;
+  const dy = -LAMP_DROP / LAMP_LEN;
+  for (let i = 0; i < lampBeams.length; i++) {
+    const B = lampBeams[i];
+    const dx = Math.sin(lampSpin) * B.dir, dz = Math.cos(lampSpin) * B.dir;
+    const hit = beamHitDist(bx, by, bz, dx, dy, dz, LAMP_LEN);
+    lampSetBeamFar(B, Math.max(0.04, Math.min(1, hit / LAMP_LEN)));
+  }
+}
 
 function lampSunk() {   // 0 at noon, 1 at the bottom of the gold hour
   try { if (typeof fSunK === 'number') return clamp(fSunK, 0, 1); } catch (e) {}
@@ -19207,8 +19834,10 @@ cullChunks = function (ccx, ccz) {
   if (lampBeam) {
     lampSpin += 0.0065;                                    // ~6s a revolution
     lampBeam.rotation.y = lampSpin;
-    lampBeam.material.opacity = want * 0.17;   // atmosphere, not a bar
+    lampBeamMat.opacity = want * 0.17;         // atmosphere, not a bar
     lampBeam.visible = lit && want > 0.02;
+    // Rule 3: re-march both directions against the terrain every ~6 frames
+    if (lampBeam.visible && (++lampClampF % 6) === 0) lampClampBeams();
   }
   if (lampGlowMesh) {
     lampGlowMesh.material.opacity = lit ? 0.35 + 0.4 * lampSunk() : 0;
@@ -19221,7 +19850,7 @@ cullChunks = function (ccx, ccz) {
 window.__worldStateHooks.push(function (S) {
   lampLitNow = !!S.lampLit;
   lampFlare = lampLitNow ? 1 : 0;
-  if (lampBeam) { lampBeam.visible = false; lampBeam.material.opacity = 0; }
+  if (lampBeam) { lampBeam.visible = false; lampBeamMat.opacity = 0; }
   if (lampGlowMesh) { lampGlowMesh.visible = false; lampGlowMesh.material.opacity = 0; }
   if (lampRoom.glow) lampRoom.glow.material.opacity = 0;
 });
@@ -19247,7 +19876,8 @@ function extendLampDebugOnce() {
   d.lampInfo = function () {
     return { lit: !!(SAVE && SAVE.lampLit), stairs: lampStairsOpen(),
       beam: !!(lampBeam && lampBeam.visible),
-      opacity: lampBeam ? +lampBeam.material.opacity.toFixed(3) : null,
+      opacity: lampBeamMat ? +lampBeamMat.opacity.toFixed(3) : null,
+      beamT: lampBeams ? lampBeams.map(b => +b.t.toFixed(3)) : null,
       sunk: +lampSunk().toFixed(3) };
   };
 }
@@ -19621,13 +20251,34 @@ for (const d of S_DOORS) {
   const A = S_NODE[d.from], B = S_NODE[d.to];
   d.x = lerp(A.x, B.x, d.t); d.z = lerp(A.z, B.z, d.t);
   d.y = lerp(A.y, B.y, d.t);
-  d.ry = Math.atan2(B.z - A.z, B.x - A.x) + Math.PI / 2;
+  /* _rot's yaw maps a box's width axis to (cos ry, −sin ry): a slab that
+     CROSSES a leg at angle θ needs ry = π/2 − θ. The old θ + π/2 is only
+     right for axis-aligned legs — on these diagonal flights every slab lay
+     ALONG the corridor (7.1 m along, 2.3 m across, measured in-engine) with
+     the invisible plug barring the way beside it. */
+  d.ry = Math.PI / 2 - Math.atan2(B.z - A.z, B.x - A.x);
 }
 let organOpen = [false, false, false];      // derived from SAVE in the world hook
+const S_DOOR_H = 5.2;                       // the slab's carved height
+const S_DOOR_SINK = 6.0;                    // fully below the tread when open
+/* RULE 6: the plug follows the VISIBLE slab, not the flag. organOpen is
+   the door's INTENT (it drives the slab's animation target); the collider
+   asks where the rendered slab actually IS this frame — solid while its
+   top still stands above the knee, passable the moment it looks passable.
+   Before this the flag opened the way while the slab still stood
+   chest-high, and a shut door was an invisible wall under a slab floating
+   near the ceiling (the slab's authored y was the leg's LINEAR lerp,
+   ~3.5 m above the inverse-square floor — the owner's "walls and doors…
+   like I'm on acid", live review 8/18). */
+function stairDoorShut(d) {
+  const base = d.group ? d.group.position.y
+    : (d.baseY !== undefined ? d.baseY : d.y);
+  return base + S_DOOR_H > (d.floorY !== undefined ? d.floorY : d.y) + 0.9;
+}
 function stairPlugAt(x, z) {
   for (let i = 0; i < S_DOORS.length; i++) {
-    if (organOpen[i]) continue;
     const d = S_DOORS[i];
+    if (!stairDoorShut(d)) continue;
     if (Math.hypot(x - d.x, z - d.z) < d.r) return true;
   }
   return false;
@@ -19811,7 +20462,12 @@ function crownColor(x, z, y) {
   const n = vnoise(x * 0.045, z * 0.045) * 0.9 + vnoise(x * 0.14 + 2, z * 0.14) * 0.5;
   const f = vnoise(x * 0.115 + 3, z * 0.115);
   const dG = crownDG(x, z);
-  if (dG > K_WALK + 1.5) {
+  /* census #16: the walk limit READS. The crag palette begins AT K_WALK —
+     not a metre and a half past it — and the last stretch of walkable
+     grass hardens to worn stone, so the line the world stops at is a line
+     the eye can see (backed by the kerb stones baked at the same contour,
+     both derived FROM crownDG so they cannot drift). */
+  if (dG > K_WALK) {
     /* the crag: bare wind-scoured stone, banded by height */
     mix3(C_KSTONE2, C_KDARK, clamp(0.45 + n * 0.6, 0, 1), _kgc);
     if (Math.abs(Math.sin(y * 0.9 + n * 2)) > 0.82) mix3(_kgc, C_KSTONE, 0.35, _kgc);
@@ -19850,6 +20506,8 @@ function crownColor(x, z, y) {
   if (crownShadeAt(x, z)) mix3(_kgc, C_KDARK, 0.42, _kgc);
   /* salt bloom in the seams */
   if (Math.abs(vnoise(x * 1.3, z * 1.3)) < 0.05) mix3(_kgc, C_KPALE, 0.5, _kgc);
+  /* the last metre before the limit hardens grass → trodden stone */
+  if (dG > K_WALK - 1.0) mix3(_kgc, C_KSTONE2, 0.65 * smoothstep((dG - (K_WALK - 1.0)) / 1.0), _kgc);
   return _kgc;
 }
 
@@ -20131,6 +20789,54 @@ let plinthSocket = null, beaconBowl = null;
       }
     }
   }
+  /* ── THE WALK LIMIT (census #16): a low kerb of weathered stones set
+     exactly on the crownDG == K_WALK contour — placement DERIVED from the
+     same function the collider answers with (Rule 1), so wall and kerb
+     cannot drift apart. Rendered ground used to run smoothly on to
+     dG≈38 as invisible-wall apron; now the line the world stops at is a
+     line on the ground. Baked into this same static mesh: zero extra
+     draw calls. ── */
+  {
+    const kerbSeen = [];
+    let ks = 0;
+    const tryKerb = (x, z) => {
+      const dG = crownDG(x, z);
+      if (dG < K_WALK - 0.3 || dG > K_WALK + 0.3) return;      // ON the line only
+      if (Math.hypot(x - K_GATE.x, z - K_GATE.z) < 6) return;  // the doorway stays clear
+      if (Math.hypot(x - S_NODE.out.x, z - S_NODE.out.z) < 6) return;
+      /* the ledge's parapet already draws this line where the view is shut */
+      if (kPadD(K_PAD.ledge, x, z) < K_WALK + 1.4 && crownRimK(x, z) <= 0.55) return;
+      for (let q = 0; q < kerbSeen.length; q++) {
+        const pq = kerbSeen[q];
+        const ddx = pq[0] - x, ddz = pq[1] - z;
+        if (ddx * ddx + ddz * ddz < 2.4) return;               // ~1.55 m spacing
+      }
+      kerbSeen.push([x, z]);
+      ks++;
+      const y = crownY(x, z);
+      boxW(md, { x, y: y - 0.28, z, w: 0.6, d: 0.28, h: 0.36 + (ks % 3) * 0.07,
+        ry: ks * 1.7, rz: hash2(ks, 5) * 0.06, warm: true,
+        col: (ks % 2) ? C_KSTONE2 : C_KSTONE, colB: C_KDARK });
+    };
+    for (const pp of K_PADS) {
+      const n2 = Math.ceil(TAU * (pp.r + K_WALK) / 0.8);
+      for (let i = 0; i < n2; i++) {
+        const a = i / n2 * TAU;
+        tryKerb(pp.x + Math.cos(a) * (pp.r + K_WALK), pp.z + Math.sin(a) * (pp.r + K_WALK));
+      }
+    }
+    for (const rr of K_RAMPS) {
+      const len = Math.hypot(rr.bx - rr.ax, rr.bz - rr.az);
+      const ux = (rr.bx - rr.ax) / len, uz = (rr.bz - rr.az) / len;
+      const n2 = Math.ceil(len / 0.8);
+      for (let i = 0; i <= n2; i++) {
+        for (const sg of [-1, 1]) {
+          tryKerb(rr.ax + ux * len * i / n2 - uz * (rr.hw + K_WALK) * sg,
+                  rr.az + uz * len * i / n2 + ux * (rr.hw + K_WALK) * sg);
+        }
+      }
+    }
+  }
   crownPropMesh = mdMesh(md, WORLD_MAT, false);
   crownPropMesh.matrixAutoUpdate = false; crownPropMesh.updateMatrix();
   crownPropMesh.visible = false;
@@ -20305,6 +21011,15 @@ for (const p of K_SALT_SPOTS) {
 const C_SROCK = col(0x5d5449), C_SROCK2 = col(0x463f37), C_SDARK = col(0x24211d);
 const C_SCUT = col(0x7d7466), C_SPALE = col(0x9a927f), C_SMOSS = col(0x4a5340);
 const C_SPIPE = col(0x6f6754), C_SROPE = col(0x6b5a3c);
+/* PER-LANDING IDENTITY: each landing keeps its own colour temperature —
+   L1 lamplight amber, L2 moss green, L3 wind-pale blue — carried by the
+   landing's paved floor, its drum liner and its pipe collars, all baked
+   into the meshes that already exist (zero extra draw calls). Three
+   identical stone rooms up a dark spiral is how a climb stops being a
+   place ("disorienting sameness between flights", the 8/18 audit). */
+const S_ACCENT = {
+  l1: [0.92, 0.72, 0.4], l2: [0.55, 0.74, 0.52], l3: [0.66, 0.78, 0.94],
+};
 
 const _sgc = [0, 0, 0];
 function stairColor(x, z, y) {
@@ -20319,12 +21034,15 @@ function stairColor(x, z, y) {
       mix3(_sgc, step < 0.18 ? C_SDARK : C_SCUT, lat < l.hw * 0.7 ? 0.55 : 0.3, _sgc);
     }
   }
-  /* the landings are laid floors, pale and swept */
+  /* the landings are laid floors, pale and swept — each in its own light */
   for (let i = 1; i <= 3; i++) {
     const n2 = S_NODES[i];
     const d = Math.hypot(x - n2.x, z - n2.z);
     if (d < n2.r + 0.5) {
-      mix3(_sgc, C_SPALE, 0.55 * smoothstep((n2.r + 0.5 - d) / 2.5), _sgc);
+      const k = smoothstep((n2.r + 0.5 - d) / 2.5);
+      mix3(_sgc, C_SPALE, 0.55 * k, _sgc);
+      const acc = S_ACCENT[n2.id];
+      if (acc) mix3(_sgc, acc, 0.18 * k, _sgc);
       if (((x * 0.5) % 1) < 0.08 || ((z * 0.5) % 1) < 0.08) mix3(_sgc, C_SDARK, 0.4, _sgc);
     }
   }
@@ -20366,10 +21084,14 @@ let stairPropMesh = null, stairDressMesh = null, stairMouthGlow = null;
    whole footprint so a gap between rocks shows stone shadow, never sky ── */
 (function buildStairShell() {
   const md = MD();
+  /* the foundry's descent-darkening curve, not its inverse: LIGHT at the
+     floor where the eye walks, darkening as the rock rises into the cap.
+     The old bands ran dark-at-base → bright-at-top, so every rock's crown
+     flared against the black lid and the walls read as strobing noise. */
   const wallRock = (x, z, R0, seedv, base) => {
     latheW(md, [[R0, 0], [R0 * 1.1, 3.0], [R0 * 0.55, 7.0], [0, 9.2]],
-      { seg: 6, ex: 0.88, x, y: base - 1.4, z, ry: seedv * 2.13, flat: true, segJitter: 0.14,
-        col: C_SROCK2, cols: [C_SDARK, C_SROCK2, C_SROCK] });
+      { seg: 6, ex: 0.88, x, y: base - 1.4, z, ry: seedv * 2.13, flat: true, segJitter: 0.09,
+        col: C_SROCK2, cols: [C_SROCK, C_SROCK2, C_SDARK] });
   };
   const intrudes = (x, z, R0) => {
     if (stairOpenCore(x, z)) return true;
@@ -20416,18 +21138,26 @@ let stairPropMesh = null, stairDressMesh = null, stairMouthGlow = null;
 
   /* the liners + the cap, one double-sided dark mesh */
   const mdD = MD();
-  const quad = (a, b, c, d, cc) => {
+  /* cc paints the first two corners (the floor pair as called below), ct
+     the last two (the ceiling pair): every liner wall carries the same
+     light-at-the-tread, dark-at-the-cap gradient the rocks do */
+  const quad = (a, b, c, d, cc, ct) => {
+    ct = ct || cc;
     mdD.p.push(a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2],
                a[0], a[1], a[2], c[0], c[1], c[2], d[0], d[1], d[2]);
-    for (let i = 0; i < 6; i++) mdD.c.push(cc[0], cc[1], cc[2]);
+    mdD.c.push(cc[0], cc[1], cc[2], cc[0], cc[1], cc[2], ct[0], ct[1], ct[2],
+               cc[0], cc[1], cc[2], ct[0], ct[1], ct[2], ct[0], ct[1], ct[2]);
   };
-  /* landings: an inward drum, so a tall room reads as a ROOM */
+  /* landings: an inward drum, so a tall room reads as a ROOM — grounded
+     light, rising dark, the landing's own accent in the mid band */
   for (let i = 0; i < S_NODES.length; i++) {
     const n = S_NODES[i];
     const H = sHead(n.id);
+    const acc = S_ACCENT[n.id];
+    const midBand = acc ? mix3(C_SROCK2, acc, 0.24) : C_SROCK2;
     latheW(mdD, [[n.r + 1.4, -0.5], [n.r + 0.9, H * 0.4], [n.r * 0.55, H * 0.86], [0, H + 0.6]], {
-      seg: 12, x: n.x, y: n.y, z: n.z, inward: true, flat: true, segJitter: 0.12,
-      col: C_SROCK2, cols: [C_SDARK, C_SROCK2, C_SROCK],
+      seg: 12, x: n.x, y: n.y, z: n.z, inward: true, flat: true, segJitter: 0.09,
+      col: C_SROCK2, cols: [C_SROCK, midBand, C_SDARK],
       skip: (t0) => {
         for (let k = 0; k < S_LEGS.length; k++) {
           const l = S_LEGS[k];
@@ -20457,11 +21187,17 @@ let stairPropMesh = null, stairDressMesh = null, stairMouthGlow = null;
       const throat = stairThroatQ((p0x + p1x) / 2, (p0z + p1z) / 2);
       const lat = l.hw + 1.9;
       for (const side of [-1, 1]) {
-        const cc = mix3(k % 2 ? C_SROCK : C_SROCK2, C_SDARK, 0.2 + 0.12 * (k % 3));
+        /* one continuous wall, light at the tread and dark at the cap —
+           the old per-9m alternation of light/dark panels striped every
+           flight ("wall-march density reading as noise", the 8/18 audit) */
+        const j = 0.92 + hash2(k * 5 + side + 1, (l.ax + l.bz) | 0) * 0.08;
+        const cc = mix3(C_SROCK, C_SROCK2, 0.4);
+        cc[0] *= j; cc[1] *= j; cc[2] *= j;
+        const ct = mix3(C_SROCK2, C_SDARK, 0.72);
         quad([l.ax + ux * len * t0 + px * lat * side, y0 - 0.6, l.az + uz * len * t0 + pz * lat * side],
              [l.ax + ux * len * t1 + px * lat * side, y1 - 0.6, l.az + uz * len * t1 + pz * lat * side],
              [l.ax + ux * len * t1 + px * lat * side, y1 + h1, l.az + uz * len * t1 + pz * lat * side],
-             [l.ax + ux * len * t0 + px * lat * side, y0 + h0, l.az + uz * len * t0 + pz * lat * side], cc);
+             [l.ax + ux * len * t0 + px * lat * side, y0 + h0, l.az + uz * len * t0 + pz * lat * side], cc, ct);
       }
       /* the ceiling of the flight */
       if (throat) continue;
@@ -20478,12 +21214,16 @@ let stairPropMesh = null, stairDressMesh = null, stairMouthGlow = null;
      the whole footprint — held clear of BOTH doorways so their daylight
      stays daylight. */
   {
-    const CAPC = [C_SDARK[0] * 0.5, C_SDARK[1] * 0.5, C_SDARK[2] * 0.5];
-    /* every block carries a SKIRT: the cap steps with the stair, and a
-       stepped lid without skirts is a venetian blind — thirteen pixels of
-       sky at the top turn, found by the magenta probe */
+    /* dark WARM stone, not a black hole: at half of C_SDARK the lid read
+       as a void that swallowed the walls under it (every up-shot of the
+       8/18 look pass was half pitch black). Still the darkest thing in
+       the stair — a gap in the rocks shows stone shadow, never sky — but
+       with hue and a little per-block life, it reads as the underside of
+       a mountain. */
     const capBlock = (x, z, s) => {
       const y = stairCeilY(x + s / 2, z + s / 2) + 0.5;
+      const j = 0.78 + (hash2((x * 0.25) | 0, (z * 0.25) | 0) * 0.5 + 0.5) * 0.3;
+      const CAPC = [C_SDARK[0] * j, C_SDARK[1] * j, C_SDARK[2] * j * 0.92];
       quad([x, y, z], [x, y, z + s], [x + s, y, z + s], [x + s, y, z], CAPC);
       quad([x, y, z], [x + s, y, z], [x + s, y, z + s], [x, y, z + s], CAPC);
       const d = 2.6;
@@ -20512,24 +21252,33 @@ let stairPropMesh = null, stairDressMesh = null, stairMouthGlow = null;
 (function buildStairPortals() {
   const md = MD();
   const mdG = MD();
-  const frame = (x, z, y, ry, w, h, warm) => {
+  const frame = (x, z, y, th, w, h, warm) => {
+    /* th = the leg's own angle, INTO the stair. The jambs stand on the
+       ACROSS axis p = (−sin th, cos th) and every box turns ry = π/2 − th
+       so its width lies across the doorway (_rot maps width to
+       (cos ry, −sin ry); the old code was only right at 45° — the exit's
+       lintel lay ALONG the walk direction, the navy slab on the rocks of
+       the 8/18 look pass). Stone colours, warm-baked: the un-warmed
+       deep-shade bake is what made the frame navy. */
+    const px = -Math.sin(th), pz = Math.cos(th);
+    const ry = Math.PI / 2 - th;
     for (const s of [-1, 1]) {
-      boxW(md, { x: x + Math.cos(ry) * s * (w + 0.55), y: y - 0.4, z: z - Math.sin(ry) * s * (w + 0.55),
-        w: 0.9, d: 1.3, h: h + 0.6, ry: -ry, col: C_SDARK, colB: C_SDARK });
-      boxW(md, { x: x + Math.cos(ry) * s * (w - 0.05), y: y - 0.4, z: z - Math.sin(ry) * s * (w - 0.05),
-        w: 0.4, d: 0.9, h: h, ry: -ry, col: C_SROCK2 });
+      boxW(md, { x: x + px * s * (w + 0.55), y: y - 0.4, z: z + pz * s * (w + 0.55),
+        w: 0.9, d: 1.3, h: h + 0.6, ry, warm: true, col: C_SROCK2, colB: C_SDARK });
+      boxW(md, { x: x + px * s * (w - 0.05), y: y - 0.4, z: z + pz * s * (w - 0.05),
+        w: 0.4, d: 0.9, h: h, ry, warm: true, col: C_SCUT });
     }
-    boxW(md, { x, y: y + h, z, w: w + 1.5, d: 1.4, h: 0.9, ry: -ry, col: C_SDARK });
-    boxW(md, { x, y: y + h - 0.35, z, w: w + 0.3, d: 0.9, h: 0.45, ry: -ry, col: C_SROCK2 });
+    boxW(md, { x, y: y + h, z, w: w + 1.5, d: 1.4, h: 0.9, ry, warm: true, col: C_SROCK2, colB: C_SDARK });
+    boxW(md, { x, y: y + h - 0.35, z, w: w + 0.3, d: 0.9, h: 0.45, ry, warm: true, col: C_SCUT });
     /* the light that stands in the doorway — a soft gradient, never a slab */
     const c0 = warm ? [1.0, 0.86, 0.58] : [0.85, 0.90, 1.0];
     for (let i = 0; i < 4; i++) {
       const k = i / 4;
       pushQuad(mdG,
-        [x - Math.cos(ry) * w * (1 - k * 0.2), y + h * k * 0.9, z + Math.sin(ry) * w * (1 - k * 0.2)],
-        [x + Math.cos(ry) * w * (1 - k * 0.2), y + h * k * 0.9, z - Math.sin(ry) * w * (1 - k * 0.2)],
-        [x + Math.cos(ry) * w * (1 - (k + 0.25) * 0.2), y + h * (k + 0.25) * 0.9, z - Math.sin(ry) * w * (1 - (k + 0.25) * 0.2)],
-        [x - Math.cos(ry) * w * (1 - (k + 0.25) * 0.2), y + h * (k + 0.25) * 0.9, z + Math.sin(ry) * w * (1 - (k + 0.25) * 0.2)],
+        [x - px * w * (1 - k * 0.2), y + h * k * 0.9, z - pz * w * (1 - k * 0.2)],
+        [x + px * w * (1 - k * 0.2), y + h * k * 0.9, z + pz * w * (1 - k * 0.2)],
+        [x + px * w * (1 - (k + 0.25) * 0.2), y + h * (k + 0.25) * 0.9, z + pz * w * (1 - (k + 0.25) * 0.2)],
+        [x - px * w * (1 - (k + 0.25) * 0.2), y + h * (k + 0.25) * 0.9, z - pz * w * (1 - (k + 0.25) * 0.2)],
         [c0[0] * (1 - k * 0.5), c0[1] * (1 - k * 0.5), c0[2] * (1 - k * 0.5)]);
     }
   };
@@ -20539,12 +21288,15 @@ let stairPropMesh = null, stairDressMesh = null, stairMouthGlow = null;
   const oAng = Math.atan2(o.z - S_NODE.b.z, o.x - S_NODE.b.x);
   frame(o.x - Math.cos(oAng) * 2.2, o.z - Math.sin(oAng) * 2.2, o.y, oAng, 2.5, 3.4, false);
   /* the order's mark over the inner door: eight phases, the fourth cut deep */
-  for (let i = 0; i < 8; i++) {
-    const a = i / 8 * TAU;
-    latheW(md, [[i === 3 ? 0.22 : 0.14, 0], [0, 0.1]],
-      { seg: 6, x: m.x + Math.cos(mAng + Math.PI / 2) * Math.cos(a) * 1.1,
-        y: m.y + 3.9 + Math.sin(a) * 1.1, z: m.z - Math.sin(mAng + Math.PI / 2) * Math.cos(a) * 1.1,
-        flat: true, col: i === 3 ? C_SPALE : C_SCUT });
+  {
+    const pmx = -Math.sin(mAng), pmz = Math.cos(mAng);
+    for (let i = 0; i < 8; i++) {
+      const a = i / 8 * TAU;
+      latheW(md, [[i === 3 ? 0.22 : 0.14, 0], [0, 0.1]],
+        { seg: 6, x: m.x + pmx * Math.cos(a) * 1.1,
+          y: m.y + 3.9 + Math.sin(a) * 1.1, z: m.z + pmz * Math.cos(a) * 1.1,
+          flat: true, col: i === 3 ? C_SPALE : C_SCUT });
+    }
   }
   stairPropMesh = mdMesh(md, WORLD_MAT, false);
   stairPropMesh.matrixAutoUpdate = false; stairPropMesh.updateMatrix();
@@ -20639,9 +21391,9 @@ const ORG_COLL = [];
     for (let i = 0; i < 4; i++) {
       const a = i / 4 * TAU;
       boxW(mdC, { x: Math.cos(a) * 0.5, y: 0.86, z: Math.sin(a) * 0.5, w: 0.42, d: 0.14, h: 0.16,
-        ry: a, col: i % 2 ? C_SCUT : C_SROCK2 });
+        ry: a, warm: true, col: i % 2 ? C_SCUT : C_SROCK2 });
     }
-    boxW(mdC, { x: 0, y: 0.9, z: 0, w: 0.14, d: 0.14, h: 0.5, tw: 0.09, td: 0.09, col: C_SCUT });
+    boxW(mdC, { x: 0, y: 0.9, z: 0, w: 0.14, d: 0.14, h: 0.5, tw: 0.09, td: 0.09, warm: true, col: C_SCUT });
     const cap = mdMesh(mdC, WORLD_MAT, false);
     cap.frustumCulled = false;
     capN.add(cap);
@@ -20654,9 +21406,12 @@ const ORG_COLL = [];
     latheW(mdP, [[0.55, 1.4], [0.48, 4.2], [0.52, 6.6], [0.44, S_LAND_H + 0.4]],
       { seg: 8, x: 0, y: 0, z: 0, flat: true, segJitter: 0.08,
         col: C_SPIPE, cols: [C_SROCK2, C_SPIPE, C_SPIPE] });
+    /* the collars carry the landing's own colour — the climb's wayfinding */
+    const vAcc = S_ACCENT[v.land.node];
+    const collarC = vAcc ? mix3(C_SCUT, vAcc, 0.45) : C_SCUT;
     for (let i = 0; i < 3; i++) {
       latheW(mdP, [[0.62, 2.0 + i * 2.2], [0.58, 2.25 + i * 2.2]],
-        { seg: 8, x: 0, y: 0, z: 0, flat: true, col: C_SCUT });
+        { seg: 8, x: 0, y: 0, z: 0, flat: true, col: collarC });
     }
     const stone = mdMesh(md, WORLD_MAT, false);
     stone.frustumCulled = false;
@@ -20681,31 +21436,45 @@ const ORG_COLL = [];
   }
 })();
 
-/* ── the doors: carved slabs that grind down into the tread ── */
+/* ── the doors: carved slabs that grind down into the tread ──
+   The slab STANDS ON THE TREAD it blocks (stairY, the rendered floor) —
+   its authored d.y was the leg's linear lerp, which near a landing sits
+   ~3.5 m above the real inverse-square floor: door 2 hung in the AIR by
+   the ceiling with an invisible wall underneath it. Pale carved stone,
+   warm-baked — the standard bake's deep-shade branch cools to navy blue,
+   which is what made every slab read as an alien monolith in the dark. */
 (function buildStairDoors() {
   for (let i = 0; i < S_DOORS.length; i++) {
     const d = S_DOORS[i];
+    d.floorY = stairY(d.x, d.z);
     const md = MD();
-    boxW(md, { x: 0, y: 0, z: 0, w: 3.5, d: 0.5, h: 5.2, tw: 3.2, ry: d.ry,
-      col: C_SROCK, colB: C_SDARK });
+    boxW(md, { x: 0, y: 0, z: 0, w: 3.5, d: 0.5, h: S_DOOR_H, tw: 3.2, ry: d.ry, warm: true,
+      col: C_SCUT, colB: C_SDARK });
     for (let k = 0; k < 4; k++) {
-      boxW(md, { x: 0, y: 0.7 + k * 1.15, z: 0, w: 3.3, d: 0.6, h: 0.16, ry: d.ry, col: C_SDARK });
+      boxW(md, { x: 0, y: 0.7 + k * 1.15, z: 0, w: 3.3, d: 0.6, h: 0.16, ry: d.ry, warm: true,
+        col: C_SDARK });
     }
-    /* how many notes this door is waiting for — carved, not written */
+    /* how many notes this door is waiting for — carved, not written.
+       On BOTH faces, proud of the stone: at depth 0 they sat buried
+       inside the half-metre slab and nobody ever saw them. */
     const n = ORGAN.landings[i].vents.length;
-    for (let k = 0; k < n; k++) {
-      latheW(md, [[0.28, 0], [0.22, 0.12], [0, 0.17]],
-        { seg: 8, x: Math.cos(d.ry) * ((k - (n - 1) / 2) * 0.8), y: 3.4,
-          z: -Math.sin(d.ry) * ((k - (n - 1) / 2) * 0.8), flat: true, col: C_SPALE });
+    const ux = Math.sin(d.ry), uz = Math.cos(d.ry);      // the slab's normal
+    for (const side of [-1, 1]) {
+      for (let k = 0; k < n; k++) {
+        latheW(md, [[0.34, 0], [0.26, 0.16], [0, 0.22]],
+          { seg: 8, x: Math.cos(d.ry) * ((k - (n - 1) / 2) * 0.9) + ux * side * 0.62,
+            y: 3.4, z: -Math.sin(d.ry) * ((k - (n - 1) / 2) * 0.9) + uz * side * 0.62,
+            flat: true, col: C_SPALE });
+      }
     }
     const slab = mdMesh(md, WORLD_MAT, false);
     slab.frustumCulled = false;
     const g = new THREE.Group();
     g.add(slab);
-    g.position.set(d.x, d.y - 0.25, d.z);
+    g.position.set(d.x, d.floorY - 0.25, d.z);
     g.visible = false;
     scene.add(g);
-    d.group = g; d.baseY = d.y - 0.25; d.k = 0;
+    d.group = g; d.baseY = d.floorY - 0.25; d.k = 0;
   }
 })();
 
@@ -20722,11 +21491,11 @@ const ORG_COLL = [];
     const wy = stairY(wx, wz);
     for (const s of [-1, 1]) {
       boxW(md, { x: wx + Math.cos(a0 + Math.PI / 2) * s * 0.7, y: wy,
-        z: wz - Math.sin(a0 + Math.PI / 2) * s * 0.7, w: 0.16, d: 0.16, h: 1.3, col: C_SROPE });
+        z: wz - Math.sin(a0 + Math.PI / 2) * s * 0.7, w: 0.16, d: 0.16, h: 1.3, warm: true, col: C_SROPE });
     }
     latheW(md, [[0.34, 0.9], [0.34, 1.3]], { seg: 8, x: wx, y: wy, z: wz, ry: a0 + Math.PI / 2,
       ex: 1, flat: true, col: C_SROPE });
-    boxW(md, { x: wx, y: wy + 1.1, z: wz, w: 0.06, d: 0.06, h: 0.9, rz: 0.5, col: C_SROPE });
+    boxW(md, { x: wx, y: wy + 1.1, z: wz, w: 0.06, d: 0.06, h: 0.9, rz: 0.5, warm: true, col: C_SROPE });
     /* coiled rope on the floor */
     for (let k = 0; k < 3; k++) {
       latheW(md, [[0.5 - k * 0.1, k * 0.1], [0.42 - k * 0.1, k * 0.1 + 0.09]],
@@ -20744,6 +21513,40 @@ const ORG_COLL = [];
       const px = sx + Math.cos(a) * d, pz = sz + Math.sin(a) * d;
       latheW(md, [[0.3 + rnd() * 0.3, 0], [0, 0.35 + rnd() * 0.3]],
         { seg: 5, x: px, y: stairY(px, pz), z: pz, flat: true, col: C_SROCK2 });
+    }
+  }
+  /* ── THE TREADS: real nosings, one pale-lipped step per ~1.15 m of rise.
+     The floor's colour lattice is 2 m; a 40 cm step cannot live in it, so
+     every flight read as a smooth mud ramp (look pass, 8/18). Geometry is
+     what makes a stair read as a stair — baked into this same mesh, so it
+     costs zero extra draw calls. ── */
+  for (let li = 0; li < S_LEGS.length; li++) {
+    const l = S_LEGS[li];
+    const len = Math.hypot(l.bx - l.ax, l.bz - l.az);
+    const ux = (l.bx - l.ax) / len, uz = (l.bz - l.az) / len;
+    const ry = Math.PI / 2 - Math.atan2(l.bz - l.az, l.bx - l.ax);   // ACROSS the flight
+    const rise = Math.abs(l.by - l.ay);
+    const steps = Math.max(2, Math.round(rise / 1.15));
+    for (let s = 1; s < steps; s++) {
+      /* the altitude this tread sits at, inverted through the smoothstep
+         the floor itself uses, so tread and floor can never drift */
+      const want = s / steps;
+      let lo = 0, hi = 1;
+      for (let it = 0; it < 18; it++) {
+        const mid2 = (lo + hi) / 2;
+        if (smoothstep(mid2) < want) lo = mid2; else hi = mid2;
+      }
+      const t = (lo + hi) / 2;
+      const x = l.ax + ux * len * t, z = l.az + uz * len * t;
+      const A = S_NODE[l.a], B = S_NODE[l.b];
+      if (Math.hypot(x - A.x, z - A.z) < A.r + 0.6) continue;   // landings stay swept
+      if (Math.hypot(x - B.x, z - B.z) < B.r + 0.6) continue;
+      let nearDoor = false;
+      for (const d of S_DOORS) if (Math.hypot(x - d.x, z - d.z) < 1.4) nearDoor = true;
+      if (nearDoor) continue;                                    // no z-fight with a slab
+      const y = stairY(x, z);
+      boxW(md, { x, y: y - 0.36, z, w: l.hw + 0.7, d: 0.30, h: 0.44, ry, warm: true,
+        col: (s % 2) ? C_SCUT : C_SPALE, colB: C_SDARK });
     }
   }
   const m = mdMesh(md, WORLD_MAT, false);
@@ -20927,58 +21730,112 @@ function tickOrgan(ctx) {
   organAudioUpdate(inside);
 }
 
-/* ── THE DAWN CALL: when the last landing sings, the whole stair plays ── */
+/* ── THE DAWN CALL: when the last landing sings, the whole stair plays ──
+   Rebuilt per RULE 5 after the owner's "absolutely incomprehensible":
+   the ride DEPARTS FROM THE PLAYER'S OWN SHOT (the follow cam, captured
+   at startCine), flies forward-and-up only — l3 → a → b → out, no
+   down-then-up doubling back — looks a FULL NODE AHEAD so each place
+   reads as it arrives, and comes home by retracing the carved air to the
+   exact follow pose before endCine, so there is never a one-frame snap.
+   Skippable from 0.9 s ALWAYS, first view included: a skip simply enters
+   the homeward leg early. */
+const DAWN = {
+  ride: 5.4, ret: 0.9,                 // seconds: the climb, the way home
+  pts: null, cum: null, total: 1,      // the polyline, arc-length mapped
+  backK: 1,                            // where the homeward leg starts
+};
+function dawnBuildPath() {
+  const l3 = S_NODE.l3, na = S_NODE.a, nb = S_NODE.b, out = S_NODE.out;
+  /* p0 is the player's own shot — CAM.x/y/z, the live follow camera */
+  DAWN.pts = [
+    [CAM.x, CAM.y, CAM.z],
+    [l3.x, l3.y + 2.8, l3.z],
+    [na.x, na.y + 2.6, na.z],
+    [nb.x, nb.y + 2.6, nb.z],
+    [out.x, out.y + 1.8, out.z],
+    /* one more, past the doorway: what the last look is FOR — the garden */
+    [K_PAD.gate.x + (K_PAD.saddle.x - K_PAD.gate.x) * 0.5, out.y + 2.2,
+     K_PAD.gate.z + (K_PAD.saddle.z - K_PAD.gate.z) * 0.5],
+  ];
+  DAWN.cum = [0];
+  let tot = 0;
+  for (let i = 1; i < 5; i++) {         // the camera rides pts 0..4 only
+    const A = DAWN.pts[i - 1], B = DAWN.pts[i];
+    tot += Math.hypot(B[0] - A[0], B[1] - A[1], B[2] - A[2]);
+    DAWN.cum.push(tot);
+  }
+  DAWN.total = tot || 1;
+  DAWN.backK = 1;
+}
+const _dp = [0, 0, 0], _dl = [0, 0, 0];
+function dawnAt(k, out) {
+  /* arc-length position on pts 0..4, and the look: a full node ahead */
+  const s = clamp(k, 0, 1) * DAWN.total;
+  let i = 1;
+  while (i < 4 && DAWN.cum[i] < s) i++;
+  const f = clamp((s - DAWN.cum[i - 1]) / ((DAWN.cum[i] - DAWN.cum[i - 1]) || 1), 0, 1);
+  const A = DAWN.pts[i - 1], B = DAWN.pts[i];
+  out[0] = lerp(A[0], B[0], f); out[1] = lerp(A[1], B[1], f); out[2] = lerp(A[2], B[2], f);
+  /* look target: the node being approached, easing to the one after it —
+     each landing, turn and doorway is READ before the camera gets there */
+  const L0 = DAWN.pts[i], L1 = DAWN.pts[Math.min(i + 1, 5)];
+  _dl[0] = lerp(L0[0], L1[0], f); _dl[1] = lerp(L0[1], L1[1], f) + 0.8; _dl[2] = lerp(L0[2], L1[2], f);
+  return out;
+}
 function tickDawnCall(t) {
-  const l1 = S_NODE.l1, l2 = S_NODE.l2, l3 = S_NODE.l3, out = S_NODE.out;
-  const na = S_NODE.a, nb = S_NODE.b;
-  if (cineSeen('dawnCall') && t > 0.9 && IN.confirm) { finishDawnCall(); return; }
+  if (!DAWN.pts) dawnBuildPath();      // safety: a probe can start the cine cold
   if (CINE.step === 0) {
     CINE.step = 1;
     SFX.dawnCall();
     rumble({ duration: 1400, strong: 0.35, weak: 0.7 });
   }
-  /* the camera rides UP THE SHAFT ITSELF, landing by landing, as each one
-     lights. It stays ON the carved centreline — a three-metre orbit put it
-     inside the rock, and from in there the shot is a black slab and the
-     open sky (found by looking at it). */
-  const k = clamp(t / 9.2, 0, 1);
-  /* every node on the way, in order: the last flight is a dog-leg, and a
-     straight line from the third landing to the doorway flies the camera
-     through thirty metres of mountain */
-  const path = [
-    [l3.x, l3.y + 2.4, l3.z], [l2.x, l2.y + 3.0, l2.z],
-    [l1.x, l1.y + 3.0, l1.z], [l2.x, l2.y + 3.6, l2.z],
-    [l3.x, l3.y + 4.2, l3.z], [na.x, na.y + 2.6, na.z],
-    [nb.x, nb.y + 2.6, nb.z], [out.x, out.y + 1.8, out.z],
-  ];
-  const seg = clamp(k * (path.length - 1), 0, path.length - 1.001);
-  const si = Math.floor(seg), sf = smoothstep(seg - si);
-  const a = path[si], b = path[si + 1];
-  const sway = Math.sin(t * 0.9) * 0.7;
-  const cx = lerp(a[0], b[0], sf), cy = lerp(a[1], b[1], sf), cz = lerp(a[2], b[2], sf);
-  const nf = Math.min(1, sf + 0.28);
-  cineCam(cx + sway, cy, cz - sway,
-    lerp(a[0], b[0], nf), lerp(a[1], b[1], nf) + 1.2, lerp(a[2], b[2], nf));
+  /* ALWAYS skippable once it has said what it is: skip = go home early */
+  if (t > 0.9 && IN.confirm && t < DAWN.ride) {
+    DAWN.backK = smoothstep(clamp(t / DAWN.ride, 0, 1));
+    CINE.t = t = DAWN.ride;
+  }
+  if (t <= DAWN.ride) {
+    const k = smoothstep(clamp(t / DAWN.ride, 0, 1));
+    DAWN.backK = k;
+    dawnAt(k, _dp);
+    /* the first beat TURNS the shot from the player to the way up — no cut */
+    const lb = smoothstep(clamp(t / 0.7, 0, 1));
+    const ty = P.fy + 1.25;
+    const tx = P.x + Math.sin(P.heading) * 0.35, tz = P.z + Math.cos(P.heading) * 0.35;
+    cineCam(_dp[0], _dp[1], _dp[2],
+      lerp(tx, _dl[0], lb), lerp(ty, _dl[1], lb), lerp(tz, _dl[2], lb));
+  } else {
+    /* the way home: back down the same carved air to the player's shot —
+       the song returning to the one who played it. Ends EXACTLY on the
+       follow pose, so endCine's snap has nothing to snap. */
+    const r = smoothstep(clamp((t - DAWN.ride) / DAWN.ret, 0, 1));
+    dawnAt(DAWN.backK * (1 - r), _dp);
+    const ty = P.fy + 1.25;
+    const tx = P.x + Math.sin(P.heading) * 0.35, tz = P.z + Math.cos(P.heading) * 0.35;
+    cineCam(_dp[0], _dp[1], _dp[2],
+      lerp(_dl[0], tx, r), lerp(_dl[1], ty, r), lerp(_dl[2], tz, r));
+  }
   /* THE SONG RUNNING UP THE STAIR: motes streaming past the camera, so a
      dark ride through a mountain reads as a mountain playing */
   if ((simTick % 2) === 0) {
-    const fx = lerp(a[0], b[0], nf), fz = lerp(a[2], b[2], nf), fy = lerp(a[1], b[1], nf);
-    psSparkle.spawn(fx + (Math.random() - 0.5) * 4, fy - 1.6 + Math.random() * 3.4,
-      fz + (Math.random() - 0.5) * 4, 0, 2.4 + Math.random() * 2, 0, 1.3);
+    psSparkle.spawn(_dl[0] + (Math.random() - 0.5) * 4, _dl[1] - 1.6 + Math.random() * 3.4,
+      _dl[2] + (Math.random() - 0.5) * 4, 0, 2.4 + Math.random() * 2, 0, 1.3);
   }
-  if (CINE.step === 1 && t > 3.0) { CINE.step = 2; SFX.chime(0.8); }
-  if (CINE.step === 2 && t > 6.4) { CINE.step = 3; SFX.chime(1.4); }
-  if (CINE.step === 3 && t > 8.6) {
-    CINE.step = 4;
-    SFX.stoneGrind();
-    CAM.shake = 0.3;
-    rumble({ duration: 900, strong: 0.7, weak: 0.9 });
+  /* the audio beats, re-timed to the forward ride */
+  if (CINE.step === 1 && t > 1.5) { CINE.step = 2; SFX.chime(0.8); }        // leaving L3
+  if (CINE.step === 2 && t > 3.2) { CINE.step = 3; SFX.chime(1.4); }        // the top turn
+  if (CINE.step === 3 && t > 4.5) {
+    CINE.step = 4;                                                          // daylight
+    SFX.windGust();
+    CAM.shake = 0.22;
+    rumble({ duration: 700, strong: 0.5, weak: 0.8 });
   }
-  if (t > 11.4) finishDawnCall();
+  if (t > DAWN.ride + DAWN.ret) finishDawnCall();
 }
 function finishDawnCall() {
   markCineSeen('dawnCall');
   organOpen[2] = true;
+  DAWN.pts = null;
   endCine();
   showCaption('The mountain remembers the song.', 3400);
 }
@@ -21670,7 +22527,9 @@ function finishStagCure() {
 }
 function tickStagCure(t) {
   const S = STAG, c = S.c;
-  if (cineSeen('stagCure') && t > 0.9 && IN.confirm) { finishStagCure(); endCine(); return; }
+  /* RULE 5: ALWAYS skippable — but the cure follows a button-mash fight,
+     so the window opens at 2 s or a leftover mash skips it unseen */
+  if (t > 2.0 && IN.confirm && t < 11.0) { CINE.t = t = 11.0; }
   if (CINE.step === 0) {
     CINE.step = 1;
     S.defeated = true;
@@ -21744,12 +22603,26 @@ function tickStagCure(t) {
   c.root.position.set(S.x, groundH(S.x, S.z), S.z);
   c.root.rotation.y = S.ang;
   c.root.visible = true;
-  /* ONE slow arc: the plinth in frame, the Stag leaving through it */
-  const k2 = smoothstep(clamp(t / 11.4, 0, 1));
+  /* ONE slow arc: the plinth in frame, the Stag leaving through it — then
+     the last 0.9 s lerps home to the player's own follow pose (CAM.x/y/z,
+     untouched through the cine), so endCine has nothing to snap (Rule 5:
+     the one-frame cut this ending used to make) */
+  const k2 = smoothstep(clamp(Math.min(t, 11.0) / 11.0, 0, 1));
   const aa = lerp(S.ang + Math.PI + 0.6, S.ang + Math.PI - 0.9, k2);
   const rr = lerp(10.5, 8.5, k2);
-  cineCam(plinthSocket[0] + Math.sin(aa) * rr, plinthSocket[1] + lerp(3.4, 2.4, k2), plinthSocket[2] + Math.cos(aa) * rr,
-    plinthSocket[0], plinthSocket[1] + lerp(1.0, 0.4, k2), plinthSocket[2]);
+  const ax = plinthSocket[0] + Math.sin(aa) * rr, ay = plinthSocket[1] + lerp(3.4, 2.4, k2),
+    az = plinthSocket[2] + Math.cos(aa) * rr;
+  const lx = plinthSocket[0], ly = plinthSocket[1] + lerp(1.0, 0.4, k2), lz = plinthSocket[2];
+  if (t <= 11.0) {
+    cineCam(ax, ay, az, lx, ly, lz);
+  } else {
+    const r = smoothstep(clamp((t - 11.0) / 0.9, 0, 1));
+    const tx = P.x + Math.sin(P.heading) * 0.35, tz = P.z + Math.cos(P.heading) * 0.35;
+    const ty = P.fy + 1.25;
+    let cx = lerp(ax, CAM.x, r), cy = lerp(ay, CAM.y, r), cz = lerp(az, CAM.z, r);
+    cy = Math.max(cy, groundH(cx, cz) + 0.5);
+    cineCam(cx, cy, cz, lerp(lx, tx, r), lerp(ly, ty, r), lerp(lz, tz, r));
+  }
   if (t > 11.9) { finishStagCure(); endCine(); }
 }
 
@@ -21927,13 +22800,29 @@ function tickBeaconChest() {
 }
 
 /* ── the region tick ── */
-let crownSeenSession = false, crownPlayTicks = 0;
+let crownSeenSession = false, crownPlayTicks = 0, stairSeenSession = false;
 function tickCrown() {
   if (state !== 'play') { organAudioUpdate(false); return; }
   crownPlayTicks++;
   /* which world am I in? resolved from the REAL position, every tick */
   stairMode = stairModeAt(P.x, P.z, P.fy);
   const inGarden = inGardenWalkQ(P.x, P.z);
+  /* the mountain is not the hornets': the gallery nest chased the family
+     through the crack and stung them mid-chord in a three-metre corridor
+     (the 8/18 look pass caught one riding the player's head up the whole
+     first flight). The stair's air pushes them home. */
+  for (let i = 0; i < HORNETS.length; i++) {
+    const h = HORNETS[i];
+    if (h.dead || !inStairFieldQ(h.x, h.z)) continue;
+    const dd = Math.hypot(h.sx - h.x, h.sz - h.z) || 1;
+    h.x += (h.sx - h.x) / dd * 9 * DT;
+    h.z += (h.sz - h.z) / dd * 9 * DT;
+    h.st = 'drift'; h.t = 0;
+  }
+  if (stairMode && !stairSeenSession) {
+    stairSeenSession = true;
+    showCaption('THE FALLS STAIR', 4200);
+  }
   if (inGarden && SAVE && !SAVE.crownSeen) {
     SAVE.crownSeen = true; storeSave();
     if (QUEST.q < 15) setQuest(15);
@@ -22058,6 +22947,10 @@ startCine = function (id) {
   }
   _preCrownStartCine(id);
   if (id === 'dawnCall' || id === 'stagCure') {
+    /* Rule 5: the ride departs from the player's own shot — capture the
+       follow pose BEFORE the mode flips (CAM.x/y/z stay frozen through
+       the cine and are also where the homeward lerp lands) */
+    if (id === 'dawnCall') dawnBuildPath();
     CAM.mode = 'cine';
     dlgBox.classList.remove('on');
   }
@@ -22083,16 +22976,31 @@ cullChunks = function (ccx, ccz) {
   /* the mode is a RENDER fact too: title screens and cinematics never run
      tickCrown, and the stair still has to know which floor it is showing */
   if (state !== 'play') stairMode = stairModeAt(P.x, P.z, P.fy);
-  const inGarden = inGardenWalkQ(P.x, P.z);
+  /* RULE 5: every visibility boolean below anchors to the VIEW (ccx/ccz =
+     p7's viewX/viewZ, viewY its height), not to the player. Outside a cine
+     the view IS the player and nothing changes; inside one, the camera
+     films a rendered world. The 8/18 audit's finding: with P parked on L3,
+     deepStair hid the hollow, the forest and the tower while the dawn-call
+     camera flew the shaft — and kVis kept the Crown itself invisible as it
+     came out of the mountain into empty sky. */
+  const vy = (typeof viewY === 'number') ? viewY : P.fy;
+  const sMode = CAM.mode === 'follow' ? stairMode : stairModeAt(ccx, ccz, vy);
+  const inGarden = inGardenWalkQ(ccx, ccz);
   /* ── DRAW-CALL HYGIENE ──
      The stair is sealed rock and the Crown is a hundred metres over the
      Falls Hollow's roof: from inside either one, the other world and the
      forest around it are drawing nothing a player can see. Measured at the
      first landing before this: 95 calls, of which the hollow's ten and the
      forest's twenty were behind solid stone. */
-  const deepStair = stairMode && P.fy > S_NODE.mouth.y + 7 &&
-    Math.hypot(P.x - S_NODE.out.x, P.z - S_NODE.out.z) > 15;
-  const inHollowNow = _preCrownInHollowAt(P.x, P.z);
+  /* a flying camera un-deeps EARLY (40 m instead of 15) so the garden is
+     already drawn while the doorway ahead still frames it — no pop-in
+     mid-shot; the play radius is untouched */
+  const deepStair = sMode && vy > S_NODE.mouth.y + 7 &&
+    Math.hypot(ccx - S_NODE.out.x, ccz - S_NODE.out.z) > (CAM.mode === 'follow' ? 15 : 40);
+  /* the stair OWNS its own air (the wrapped inHollowAt rule) — but only a
+     flying camera needs that answer here; in play this stays byte-for-byte
+     the old player-anchored test, so no frame gets more expensive */
+  const inHollowNow = (CAM.mode !== 'follow' && sMode) ? false : _preCrownInHollowAt(ccx, ccz);
   /* THE GARDEN IS A WALLED ROOM. Its rim shuts out the whole world except
      at the ledge's parapet, so from the terraces the forest below and its
      far tier are drawing a hundred metres of rock's worth of nothing.
@@ -22102,8 +23010,8 @@ cullChunks = function (ccx, ccz) {
      the falls; everywhere else in the garden the rim IS the horizon (and
      a culled world behind a rim you can see over is a hole in it — the
      structure probe casts for exactly that) */
-  const atTheView = kPadD(K_PAD.ledge, P.x, P.z) <= K_WALK + 2 ||
-    kPadD(K_PAD.saddle, P.x, P.z) <= K_WALK + 2;
+  const atTheView = kPadD(K_PAD.ledge, ccx, ccz) <= K_WALK + 2 ||
+    kPadD(K_PAD.saddle, ccx, ccz) <= K_WALK + 2;
   const walled = inGarden && !atTheView;
   const hideHollow = deepStair || inGarden;
   if (hideHollow) {
@@ -22119,7 +23027,7 @@ cullChunks = function (ccx, ccz) {
      drawing thirty-five impression tiles through a hundred metres of hill
      (measured at the crack: 114 calls, 4 of them this part's). The near
      chunks stay — the throat's framed daylight is made of them. */
-  if (inHollowNow && Math.hypot(P.x - BASIN.x, P.z - BASIN.z) > 34) {
+  if (inHollowNow && Math.hypot(ccx - BASIN.x, ccz - BASIN.z) > 34) {
     for (let i = 0; i < farTier.length; i++) if (farTier[i]) farTier[i].visible = false;
   }
   if (deepStair || walled) {
@@ -22149,7 +23057,7 @@ cullChunks = function (ccx, ccz) {
   crownPropMesh.visible = kVis;
   crownGlowMesh.visible = kVis && near2(K_PLINTH.x, K_PLINTH.z, 120);
   /* the authored horizon belongs to the parapet and nowhere else */
-  crownVista.visible = inGarden || (stairMode && P.fy > S_NODE.b.y);
+  crownVista.visible = inGarden || (sMode && vy > S_NODE.b.y);
   glintMount.visible = kVis && near2(K_GLINT.x, K_GLINT.z, 140);
   crownChest1.group.visible = kVis && near2(crownChest1.x, crownChest1.z, 44);
   crownChest2.group.visible = kVis && near2(crownChest2.x, crownChest2.z, 44);
@@ -22183,21 +23091,26 @@ cullChunks = function (ccx, ccz) {
   /* before the crack is answered there is nothing behind it but stone, and
      the Hollow's gallery is an expensive frame already */
   const atMouth = stairInOpen && near2(S_NODE.mouth.x, S_NODE.mouth.z, 26);
-  const sVis = stairMode || atMouth || near2(S_NODE.out.x, S_NODE.out.z, 22);
-  const sDeep = stairMode || (stairInOpen && near2(S_NODE.mouth.x, S_NODE.mouth.z, 12)) ||
+  const sVis = sMode || atMouth || near2(S_NODE.out.x, S_NODE.out.z, 22);
+  const sDeep = sMode || (stairInOpen && near2(S_NODE.mouth.x, S_NODE.mouth.z, 12)) ||
     near2(S_NODE.out.x, S_NODE.out.z, 22);
   stairFloorMesh.visible = sDeep;
   stairWallMesh.visible = sDeep;
-  stairCapMesh.visible = stairMode || near2(S_NODE.out.x, S_NODE.out.z, 22);
+  stairCapMesh.visible = sMode || near2(S_NODE.out.x, S_NODE.out.z, 22);
   stairPropMesh.visible = sVis;
-  stairDressMesh.visible = stairMode;
-  stairMouthGlow.visible = sVis;
+  stairDressMesh.visible = sMode;
+  /* the doorway light is a billboard sheet: the dawn-call camera flies
+     straight through it, and from a metre away it is a pale wall (the
+     8/18 trace, frame t=4.5) — it hides while the flying camera is close */
+  stairMouthGlow.visible = sVis &&
+    !(CINE.id === 'dawnCall' && near2(S_NODE.out.x, S_NODE.out.z, 9));
   for (let i = 0; i < S_DOORS.length; i++) {
     const d = S_DOORS[i];
     d.group.visible = sVis && near2(d.x, d.z, 20);
     const wantK = organOpen[i] ? 1 : 0;
     d.k += (wantK - d.k) * Math.min(1, dtv * 1.6);
-    d.group.position.y = d.baseY - smoothstep(d.k) * 5.6;
+    if (Math.abs(wantK - d.k) < 0.004) d.k = wantK;   // settle, so the plug settles too
+    d.group.position.y = d.baseY - smoothstep(d.k) * S_DOOR_SINK;
   }
   for (let i = 0; i < ORG_VENTS.length; i++) {
     const v = ORG_VENTS[i];
@@ -22220,7 +23133,7 @@ cullChunks = function (ccx, ccz) {
     }
   }
   /* the fog inside the mountain */
-  const inS = stairMode && state !== 'title';
+  const inS = sMode && state !== 'title';
   kFogT += ((inS ? 1 : 0) - kFogT) * Math.min(1, dtv * 2.6);
   if (kFogT > 0.01) {
     scene.fog.color.setRGB(
@@ -22344,7 +23257,7 @@ function crownDeriveWorld(S) {
     L.sang = !!S[keys[i]];
     organOpen[i] = L.sang;
     S_DOORS[i].k = L.sang ? 1 : 0;
-    S_DOORS[i].group.position.y = S_DOORS[i].baseY - (L.sang ? 5.6 : 0);
+    S_DOORS[i].group.position.y = S_DOORS[i].baseY - (L.sang ? S_DOOR_SINK : 0);
     for (const v of L.vents) {
       v.locked = L.sang;
       v.lockT = 0; v.wob = 0;
@@ -22408,6 +23321,7 @@ function crownDeriveWorld(S) {
   /* the pinwheels stand still until p6h's wind comes home */
   for (const wpin of K_PINWHEELS) wpin.rotation.z = 0;
   crownSeenSession = false;
+  stairSeenSession = false;
   glintSeenT = 0;
   /* NOT stairMode: the derivation runs INSIDE applySave, which has already
      resolved which world the saved position belongs to and is about to ask
@@ -22565,6 +23479,29 @@ function extendCrownDebugOnce() {
     },
   });
 }
+</script>
+<script>
+/* ═══════════ RULES CORE registrations for p6g (pure addition — this block
+   is appended; nothing above it is edited) ═══════════ */
+const __regCrownGround = groundH;    // p6g's final chain (the last ground wrapper)
+window.__WORLD_REG.push({
+  name: 'crown', kind: 'ground', over: ['forest', 'hollow'],
+  owns: (x, z) => inStairFieldQ(x, z) || inCrownFieldQ(x, z),
+  ground: (x, z) => __regCrownGround(x, z),
+  note: 'the Falls Stair + the Crown watch-garden. 3D CAVEAT: the stair climbs OVER the hollow, so the x,z answer follows stairMode (player height) — the hollow keeps its own floor under the same coordinates.',
+});
+/* Rule 2: the stair's two mouths. openNow reads the SAVE (intent); the
+   live chain answers from stairInOpen / the mouth plug — the invariant
+   sweep checks the two never disagree. K_GATE (the stair-out threshold
+   onto the garden) is always-open ground: the garden-walk-first rule in
+   __forestSolid is what keeps it that way, and that is exactly what the
+   check protects. */
+window.__PORTALS.push(
+  { name: 'stair-crack', x: S_NODE.mouth.x, z: S_NODE.mouth.z,
+    openNow: () => !!(SAVE && SAVE.stairOpen) },
+  { name: 'stair-out', x: K_GATE.x, z: K_GATE.z,
+    openNow: () => true },
+);
 </script>
 <script>
 /* ═══════════════════════════════════════════════════════════════════════
@@ -22755,7 +23692,14 @@ function riverSurfaceAt(x, z) {
   const r = runNear(x, z);
   const w = r.off < 0 ? r.s.wl : r.s.wr;
   if (Math.abs(r.off) > w + 0.6) return null;
-  return r.s.y;
+  /* RULE 4: the INTERPOLATED sheet height between stations — lerp by
+     run-distance toward the neighbour the query leans at. The rendered
+     sheet spans stations linearly, so a hull riding the QUANTIZED station
+     height stepped several cm against the drawn water at every graded
+     riffle; the true local surface is the line between the stations. */
+  const t = clamp(r.along / RUN_STEP, -1, 1);
+  const j = clamp(r.i + (t >= 0 ? 1 : -1), 0, RUN.length - 1);
+  return lerp(r.s.y, RUN[j].y, Math.abs(t));
 }
 function riverDepthAt(x, z) {
   /* the 8 m river mask is one array lookup and answers "nowhere near the
@@ -23618,7 +24562,12 @@ function skiffPlaceAt(x, z) {
   SKF.spd = 0;
   if (!SKF.on) { skiffColl.x = SKF.x; skiffColl.z = SKF.z; }
 }
-function skiffY() { return RUN[SKF.i].y; }
+function skiffY() {
+  /* Rule 4: she rides the TRUE local surface (interpolated between
+     stations), never a quantized station height; freeboard stays fixed */
+  const y = riverSurfaceAt(SKF.x, SKF.z);
+  return y === null ? RUN[SKF.i].y : y;
+}
 /* SHE MUST ALWAYS BE BOARDABLE. Moored on the centre-line of a sixteen-metre
    river she is four metres past anyone's reach from either bank, and there
    is no way to call her back — p6c learned this the hard way with the
@@ -24858,6 +25807,118 @@ function extendGreenDebugOnce() {
 }
 </script>
 <script>
+/* ═══════════ RULES CORE registrations for p6h + RULE 6 (pure addition) ═══════════ */
+window.__WORLD_REG.push({
+  name: 'river-surface', kind: 'water', over: ['forest'],
+  owns: (x, z) => riverWet() && riverSurfaceAt(x, z) !== null,
+  surface: (x, z) => riverSurfaceAt(x, z),
+  note: 'the Silverrun’s authored water sheet — an OVERLAY on forest ground (kind:water, so the ground conformance check skips it); the bed below stays groundH',
+});
+/* Rule 4: the skiff is a hull whenever the river runs. Her group rides
+   skiffY() − 0.16, so waterline = group y + 0.16. Her depth law is her own
+   draft (a punt in a river that never holds 1.3 m), which is why the hull
+   record carries depthOk instead of the sweep hard-coding the sailboat's. */
+window.__HULLS.push({
+  name: 'skiff', r: 2.6,
+  afloat: () => riverWet(),
+  underway: () => !!P.skiffing,
+  x: () => SKF.x, z: () => SKF.z,
+  waterlineY: () => skiffGrp.position.y + 0.16,
+  depthOk: () => riverDepthAt(SKF.x, SKF.z) >= SKIFF_DRAFT + 0.1,
+  rescue: () => skiffRescueIfNeeded(),
+});
+
+/* ═══════════ RULE 6 — invariantSweep(): the repair pass ═══════════
+   When world state changes, downstream truth is RE-DERIVED, not trusted:
+   the player stands in open air, every hull floats deep enough where it
+   is moored, and every portal's live solid answer agrees with its
+   openNow(). Runs at the tail of applyWorldState (p7 calls it after the
+   world-state hooks) and every ~5 s of play. Repairs are actions the game
+   already owns (nudge + re-seat, the boat/skiff rescue machinery);
+   disagreements it cannot repair are recorded for the harness. */
+window.__invariantReport = { fixes: [], portalBad: [], runs: 0 };
+function invariantSweep() {
+  const R = window.__invariantReport;
+  R.runs++;
+  const rec = (arr, s) => { if (arr.length < 30 && arr[arr.length - 1] !== s) arr.push(s); };
+  try {
+    /* 1. the player is never inside solid. Skipped afloat and indoors —
+       hulls carry the player, and interiors answer solid with their own
+       room clamps, not worldSolidAt. */
+    if (state === 'play' && !P.sailing && !P.skiffing &&
+        !(typeof roomAt === 'function' && roomAt(P.x, P.z)) &&
+        worldSolidAt(P.x, P.z)) {
+      let done = false;
+      for (let r = 0.6; r <= 8 && !done; r += 0.6) {
+        for (let i = 0; i < 16 && !done; i++) {
+          const a = i * (TAU / 16);
+          const px = P.x + Math.sin(a) * r, pz = P.z + Math.cos(a) * r;
+          if (worldSolidAt(px, pz)) continue;
+          P.x = px; P.z = pz;
+          P.fy = Math.max(groundH(px, pz), supportYAt(px, pz, P.fy));
+          done = true;
+          rec(R.fixes, 'player unstuck to ' + px.toFixed(1) + ',' + pz.toFixed(1));
+        }
+      }
+      if (!done) rec(R.fixes, 'player inside solid at ' + P.x.toFixed(1) + ',' + P.z.toFixed(1) + ' — no open air within 8m');
+    }
+    /* 2. every registered hull floats where it is moored */
+    const HS = window.__HULLS || [];
+    for (let i = 0; i < HS.length; i++) {
+      const H = HS[i];
+      try {
+        if (!H.afloat() || H.underway() || H.depthOk()) continue;
+        const ox = H.x(), oz = H.z();
+        H.rescue();
+        if (H.x() !== ox || H.z() !== oz) {
+          rec(R.fixes, H.name + ' re-moored ' + ox.toFixed(0) + ',' + oz.toFixed(0) +
+            ' → ' + H.x().toFixed(0) + ',' + H.z().toFixed(0));
+        }
+      } catch (e) {}
+    }
+    /* 3. every portal's live solid answer agrees with openNow() */
+    const PS = window.__PORTALS || [];
+    for (let i = 0; i < PS.length; i++) {
+      const PT = PS[i];
+      try {
+        const open = !!PT.openNow();
+        const solid = !!worldSolidAt(PT.x, PT.z);
+        if (open === solid) rec(R.portalBad, PT.name + ' open=' + open + ' solid=' + solid);
+      } catch (e) { rec(R.portalBad, PT.name + ' threw: ' + e.message); }
+    }
+  } catch (e) {}
+}
+window.__invariantSweep = invariantSweep;
+
+/* ── the rules ticker: beams re-marched every ~6 frames, the invariant
+   sweep every ~5 s of play (never during Pearl's voyage — her cine owns
+   the boat). This wrap is appended after every region part, so it is the
+   outermost link of the cullChunks chain p7 calls each render frame. ── */
+const _rulesCull = cullChunks;
+let _rulesBeamF = 0, _rulesSweepTick = -1e9;
+cullChunks = function (ccx, ccz) {
+  _rulesCull(ccx, ccz);
+  if ((++_rulesBeamF % 6) === 0) {
+    try {
+      grottoClampBeam();
+      hollowClampBeams();
+    } catch (e) {}
+  }
+  if (state === 'play' && !VOYAGE.active && simTick - _rulesSweepTick >= 300) {
+    _rulesSweepTick = simTick;
+    invariantSweep();
+  }
+};
+window.__telemetryHooks.push(function (T) {
+  T.regOwners = window.__WORLD_REG.length;
+  T.portalCount = window.__PORTALS.length;
+  T.hullCount = window.__HULLS.length;
+  T.sweepRuns = window.__invariantReport.runs;
+  T.sweepFixes = window.__invariantReport.fixes.length;
+  T.sweepPortalBad = window.__invariantReport.portalBad.length;
+});
+</script>
+<script>
 /* ═══════════════════ p7 — flow, HUD, telemetry, main loop ═══════════════════ */
 
 let simTick = 0;
@@ -25019,6 +26080,10 @@ function applyWorldState() {
      derive the world from SAVE in BOTH directions. Hooks run in build.sh
      concatenation order — later regions may override earlier sky state. */
   for (const h of window.__worldStateHooks) { try { h(S); } catch (e) {} }
+  /* RULE 6: derive, then REPAIR. After every derivation the invariant
+     sweep re-checks the player's footing, every hull's mooring and every
+     portal's solid-vs-openNow agreement (defined in p6h). */
+  if (window.__invariantSweep) { try { window.__invariantSweep(); } catch (e) {} }
   /* quest line */
   if (SAVE) setQuest(S.q);
   else { QUEST.q = 0; questEl.textContent = ''; questEl.classList.remove('on'); }
@@ -25480,6 +26545,14 @@ function tickSim() {
 /* ── render-frame visuals ── */
 let grottoT = 0;
 const _fogC = [0, 0, 0];
+/* RULE 5 — THE CULL ANCHOR (viewX/viewY/viewZ). Visibility derives from
+   the CAMERA's position whenever the camera is not the follow cam (cines,
+   the title vista, freecam, the handoff): a cinematic must film a RENDERED
+   world, not the one culled around a player it left behind. In normal play
+   the anchor is the player — identical behaviour, zero perf change. Every
+   culler in the wrap chain receives viewX/viewZ as ccx/ccz and may read
+   viewY for height-aware culls. */
+let viewX = 0, viewY = 0, viewZ = 0;
 function updateVisuals(dtv, now) {
   if (PORTRAIT.on) {
     const d = PORTRAIT.def;
@@ -25509,7 +26582,13 @@ function updateVisuals(dtv, now) {
   scene.fog.far = lerp(FOG0.far, FOG_GROTTO.far, grottoT);
   // sky follows the camera
   skyGrp.position.set(camera.position.x, 0, camera.position.z);
-  cullChunks(camera.position.x, camera.position.z);
+  {
+    const followCam = CAM.mode === 'follow' && state !== 'title' && !FREECAM.on;
+    viewX = followCam ? P.x : camera.position.x;
+    viewY = followCam ? P.fy : camera.position.y;
+    viewZ = followCam ? P.z : camera.position.z;
+  }
+  cullChunks(viewX, viewZ);
   // draw-call budget: far props and cast hide beyond the fog
   {
     const ccx = camera.position.x, ccz = camera.position.z;
