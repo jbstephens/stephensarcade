@@ -89,11 +89,11 @@
 const W = 1280, H = 720, TILE = 32, GY0 = 8;
 /* v4b: TWO worlds. The active world's grid/canvases live in these globals;
    the inactive world's live in `otherWorld` and swap in wholesale. */
-const EGW = 80, EGH = 44;                      // Earth grid
+const EGW = 160, EGH = 88;                     // Earth grid (BIG WORLD — viable via per-island bakes)
 const MGW = 40, MGH = 26;                      // Moon grid (all space around one landmass)
 const RGW = 44, RGH = 28;                      // v6b: Mars grid — bigger than the moon
 let GW = EGW, GH = EGH;
-let WORLD_W = GW * TILE, WORLD_H = GY0 + GH * TILE;   // 2560 x 1416 (Earth)
+let WORLD_W = GW * TILE, WORLD_H = GY0 + GH * TILE;   // 5120 x 2824 (Earth, per-island baked)
 const CX = 24, CYG = 13;                       // home island centre in grid coords
 const MCX = 20, MCY = 13;                      // moon landmass centre
 const RCX = 22, RCY = 14;                      // mars landmass centre
@@ -1356,7 +1356,7 @@ let shakeAmt = 0, shakeX = 0, shakeY = 0;
 let landSalt = [0, 0, 0];
 /* ── v3: archipelago ── */
 let settled = [];                             // settled islands [{gx,gy,steps,o}]
-const SETTLE_MAX = 3, ISLE_STEP_MAX = 4;
+const SETTLE_MAX = 12, ISLE_STEP_MAX = 4;
 let camX = 0, camY = 0, camPan = null;        // camera top-left (world px) + cinematic pan
 let isleId = [];                              // flood-fill island component id per tile
 const edgeArrows = [{ on: false }, { on: false }, { on: false }];   // pooled edge pointers
@@ -5364,8 +5364,28 @@ function decSprite(k) {
    decor + wire bakes. Terrain/bg are rebuilt ONLY on island changes.
    ═══════════════════════════════════════════════════════════════════════ */
 let terrainC, tg, bgC, bgg;
-{ const a = C(WORLD_W, WORLD_H); terrainC = a[0]; tg = a[1]; }
-{ const a = C(WORLD_W, WORLD_H); bgC = a[0]; bgg = a[1]; }
+/* PER-ISLAND BAKE: Earth no longer uses a world-sized terrainC/bgC (a full
+   re-bake at 160×88 cost ~5.25s on the Pi). Earth bakes EACH island into its
+   own small canvas and re-bakes only the island that changed. The globals
+   below stay as tiny 1×1 placeholders while Earth is active (it never reads
+   them); moon/mars/planets keep their own small world-sized canvases via
+   mkWorldBundle and the ORIGINAL rebuildTerrain/rebuildBG path, untouched. */
+{ const a = C(1, 1); terrainC = a[0]; tg = a[1]; }
+{ const a = C(1, 1); bgC = a[0]; bgg = a[1]; }
+/* ── Earth per-island bake store (active-world globals; parked in the earth
+   bundle by pack/swap). Each entry: {canvas,ctx,ox,oy,w,h,coast[]}. ── */
+let isleBakes = new Map();          // isleId → bake
+let bridgeBakes = new Map();        // bridge index → bake
+let isleDirty = new Set();          // isleIds needing a re-bake before render
+let bridgeDirty = new Set();        // bridge indices needing a re-bake
+let isleDirtyAll = true;            // rebuild every island (settle/age/merge/load)
+let bridgeDirtyAll = true;          // rebuild every bridge bake
+let earthMiniDirty = true;          // the minimap/thumbnail overview is stale
+let earthMiniC = null, earthMiniG = null;   // scaled overview for stats-map + thumb
+/* bake-scoping instrumentation (read by the test harness to PROVE a single
+   flora/building/bridge change never re-bakes anything near world-size) */
+let __bakeLog = null;               // null = off; array = recording {kind,id,w,h}
+function __logBake(kind, id, w, h) { if (__bakeLog) __bakeLog.push({ kind, id, w, h }); }
 const RX = [0, 6.4, 8.6, 10.8, 13.2, 15.4, 16.4];
 const RY = [0, 4.8, 6.2, 7.6, 8.8, 10.0, 10.6];
 
@@ -5382,12 +5402,17 @@ function mkWorldBundle(name, gw, gh) {
            landAge: [], coast: [], occ: [], isleId: [], buildings: [], flora: [],
            wires: [], decor: [], decorMap: new Map(), bridges: [], bridgeSet: new Map(),
            anims: [], robots: [], ferries: [], camX: 0, camY: 0, camPan: null,
-           terrainC: tc, tg: tgx, bgC: bc, bgg: bgx, terrainDirty: true, bgDirty: true };
+           terrainC: tc, tg: tgx, bgC: bc, bgg: bgx, terrainDirty: true, bgDirty: true,
+           /* Earth-only per-island bakes ride along too (empty for other worlds) */
+           isleBakes: new Map(), bridgeBakes: new Map(), isleDirty: new Set(), bridgeDirty: new Set(),
+           isleDirtyAll: true, bridgeDirtyAll: true, earthMiniDirty: true, earthMiniC: null, earthMiniG: null };
 }
 function packCurWorld() {
   return { name: world, GW, GH, WORLD_W, WORLD_H, landAge, coast, occ, isleId,
            buildings, flora, wires, decor, decorMap, bridges, bridgeSet, anims, robots, ferries, camX, camY, camPan,
-           terrainC, tg, bgC, bgg, terrainDirty, bgDirty };
+           terrainC, tg, bgC, bgg, terrainDirty, bgDirty,
+           isleBakes, bridgeBakes, isleDirty, bridgeDirty,
+           isleDirtyAll, bridgeDirtyAll, earthMiniDirty, earthMiniC, earthMiniG };
 }
 function swapTo(name) {
   if (world === name) return;
@@ -5403,6 +5428,14 @@ function swapTo(name) {
   camX = o.camX; camY = o.camY; camPan = o.camPan;
   terrainC = o.terrainC; tg = o.tg; bgC = o.bgC; bgg = o.bgg;
   terrainDirty = o.terrainDirty; bgDirty = o.bgDirty;
+  /* Earth per-island bake state (present only on the earth bundle; other
+     worlds carry empty stores — harmless, they never touch them) */
+  isleBakes = o.isleBakes || new Map(); bridgeBakes = o.bridgeBakes || new Map();
+  isleDirty = o.isleDirty || new Set(); bridgeDirty = o.bridgeDirty || new Set();
+  isleDirtyAll = o.isleDirtyAll !== undefined ? o.isleDirtyAll : true;
+  bridgeDirtyAll = o.bridgeDirtyAll !== undefined ? o.bridgeDirtyAll : true;
+  earthMiniDirty = o.earthMiniDirty !== undefined ? o.earthMiniDirty : true;
+  earthMiniC = o.earthMiniC || null; earthMiniG = o.earthMiniG || null;
   world = o.name;
   glowDirty = true;                             // placement-aid overlay is per-world
 }
@@ -5416,7 +5449,7 @@ function inWorld(name, fn) {
 /* read-only view of a world's contents, live or parked */
 function worldData(name) {
   return world === name
-    ? { buildings, flora, robots, decor, bridges, bgC, WORLD_W, WORLD_H }
+    ? { buildings, flora, robots, decor, bridges, bgC, earthMiniC, WORLD_W, WORLD_H }
     : parked.get(name);
 }
 /* all buildings across EVERY world (economy/goals are global) */
@@ -5502,6 +5535,10 @@ function recomputeIsleIds() {
     }
   }
   reachDirty = true;                            // isle ids renumbered → bridge groups stale
+  /* component ids just changed (settle / age / growth / merge / crumble) — every
+     Earth island bake is keyed by isleId, so invalidate them ALL (lazily; the
+     sum of a few SMALL island re-bakes is still far cheaper than one world bake) */
+  if (world === 'earth') { isleDirtyAll = true; bridgeDirtyAll = true; earthMiniDirty = true; }
 }
 const isleIdAt = (gx, gy) => gx >= 0 && gy >= 0 && gx < GW && gy < GH ? isleId[gy][gx] : 0;
 const isLand = (gx, gy) => gx >= 0 && gy >= 0 && gx < GW && gy < GH && landAge[gy][gx] > 0 && landAge[gy][gx] <= age;
@@ -6260,19 +6297,25 @@ function recomputePower() {
     }
   }
   glowDirty = true;
-  terrainDirty = true;
+  /* wires bake into the terrain layer. On Earth a structural power change is
+     ALWAYS confined to one island (power never crosses water) and the caller
+     that triggered it (addBuilding/removeBuilding/repair/colony) already marks
+     that island dirty — so per-island bakes pick the new wires up without a
+     world-wide invalidation. Other worlds keep the whole-terrain re-bake. */
+  if (world !== 'earth') terrainDirty = true;
 }
-function drawWires(g) {           // bake-time only — drawn into the terrain layer
-  for (const w of wires) {
-    const mx = (w.x0 + w.x1) / 2, my = Math.max(w.y0, w.y1) / 2 + Math.min(w.y0, w.y1) / 2 + 5;
-    g.globalAlpha = w.on ? 1 : 0.5;
-    g.lineCap = 'round';
-    g.strokeStyle = '#241a10'; g.lineWidth = 2.6;
-    g.beginPath(); g.moveTo(w.x0, w.y0); g.quadraticCurveTo(mx, my, w.x1, w.y1); g.stroke();
-    g.strokeStyle = w.on ? '#59606a' : '#3a3830'; g.lineWidth = 1;
-    g.beginPath(); g.moveTo(w.x0, w.y0 - 1); g.quadraticCurveTo(mx, my - 1, w.x1, w.y1 - 1); g.stroke();
-    g.globalAlpha = 1;
-  }
+function drawOneWire(g, w) {       // one wire run (shared by full + per-island bakes)
+  const mx = (w.x0 + w.x1) / 2, my = Math.max(w.y0, w.y1) / 2 + Math.min(w.y0, w.y1) / 2 + 5;
+  g.globalAlpha = w.on ? 1 : 0.5;
+  g.lineCap = 'round';
+  g.strokeStyle = '#241a10'; g.lineWidth = 2.6;
+  g.beginPath(); g.moveTo(w.x0, w.y0); g.quadraticCurveTo(mx, my, w.x1, w.y1); g.stroke();
+  g.strokeStyle = w.on ? '#59606a' : '#3a3830'; g.lineWidth = 1;
+  g.beginPath(); g.moveTo(w.x0, w.y0 - 1); g.quadraticCurveTo(mx, my - 1, w.x1, w.y1 - 1); g.stroke();
+  g.globalAlpha = 1;
+}
+function drawWires(g) {            // bake-time only — drawn into the terrain layer
+  for (const w of wires) drawOneWire(g, w);
 }
 /* placement aid: faint glow on the grid + everything one step away from it,
    baked at ¼ resolution and blitted as ONE drawImage while placing */
@@ -6490,7 +6533,8 @@ function placeDecor(k, gx, gy) {
   decor.push(it);
   decorMap.set(DKEY(gx, gy), it);
   if (d.path) pathsLaid++;
-  if (d.path || d.flat) terrainDirty = true; else bgDirty = true;
+  if (world === 'earth') markIsleDirtyAt(gx, gy);
+  else if (d.path || d.flat) terrainDirty = true; else bgDirty = true;
   recomputeAnims();
   if (d.golden) {
     goldenPlaced++;
@@ -6511,7 +6555,8 @@ function removeDecor(it) {        // decorations always refund in full
   addFloat(tX(it.gx) + 16, tY(it.gy), 'REFUNDED!', '#7dff9a');
   SFX.remove();
   for (let i = 0; i < 4; i++) spawnP(tX(it.gx) + 16, tY(it.gy) + 16, SPR.puff[0], { life: 0.4 });
-  if (D[it.k].path || D[it.k].flat) terrainDirty = true; else bgDirty = true;
+  if (world === 'earth') markIsleDirtyAt(it.gx, it.gy);
+  else if (D[it.k].path || D[it.k].flat) terrainDirty = true; else bgDirty = true;
   recomputeAnims();
   return true;
 }
@@ -7156,8 +7201,266 @@ function rebuildZipzorpTerrain() {
   drawDecorTerrain(tg);
   drawWires(tg);
 }
+/* ═══════════════════════════════════════════════════════════════════════
+   PER-ISLAND BAKE (EARTH ONLY) — each island is baked into its own small
+   canvas; a change re-bakes ONLY that island (cost ∝ one small island, not
+   the whole 160×88 world). Bridges get their own small bakes. The ocean +
+   under-island halos are drawn procedurally per frame. Moon/Mars/planets are
+   SMALL and keep the original terrainC/bgC path (see rebuildTerrain below).
+   ═══════════════════════════════════════════════════════════════════════ */
+function _vn(x, y, sx, sy) {
+  const fx = x / sx, fy = y / sy;
+  const x0 = Math.floor(fx), y0 = Math.floor(fy);
+  const sm = t => t * t * (3 - 2 * t);
+  const u = sm(fx - x0), v = sm(fy - y0);
+  const h = (a, b) => hash2(a * 13 + 7, b * 17 + 3);
+  return (h(x0, y0) * (1 - u) + h(x0 + 1, y0) * u) * (1 - v)
+       + (h(x0, y0 + 1) * (1 - u) + h(x0 + 1, y0 + 1) * u) * v;
+}
+const landMots = (gx, gy) => _vn(gx, gy, 5, 4) * 0.65 + _vn(gx + 31, gy + 17, 2, 2) * 0.35;
+
+/* ── per-island dirty marking (replaces Earth's whole-world bgDirty path) ── */
+function markIsleDirty(id) { if (id) { isleDirty.add(id); earthMiniDirty = true; } }
+function markIsleDirtyAt(gx, gy) {
+  const id = isleIdAt(gx, gy);
+  if (id) { isleDirty.add(id); earthMiniDirty = true; return; }
+  /* water tile (a bridge deck, or a coast tile whose owner is a neighbour) */
+  for (const [dx, dy] of DIRS4) { const nid = isleIdAt(gx + dx, gy + dy); if (nid) { isleDirty.add(nid); earthMiniDirty = true; } }
+  markBridgeDirtyAt(gx, gy);
+}
+function markBridgeDirtyAt(gx, gy) {
+  for (let i = 0; i < bridges.length; i++)
+    for (const t of bridgeDeckTiles(bridges[i])) if (t[0] === gx && t[1] === gy) { bridgeDirty.add(i); earthMiniDirty = true; return; }
+}
+
+/* tile bounding box of one island's CURRENTLY-VISIBLE land (isLand is age-gated) */
+function isleBounds(id) {
+  let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9, any = false;
+  for (let gy = 0; gy < GH; gy++) for (let gx = 0; gx < GW; gx++) {
+    if (isleId[gy][gx] !== id || !isLand(gx, gy)) continue;
+    any = true; if (gx < x0) x0 = gx; if (gy < y0) y0 = gy; if (gx > x1) x1 = gx; if (gy > y1) y1 = gy;
+  }
+  return any ? { x0, y0, x1, y1 } : null;
+}
+function decorStandSpr(it) {
+  const d = D[it.k];
+  return d.conn ? (it.k === 'fence' ? SPR.fence16 : SPR.hedge16)[decorMask(it)] : SPR.dec[it.k];
+}
+/* bake ONE island (id) into its own small canvas */
+function rebuildIsleBake(id) {
+  const b = isleBounds(id);
+  if (!b) { isleBakes.delete(id); return; }
+  const M = 2 * TILE;                            // margin: coast/foam/faint ring + wet edge
+  let minX = tX(b.x0) - M, minY = tY(b.y0) - M, maxX = tX(b.x1) + TILE + M, maxY = tY(b.y1) + TILE + M + 8;
+  /* grow the canvas to fit tall / overhanging standing sprites of THIS island */
+  const un = (x, y, w, h) => { if (x < minX) minX = x; if (y < minY) minY = y; if (x + w > maxX) maxX = x + w; if (y + h > maxY) maxY = y + h; };
+  for (const f of flora) { if (f.gone || isleIdAt(f.gx, f.gy) !== id) continue; const s = floraSprite(f); un(tX(f.gx), tY(f.gy) + 32 - s.height, s.width, s.height); }
+  for (const bo of buildings) { if (isleIdAt(bo.gx, bo.gy) !== id) continue; const s = buildingSpr(bo); un(tX(bo.gx), buildingDrawY(bo, s), s.width, s.height); }
+  for (const it of decor) { if (isleIdAt(it.gx, it.gy) !== id) continue; const d = D[it.k]; if (d.path || d.flat) continue; const s = decorStandSpr(it); un(tX(it.gx) + 16 - s.width / 2, tY(it.gy) + 32 - s.height, s.width, s.height); }
+  for (const il of settled) { if (isleIdAt(il.gx, il.gy) !== id || occ[il.gy][il.gx]) continue; un(tX(il.gx), tY(il.gy) + 32 - SPR.camp.height, SPR.camp.width, SPR.camp.height); }
+  minX = Math.floor(minX); minY = Math.floor(minY); maxX = Math.ceil(maxX); maxY = Math.ceil(maxY);
+  const w = Math.max(1, maxX - minX), h = Math.max(1, maxY - minY);
+  let bk = isleBakes.get(id);
+  if (!bk || bk.canvas.width !== w || bk.canvas.height !== h) { const [cv, cx] = C(w, h); bk = { canvas: cv, ctx: cx }; isleBakes.set(id, bk); }
+  bk.ox = minX; bk.oy = minY; bk.w = w; bk.h = h; bk.coast = [];
+  const g = bk.ctx; g.clearRect(0, 0, w, h);
+  g.save(); g.translate(-minX, -minY);
+  drawIsleContent(g, id, b, bk.coast);
+  g.restore();
+  __logBake('isle', id, w, h);
+}
+/* draw one island's terrain + coast + y-sorted standing objects (offset already
+   applied by the caller's translate). Mirrors rebuildTerrain + rebuildBG, but
+   restricted to tiles/objects whose isleId === id. */
+function drawIsleContent(g, id, b, coastOut) {
+  const mine = (gx, gy) => gx >= 0 && gy >= 0 && gx < GW && gy < GH && isleId[gy][gx] === id && isLand(gx, gy);
+  const nearMineR = (gx, gy, r) => { for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) if (mine(gx + dx, gy + dy)) return true; return false; };
+  /* 1. coast / foam / shallow rings on WATER tiles adjacent to this island */
+  for (let gy = b.y0 - 2; gy <= b.y1 + 2; gy++) for (let gx = b.x0 - 2; gx <= b.x1 + 2; gx++) {
+    if (gx < 0 || gy < 0 || gx >= GW || gy >= GH || isLand(gx, gy)) continue;
+    if (nearMineR(gx, gy, 1)) {
+      g.drawImage(SPR.shallow, tX(gx), tY(gy));
+      g.drawImage(SPR.foam[(gx + gy) % 2], tX(gx), tY(gy));
+      coastOut.push({ x: tX(gx) + 16, y: tY(gy) + 16 });
+    } else if (nearMineR(gx, gy, 2)) {
+      g.globalAlpha = 0.4; g.drawImage(SPR.shallow, tX(gx), tY(gy)); g.globalAlpha = 1;
+    }
+  }
+  /* 2. land tiles: mottled grass + beach sand */
+  for (let gy = b.y0; gy <= b.y1; gy++) for (let gx = b.x0; gx <= b.x1; gx++) {
+    if (!mine(gx, gy)) continue;
+    const x = tX(gx), y = tY(gy);
+    if (sandAt(gx, gy)) {
+      g.drawImage(SPR.sand, x, y);
+      g.fillStyle = 'rgba(150,115,60,0.4)';
+      if (!isLand(gx, gy + 1)) g.fillRect(x, y + 27, 32, 5);
+      if (!isLand(gx, gy - 1)) g.fillRect(x, y, 32, 4);
+      if (!isLand(gx - 1, gy)) g.fillRect(x, y, 4, 32);
+      if (!isLand(gx + 1, gy)) g.fillRect(x + 28, y, 4, 32);
+    } else {
+      g.drawImage(SPR.grass[Math.min(4, Math.floor(landMots(gx, gy) * 5))], x, y);
+      const d = hash2(gx * 3 + 1, gy * 5 + 2);
+      const ox = 4 + Math.floor(hash2(gx + 9, gy + 4) * 18), oy = 4 + Math.floor(hash2(gx + 2, gy + 11) * 18);
+      if (d < 0.06) g.drawImage(SPR.flower[Math.floor(d * 66) % 4], x + ox, y + oy);
+      else if (d < 0.09) g.drawImage(SPR.pebble, x + ox, y + oy);
+      else if (d < 0.16) g.drawImage(SPR.tuft, x + ox, y + oy);
+    }
+  }
+  /* 3. south-facing cliff lip */
+  for (let gy = b.y0; gy <= b.y1; gy++) for (let gx = b.x0; gx <= b.x1; gx++) {
+    if (!mine(gx, gy) || isLand(gx, gy + 1)) continue;
+    const x = tX(gx), y = tY(gy);
+    g.fillStyle = '#c9a568'; g.fillRect(x, y + 26, 32, 4);
+    g.fillStyle = '#8a6538'; g.fillRect(x, y + 30, 32, 2);
+  }
+  /* 4. flat decor (paths / beds / ponds) on this island */
+  for (const it of decor) {
+    if (isleIdAt(it.gx, it.gy) !== id) continue;
+    const d = D[it.k];
+    if (d.path) g.drawImage(SPR.path[it.k][decorMask(it)], tX(it.gx), tY(it.gy));
+    else if (d.flat) g.drawImage(SPR.dec[it.k], tX(it.gx), tY(it.gy));
+  }
+  /* 5. power-grid wires on this island */
+  for (const w of wires) {
+    if (isleIdAt(Math.floor(w.x0 / TILE), Math.floor((w.y0 - GY0) / TILE)) !== id) continue;
+    drawOneWire(g, w);
+  }
+  /* 6. y-sorted standing objects (flora / buildings / decor / camp) */
+  const items = [];
+  for (const f of flora) if (!f.gone && f.shakeT <= 0 && isleIdAt(f.gx, f.gy) === id) items.push({ y: tY(f.gy) + 32, f });
+  for (const bo of buildings) if (!(bo.wobT > 0) && isleIdAt(bo.gx, bo.gy) === id) items.push({ y: tY(bo.gy) + (B[bo.k].size || 1) * 32, b: bo });
+  for (const it of decor) { const d = D[it.k]; if (d.path || d.flat || isleIdAt(it.gx, it.gy) !== id) continue; items.push({ y: tY(it.gy) + 32, dec: it }); }
+  for (const il of settled) if (isleIdAt(il.gx, il.gy) === id && !occ[il.gy][il.gx]) items.push({ y: tY(il.gy) + 32, camp: il });
+  items.sort((a, c) => a.y - c.y);
+  for (const it of items) {
+    if (it.f) drawFlora(g, it.f);
+    else if (it.camp) g.drawImage(SPR.camp, tX(it.camp.gx), tY(it.camp.gy) + 32 - SPR.camp.height);
+    else if (it.dec) drawDecorItem(g, it.dec);
+    else drawBuilding(g, it.b);
+  }
+}
+/* bake ONE bridge (bi) into its own small canvas */
+function rebuildBridgeBake(bi) {
+  const br = bridges[bi];
+  if (!br) { bridgeBakes.delete(bi); return; }
+  const tiles = bridgeDeckTiles(br);
+  if (!tiles.length) { bridgeBakes.delete(bi); return; }
+  let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+  for (const t of tiles) { if (t[0] < x0) x0 = t[0]; if (t[1] < y0) y0 = t[1]; if (t[0] > x1) x1 = t[0]; if (t[1] > y1) y1 = t[1]; }
+  const minX = tX(x0) - TILE, minY = tY(y0) - TILE, maxX = tX(x1) + 2 * TILE, maxY = tY(y1) + 2 * TILE;
+  const w = maxX - minX, h = maxY - minY;
+  let bk = bridgeBakes.get(bi);
+  if (!bk || bk.canvas.width !== w || bk.canvas.height !== h) { const [cv, cx] = C(w, h); bk = { canvas: cv, ctx: cx }; bridgeBakes.set(bi, bk); }
+  bk.ox = minX; bk.oy = minY; bk.w = w; bk.h = h;
+  const g = bk.ctx; g.clearRect(0, 0, w, h);
+  g.save(); g.translate(-minX, -minY);
+  for (const t of tiles) {
+    const gx = t[0], gy = t[1];
+    const hh = isBridge(gx - 1, gy) || isBridge(gx + 1, gy);
+    const vv = isBridge(gx, gy - 1) || isBridge(gx, gy + 1);
+    g.drawImage((hh || !vv) ? SPR.bridgeDeckH : SPR.bridgeDeckV, tX(gx), tY(gy));
+  }
+  for (const pl of br.pylons) g.drawImage(SPR.bridgePylon, tX(pl[0]), tY(pl[1]));
+  g.restore();
+  __logBake('bridge', bi, w, h);
+}
+/* rebuild global coast[] (used only for ocean sparkle culling) from the bakes */
+function rebuildCoast() { coast = []; for (const bk of isleBakes.values()) if (bk.coast) for (const c of bk.coast) coast.push(c); }
+
+/* ── ocean + halo procedural assets (baked once; ocean strip rebuilt on resize) ── */
+let _oceanGradC = null, _oceanGradH = 0, _oceanPat = null, _haloDiscC = null;
+function bakeOceanAssets() {
+  if (!_haloDiscC) {
+    const R = 200; const [c, g] = C(R * 2, R * 2);
+    const gr = g.createRadialGradient(R, R, R * 0.16, R, R, R);
+    gr.addColorStop(0, 'rgba(120,215,255,0.13)'); gr.addColorStop(1, 'rgba(120,215,255,0)');
+    g.fillStyle = gr; g.fillRect(0, 0, R * 2, R * 2); _haloDiscC = c;
+  }
+  if (!_oceanPat) {
+    const S = 512; const [c, g] = C(S, S);
+    const rnd = mulberry(0x51a7e5);
+    const streak = (col, n, ww, hh) => {
+      g.fillStyle = col;
+      for (let i = 0; i < n; i++) {
+        const x = (rnd() * S) | 0, y = (rnd() * S) | 0;
+        g.fillRect(x, y, ww, hh);
+        if (x + ww > S) g.fillRect(x - S, y, ww, hh);   // wrap so the pattern is seamless
+      }
+    };
+    streak('rgba(10,50,90,0.25)', 96, 26, 3);
+    streak('rgba(200,235,255,0.14)', 64, 14, 2);
+    _oceanPat = ctx.createPattern(c, 'repeat');
+  }
+  if (!_oceanGradC || _oceanGradH !== WORLD_H) {
+    const [c, g] = C(8, WORLD_H);
+    const gr = g.createLinearGradient(0, 0, 0, WORLD_H);
+    gr.addColorStop(0, '#2b7db8'); gr.addColorStop(1, '#175a92');
+    g.fillStyle = gr; g.fillRect(0, 0, 8, WORLD_H); _oceanGradC = c; _oceanGradH = WORLD_H;
+  }
+}
+/* per-frame Earth sea: vertical gradient + world-locked flecks + island halos.
+   Called with ctx already translated by (-camRX,-camRY) so we draw in WORLD px. */
+function drawEarthOcean() {
+  bakeOceanAssets();
+  ctx.drawImage(_oceanGradC, 0, camRY, 8, H, camRX, camRY, W, H);
+  const drawHalo = (gx, gy, r) => {
+    const cx = tX(gx) + 16, cy = tY(gy) + 16;
+    if (!onCam(cx, cy, r)) return;
+    ctx.drawImage(_haloDiscC, cx - r, cy - r, r * 2, r * 2);
+  };
+  drawHalo(CX, CYG, 460);
+  for (const il of settled) drawHalo(il.gx, il.gy, 220 + il.steps * 40);
+  ctx.fillStyle = _oceanPat; ctx.fillRect(camRX, camRY, W, H);
+}
+/* composite the visible island + bridge bakes (culled to the camera window) */
+function compositeEarth() {
+  const L = camRX, Tp = camRY, R = camRX + W, Bt = camRY + H;
+  for (const bk of isleBakes.values())
+    if (bk.ox < R && bk.ox + bk.w > L && bk.oy < Bt && bk.oy + bk.h > Tp) ctx.drawImage(bk.canvas, bk.ox, bk.oy);
+  for (const bk of bridgeBakes.values())
+    if (bk.ox < R && bk.ox + bk.w > L && bk.oy < Bt && bk.oy + bk.h > Tp) ctx.drawImage(bk.canvas, bk.ox, bk.oy);
+}
+/* ensure every dirty Earth island / bridge bake is current before we render */
+function ensureEarthBakes() {
+  /* compatibility: any legacy full-world flag on Earth → rebuild all islands
+     (still just a handful of SMALL bakes — never a world-sized one) */
+  if (bgDirty || terrainDirty) { isleDirtyAll = true; bgDirty = false; terrainDirty = false; }
+  if (isleDirtyAll) {
+    isleDirtyAll = false;
+    const present = new Set();
+    for (let gy = 0; gy < GH; gy++) for (let gx = 0; gx < GW; gx++) { const id = isleId[gy][gx]; if (id && isLand(gx, gy)) present.add(id); }
+    for (const id of [...isleBakes.keys()]) if (!present.has(id)) isleBakes.delete(id);
+    for (const id of present) isleDirty.add(id);
+    bridgeDirtyAll = true; earthMiniDirty = true;
+  }
+  if (bridgeDirtyAll) { bridgeDirtyAll = false; bridgeBakes.clear(); for (let i = 0; i < bridges.length; i++) bridgeDirty.add(i); }
+  let changed = false;
+  for (const id of isleDirty) { rebuildIsleBake(id); changed = true; }
+  isleDirty.clear();
+  for (const bi of bridgeDirty) { rebuildBridgeBake(bi); changed = true; }
+  bridgeDirty.clear();
+  if (changed) { rebuildCoast(); earthMiniDirty = true; }
+  if (earthMiniDirty) rebuildEarthMini();
+}
+/* scaled overview of Earth (islands + bridges over the sea) for the stats-map
+   minimap and the save thumbnail — rebuilt only when islands change */
+function rebuildEarthMini() {
+  earthMiniDirty = false;
+  const MW = Math.min(512, WORLD_W), mh = Math.max(1, Math.round(MW * WORLD_H / WORLD_W)), s = MW / WORLD_W;
+  if (!earthMiniC) { const [c, g] = C(MW, mh); earthMiniC = c; earthMiniG = g; }
+  else if (earthMiniC.width !== MW || earthMiniC.height !== mh) { earthMiniC.width = MW; earthMiniC.height = mh; earthMiniG.imageSmoothingEnabled = false; }
+  const g = earthMiniG;
+  bakeOceanAssets();
+  g.clearRect(0, 0, MW, mh);
+  g.drawImage(_oceanGradC, 0, 0, 8, WORLD_H, 0, 0, MW, mh);
+  for (const bk of isleBakes.values()) g.drawImage(bk.canvas, bk.ox * s, bk.oy * s, bk.w * s, bk.h * s);
+  for (const bk of bridgeBakes.values()) g.drawImage(bk.canvas, bk.ox * s, bk.oy * s, bk.w * s, bk.h * s);
+  __logBake('mini', -1, MW, mh);
+}
+
 function rebuildTerrain() {
   terrainDirty = false;
+  if (world === 'earth') return;                 // Earth uses per-island bakes (ensureEarthBakes)
   if (world === 'zipzorp') { rebuildZipzorpTerrain(); bgDirty = true; return; }  // v9a
   if (world === 'moon') { rebuildMoonTerrain(); bgDirty = true; return; }
   if (world === 'mars') { rebuildMarsTerrain(); bgDirty = true; return; }
@@ -7254,6 +7557,7 @@ function rebuildTerrain() {
 }
 function rebuildBG() {
   bgDirty = false;
+  if (world === 'earth') return;                 // Earth uses per-island bakes (ensureEarthBakes)
   bgg.drawImage(terrainC, 0, 0);
   const items = [];
   for (const f of flora) if (!f.gone && f.shakeT <= 0) items.push({ y: tY(f.gy) + 32, f });
@@ -7307,27 +7611,24 @@ function drawFlora(g, f, shake) {
   const ox = shake ? Math.sin(T * 42) * 2 : 0;
   g.drawImage(s, tX(f.gx) + ox, tY(f.gy) + 32 - s.height);
 }
-function drawBuilding(g, b) {
+/* the sprite drawBuilding would draw for b, in its current state (shared with
+   the per-island bake so canvas bounds match the draw exactly) */
+function buildingSpr(b) {
   const sz = B[b.k].size || 1;
-  if (b.rubble) {
-    const s = (sz === 2 ? SPR.rubble2 : SPR.rubble1)[clamp(b.repair || 0, 0, 2)];
-    g.drawImage(s, tX(b.gx), tY(b.gy) + sz * 32 - s.height);
-    return;
-  }
-  if (b.k === 'popcannon') {                    // v4c: base only — the barrel is a live overlay
-    g.drawImage(SPR.cannonBase, tX(b.gx), tY(b.gy) + 32 - SPR.cannonBase.height);
-    return;
-  }
-  if (B[b.k].mega) {                            // v7: staged megastructure bakes
-    const arr = (islandPowered ? SPR.megaLit : SPR.mega)[b.k];
-    const ms = arr[clamp(b.stage || 0, 0, arr.length - 1)];
-    g.drawImage(ms, tX(b.gx), tY(b.gy) + sz * 32 - ms.height);
-    return;
-  }
+  if (b.rubble) return (sz === 2 ? SPR.rubble2 : SPR.rubble1)[clamp(b.repair || 0, 0, 2)];
+  if (b.k === 'popcannon') return SPR.cannonBase;   // barrel is a live overlay
+  if (B[b.k].mega) { const arr = (islandPowered ? SPR.megaLit : SPR.mega)[b.k];
+                     return arr[clamp(b.stage || 0, 0, arr.length - 1)]; }
   const lit = (islandPowered && b.k !== 'campfire') || (b.k === 'stargate' && legends);
-  const s = b.gold ? (lit ? SPR.bLitGold : SPR.bGold)[b.k]
-                   : (lit ? SPR.bLit : SPR.b)[b.k];
-  g.drawImage(s, tX(b.gx), tY(b.gy) + sz * 32 - s.height);
+  return b.gold ? (lit ? SPR.bLitGold : SPR.bGold)[b.k] : (lit ? SPR.bLit : SPR.b)[b.k];
+}
+function buildingDrawY(b, s) {     // top-y where sprite s is drawn for building b
+  if (b.k === 'popcannon') return tY(b.gy) + 32 - s.height;
+  return tY(b.gy) + (B[b.k].size || 1) * 32 - s.height;
+}
+function drawBuilding(g, b) {
+  const s = buildingSpr(b);
+  g.drawImage(s, tX(b.gx), buildingDrawY(b, s));
 }
 
 /* ── animated overlay registry (rebuilt when buildings change) ── */
@@ -7751,7 +8052,7 @@ function addBuilding(k, gx, gy) {
   for (let dy = 0; dy < s; dy++) for (let dx = 0; dx < s; dx++) occ[gy + dy][gx + dx] = b;
   refreshColonyChecks();
   recomputePower(); recomputeAnims();
-  bgDirty = true;
+  if (world === 'earth') markIsleDirtyAt(gx, gy); else bgDirty = true;
   return b;
 }
 function placeBuilding(k, gx, gy) {
@@ -7805,7 +8106,7 @@ function removeBuilding(b) {
     spawnP(tX(b.gx) + s * 16, tY(b.gy) + s * 16, SPR.puff[0], { life: 0.5 });
   refreshColonyChecks();
   recomputePower(); recomputeAnims();
-  bgDirty = true;
+  if (world === 'earth') markIsleDirtyAt(b.gx, b.gy); else bgDirty = true;
   return true;
 }
 
@@ -8052,7 +8353,7 @@ function harvestFlora(f, px2, py2) {
     return;
   }
   f.shakeT = 0.28;
-  bgDirty = true;
+  if (world === 'earth') markIsleDirtyAt(f.gx, f.gy); else bgDirty = true;
   if (f.rainbow) {                              // rainbow tree: 3 wood + 2 food + 1 best
     const top = topResource();
     res.wood += 3; res.food += 2; res[top] += 1;
@@ -10483,7 +10784,7 @@ function feedMega(p, b) {
   }
   payCost(cost);
   b.stage = (b.stage || 0) + 1;
-  bgDirty = true;
+  if (world === 'earth') markIsleDirtyAt(b.gx, b.gy); else bgDirty = true;
   if (b.k === 'windchime') SFX.chime();          // v8b: the chime thanks you, softly
   const s = B[b.k].size || 1, cx2 = tX(b.gx) + s * 16, cy2 = tY(b.gy) + s * 16;
   if (megaDone(b)) {
@@ -10631,7 +10932,7 @@ function smashBuilding(b) {
   b.rubble = true; b.repair = 0; b.idle = null;
   refreshColonyChecks();                        // rubble stops counting (levels never revert)
   recomputePower();                             // v5a: rubble doesn't conduct — grid may split
-  bgDirty = true;
+  if (world === 'earth') markIsleDirtyAt(b.gx, b.gy); else bgDirty = true;
   shakeAmt = Math.max(shakeAmt, 6);
   SFX.boom();
   const s = B[b.k].size || 1, cx2 = tX(b.gx) + s * 16, cy2 = tY(b.gy) + s * 16;
@@ -10688,7 +10989,7 @@ function repairWhack(b) {
   doorCoolT = T + 0.8;                           // v5b: fix flurries never barge indoors
   if (b.packed) { packWhack(b); return; }        // v4d: landlocked seaport packs up instead
   b.repair = (b.repair || 0) + 1;
-  bgDirty = true;
+  if (world === 'earth') markIsleDirtyAt(b.gx, b.gy); else bgDirty = true;
   const s = B[b.k].size || 1, cx2 = tX(b.gx) + s * 16, cy2 = tY(b.gy) + s * 16;
   for (let i = 0; i < 4; i++) spawnP(cx2, cy2, SPR.chip, { life: 0.5 });
   if (b.repair >= 3) {
@@ -10807,7 +11108,7 @@ function fizzleShot(ob, x, y) {
   SFX.boing();
   addFloat(x, y - 20, 'BOING!', '#8fd4ff');
   for (let i = 0; i < 4; i++) spawnP(x, y - 6, SPR.puff[0], { vy: -18, g: -8, life: 0.5 });
-  if (ob && !(ob.wobT > 0)) { ob.wobT = 0.55; wobbleN++; bgDirty = true; }
+  if (ob && !(ob.wobT > 0)) { ob.wobT = 0.55; wobbleN++; if (world === 'earth') markIsleDirtyAt(ob.gx, ob.gy); else bgDirty = true; }
   else if (ob) ob.wobT = 0.55;
   lastImpact = { type: 'fizzle', x, y };
 }
@@ -10816,7 +11117,7 @@ function cannonRepair(b) {                       // burst "shakes it back togeth
   rubbleFixed++;
   refreshColonyChecks();
   recomputePower();                              // v5a: the grid heals with it
-  bgDirty = true;
+  if (world === 'earth') markIsleDirtyAt(b.gx, b.gy); else bgDirty = true;
   const s = B[b.k].size || 1, cx2 = tX(b.gx) + s * 16, cy2 = tY(b.gy) + s * 16;
   SFX.fixed();
   addFloat(cx2, tY(b.gy) - 6, 'FIXED!', '#7dff9a');
@@ -10854,7 +11155,7 @@ function blastHarvest(f) {
             : f.type === 'hem' ? SPR.redChip : SPR.chip;
   for (let i = 0; i < 4; i++) spawnP(cx2, cy2 + 6, spr, { vy: -55, g: -16, life: 0.6 });
   f.gone = true; f.hits = 0; f.regrowT = 35 + Math.random() * 15;
-  bgDirty = true;
+  if (world === 'earth') markIsleDirtyAt(f.gx, f.gy); else bgDirty = true;
 }
 function burstAt(x, y) {
   const gx0 = Math.floor(x / TILE), gy0 = Math.floor((y - GY0) / TILE);
@@ -11072,7 +11373,7 @@ function landGrowthSanity(silent) {
 /* landlocked seaport pack-up: 3 whacks, FULL refund, never a repair */
 function packWhack(b) {
   b.repair = (b.repair || 0) + 1;
-  bgDirty = true;
+  if (world === 'earth') markIsleDirtyAt(b.gx, b.gy); else bgDirty = true;
   const s = B[b.k].size || 1, cx2 = tX(b.gx) + s * 16, cy2 = tY(b.gy) + s * 16;
   for (let i = 0; i < 4; i++) spawnP(cx2, cy2, SPR.chip, { life: 0.5 });
   if (b.repair >= 3) {
@@ -11670,7 +11971,8 @@ function finishBridge(p) {
       bridges.push(br);
       rebuildBridgeIndex();
       rebuildBridgeReach();
-      terrainDirty = true;
+      /* only the NEW bridge bake is dirty — islands don't change (earth-only) */
+      bridgeDirty.add(bridges.length - 1); earthMiniDirty = true;
       committed = true;
     }
   }
@@ -11834,8 +12136,17 @@ function updateFerries(dt) {
 function thumbURL(src, sw, sh) {
   try {
     const [c, g] = C(96, 54);
-    g.drawImage(src || bgC, 0, 0, sw || WORLD_W, sh || WORLD_H, 0, 0, 96, 54);
+    if (!src) return null;
+    g.drawImage(src, 0, 0, sw || src.width, sh || src.height, 0, 0, 96, 54);
     return c.toDataURL('image/png');
+  } catch (e) { return null; }
+}
+/* the Earth save thumbnail is composed from the per-island bakes over the sea */
+function earthThumbURL() {
+  try {
+    if (world === 'earth') { if (earthMiniDirty || !earthMiniC) rebuildEarthMini(); return thumbURL(earthMiniC); }
+    const eb = parked.get('earth');
+    return eb && eb.earthMiniC ? thumbURL(eb.earthMiniC) : null;
   } catch (e) { return null; }
 }
 function saveGame() {
@@ -11902,7 +12213,7 @@ function saveGame() {
     /* v4d: P1's dinghy (moored + moon-stashed) survives save/load */
     moors: players[0] ? [players[0].moor ? [Math.round(players[0].moor.x), Math.round(players[0].moor.y)] : 0,
                          players[0].moorE ? [Math.round(players[0].moorE.x), Math.round(players[0].moorE.y)] : 0] : 0,
-    thumb: thumbURL(eD.bgC, eD.WORLD_W || EGW * TILE, eD.WORLD_H || GY0 + EGH * TILE),
+    thumb: earthThumbURL(),
   };
   /* v8a/v8b: the lazily-born planet worlds save only once they exist */
   for (const pw of PW_SAVE) {
@@ -12003,6 +12314,9 @@ function resetWorldState() {
   buildings = []; seqN = 1; flora = []; wires = []; anims = [];
   decor = []; decorMap = new Map(); pathsLaid = 0; goldenPlaced = 0; glowDirty = true;
   bridges = []; bridgeSet = new Map(); bridgeGroupMap = new Map(); reachDirty = true;   // BRIDGES
+  /* PER-ISLAND BAKE: fresh earth bake store (world is 'earth' after swapTo above) */
+  isleBakes = new Map(); bridgeBakes = new Map(); isleDirty = new Set(); bridgeDirty = new Set();
+  isleDirtyAll = true; bridgeDirtyAll = true; earthMiniDirty = true;
   interior = null; insideCount = 0; residentsGreeted = 0; catPets = 0;   // v5b
   cookieDay = ''; recentEvents = [];
   liftRides = 0; starDeckSeen = false;           // v7.2
@@ -18117,7 +18431,12 @@ function drawStatsMap(x, y) {
   }
   ctx.drawImage(SPR.miniP, mx0, my0);
   const msc = Math.min(264 / WORLD_W, 146 / WORLD_H);
-  ctx.drawImage(bgC, 0, 0, WORLD_W, WORLD_H, mx0 + 6, my0 + 6, Math.round(WORLD_W * msc), Math.round(WORLD_H * msc));
+  if (world === 'earth') {
+    if (earthMiniDirty || !earthMiniC) rebuildEarthMini();
+    ctx.drawImage(earthMiniC, 0, 0, earthMiniC.width, earthMiniC.height, mx0 + 6, my0 + 6, Math.round(WORLD_W * msc), Math.round(WORLD_H * msc));
+  } else {
+    ctx.drawImage(bgC, 0, 0, WORLD_W, WORLD_H, mx0 + 6, my0 + 6, Math.round(WORLD_W * msc), Math.round(WORLD_H * msc));
+  }
   /* camera window */
   ctx.strokeStyle = 'rgba(255,255,255,0.75)'; ctx.lineWidth = 1;
   ctx.strokeRect(mx0 + 6 + camX * msc, my0 + 6 + camY * msc, W * msc, H * msc);
@@ -18537,15 +18856,21 @@ function reTx() {                                // restore shake+camera after s
   ctx.translate(shakeX - camRX, shakeY - camRY);
 }
 function renderPlay() {
-  if (terrainDirty) rebuildTerrain();
-  if (bgDirty) rebuildBG();
+  if (world === 'earth') { ensureEarthBakes(); }
+  else { if (terrainDirty) rebuildTerrain(); if (bgDirty) rebuildBG(); }
   camRX = Math.round(camX); camRY = Math.round(camY);
   shakeX = shakeAmt > 0.2 ? (Math.random() - 0.5) * shakeAmt * 2 : 0;
   shakeY = shakeAmt > 0.2 ? (Math.random() - 0.5) * shakeAmt * 2 : 0;
   ctx.save();
   ctx.translate(shakeX - camRX, shakeY - camRY);
-  /* ONE source-rect blit of the visible world window */
-  ctx.drawImage(bgC, camRX, camRY, W, H, camRX, camRY, W, H);
+  if (world === 'earth') {
+    /* procedural sea + halos, then each visible island/bridge bake (culled) */
+    drawEarthOcean();
+    compositeEarth();
+  } else {
+    /* other worlds: ONE source-rect blit of the visible world window */
+    ctx.drawImage(bgC, camRX, camRY, W, H, camRX, camRY, W, H);
+  }
 
   /* v5a: placement aid — connected/powered tiles glow while placing a
      power-hungry building or a pole (ONE scaled blit of a ¼-res bake) */
@@ -19921,7 +20246,7 @@ function updatePlay(dt) {
     if (f.gone) {
       f.regrowT -= dt;
       if (f.regrowT <= 0) {
-        f.gone = false; f.hits = 0; bgDirty = true;
+        f.gone = false; f.hits = 0; if (world === 'earth') markIsleDirtyAt(f.gx, f.gy); else bgDirty = true;
         spawnP(tX(f.gx) + 16, tY(f.gy) + 16, SPR.spark[0], { vy: -20, g: 0, life: 0.7 });
       }
     } else {
@@ -19931,7 +20256,7 @@ function updatePlay(dt) {
       }
       if (f.shakeT > 0) {
         f.shakeT -= dt;
-        if (f.shakeT <= 0) bgDirty = true;
+        if (f.shakeT <= 0) { if (world === 'earth') markIsleDirtyAt(f.gx, f.gy); else bgDirty = true; }
       }
     }
   }
@@ -19992,7 +20317,7 @@ function updatePlay(dt) {
   if (wobbleN > 0) for (const b of buildings) {
     if (b.wobT > 0) {
       b.wobT -= dt;
-      if (b.wobT <= 0) { b.wobT = 0; wobbleN--; bgDirty = true; }
+      if (b.wobT <= 0) { b.wobT = 0; wobbleN--; if (world === 'earth') markIsleDirtyAt(b.gx, b.gy); else bgDirty = true; }
     }
   }
   for (const p of players)                       // a disaster rubbled the manned cannon → hop off
@@ -20147,7 +20472,8 @@ window.__test = {
   forceBridge(pl) {                              // build+commit straight from a pylon list
     if (!Array.isArray(pl) || !pl.length) return false;
     const br = { pylons: pl.map(t => [t[0], t[1]]) };
-    bridges.push(br); rebuildBridgeIndex(); rebuildBridgeReach(); terrainDirty = true;
+    bridges.push(br); rebuildBridgeIndex(); rebuildBridgeReach();
+    bridgeDirty.add(bridges.length - 1); earthMiniDirty = true;
     return bridgeDeckTiles(br).length;
   },
   dropPylon(gx, gy) {                            // force a pylon via the REAL validated path
@@ -20194,9 +20520,19 @@ window.__test = {
   plant(type, gx, gy, g) {                       // v4c test hook: deterministic flora (v4d: g=1 golden, g=2 rainbow)
     if (!isLand(gx, gy) || occ[gy][gx] || floraAt(gx, gy)) return false;
     flora.push({ type, gx, gy, hits: 0, gone: false, regrowT: 0, shakeT: 0, golden: g === 1, rainbow: g === 2 });
-    bgDirty = true;
+    if (world === 'earth') markIsleDirtyAt(gx, gy); else bgDirty = true;
     return true;
   },
+  /* ── PER-ISLAND BAKE proof hooks ── */
+  bakeReset() { __bakeLog = []; },               // begin recording re-bakes
+  bakeLog() { const l = __bakeLog || []; __bakeLog = null; return l.slice(); },   // stop + read
+  isleBakeInfo() {
+    const isles = [...isleBakes.entries()].map(([id, b]) => ({ id, w: b.w, h: b.h, ox: b.ox, oy: b.oy }));
+    const brs = [...bridgeBakes.entries()].map(([i, b]) => ({ i, w: b.w, h: b.h }));
+    return { world, isles, bridges: brs, mini: earthMiniC ? { w: earthMiniC.width, h: earthMiniC.height } : null,
+             worldW: WORLD_W, worldH: WORLD_H, EGW, EGH };
+  },
+  renderOnce() { if (scene === 'play') renderPlay(); return true; },   // force a bake pass
   /* ── v4d hooks ── */
   whack(gx, gy) {                                // whack a tile (player code path): flora or rubble
     const f = floraAt(gx, gy);
