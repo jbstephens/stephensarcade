@@ -96,18 +96,74 @@ High scores live on the console itself and survive reboots.
 | Need to escape the kiosk | SSH in: `pkill -f ses-kiosk; pkill -f chromium` gives you the desktop until next reboot. |
 | Point it at a different URL | Edit `/etc/ses-kiosk.conf` on the Pi, reboot. |
 
+## Offline mode
+
+The console serves the whole arcade from a **local web server on the Pi**, so it
+plays with **no internet** — faster boot, and it works anywhere (car, cabin, a
+dead Wi-Fi day). `pi/setup.sh` sets this up automatically; there's nothing extra
+to do.
+
+### How it works
+
+- A checkout of this repo lives on the Pi (default `~/stephensarcade`).
+- `scripts/build-local.sh` copies the web root into `local-arcade/` and rewrites
+  each game's `https://ses.q5labs.co/lib/controller.js` reference to the
+  repo-relative `/lib/controller.js`, so controllers work with no network. Every
+  game is otherwise a single self-contained HTML file, so that's the only fixup
+  needed.
+- **`ses-webserver.service`** runs `lighttpd` serving `local-arcade/` on
+  **`127.0.0.1:8080`** (localhost only — never exposed to the network).
+- **`ses-arcade-sync.timer`** runs every 30 min: when online it `git pull`s and
+  re-runs `build-local.sh` so the offline copy stays current; when offline it
+  does nothing and keeps serving the last good build.
+
+### The fallback guarantee (why this can't brick the boot)
+
+Before every launch, `ses-kiosk` health-checks the local server
+(`curl http://localhost:8080/` and confirms it's really the arcade). If it
+answers, Chromium opens `http://localhost:8080/?fx=low` (offline). If it does
+**not** answer — server down, mid-rebuild, not installed, anything — the kiosk
+falls back to the online `https://ses.q5labs.co/?fx=low`, **exactly as before
+offline mode existed**. The check re-runs on every Chromium relaunch, so a local
+server that dies mid-session is caught and the next launch goes online. Worst
+case, the console behaves like the old online-only build — never a black screen.
+
+### Common tasks
+
+- **Force online (ignore the local server):** set `SES_DISABLE_LOCAL=1` in
+  `/etc/ses-kiosk.conf` and reboot (or `pkill -f ses-kiosk`). To go back, remove
+  that line.
+- **Rebuild the offline copy now:** `cd ~/stephensarcade && bash scripts/build-local.sh`
+  (safe to re-run; it swaps the new tree in atomically).
+- **Force a sync now:** `sudo systemctl start ses-arcade-sync.service`, then
+  `journalctl -u ses-arcade-sync -n 20` to see what it did.
+- **Change the port:** edit `SES_LOCAL_PORT` in `/etc/ses-kiosk.conf`,
+  `server.port` in `/etc/lighttpd/ses-arcade.conf`, and restart both
+  `ses-webserver` and the kiosk.
+
+### Troubleshooting offline mode
+
+| Problem | Fix |
+| --- | --- |
+| Boots online when I expected offline | `curl -I http://localhost:8080/` — if it fails, `systemctl status ses-webserver` and `journalctl -u ses-webserver`. The kiosk is *correctly* falling back until the server is healthy. |
+| Games load but controllers are dead offline | The `controller.js` rewrite didn't run — re-run `bash scripts/build-local.sh` and check `local-arcade/lib/controller.js` exists. |
+| Offline copy is stale | `journalctl -u ses-arcade-sync` — it only updates when online and fast-forwardable. Run `git -C ~/stephensarcade pull` by hand if history diverged. |
+
 ## What's inside
 
 | File | Lives at (on the Pi) | Does |
 | --- | --- | --- |
 | `pi/setup.sh` | — (run once) | Installs and wires up everything below. |
-| `pi/kiosk.sh` | `/usr/local/bin/ses-kiosk` | Waits for network, launches Chromium in kiosk mode, restarts it if it dies. |
+| `pi/kiosk.sh` | `/usr/local/bin/ses-kiosk` | Waits for network, health-checks the local server, launches Chromium (local if up, else online), restarts it if it dies. |
 | `pi/pair-controller.sh` | `/usr/local/bin/ses-pair-controller` | Scans, pairs, and trusts Bluetooth gamepads. |
-| — | `/etc/ses-kiosk.conf` | `SES_URL` — which arcade the console boots into. |
+| `scripts/build-local.sh` | (in the checkout) | Builds `local-arcade/` — the offline copy of the web root. |
+| `pi/lighttpd-arcade.conf` | `/etc/lighttpd/ses-arcade.conf` | lighttpd config: serve `local-arcade/` on `127.0.0.1:8080`. |
+| `pi/ses-webserver.service` | `/etc/systemd/system/` | Runs the local offline web server; auto-restarts. |
+| `pi/ses-arcade-sync.sh` | `/usr/local/bin/ses-arcade-sync` | When online: `git pull` + rebuild `local-arcade/`. When offline: no-op. |
+| `pi/ses-arcade-sync.{service,timer}` | `/etc/systemd/system/` | Runs the sync every 30 min. |
+| — | `/etc/ses-kiosk.conf` | `SES_URL` (online fallback), `SES_LOCAL_PORT`, `SES_DISABLE_LOCAL`. |
 
 ## Later (out of scope for v1)
 
-- Offline play: serve the bundled `games/` straight off the Pi so it works
-  with no internet, syncing updates from the live site in the background.
 - Per-game saves, leaderboards, accounts (needs a real database).
 - NVMe SSD if the data ever gets heavy.

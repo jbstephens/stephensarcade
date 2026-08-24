@@ -39,6 +39,16 @@ fetch() { # fetch <name> <dest>
   fi
 }
 
+# Like fetch, but with an explicit mode (units/configs want 0644, not 0755).
+getfile() { # getfile <name> <dest> <mode>
+  if [ -n "$HERE" ] && [ -f "$HERE/$1" ]; then
+    sudo install -m "$3" "$HERE/$1" "$2"
+  else
+    curl -fsSL "$BASE_URL/$1" | sudo tee "$2" >/dev/null
+    sudo chmod "$3" "$2"
+  fi
+}
+
 say "Checking for Chromium"
 if ! command -v chromium-browser >/dev/null && ! command -v chromium >/dev/null; then
   sudo apt-get update
@@ -59,6 +69,10 @@ if [ ! -f /etc/ses-kiosk.conf ]; then
 SES_URL=$ARCADE_URL
 EOF
 fi
+# Local offline server port the kiosk health-checks (see "offline mode" below).
+# Idempotent: only appended if not already present.
+grep -q '^SES_LOCAL_PORT=' /etc/ses-kiosk.conf \
+  || echo 'SES_LOCAL_PORT=8080' | sudo tee -a /etc/ses-kiosk.conf >/dev/null
 
 say "Hooking the kiosk into session autostart"
 KIOSK_LINE="/usr/local/bin/ses-kiosk &"
@@ -126,6 +140,54 @@ for BT_PLUGIN in /usr/lib/*/wf-panel-pi/libbluetooth.so; do
   [ -e "$BT_PLUGIN" ] && sudo mv "$BT_PLUGIN" "$BT_PLUGIN.disabled"
 done
 pkill -x wf-panel-pi 2>/dev/null || true   # lwrespawn brings it back sans BT
+
+# ── Offline mode: local web server + background sync ────────────────────────
+# Serve the arcade from a local static server so the cabinet plays with NO
+# internet. This is layered UNDER the kiosk's fail-safe: if any of this is
+# missing or broken, kiosk.sh health-checks the local server and falls back to
+# the online URL, so the console can never end up worse than online-only.
+say "Setting up offline mode (local web server + background sync)"
+
+# 1. A repo checkout on the Pi to build the offline tree from and to sync.
+#    Use the checkout we're running from if there is one; else clone it.
+SES_REPO_DIR="${SES_REPO_DIR:-$HOME/stephensarcade}"
+if [ -n "$HERE" ] && git -C "$HERE" rev-parse --show-toplevel >/dev/null 2>&1; then
+  SES_REPO_DIR="$(git -C "$HERE" rev-parse --show-toplevel)"
+elif [ ! -d "$SES_REPO_DIR/.git" ]; then
+  git clone --depth 1 https://github.com/jbstephens/stephensarcade.git "$SES_REPO_DIR"
+fi
+DOCROOT="$SES_REPO_DIR/local-arcade"
+ARCADE_USER="$(id -un)"
+
+# 2. lighttpd — the tiny, rock-solid static server. We run our OWN instance
+#    (localhost:8080) via ses-webserver.service, so disable the packaged one.
+if ! command -v lighttpd >/dev/null; then
+  sudo apt-get install -y lighttpd
+fi
+sudo systemctl disable --now lighttpd 2>/dev/null || true
+sudo mkdir -p /etc/lighttpd
+getfile lighttpd-arcade.conf /etc/lighttpd/ses-arcade.conf 0644
+
+# 3. The offline web-server unit (docroot patched to this Pi's checkout).
+getfile ses-webserver.service /etc/systemd/system/ses-webserver.service 0644
+sudo sed -i "s#^Environment=SES_ARCADE_DOCROOT=.*#Environment=SES_ARCADE_DOCROOT=$DOCROOT#" \
+  /etc/systemd/system/ses-webserver.service
+
+# 4. The sync script + oneshot service + timer (user/path patched to this Pi).
+getfile ses-arcade-sync.sh /usr/local/bin/ses-arcade-sync 0755
+getfile ses-arcade-sync.service /etc/systemd/system/ses-arcade-sync.service 0644
+sudo sed -i "s#^User=.*#User=$ARCADE_USER#; s#^Environment=SES_REPO_DIR=.*#Environment=SES_REPO_DIR=$SES_REPO_DIR#" \
+  /etc/systemd/system/ses-arcade-sync.service
+getfile ses-arcade-sync.timer /etc/systemd/system/ses-arcade-sync.timer 0644
+
+# 5. Build the offline tree once, then enable the server + sync timer.
+#    A failed build is non-fatal: the kiosk just serves online until the next
+#    successful sync.
+bash "$SES_REPO_DIR/scripts/build-local.sh" \
+  || echo "  (build-local failed — kiosk will use the online fallback for now)"
+sudo systemctl daemon-reload
+sudo systemctl enable --now ses-webserver.service
+sudo systemctl enable --now ses-arcade-sync.timer
 
 # LXDE/X11 — fallback if Wayland is ever switched off.
 if [ -d /etc/xdg/lxsession/LXDE-pi ]; then

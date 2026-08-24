@@ -13,15 +13,46 @@
 #                                     (reach it from another machine via
 #                                     `ssh -L 9222:localhost:9222 ...`)
 #   SES_EXTRA_FLAGS="--foo --bar"     extra Chromium flags, space-separated
+#   SES_LOCAL_PORT=8080               local offline server port (ses-webserver)
+#   SES_DISABLE_LOCAL=1               ignore the local server, always go online
+#
+# OFFLINE MODE (fail-safe): before each launch we health-check a local web
+# server (ses-webserver.service, serving the offline build at localhost). If
+# it answers with the arcade we point Chromium at it, so the cabinet plays with
+# no internet. If it does NOT answer we fall back to the online URL exactly as
+# before. The local server can therefore NEVER brick the boot — worst case the
+# console behaves precisely like the online-only build it replaced. The check
+# is re-run on every Chromium relaunch, so a local server that dies mid-session
+# is noticed and the next launch falls back to online automatically.
 set -u
 
 CONF=/etc/ses-kiosk.conf
 [ -f "$CONF" ] && . "$CONF"
-URL="${SES_URL:-https://ses.q5labs.co}"
+ONLINE_URL="${SES_URL:-https://ses.q5labs.co}"
 PROFILE="${SES_PROFILE:-$HOME/.config/ses-kiosk}"
 MODE="${SES_MODE:-}"
 DEBUG_PORT="${SES_DEBUG_PORT:-}"
 EXTRA_FLAGS="${SES_EXTRA_FLAGS:-}"
+LOCAL_PORT="${SES_LOCAL_PORT:-8080}"
+LOCAL_URL="http://localhost:${LOCAL_PORT}/?fx=low"
+
+# Is the local offline server up AND actually serving the arcade? A bare 200
+# isn't enough — we confirm the launcher page by grepping for a known marker so
+# a stray "it's listening but wrong" server can't hijack the boot.
+local_healthy() {
+  [ -z "${SES_DISABLE_LOCAL:-}" ] || return 1
+  curl -fsS --max-time 2 "http://localhost:${LOCAL_PORT}/" 2>/dev/null \
+    | grep -qi 'games.js\|Stephens Arcade'
+}
+
+# Pick where Chromium points THIS launch: local if healthy, else online.
+pick_url() {
+  if local_healthy; then
+    echo "$LOCAL_URL"
+  else
+    echo "$ONLINE_URL"
+  fi
+}
 
 BROWSER=$(command -v chromium-browser || command -v chromium)
 if [ -z "$BROWSER" ]; then
@@ -81,10 +112,14 @@ if [ -n "$MODE" ] && [ -n "${WAYLAND_DISPLAY:-}" ] && command -v wlr-randr >/dev
   ) &
 fi
 
-# Give Wi-Fi a moment to come up so we don't boot into an error page.
-# After ~60s we launch anyway; Chromium will show its retry page.
+# Wait until we have SOMETHING to show, so we don't boot into an error page:
+# the local offline server (instant when present) OR the online site once
+# Wi-Fi is up. After ~60s we launch anyway; Chromium shows its retry page.
+# When the local server is up this breaks on the first pass, so offline boots
+# are fast and never wait on the network.
 for _ in $(seq 1 30); do
-  curl -fsI --max-time 2 "$URL" >/dev/null 2>&1 && break
+  local_healthy && break
+  curl -fsI --max-time 2 "$ONLINE_URL" >/dev/null 2>&1 && break
   sleep 2
 done
 
@@ -116,6 +151,11 @@ while true; do
   if [ -f "$PREFS" ]; then
     sed -i 's/"exited_cleanly":false/"exited_cleanly":true/; s/"exit_type":"[^"]*"/"exit_type":"Normal"/' "$PREFS"
   fi
+
+  # Re-decide local-vs-online on EVERY launch: if the local server died since
+  # last time, this falls back to online without any other change.
+  URL="$(pick_url)"
+  echo "$(date -Is) ses-kiosk: launching $URL" >&2
 
   # shellcheck disable=SC2086 — EXTRA_FLAGS is intentionally word-split
   "$BROWSER" \
