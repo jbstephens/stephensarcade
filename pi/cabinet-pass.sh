@@ -12,7 +12,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 STAMP=$(date +%Y-%m-%d-%H%M)
-BACKUP="$HOME/Documents/Projects/stephensgames/pi_localstorage_$STAMP.json"
+BACKUP="$HOME/Developer/stephensgames/pi_localstorage_$STAMP.json"
 CDP="CDP_PORT=9223 node --experimental-websocket pi/cdp.mjs"
 
 pgrep -f "ssh -f -N -L 9223" >/dev/null || ssh -f -N -L 9223:localhost:9222 arcade@ses.local
