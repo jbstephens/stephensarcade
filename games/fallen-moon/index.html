@@ -981,6 +981,13 @@ function defaultSave() {
     fireworks: 0,             // firework charges aboard the skiff (p6j)
     marketHeart: false,       // the market heart container (p6j)
     tbc5Seen: false,
+    /* PHASE 6 — THE WANING LANTERN */
+    starsSeen: false,         // Pearl's rooftop reveal seen — the star arc is live (p6l)
+    starLantern: false,       // the STAR LANTERN rides the masthead (p6l sets, p6k renders)
+    beaconLit: [false, false, false, false],   // the four dark beacons (p6k sets)
+    mothDone: false,          // the Lantern Moth cured — the Far Star is a roost (p6l)
+    lantern6: false,          // THE WANING LANTERN, handed down by the moth (p6l)
+    tbc6Seen: false,
     tbc2Seen: false, tbc3Seen: false,   // end cards shown once each
     lastPos: null,            // where you ACTUALLY were — what CONTINUE resumes to
     lastShade: [8.2, 7.0],    // the SUNSTRUCK respawn anchor, and only that
@@ -1035,6 +1042,23 @@ function loadSave() {
     if (out.paddleWheel && out.mouthOpen) qMin = Math.max(qMin, 20);   // the refit closes the mouth chapter, retroactively too
     if (out.marketOpen) qMin = Math.max(qMin, 21);
     if (out.sky >= 5 || out.ph >= 5) qMin = Math.max(qMin, 22);
+    /* phase 6 — the MIRROR-6 law: every advance carries its derivation */
+    if (out.starsSeen) qMin = Math.max(qMin, 23);
+    if (out.starLantern) qMin = Math.max(qMin, 24);
+    {
+      const bl6 = Array.isArray(out.beaconLit) ? out.beaconLit : [];
+      const lit6 = bl6.filter(Boolean).length;
+      if (lit6 > 0) {
+        /* a lit beacon means the star road is being walked: the reveal and
+           the masthead lantern must both stand, or the moth's second phase
+           has no safe ground (the never-soft-lock rule, forward) */
+        out.starsSeen = true; out.starLantern = true;
+        qMin = Math.max(qMin, 24);
+      }
+      if (lit6 >= 4) qMin = Math.max(qMin, 25);
+    }
+    if (out.mothDone) { out.lantern6 = true; qMin = Math.max(qMin, 26); }
+    if (out.sky >= 6 || out.ph >= 6) qMin = Math.max(qMin, 27);
     if (out.q < qMin) out.q = qMin;
     return out;
   } catch (e) { return null; }
@@ -30789,6 +30813,4145 @@ function nmExtendDebugOnce() {
       window.__nightK = nmNightK;
       nmDomeSig = -999;
       return +nmNightK.toFixed(2);
+    },
+  });
+}
+</script>
+<script>
+/* ═══════════════════════════════════════════════════════════════════════
+   PHASE 6, PART ONE — THE STAR ROAD (p6k-stars)
+
+   Owns: the returning STAR-FIELD (one baked sprite mesh — constellations
+   that rise INCOMPLETE, complete per-beacon, and the whole-sky FILL at
+   sky ≥ 6), the spyglass STAR-SIGHTING verb + the glitter lanes on the
+   water, THE STAR LANTERN at the sailboat's masthead (and its silver
+   pool — the moth fight's safe ground, exported), the FOUR DARK BEACON
+   ISLETS (terrain, towers, climbs, portals, the reef wash, the drowned
+   tower's flooded hall + punt), their hostile pockets (moth-wisps,
+   night gulls, snappers), and BEACON LIGHTING (beamHitDist beams, the
+   repeatable constellation-completing beat).
+
+   Concatenated AFTER p6j-night.html, BEFORE p6l-moth.html. p6l consumes
+   the pinned interface on window.__p6k (lanternPoolAt, lanternPoolR,
+   farStarDoor, beaconPos, sightingActive, laneTarget, lightBeacon) and
+   sets SAVE.starsSeen / SAVE.starLantern; this file only READS those
+   flags and runs whether or not p6l has landed.
+
+   Save flags OWNED here: beaconLit (array[4] of bool) — set live at the
+   lamp, derived both ways via __worldStateHooks. Quest flow, compass
+   answers, cines at Pearl, the tinker and TBC 6/8 are all p6l's.
+   ═══════════════════════════════════════════════════════════════════════ */
+window.__worldStateHooks = window.__worldStateHooks || [];
+window.__telemetryHooks = window.__telemetryHooks || [];
+window.__WORLD_REG = window.__WORLD_REG || [];
+window.__PORTALS = window.__PORTALS || [];
+window.__HULLS = window.__HULLS || [];
+
+/* ── the four beacons: geography, all locked here ──
+   Chosen against the live floor: the moon bowl reaches −246 m as far as
+   (−700, 230), so the reef stack stands east of it on the −64 m bench.
+   Every islet sits inside the sea box (p6d owns the water between). */
+const SK_B = [
+  /* 0 THE HARBOR STAR — the headland knoll off Brightharbor's west cliffs */
+  { id: 'harborstar', x: -197, z: 108, r: 26,
+    tower: { x: -206, z: 122, r: 2.9, h: 8.6, doorAng: 2.53 } },
+  /* 1 THE REEF STAR — a wave-washed stack on the deep bench */
+  { id: 'reefstar', x: -902, z: 318, r: 30,
+    tower: { x: -902, z: 318, r: 1.15, h: 2.2, doorAng: 0 } },
+  /* 2 THE DROWNED STAR — a half-sunk tower leaning out of a shoal bank */
+  { id: 'drownedstar', x: -1252, z: 238, r: 34,
+    tower: { x: -1258, z: 230, r: 5.6, h: 12.0, doorAng: 0.79 } },
+  /* 3 THE FAR STAR — past the Hourless Isles, the longest dark-water sail */
+  { id: 'farstar', x: -2298, z: -1005, r: 40,
+    tower: { x: -2306, z: -1014, r: 4.0, h: 14.0, doorAng: 0.71 } },
+];
+const SK_WL = -0.55;                        // the sea's design waterline (== WL)
+const SK_POOL_R = 3.4;                      // the star lantern's silver pool radius
+
+/* flags read (owned elsewhere): starsSeen + starLantern are p6l's to SET */
+const skStarsSeen = () => !!(SAVE && SAVE.starsSeen);
+const skLanternOn = () => !!(SAVE && SAVE.starLantern);
+const skSky = () => (SAVE ? (SAVE.sky | 0) : 0);
+/* the one flag owned HERE — normalized on every touch, never assumed */
+function skBeaconLit() {
+  if (!SAVE) return [false, false, false, false];
+  if (!Array.isArray(SAVE.beaconLit) || SAVE.beaconLit.length !== 4) {
+    SAVE.beaconLit = [!!(SAVE.beaconLit && SAVE.beaconLit[0]), !!(SAVE.beaconLit && SAVE.beaconLit[1]),
+                      !!(SAVE.beaconLit && SAVE.beaconLit[2]), !!(SAVE.beaconLit && SAVE.beaconLit[3])];
+  }
+  return SAVE.beaconLit;
+}
+const skLitCount = () => skBeaconLit().filter(Boolean).length;
+/* dusk: p6j's clock is the ONE night authority — this file only reads it */
+const skDuskK = () => (typeof nmNightK === 'number' ? nmNightK : (window.__nightK || 0));
+</script>
+<script>
+/* ═══════════ p6k/2 — THE SKY: the star-field, the constellations ═══════════
+   ONE baked sprite mesh (the p6j star pattern: inward-facing DOT_TEX
+   quads on the dome radius — additive, so a BLACK vertex is an absent
+   star and lighting one is a color write, never a mesh change).
+   Layout in the buffer, contiguous by group:
+     [c0 base][c0 anchors][c1 base][c1 anchors]...[the FILL]
+   States: hidden (sky<5 or !starsSeen) · incomplete (base lit, anchors
+   dark) · complete (beaconLit[i]: base brightened + anchors lit) ·
+   whole-sky fill (sky≥6). Stars are NEVER lights. */
+const SK_DOME_R = 414;
+const SK_CONST = [
+  /* az/el: the western sea sky, spread so each reads alone; stars as
+     [dAz, dEl, size, warm] offsets; anchors are the MISSING points */
+  { id: 'lanternbird', az: -0.95, el: 0.52,
+    stars: [[-0.10, -0.05, 5.7, 0], [-0.055, -0.015, 4.8, 0], [0, 0.02, 6.4, 1], [0.05, 0.055, 5.1, 0],
+            [0.10, 0.08, 4.6, 0], [0.02, -0.06, 4.4, 0], [0.075, -0.035, 4.8, 1]],
+    anchors: [[0.145, 0.115, 7.9, 0], [-0.145, -0.09, 7.3, 0]] },
+  { id: 'breaker', az: -1.45, el: 0.66,
+    stars: [[-0.12, -0.02, 4.8, 0], [-0.06, 0.03, 5.5, 0], [0, -0.015, 5.1, 1], [0.06, 0.035, 5.7, 0],
+            [0.12, -0.01, 4.8, 0], [0.0, 0.07, 4.4, 0]],
+    anchors: [[0.155, 0.06, 7.7, 0], [-0.155, 0.05, 7.5, 0]] },
+  { id: 'keelstar', az: -1.92, el: 0.55,
+    stars: [[-0.02, -0.09, 5.3, 0], [0.02, -0.04, 4.8, 0], [-0.015, 0.01, 5.5, 1], [0.02, 0.06, 5.1, 0],
+            [-0.05, 0.1, 4.6, 0], [0.06, 0.1, 4.6, 0]],
+    anchors: [[0, 0.145, 8.1, 0], [0.005, -0.135, 7.0, 0]] },
+  { id: 'greymoth', az: -2.38, el: 0.74,
+    stars: [[0, 0, 5.9, 1], [-0.07, 0.05, 5.1, 0], [0.07, 0.05, 5.1, 0], [-0.11, 0.1, 4.6, 0],
+            [0.11, 0.1, 4.6, 0], [-0.06, -0.05, 4.8, 0], [0.06, -0.05, 4.8, 0], [0, 0.075, 4.4, 0]],
+    anchors: [[-0.155, 0.145, 7.9, 0], [0.155, 0.145, 7.9, 0], [0, -0.105, 7.0, 0]] },
+];
+const SK_FILL_N = 240;
+/* buffer bookkeeping: per record {v0, n} vertex ranges */
+const skStarSpans = [];   // [{base:{v0,n}, anch:{v0,n}}...]
+let skFillSpan = null;
+let skStarMesh = null, skStarColA = null, skStarBase = null;   // base = authored colors
+(function skBuildStars() {
+  const p = [], c = [], u = [], base = [];
+  const _q = new THREE.Quaternion(), _z = new THREE.Vector3(0, 0, 1), _n = new THREE.Vector3();
+  const quad = [[-1, -1], [1, -1], [1, 1], [-1, -1], [1, 1], [-1, 1]];
+  const uvs = [[0, 0], [1, 0], [1, 1], [0, 0], [1, 1], [0, 1]];
+  const pushStar = (az, el, s, cc) => {
+    const ce = Math.cos(el);
+    const px = Math.sin(az) * ce * SK_DOME_R, py = Math.sin(el) * SK_DOME_R, pz = Math.cos(az) * ce * SK_DOME_R;
+    _n.set(-px, -py, -pz).normalize();
+    _q.setFromUnitVectors(_z, _n);
+    for (let k = 0; k < 6; k++) {
+      const v = new THREE.Vector3(quad[k][0] * s, quad[k][1] * s, 0).applyQuaternion(_q);
+      p.push(px + v.x, py + v.y, pz + v.z);
+      c.push(0, 0, 0);                       // born dark; the derive lights them
+      base.push(cc[0], cc[1], cc[2]);
+      u.push(uvs[k][0], uvs[k][1]);
+    }
+  };
+  for (const C of SK_CONST) {
+    const span = { base: { v0: p.length / 3, n: 0 }, anch: null };
+    for (const st of C.stars) {
+      const cc = st[3] ? [1.0, 0.93, 0.78] : [0.86, 0.92, 1.0];
+      pushStar(C.az + st[0], C.el + st[1], st[2], cc);
+    }
+    span.base.n = p.length / 3 - span.base.v0;
+    span.anch = { v0: p.length / 3, n: 0 };
+    for (const st of C.anchors) pushStar(C.az + st[0], C.el + st[1], st[2], [0.93, 0.96, 1.0]);
+    span.anch.n = p.length / 3 - span.anch.v0;
+    skStarSpans.push(span);
+  }
+  /* the FILL: the whole sky the family will sail phase 8 under */
+  skFillSpan = { v0: p.length / 3, n: 0 };
+  const rnd = mulberry32(606);
+  for (let i = 0; i < SK_FILL_N; i++) {
+    const az = rnd() * TAU, el = 0.06 + Math.pow(rnd(), 1.35) * 1.38;
+    const b = 0.3 + rnd() * 0.6;
+    const cc = rnd() < 0.14 ? [b, b * 0.9, b * 0.76] : [b * 0.88, b * 0.94, b];
+    pushStar(az, el, 0.8 + rnd() * 1.7, cc);
+  }
+  skFillSpan.n = p.length / 3 - skFillSpan.v0;
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(p), 3));
+  g.setAttribute('color', new THREE.BufferAttribute(new Float32Array(c), 3));
+  g.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(u), 2));
+  skStarMesh = new THREE.Mesh(g, new THREE.MeshBasicMaterial({
+    map: DOT_TEX, vertexColors: true, transparent: true, opacity: 0, fog: false,
+    blending: THREE.AdditiveBlending, depthWrite: false,
+  }));
+  skStarMesh.frustumCulled = false;
+  skStarMesh.visible = false;
+  skyGrp.add(skStarMesh);
+  skStarColA = g.attributes.color;
+  skStarBase = new Float32Array(base);
+})();
+/* write a span's colors as base × k (0 = absent, 1 = lit, >1 = gleam) */
+function skPaintSpan(span, k) {
+  for (let v = span.v0; v < span.v0 + span.n; v++) {
+    skStarColA.setXYZ(v, skStarBase[v * 3] * k, skStarBase[v * 3 + 1] * k, skStarBase[v * 3 + 2] * k);
+  }
+  skStarColA.needsUpdate = true;
+}
+/* the steady state for constellation i (gleam pulses ride on top) */
+function skPaintConst(i) {
+  const lit = skBeaconLit()[i];
+  skPaintSpan(skStarSpans[i].base, lit ? 1.28 : 0.8);
+  skPaintSpan(skStarSpans[i].anch, lit ? 1.35 : 0);
+}
+function skPaintSky() {
+  for (let i = 0; i < 4; i++) skPaintConst(i);
+  skPaintSpan(skFillSpan, skSky() >= 6 ? 1 : 0);
+}
+/* direction of constellation i's center (unit, world) */
+const _skCD = [0, 0, 0];
+function skConstDir(i) {
+  const C = SK_CONST[i];
+  const ce = Math.cos(C.el);
+  _skCD[0] = Math.sin(C.az) * ce; _skCD[1] = Math.sin(C.el); _skCD[2] = Math.cos(C.az) * ce;
+  return _skCD;
+}
+</script>
+<script>
+/* ═══════════ p6k/3 — THE STAR LANTERN + the silver pool (pinned exports) ═══════════ */
+
+/* the shared additive kit (p6j's pattern — crossed DOT_TEX quads) */
+function skGlowQuad(md, x, y, z, w, h, cc, uOut) {
+  const v = [[-w, -h], [w, -h], [w, h], [-w, -h], [w, h], [-w, h]];
+  const uv = [[0, 0], [1, 0], [1, 1], [0, 0], [1, 1], [0, 1]];
+  for (let k = 0; k < 6; k++) {
+    md.p.push(x + v[k][0], y + v[k][1], z);
+    md.c.push(cc[0] * 0.7, cc[1] * 0.7, cc[2] * 0.7);
+    uOut.push(uv[k][0], uv[k][1]);
+  }
+  for (let k = 0; k < 6; k++) {
+    md.p.push(x, y + v[k][1], z + v[k][0]);
+    md.c.push(cc[0] * 0.7, cc[1] * 0.7, cc[2] * 0.7);
+    uOut.push(uv[k][0], uv[k][1]);
+  }
+}
+function skFlatQuad(md, x, y, z, ax, az, len, w, cc, uOut) {
+  const fx = ax * len, fz = az * len, nx = -az * w, nz = ax * w;
+  const q = [[x - fx + nx, z - fz + nz], [x + fx + nx, z + fz + nz], [x + fx - nx, z + fz - nz], [x - fx - nx, z - fz - nz]];
+  const uv = [[0, 0], [1, 0], [1, 1], [0, 1]];
+  const idx = [0, 1, 2, 0, 2, 3];
+  for (const i of idx) {
+    md.p.push(q[i][0], y, q[i][1]);
+    md.c.push(cc[0], cc[1], cc[2]);
+    uOut.push(uv[i][0], uv[i][1]);
+  }
+}
+function skGlowMesh(md, uvsArr, op) {
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(md.p), 3));
+  g.setAttribute('color', new THREE.BufferAttribute(new Float32Array(md.c), 3));
+  g.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(uvsArr), 2));
+  const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({
+    map: DOT_TEX, vertexColors: true, transparent: true, opacity: op === undefined ? 0.85 : op,
+    fog: false, blending: THREE.AdditiveBlending, depthWrite: false,
+  }));
+  m.frustumCulled = false;
+  return m;
+}
+const SK_SILVER = [0.72, 0.82, 1.0], SK_SILVER2 = [0.5, 0.62, 0.85];
+
+/* ── the masthead lantern: a silver cage above the mainmast head — the
+   boat's build completes UPWARD (the visible-upgrade law). The cage is
+   solid geometry; the light is one additive glow mesh. ── */
+let skLantGrp = null, skLantGlow = null, skLantK = 0;
+(function skBuildLantern() {
+  skLantGrp = new THREE.Group();
+  const md = MD();
+  const C_SILV = col(0x9fb2c8), C_SILV2 = col(0x6c7d96), C_DARK = col(0x3a4353);
+  /* a short finial mast above the masthead, then the cage */
+  boxW(md, { x: 0, y: 0, z: 0, w: 0.045, d: 0.045, h: 0.55, col: C_SILV2 });
+  latheW(md, [[0.05, 0], [0.19, 0.08], [0.21, 0.34], [0.17, 0.5], [0.04, 0.6]],
+    { seg: 7, x: 0, y: 0.5, z: 0, col: C_SILV, cols: [C_DARK, SK_SILVER, SK_SILVER, C_SILV] });
+  for (let k = 0; k < 4; k++) {
+    const a = k * (TAU / 4);
+    boxW(md, { x: Math.cos(a) * 0.19, y: 0.55, z: Math.sin(a) * 0.19, w: 0.022, d: 0.022, h: 0.34, col: C_DARK });
+  }
+  boxW(md, { x: 0, y: 1.1, z: 0, w: 0.05, d: 0.05, h: 0.06, col: C_SILV2 });
+  const cage = mdMesh(md, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide }), false);
+  cage.frustumCulled = false;
+  skLantGrp.add(cage);
+  const gm = MD(), uvs = [];
+  skGlowQuad(gm, 0, 0.82, 0, 1.35, 1.35, SK_SILVER, uvs);
+  skGlowQuad(gm, 0, 0.82, 0, 0.55, 0.55, [0.9, 0.95, 1], uvs);
+  skLantGlow = skGlowMesh(gm, uvs, 0.0);
+  skLantGrp.add(skLantGlow);
+  /* the masthead: the mainmast tops out at y≈3.05 local (p6c's build) */
+  skLantGrp.position.set(0, 3.05, 0.28);
+  skLantGrp.visible = false;
+  sailboat.group.add(skLantGrp);
+})();
+
+/* ── the silver pool: the lantern's light on the ground around the
+   player — the moth fight's safe ground (p6l consumes the export) ── */
+let skPoolMesh = null;
+(function skBuildPool() {
+  const md = MD(), uvs = [];
+  skFlatQuad(md, 0, 0, 0, 1, 0, SK_POOL_R * 1.12, SK_POOL_R * 1.12, [0.34, 0.42, 0.6], uvs);
+  skFlatQuad(md, 0, 0.02, 0, 0, 1, SK_POOL_R * 0.62, SK_POOL_R * 0.62, [0.3, 0.38, 0.58], uvs);
+  skPoolMesh = skGlowMesh(md, uvs, 0.8);
+  skPoolMesh.renderOrder = 3;
+  skPoolMesh.visible = false;
+  scene.add(skPoolMesh);
+})();
+
+/* ═══ the pinned interface ═══ */
+window.__p6k = window.__p6k || {};
+window.__p6k.lanternPoolR = SK_POOL_R;
+window.__p6k.lanternPoolAt = function (x, z) {
+  if (!skLanternOn()) return false;
+  /* the pool travels with its bearer: the player ashore, the masthead when
+     she is the nearest light. Both are honest silver ground. */
+  const px = P.sailing ? BOAT.x : P.x, pz = P.sailing ? BOAT.z : P.z;
+  if (Math.hypot(x - px, z - pz) <= SK_POOL_R) return true;
+  if (Math.hypot(x - BOAT.x, z - BOAT.z) <= SK_POOL_R + 1.2) return true;
+  return false;
+};
+window.__p6k.beaconPos = SK_B.map(b => ({ x: b.x, z: b.z }));
+window.__p6k.sightingActive = () => skLaneT > 0;
+window.__p6k.laneTarget = () => (skLaneT > 0 ? skLaneI : -1);
+</script>
+<script>
+/* ═══════════ p6k/4 — THE FOUR ISLETS: ground, towers, portals, registry ═══════════
+   Region pattern: one analytic pad-stack per islet → makeMeshField →
+   the SAME field renders the sheet and answers groundH (rendered ==
+   physics by construction). The skirt blends to the captured previous
+   chain, so the sea keeps its floor right up to each footprint. */
+const _skGroundH = groundH;
+const _skWorldSolid = worldSolidAt;
+
+/* pad-stack: h = max over pads of (y − max(0, d − r) · fall) — overlapping
+   pads chain into walkable ramps; authored, never generated */
+function skPadH(pads, x, z) {
+  let h = -1e9;
+  for (let i = 0; i < pads.length; i++) {
+    const p = pads[i];
+    const d = Math.hypot(x - p[0], z - p[1]);
+    const v = p[3] - Math.max(0, d - p[2]) * p[4];
+    if (v > h) h = v;
+  }
+  return h;
+}
+/* per-islet pads: [x, z, r, y, fall] (y absolute; WL = −0.55) */
+const SK_PADS = [
+  /* 0 HARBOR STAR: court knoll + ramp chain down to the landing spit */
+  [[-203, 118, 9, 5.65, 0.55],
+   [-197, 109, 4, 3.6, 0.5], [-193, 104, 4, 1.6, 0.45], [-190.5, 100.5, 4.5, 0.0, 0.4],
+   [-189, 98, 5, -0.2, 0.3]],
+  /* 1 REEF STAR: awash base ring, south landing shelf, two terraces, crown */
+  [[-902, 318, 3.6, 4.65, 0.9],
+   [-904.5, 315.5, 2.6, 3.4, 0.8],
+   [-902, 313.5, 4.5, 2.05, 0.7],
+   [-899, 310.5, 3, 0.9, 0.6],
+   [-902, 308, 6, -0.2, 0.35],
+   [-902, 305, 4, -0.2, 0.3],
+   [-902, 318, 12, -0.3, 0.5]],
+  /* 2 DROWNED STAR: one broad shoal bank + the dry spit (the hall dips below) */
+  [[-1252, 238, 26, -1.4, 0.5],
+   [-1236, 252, 6, 0.0, 0.28], [-1240, 248, 4, -0.6, 0.3],
+   /* fallen ashlar inside the hall: the divers' dry step at the stair foot */
+   [-1259, 226.3, 1.8, 0.05, 1.2]],
+  /* 3 FAR STAR: beach → ramp → meadow → tower rise, cove to the southeast */
+  [[-2306, -1014, 6.5, 5.75, 0.5],
+   [-2301, -1009, 4, 4.7, 0.5],
+   [-2298, -1005, 10, 3.65, 0.7],
+   [-2293, -999, 5, 1.5, 0.35],
+   [-2288, -993, 8, -0.2, 0.25],
+   [-2298, -1005, 22, -0.5, 0.45]],
+];
+function skRawFor(i) {
+  const B = SK_B[i], pads = SK_PADS[i];
+  const T = B.tower;
+  return function (x, z) {
+    const base = _skGroundH(x, z);
+    const d = Math.hypot(x - B.x, z - B.z);
+    if (d >= B.r) return base;
+    const k = smoothstep(clamp((B.r - d) / 8, 0, 1));
+    let h = lerp(base, Math.max(base, skPadH(pads, x, z)), k);
+    /* stone character: noise that spares beaches, water and the punt bank */
+    const NAMP = [0.5, 1.0, 0.0, 0.55][i];
+    if (NAMP > 0 && h > SK_WL + 0.75) {
+      h += (vnoise(x * 0.13, z * 0.13) - 0.5) * NAMP * k * clamp((h - SK_WL - 0.75) / 1.6, 0, 1);
+    }
+    if (i === 2) {
+      /* the flooded hall: the tower's ground floor gave itself to the sea —
+         but the fallen-ashlar step (the last pad) stays proud of the water */
+      const dT = Math.hypot(x - T.x, z - T.z);
+      if (dT < 5.6) {
+        h = lerp(h, SK_WL - 1.5, smoothstep(clamp((5.6 - dT) / 0.9, 0, 1)));
+        const rb = SK_PADS[2][3];
+        h = Math.max(h, (rb[3] - Math.max(0, Math.hypot(x - rb[0], z - rb[1]) - rb[2]) * rb[4]) * k);
+      }
+    }
+    return h;
+  };
+}
+/* fields on 2 m lattices, boxes aligned to each footprint */
+const skFields = [], skBoxes = [];
+for (let i = 0; i < 4; i++) {
+  const B = SK_B[i];
+  const x0 = B.x - (B.r + 4), z0 = B.z - (B.r + 4), x1 = B.x + (B.r + 4), z1 = B.z + (B.r + 4);
+  skBoxes.push([x0, z0, x1, z1]);
+  skFields.push(makeMeshField(skRawFor(i), x0, z0, x1, z1, 2, () => false));
+}
+function skIsleIdx(x, z) {
+  for (let i = 0; i < 4; i++) {
+    const B = SK_B[i];
+    const dx = x - B.x, dz = z - B.z;
+    if (dx * dx + dz * dz < (B.r + 3) * (B.r + 3)) return i;
+  }
+  return -1;
+}
+function skGroundAt(x, z) {
+  const i = skIsleIdx(x, z);
+  return i < 0 ? _skGroundH(x, z) : skFields[i](x, z);
+}
+groundH = function (x, z) {
+  const i = skIsleIdx(x, z);
+  if (i >= 0) return skFields[i](x, z);
+  return _skGroundH(x, z);
+};
+
+/* ── the rendered sheets: same lattice, same field, isle palette ── */
+const _skc = [0, 0, 0];
+function skSheetColor(f, x, z, y) {
+  const n = vnoise(x * 0.07, z * 0.07);
+  const n2 = vnoise(x * 0.019 + 11, z * 0.019 - 4);
+  if (y < SK_WL - 0.9) { mix3(S_IDEEP, S_IWET, clamp((y - (SK_WL - 5.5)) / 4.6, 0, 1), _skc); return _skc; }
+  if (y < SK_WL + 0.5) { mix3(S_IWET, S_ISAND, clamp((y - (SK_WL - 0.9)) / 1.4, 0, 1), _skc); return _skc; }
+  const sx = (f(x + 2, z) - f(x - 2, z)) / 4;
+  const sz = (f(x, z + 2) - f(x, z - 2)) / 4;
+  const slope = Math.hypot(sx, sz);
+  mix3(S_ISAND, S_ITURF, clamp((y - SK_WL - 1.6) / 4.4 + n2 * 0.25, 0, 1), _skc);
+  mix3(_skc, S_ITURF2, clamp(n * 0.5 + n2 * 0.45 + 0.4, 0, 1) * 0.5, _skc);
+  const rockT = 0.5 + n * 0.22 + n2 * 0.16;
+  if (slope > rockT) mix3(_skc, n > 0 ? S_IROCK : S_IROCK2, clamp((slope - rockT) / 0.55, 0, 0.85), _skc);
+  return _skc;
+}
+const skSheets = [];
+(function skBuildSheets() {
+  for (let i = 0; i < 4; i++) {
+    const B = SK_B[i], f = skFields[i];
+    const [x0, z0, x1, z1] = skBoxes[i];
+    const md = MD();
+    const gcv = (x, z) => {
+      const y = f(x, z);
+      const c = skSheetColor(f, x, z, y);
+      return [c[0], c[1], c[2], y];
+    };
+    for (let x = x0; x < x1; x += 2) {
+      for (let z = z0; z < z1; z += 2) {
+        const mx = x + 1, mz = z + 1;
+        if (Math.hypot(mx - B.x, mz - B.z) > B.r + 3) continue;
+        const c00 = gcv(x, z), c10 = gcv(x + 2, z), c01 = gcv(x, z + 2), c11 = gcv(x + 2, z + 2);
+        pushTriIsle(md, x, c00[3], z, x, c01[3], z + 2, x + 2, c11[3], z + 2, c00, c01, c11);
+        pushTriIsle(md, x, c00[3], z, x + 2, c11[3], z + 2, x + 2, c10[3], z, c00, c11, c10);
+      }
+    }
+    const m = mdMesh(md, WORLD_MAT, false);
+    m.matrixAutoUpdate = false; m.updateMatrix();
+    m.frustumCulled = false;
+    m.visible = false;
+    scene.add(m);
+    skSheets.push(m);
+  }
+})();
+
+/* ── solid authority: the tower shells (walls read as walls; every
+   doorway is a registered portal and stays open air) ── */
+function skAngTo(cx, cz, x, z) { return Math.atan2(x - cx, z - cz); }
+function skAngDiff(a, b) {
+  let d = a - b;
+  d = ((d % TAU) + TAU) % TAU;
+  if (d > Math.PI) d -= TAU;
+  return Math.abs(d);
+}
+/* ring specs: [isle, r0, r1, doorAng, doorHalf] */
+const SK_RINGS = [
+  [0, 2.35, 3.15, 2.53, 0.5],
+  [2, 5.0, 6.2, 0.79, 0.36],
+  [3, 3.45, 4.35, 0.71, 0.4],
+];
+function skSolidAt(x, z) {
+  for (let i = 0; i < SK_RINGS.length; i++) {
+    const [bi, r0, r1, dAng, dHalf] = SK_RINGS[i];
+    const T = SK_B[bi].tower;
+    const d = Math.hypot(x - T.x, z - T.z);
+    if (d > r0 && d < r1 && skAngDiff(skAngTo(T.x, T.z, x, z), dAng) > dHalf) return true;
+  }
+  return false;
+}
+worldSolidAt = function (x, z) {
+  if (skIsleIdx(x, z) >= 0) return skSolidAt(x, z);
+  return _skWorldSolid(x, z);
+};
+/* movement colliders along the same rings (arc studs, door gaps open) */
+(function skRingColls() {
+  for (const [bi, r0, r1, dAng, dHalf] of SK_RINGS) {
+    const T = SK_B[bi].tower;
+    /* studs sit a hair OUTSIDE the wall's midline with a tight radius, so
+       they never pinch the drowned spiral against its own balustrade —
+       the stud band must stay clear of the treads' outer edge */
+    const rm = (r0 + r1) / 2 + 0.3, th = (r1 - r0) / 2;
+    const n = Math.max(12, Math.round(rm * 4.2));
+    for (let k = 0; k < n; k++) {
+      const a = k / n * TAU;
+      if (skAngDiff(a, dAng) < dHalf + 0.55 / rm) continue;
+      addColl(T.x + Math.sin(a) * rm, T.z + Math.cos(a) * rm, th + 0.2);
+    }
+  }
+})();
+
+/* ── the towers: dead harbor-stars, one merged mesh + one glow mesh per
+   islet. Chunky ashlar courses (12 segment blocks a course, door courses
+   skipped at the doorway); every doorway renders frame + light gradient
+   + a pale threshold stone — Rule 2 in pixels. ── */
+const C_SKSTONE = col(0xcfc8b4), C_SKSTONE2 = col(0xa9a291), C_SKSTONE3 = col(0x847e6e),
+      C_SKIRON = col(0x3d4148), C_SKVERD = col(0x5f8a7a), C_SKDARK = col(0x2c3038);
+const SK_TOWER_MAT = new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide });
+/* the night pass dims WORLD_MAT every frame; these follow it (a bright
+   bone-white tower at midnight was the giveaway) */
+const SK_NIGHT_MATS = [SK_TOWER_MAT];
+function skRing(md, T, y0, rm, th, courseH, courses, doorAng, doorHalf, doorTop, jitterSeed) {
+  for (let c = 0; c < courses; c++) {
+    const y = y0 + c * courseH;
+    const n = 12;
+    for (let s = 0; s < n; s++) {
+      const a = (s + (c % 2) * 0.5) / n * TAU;
+      if (y - y0 < doorTop && skAngDiff(a, doorAng) < doorHalf + 0.5 / rm) continue;
+      const j = hash2(jitterSeed + s * 7, c * 13);
+      const cc = j > 0.3 ? C_SKSTONE : (j > -0.3 ? C_SKSTONE2 : C_SKSTONE3);
+      boxW(md, {
+        x: T.x + Math.sin(a) * rm, y: y - 0.04 + j * 0.03, z: T.z + Math.cos(a) * rm,
+        w: rm * Math.PI / n * 0.98, d: th, h: courseH + 0.06, ry: a,
+        col: cc, colB: C_SKSTONE3,
+      });
+    }
+  }
+}
+function skDoorFrame(md, gm, guv, T, y0, rr, doorAng, doorHalf, h) {
+  const dx = Math.sin(doorAng), dz = Math.cos(doorAng);
+  const px = -dz, pz = dx;             // tangential
+  const wHalf = rr * Math.sin(doorHalf);
+  for (const s of [-1, 1]) {
+    boxW(md, { x: T.x + dx * rr + px * wHalf * s, y: y0 - 0.1, z: T.z + dz * rr + pz * wHalf * s,
+      w: 0.24, d: 0.34, h: h + 0.1, ry: doorAng, col: C_SKSTONE2, colB: C_SKSTONE3 });
+  }
+  boxW(md, { x: T.x + dx * rr, y: y0 + h, z: T.z + dz * rr,
+    w: wHalf + 0.34, d: 0.36, h: 0.34, ry: doorAng, col: C_SKSTONE, colB: C_SKSTONE2 });
+  /* the floor cue: a pale worn threshold slab through the gap */
+  boxW(md, { x: T.x + dx * rr, y: y0 - 0.13, z: T.z + dz * rr,
+    w: wHalf + 0.1, d: 0.6, h: 0.15, ry: doorAng, col: col(0xe2dbc6), colB: C_SKSTONE2 });
+  /* the light gradient: a soft additive sheet standing in the doorway */
+  skGlowQuad(gm, 0, 0, 0, 0.01, 0.01, [0, 0, 0], guv);   // keep buffers aligned (noop)
+  const gmd = { p: gm.p, c: gm.c };
+  const q = [[-wHalf * 0.9, 0.05], [wHalf * 0.9, 0.05], [wHalf * 0.7, h * 0.92], [-wHalf * 0.7, h * 0.92]];
+  const uv = [[0, 0], [1, 0], [1, 1], [0, 1]];
+  const idx = [0, 1, 2, 0, 2, 3];
+  for (const i of idx) {
+    gmd.p.push(T.x + dx * rr + px * q[i][0], y0 + q[i][1], T.z + dz * rr + pz * q[i][0]);
+    gmd.c.push(0.2, 0.24, 0.3);
+    guv.push(uv[i][0], uv[i][1]);
+  }
+}
+function skLampCage(md, x, y, z, s) {
+  latheW(md, [[0.34 * s, 0], [0.5 * s, 0.12 * s], [0.52 * s, 0.7 * s], [0.42 * s, 0.98 * s], [0.1 * s, 1.15 * s]],
+    { seg: 7, x, y, z, col: C_SKIRON, cols: [C_SKIRON, C_SKVERD, C_SKIRON, C_SKIRON] });
+  for (let k = 0; k < 4; k++) {
+    const a = k * (TAU / 4) + 0.4;
+    boxW(md, { x: x + Math.cos(a) * 0.44 * s, y: y + 0.12 * s, z: z + Math.sin(a) * 0.44 * s,
+      w: 0.035, d: 0.035, h: 0.85 * s, col: C_SKDARK });
+  }
+  /* the cold glass — dark until its beacon burns */
+  latheW(md, [[0.2 * s, 0.25 * s], [0.26 * s, 0.45 * s], [0.18 * s, 0.72 * s]],
+    { seg: 6, x, y, z, col: C_SKDARK, cols: [C_SKDARK, col(0x424c5c)] });
+}
+function skRock(md, x, z, r, h, seed) {
+  const y = skGroundAt(x, z);
+  latheW(md, [[r, 0], [r * 1.02, h * 0.4], [r * 0.62, h * 0.82], [0.1, h]],
+    { seg: 6, ex: 0.85, x, y: y - 0.5, z, ry: seed * 1.9, flat: true, segJitter: 0.16,
+      col: S_IROCK, cols: [S_IROCK2, S_IROCK, S_STONE2] });
+}
+/* absolute lamp positions (beam origins); [3] is the Far Star's — its
+   lamp ROOM is p6l's, but the shell carries the cage and the beam */
+const SK_LAMP = [];
+const skTowerMeshes = [], skTowerGlows = [];
+const SK_DECK = [];               // per-islet deck info for plat colliders
+(function skBuildTowers() {
+  for (let bi = 0; bi < 4; bi++) {
+    const B = SK_B[bi], T = B.tower;
+    const md = MD();
+    const gm = MD(), guv = [];
+    const gy = skGroundAt(T.x, T.z);
+    if (bi === 0) {
+      /* THE HARBOR STAR: drum + interior spiral + open lamp deck */
+      const y0 = gy - 0.3;
+      skRing(md, T, y0, (2.35 + 3.15) / 2, 0.42, 1.24, 6, T.doorAng, 0.5, 2.4, 3);
+      skDoorFrame(md, gm, guv, T, y0 + 0.1, 2.75, T.doorAng, 0.5, 2.3);
+      /* the deck: floor disc + parapet course + the lamp cage */
+      const deckY = y0 + 7.44;
+      latheW(md, [[0.2, 0], [3.15, 0]], { seg: 12, x: T.x, y: deckY, z: T.z, flat: true, col: C_SKSTONE2, cols: [C_SKSTONE2] });
+      skRing(md, T, deckY, (2.35 + 3.15) / 2, 0.34, 0.8, 1, T.doorAng + Math.PI, 0.4, 1.0, 9);
+      /* interior spiral treads around a NEWEL — the column makes the climb
+         a corridor: drum wall outside, stone post inside, nowhere to slip */
+      boxW(md, { x: T.x, y: y0, z: T.z, w: 0.5, d: 0.5, h: 7.5, tw: 0.42, td: 0.42, col: C_SKSTONE3, colB: C_SKSTONE3 });
+      for (let s = 0; s < 18; s++) {
+        const a = T.doorAng + 1.1 + s * 0.26;
+        const ty = y0 + 0.35 + s * 0.42;
+        boxW(md, { x: T.x + Math.sin(a) * 1.55, y: ty - 0.14, z: T.z + Math.cos(a) * 1.55,
+          w: 0.72, d: 0.55, h: 0.16, ry: a, col: s % 2 ? C_SKSTONE : C_SKSTONE2, colB: C_SKSTONE3 });
+      }
+      skLampCage(md, T.x, deckY + 0.86, T.z, 1.25);
+      boxW(md, { x: T.x, y: deckY, z: T.z, w: 0.3, d: 0.3, h: 0.9, col: C_SKSTONE3 });
+      SK_LAMP.push({ x: T.x, y: deckY + 1.5, z: T.z });
+      SK_DECK.push({ x: T.x, z: T.z, y: deckY, r: 2.2 });
+      skRock(md, -207.5, 99.5, 2.0, 2.8, 11);
+      skRock(md, -186.5, 116, 1.5, 2.1, 12);
+    } else if (bi === 1) {
+      /* THE REEF STAR: no drum — a stone plinth and the basket pillar on
+         the crown; the climb is the rock itself, washed by the sets */
+      const cy = skGroundAt(T.x, T.z);
+      latheW(md, [[1.7, 0], [1.45, 0.5], [1.15, 0.9]], { seg: 7, x: T.x, y: cy - 0.2, z: T.z,
+        flat: true, segJitter: 0.12, col: C_SKSTONE2, cols: [C_SKSTONE3, C_SKSTONE2] });
+      boxW(md, { x: T.x, y: cy + 0.7, z: T.z, w: 0.26, d: 0.26, h: 1.5, col: C_SKSTONE3 });
+      skLampCage(md, T.x, cy + 2.2, T.z, 1.1);
+      SK_LAMP.push({ x: T.x, y: cy + 2.85, z: T.z });
+      SK_DECK.push(null);
+      /* the stair gate: a leaning weathered arch where the shelf meets
+         the ramp — the threshold reads from both sides */
+      {
+        const ax = -902, az = 309.5, ay = skGroundAt(ax, az);
+        for (const s of [-1, 1]) {
+          boxW(md, { x: ax + 1.15 * s, y: ay - 0.2, z: az, w: 0.26, d: 0.34, h: 2.6 + s * 0.15,
+            rz: s * 0.06, col: C_SKSTONE2, colB: C_SKSTONE3 });
+        }
+        boxW(md, { x: ax, y: ay + 2.35, z: az, w: 1.62, d: 0.38, h: 0.36, rz: 0.05, col: C_SKSTONE, colB: C_SKSTONE2 });
+        boxW(md, { x: ax, y: ay - 0.16, z: az, w: 1.2, d: 0.62, h: 0.16, col: col(0xe2dbc6), colB: C_SKSTONE2 });
+        const uv = [[0, 0], [1, 0], [1, 1], [0, 1]];
+        for (const i of [0, 1, 2, 0, 2, 3]) {
+          const q = [[-1.0, 0.05], [1.0, 0.05], [0.8, 2.2], [-0.8, 2.2]][i];
+          gm.p.push(ax + q[0], ay + q[1], az);
+          gm.c.push(0.2, 0.24, 0.3);
+          guv.push(uv[i][0], uv[i][1]);
+        }
+      }
+      skRock(md, B.x - 7, B.z - 9, 2.4, 2.2, 21);
+      skRock(md, B.x + 9, B.z + 3, 1.9, 1.8, 22);
+    } else if (bi === 2) {
+      /* THE DROWNED STAR: a leaning shell, hall awash, spiral to a tilted
+         lamp room. The lean is rendered per-course; colliders stay true. */
+      const y0 = SK_WL - 1.3;
+      const leanX = 0.14, leanZ = 0.1;      // m of drift per m of height
+      for (let c = 0; c < 9; c++) {
+        const y = y0 + c * 1.34;
+        const off = (y - y0);
+        for (let s = 0; s < 12; s++) {
+          const a = (s + (c % 2) * 0.5) / 12 * TAU;
+          if ((y - y0) < 3.4 && skAngDiff(a, T.doorAng) < 0.36 + 0.5 / 5.6) continue;
+          /* the seaward wall is broken open above half height */
+          if (c > 5 && skAngDiff(a, 3.9) < 0.7) continue;
+          const j = hash2(31 + s * 7, c * 13);
+          boxW(md, {
+            x: T.x + off * leanX + Math.sin(a) * 5.6, y: y - 0.04, z: T.z + off * leanZ + Math.cos(a) * 5.6,
+            w: 5.6 * Math.PI / 12 * 0.97, d: 0.55, h: 1.4, ry: a,
+            col: y < SK_WL + 0.8 ? mix3(C_SKSTONE3, col(0x4e5a58), 0.5) : (j > 0.2 ? C_SKSTONE2 : C_SKSTONE3),
+            colB: C_SKSTONE3,
+          });
+        }
+      }
+      /* the flooded mouth's frame + gradient (the portal renders) */
+      skDoorFrame(md, gm, guv, T, SK_WL - 0.1, 5.6, T.doorAng, 0.36, 3.2);
+      /* spiral stair hugging the inner wall, hall landing to lamp floor —
+         shallow treads a stride wide (a seven-year-old climbs this over
+         open water; the stair itself must never be the enemy) */
+      for (let s = 0; s < 27; s++) {
+        const a = T.doorAng + 2.5 + s * 0.2;
+        const ty = 0.05 + s * 0.325;
+        const off = (ty - y0);
+        boxW(md, { x: T.x + off * leanX * 0.55 + Math.sin(a) * 4.0, y: ty - 0.16, z: T.z + off * leanZ * 0.55 + Math.cos(a) * 4.0,
+          w: 0.9, d: 0.68, h: 0.18, ry: a, col: s % 2 ? C_SKSTONE : C_SKSTONE2, colB: C_SKSTONE3 });
+      }
+      /* the snappers' corbels: wall niches BESIDE the stair, never on it */
+      for (const sc of [2, 5]) {
+        const a = T.doorAng + 2.5 + sc * 0.2;
+        const ty = 0.05 + sc * 0.325;
+        const off = (ty - y0);
+        boxW(md, { x: T.x + off * leanX * 0.55 + Math.sin(a) * 5.0, y: ty + 0.02, z: T.z + off * leanZ * 0.55 + Math.cos(a) * 5.0,
+          w: 0.55, d: 0.5, h: 0.3, ry: a, col: C_SKSTONE3, colB: C_SKSTONE3 });
+      }
+      /* the broken balustrade: stub posts on the well side — the rail that
+         keeps a seven-year-old (and a bot) out of the drop */
+      for (let s = 0; s < 27; s += 2) {
+        const a = T.doorAng + 2.5 + s * 0.2;
+        const ty = 0.05 + s * 0.325;
+        const off = (ty - y0);
+        boxW(md, { x: T.x + off * leanX * 0.55 + Math.sin(a) * 2.95, y: ty - 0.05, z: T.z + off * leanZ * 0.55 + Math.cos(a) * 2.95,
+          w: 0.18, d: 0.18, h: 1.3 + hash2(s, 51) * 0.12, ry: a, col: C_SKSTONE3, colB: C_SKSTONE3 });
+      }
+      /* and the surviving OUTER rail where the spiral crosses over the
+         flooded mouth — the wall opens there, the rail does not */
+      for (let s = 15; s < 24; s++) {
+        const a = ((T.doorAng + 2.5 + s * 0.2) % TAU + TAU) % TAU;
+        if (skAngDiff(a, T.doorAng) > 0.7) continue;
+        const ty = 0.05 + s * 0.325;
+        const off = (ty - y0);
+        boxW(md, { x: T.x + off * leanX * 0.55 + Math.sin(a) * 5.0, y: ty - 0.05, z: T.z + off * leanZ * 0.55 + Math.cos(a) * 5.0,
+          w: 0.2, d: 0.2, h: 1.35, ry: a, col: C_SKSTONE3, colB: C_SKSTONE3 });
+      }
+      /* the stair-base landing beside the mouth (punt hop-off) */
+      boxW(md, { x: T.x + Math.sin(T.doorAng + 2.2) * 3.9, y: -0.15, z: T.z + Math.cos(T.doorAng + 2.2) * 3.9,
+        w: 1.5, d: 1.5, h: 0.22, ry: T.doorAng + 2.2, col: C_SKSTONE2, colB: C_SKSTONE3 });
+      /* the tilted lamp floor + cage: the room leans with its tower — the
+         floor is a ring of wedges with a STAIRWELL gap where the spiral
+         arrives (a full slab was a ceiling over the whole climb) */
+      const fy = 8.9, foffX = (fy - y0) * leanX * 0.55, foffZ = (fy - y0) * leanZ * 0.55;
+      const stairHeadA = ((T.doorAng + 2.5 + 26 * 0.2) % TAU + TAU) % TAU;   // ≈2.21
+      /* the floor: a complete inner disc (the room), and an outer skirt of
+         wedges with ONE missing sector — the hole the spiral rises through */
+      latheW(md, [[0.2, 0], [3.05, 0]], { seg: 12, x: T.x + foffX, y: fy - 0.06, z: T.z + foffZ, flat: true, col: C_SKSTONE2, cols: [C_SKSTONE2] });
+      boxW(md, { x: T.x + foffX, y: fy - 0.22, z: T.z + foffZ, w: 2.2, d: 2.2, h: 0.18, rx: 0.04, rz: 0.03, col: C_SKSTONE3, colB: C_SKSTONE3 });
+      for (let w = 0; w < 12; w++) {
+        const a = w / 12 * TAU + 0.13;
+        if (skAngDiff(a, stairHeadA) < 0.72) continue;
+        boxW(md, { x: T.x + foffX + Math.sin(a) * 3.9, y: fy - 0.18 + Math.sin(a) * 0.14, z: T.z + foffZ + Math.cos(a) * 3.9,
+          w: 1.15, d: 1.05, h: 0.22, ry: a, rx: 0.04, col: C_SKSTONE2, colB: C_SKSTONE3 });
+      }
+      /* the head's threshold stones: two worn slabs stepping the last
+         treads up onto the room floor */
+      for (const [da, rr, ty2] of [[-0.21, 3.5, 8.24], [0.02, 3.45, 8.5]]) {
+        const a = stairHeadA + da;
+        boxW(md, { x: T.x + foffX + Math.sin(a) * rr, y: ty2, z: T.z + foffZ + Math.cos(a) * rr,
+          w: 0.85, d: 0.8, h: 0.14, ry: a, col: C_SKSTONE, colB: C_SKSTONE3 });
+      }
+      skLampCage(md, T.x + foffX, fy + 0.14, T.z + foffZ, 1.3);
+      SK_LAMP.push({ x: T.x + foffX, y: fy + 0.8, z: T.z + foffZ });
+      SK_DECK.push({ x: T.x + foffX, z: T.z + foffZ, y: fy, r: 3.3 });
+      skRock(md, -1237, 254.5, 1.6, 1.7, 31);   // the spit boulder (a snapper's)
+    } else {
+      /* THE FAR STAR: perfect, lit-ready, silent. Shell + door + cage
+         only — its lamp room belongs to the guardian (p6l). */
+      const y0 = gy - 0.3;
+      skRing(md, T, y0, (3.45 + 4.35) / 2, 0.46, 1.42, 9, T.doorAng, 0.4, 2.9, 41);
+      skDoorFrame(md, gm, guv, T, y0 + 0.1, 3.9, T.doorAng, 0.4, 2.8);
+      const topY = y0 + 12.9;
+      latheW(md, [[0.2, 0], [4.35, 0]], { seg: 12, x: T.x, y: topY, z: T.z, flat: true, col: C_SKSTONE2, cols: [C_SKSTONE2] });
+      skRing(md, T, topY, (3.45 + 4.35) / 2, 0.36, 0.9, 1, T.doorAng + Math.PI, 0.3, 1.0, 43);
+      skLampCage(md, T.x, topY + 0.95, T.z, 1.6);
+      SK_LAMP.push({ x: T.x, y: topY + 1.8, z: T.z });
+      SK_DECK.push(null);
+      skRock(md, B.x + 12, B.z + 8, 2.6, 3.4, 44);
+      skRock(md, B.x - 6, B.z + 14, 2.0, 2.6, 45);
+    }
+    const m = mdMesh(md, SK_TOWER_MAT, false);
+    m.matrixAutoUpdate = false; m.updateMatrix();
+    m.frustumCulled = false;
+    m.visible = false;
+    scene.add(m);
+    skTowerMeshes.push(m);
+    const g = skGlowMesh(gm, guv, 0.5);
+    g.visible = false;
+    scene.add(g);
+    skTowerGlows.push(g);
+  }
+})();
+
+/* ── the climbs' colliders (plat = support, never wall) ── */
+const skPlatColls = [];
+(function skBuildClimbColls() {
+  const T0 = SK_B[0].tower, gy0 = skGroundAt(T0.x, T0.z) - 0.3;
+  addColl(T0.x, T0.z, 0.62);                      // the newel post (full height)
+  for (let s = 0; s < 18; s++) {
+    const a = T0.doorAng + 1.1 + s * 0.26;
+    const c = addColl(T0.x + Math.sin(a) * 1.55, T0.z + Math.cos(a) * 1.55, 0.8, gy0 + 0.35 + s * 0.42);
+    c.plat = true;
+    skPlatColls.push(c);
+  }
+  const D0 = SK_DECK[0];
+  for (const [ox, oz] of [[0, 0], [1.3, 0.8], [-1.3, -0.8], [0.9, -1.2], [-0.9, 1.2]]) {
+    const c = addColl(D0.x + ox, D0.z + oz, 1.25, D0.y);
+    c.plat = true;
+    skPlatColls.push(c);
+  }
+  const T2 = SK_B[2].tower, y02 = SK_WL - 1.3;
+  for (let s = 0; s < 27; s++) {
+    const a = T2.doorAng + 2.5 + s * 0.2;
+    const ty = 0.05 + s * 0.325;
+    const off = (ty - y02) * 0.55;
+    const c = addColl(T2.x + off * 0.14 + Math.sin(a) * 4.0, T2.z + off * 0.1 + Math.cos(a) * 4.0, 0.95, ty);
+    c.plat = true;
+    skPlatColls.push(c);
+    if ((s % 2) === 0) {
+      /* the balustrade: a WALL on the well side at this tread's height */
+      addColl(T2.x + off * 0.14 + Math.sin(a) * 2.95, T2.z + off * 0.1 + Math.cos(a) * 2.95, 0.42, ty + 1.35);
+    }
+    const aN = ((a % TAU) + TAU) % TAU;
+    if (skAngDiff(aN, T2.doorAng) < 0.7) {
+      /* the outer rail over the mouth: the one stretch with no wall */
+      addColl(T2.x + off * 0.14 + Math.sin(a) * 5.0, T2.z + off * 0.1 + Math.cos(a) * 5.0, 0.48, ty + 1.35);
+    }
+  }
+  {
+    const c = addColl(T2.x + Math.sin(T2.doorAng + 2.2) * 3.9, T2.z + Math.cos(T2.doorAng + 2.2) * 3.9, 1.5, 0.07);
+    c.plat = true;
+    skPlatColls.push(c);
+  }
+  const D2 = SK_DECK[2];
+  {
+    /* the lamp floor: a complete inner room disc, an outer skirt with one
+       open sector over the spiral's head — the last tread steps INWARD */
+    const headA = ((T2.doorAng + 2.5 + 26 * 0.2) % TAU + TAU) % TAU;
+    const cc = addColl(D2.x, D2.z, 1.7, D2.y);
+    cc.plat = true; skPlatColls.push(cc);
+    for (let w = 0; w < 10; w++) {
+      const a = w / 10 * TAU;
+      const c = addColl(D2.x + Math.sin(a) * 2.2, D2.z + Math.cos(a) * 2.2, 1.3, D2.y + Math.sin(a) * 0.1);
+      c.plat = true; skPlatColls.push(c);
+    }
+    for (let w = 0; w < 12; w++) {
+      const a = w / 12 * TAU + 0.13;
+      if (skAngDiff(a, headA) < 0.72) continue;
+      const c = addColl(D2.x + Math.sin(a) * 3.9, D2.z + Math.cos(a) * 3.9, 1.1, D2.y + Math.sin(a) * 0.14);
+      c.plat = true; skPlatColls.push(c);
+    }
+    for (const [da, rr, ty2] of [[-0.21, 3.5, 8.38], [0.02, 3.45, 8.64]]) {
+      const a = headA + da;
+      const c = addColl(D2.x + Math.sin(a) * rr, D2.z + Math.cos(a) * rr, 0.9, ty2);
+      c.plat = true; skPlatColls.push(c);
+    }
+  }
+})();
+
+/* ── rescue anchors: a dunked or downed player wakes on the islet's own
+   footing, WITH the boat — never 400 m away on someone else's strand ── */
+ISLE_ANCHORS.push(
+  { x: -190, z: 96, sx: -189, sz: 98, id: 'harborstar' },
+  { x: -902, z: 301, sx: -902, sz: 307, id: 'reefstar' },
+  { x: -1241, z: 249, sx: -1236, sz: 252, id: 'drownedstar' },
+  { x: -2285, z: -990, sx: -2288, sz: -993, id: 'farstar' },
+);
+
+/* ── shade: every charted isle casts it, and so do these. The DROWNED
+   TOWER'S whole footprint is one shade circle — its hall and spiral are
+   ENCLOSED, but inShadeAt's isle model is 2D circles, and an unregistered
+   interior reads as open sun: a midday punt-in fainted the player on the
+   stair and woke them outside at the anchor (the probe caught it; a kid
+   would hit it every noon). Each open tower casts a lee at its base. ── */
+ISLE_SHADE.push(
+  { x: -1257.5, z: 228.5, r: 9.5 },            /* drowned tower: hall + full spiral */
+  { x: -196, z: 106, r: 4.5 },                 /* harbor star tower lee */
+  { x: -902, z: 315, r: 4.5 },                 /* reef star stack lee */
+  { x: -2294, z: -1002, r: 5.0 },              /* far star tower lee */
+);
+
+/* ── the swell yields to the islets: shoal the amp (and pull the color
+   band in) around each footprint, calm inside the drowned hall — the
+   same law every charted isle already obeys ── */
+const _skSeaShoal = seaShoalAt;
+seaShoalAt = function (x, z) {
+  const s = _skSeaShoal(x, z);
+  for (let i = 0; i < 4; i++) {
+    const B = SK_B[i];
+    const dx = x - B.x, dz = z - B.z;
+    const d2 = dx * dx + dz * dz;
+    const rOut = B.r + 58;
+    if (d2 > rOut * rOut) continue;
+    const d = Math.sqrt(d2);
+    s.amp *= clamp((d - B.r * 0.94) / 58, 0, 1);
+    s.off = Math.min(s.off, smoothstep(clamp((d - B.r * 0.98) / 160, 0, 1)));
+  }
+  return s;
+};
+
+/* ═══ RULES registrations: the ground owner + all four thresholds ═══ */
+window.__WORLD_REG.push({
+  name: 'star-isles', kind: 'ground', over: ['sea'],
+  owns: (x, z) => skIsleIdx(x, z) >= 0,
+  ground: (x, z) => skGroundAt(x, z),
+  note: 'the four dark-beacon islets (p6k) — pad-stack fields on 2 m lattices; solid = skSolidAt (tower shells); every doorway is a portal below',
+});
+window.__PORTALS.push(
+  { name: 'harbor-star-door',
+    x: SK_B[0].tower.x + Math.sin(2.53) * 2.75, z: SK_B[0].tower.z + Math.cos(2.53) * 2.75,
+    openNow: () => true },
+  { name: 'reef-star-arch', x: -902, z: 309.5, openNow: () => true },
+  { name: 'drowned-star-mouth',
+    x: SK_B[2].tower.x + Math.sin(0.79) * 5.6, z: SK_B[2].tower.z + Math.cos(0.79) * 5.6,
+    openNow: () => true },
+  { name: 'far-star-door',
+    x: SK_B[3].tower.x + Math.sin(0.71) * 3.9, z: SK_B[3].tower.z + Math.cos(0.71) * 3.9,
+    openNow: () => true },
+);
+/* the pinned door export for p6l: outward-facing yaw of the doorway */
+window.__p6k.farStarDoor = {
+  x: SK_B[3].tower.x + Math.sin(0.71) * 3.9,
+  z: SK_B[3].tower.z + Math.cos(0.71) * 3.9,
+  yaw: 0.71,
+};
+</script>
+<script>
+/* ═══════════ p6k/5 — islet dynamics: THE PUNT and THE REEF WASH ═══════════ */
+
+/* ── the tower punt: a waterlogged flat-bottom tender that has ridden
+   inside the drowned tower for a year. Stick to drift, ✕ to pole (the
+   ferry-pole verb, hers); □ steps off at the landing or the spit. She
+   is a registered hull — the hall's water yields to her (Rule 4). ── */
+const SK_PUNT = {
+  on: false, x: -1243, z: 245, ang: 2.2, spd: 0, vx: 0, vz: 0,
+  moorX: -1243, moorZ: 245, moorAng: 2.2, bobPh: 0, shoves: 0, shoves2: 0,
+};
+let skPuntGrp = null, skPuntColl = null, skPuntPoleT = 0, skPuntPole2T = 0;
+(function skBuildPunt() {
+  const md = MD();
+  const C_P = col(0x6e5a3e), C_P2 = col(0x4c3d28), C_BILGE = col(0x8a7856);
+  boxW(md, { x: 0, y: 0, z: 0, w: 0.58, d: 1.35, h: 0.46, tw: 0.66, td: 1.62, col: C_P, colB: C_P2 });
+  boxW(md, { x: 0, y: 0.16, z: 1.75, w: 0.34, d: 0.45, h: 0.3, tw: 0.18, td: 0.26, rx: -0.26, col: C_P });
+  boxW(md, { x: 0, y: 0.16, z: -1.75, w: 0.34, d: 0.45, h: 0.3, tw: 0.18, td: 0.26, rx: 0.26, col: C_P2 });
+  boxW(md, { x: 0, y: 0.27, z: 0, w: 0.55, d: 1.6, h: 0.07, col: C_BILGE });
+  boxW(md, { x: 0, y: 0.44, z: -0.5, w: 0.55, d: 0.13, h: 0.06, col: C_P2 });
+  /* her own pole, shipped along the gunwale */
+  boxW(md, { x: 0.44, y: 0.5, z: -0.8, w: 0.03, d: 0.03, h: 2.3, rx: -0.55, ry: 0.2, col: C_P2 });
+  /* green waterline stain: a year in a flooded hall */
+  for (const s of [-1, 1]) {
+    boxW(md, { x: 0.6 * s, y: 0.1, z: 0, w: 0.045, d: 1.55, h: 0.14, col: col(0x59695c) });
+  }
+  const puntMat = new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide });
+  SK_NIGHT_MATS.push(puntMat);
+  const hull = mdMesh(md, puntMat, false);
+  hull.frustumCulled = false;
+  skPuntGrp = new THREE.Group();
+  skPuntGrp.add(hull);
+  skPuntGrp.visible = false;
+  scene.add(skPuntGrp);
+  skPuntColl = addColl(SK_PUNT.x, SK_PUNT.z, 1.0);
+})();
+window.__HULLS.push({
+  name: 'star-punt', r: 2.0,
+  afloat: () => true,
+  underway: () => SK_PUNT.on,
+  x: () => SK_PUNT.x, z: () => SK_PUNT.z,
+  waterlineY: () => skPuntY() + 0.16,
+  depthOk: () => true,
+  rescue: () => skPuntMoor(),
+});
+function skPuntY() {
+  return SK_WL + (typeof swellAt === 'function' ? swellAt(SK_PUNT.x, SK_PUNT.z) * 0.5 : 0);
+}
+function skPuntMoor() {
+  SK_PUNT.on = false;
+  SK_PUNT.x = SK_PUNT.moorX; SK_PUNT.z = SK_PUNT.moorZ; SK_PUNT.ang = SK_PUNT.moorAng;
+  SK_PUNT.spd = 0; SK_PUNT.vx = 0; SK_PUNT.vz = 0;
+  skPuntColl.off = false;
+  skPuntColl.x = SK_PUNT.x; skPuntColl.z = SK_PUNT.z;
+}
+/* punt water: afloat inside the drowned islet's shoal + hall, never on
+   the spit, never through a wall (the mouth is the one way in) */
+function skPuntWaterOk(x, z) {
+  if (skIsleIdx(x, z) !== 2) return false;
+  if (skSolidAt(x, z)) return false;
+  return SK_WL - skGroundAt(x, z) > 0.28;
+}
+function skPuntFooting() {
+  /* dry or platform footing within a step of the gunwale, walk-connected */
+  for (let r = 1.6; r <= 5.2; r += 0.6) {
+    for (let i = 0; i < 12; i++) {
+      const a = SK_PUNT.ang + i * (TAU / 12);
+      const px = SK_PUNT.x + Math.sin(a) * r, pz = SK_PUNT.z + Math.cos(a) * r;
+      if (worldSolidAt(px, pz)) continue;
+      let blocked = false;
+      for (let s = 1; s <= 3; s++) {
+        const mx = SK_PUNT.x + (px - SK_PUNT.x) * s / 4, mz = SK_PUNT.z + (pz - SK_PUNT.z) * s / 4;
+        if (worldSolidAt(mx, mz)) { blocked = true; break; }
+      }
+      if (blocked) continue;
+      const sy = supportYAt(px, pz, SK_WL + 2.0);
+      /* strictly above the DUNK line (WL+0.35): p6c dunks any standing
+         fy below it wherever terrain depth > 0.8 — and the whole drowned
+         hall is deep terrain. A footing below that line is a footing the
+         tide law re-dunks the instant you stand on it (the probe caught
+         the full cascade: step off → splash → wake on the spit outside).
+         Margin: only offer step-off onto ground a real step ABOVE water. */
+      if (sy > SK_WL + 0.4 && sy < SK_WL + 2.0) return { x: px, z: pz, y: sy };
+    }
+  }
+  return null;
+}
+function skBoardPunt() {
+  SK_PUNT.on = true;
+  P.skPunting = true;
+  P.x = SK_PUNT.x; P.z = SK_PUNT.z; P.fy = skPuntY() + 0.44; P.air = false; P.jvy = 0;
+  P.vx = 0; P.vz = 0; P.st = 'idle'; P.sprint = false;
+  SK_PUNT.spd = 0;
+  skPuntColl.off = true;
+  SFX.creakBoat ? SFX.creakBoat() : SFX.creak();
+  SFX.splashSm ? SFX.splashSm() : SFX.splash();
+  rumble({ duration: 90, strong: 0.15, weak: 0.3 });
+}
+function skLeavePunt() {
+  const s = skPuntFooting();
+  if (!s) return false;
+  SK_PUNT.on = false;
+  P.skPunting = false;
+  P.x = s.x; P.z = s.z; P.fy = s.y; P.air = false; P.jvy = 0;
+  P.vx = 0; P.vz = 0; P.st = 'idle';
+  /* the landing IS dry ground from this instant: record it in BOTH dunk
+     recorders so a splash a step later wakes you here, never back on the
+     spit outside (step off the punt, wake where you stepped — the law). */
+  skLastDry[0] = s.x; skLastDry[1] = s.z; skLastDry[2] = 1;
+  if (typeof lastDry !== 'undefined') { lastDry[0] = s.x; lastDry[1] = s.z; }
+  skPuntColl.off = false;
+  skPuntColl.x = SK_PUNT.x; skPuntColl.z = SK_PUNT.z;
+  SFX.splashSm ? SFX.splashSm() : SFX.splash();
+  return true;
+}
+function skPuntShove(fromP2) {
+  if (fromP2) { if (skPuntPole2T > 0) return; skPuntPole2T = 0.5; SK_PUNT.shoves2++; }
+  else { if (skPuntPoleT > 0) return; skPuntPoleT = 0.5; SK_PUNT.shoves++; }
+  SK_PUNT.spd = Math.min(4.8, SK_PUNT.spd + 2.6);
+  SFX.thump(false);
+  SFX.splashSm ? SFX.splashSm() : SFX.splash();
+  rumble({ duration: 70, strong: 0.12, weak: 0.3 });
+  /* the pole answers the stair's snappers */
+  let hit = false;
+  for (const sn of SK_SNAPS) {
+    if (sn.gone || sn.st === 'leave') continue;
+    if (Math.hypot(sn.x - SK_PUNT.x, sn.z - SK_PUNT.z) < 3.4 && Math.abs(sn.y - SK_WL) < 2.4) {
+      if (skHitSnapper(sn)) hit = true;
+    }
+  }
+  if (hit) SFX.hit();
+}
+let skP2AtkWas = false;
+function skTickPunt() {
+  if (IN.atk) {
+    const ctx = currentInteract();
+    if (ctx && ctx.id === 'skPuntOff') { doInteract(ctx); IN.atk = false; return; }
+    skPuntShove(false);
+    IN.atk = false;
+  }
+  if (IN.jump) {
+    const ctx = currentInteract();
+    if (ctx && ctx.id === 'skPuntOff') { doInteract(ctx); IN.jump = false; return; }
+  }
+  /* P2's pole (drop-in: any second pad, south button) */
+  if (window.ArcadeController) {
+    try {
+      const p2 = ArcadeController.pad(1);
+      const dn = !!(p2 && p2.connected && p2.button('south'));
+      if (dn && !skP2AtkWas) skPuntShove(true);
+      skP2AtkWas = dn;
+    } catch (e) {}
+  }
+  if (skPuntPoleT > 0) skPuntPoleT -= DT;
+  if (skPuntPole2T > 0) skPuntPole2T -= DT;
+  const mag = moveVec();
+  if (mag > 0.1) {
+    SK_PUNT.ang = angLerp(SK_PUNT.ang, Math.atan2(_mv[0], _mv[1]), 0.1);
+    SK_PUNT.spd += (2.3 - SK_PUNT.spd) * 0.035;
+  }
+  SK_PUNT.spd *= 0.985;
+  const nx = SK_PUNT.x + Math.sin(SK_PUNT.ang) * SK_PUNT.spd * DT;
+  const nz = SK_PUNT.z + Math.cos(SK_PUNT.ang) * SK_PUNT.spd * DT;
+  if (skPuntWaterOk(nx, SK_PUNT.z)) SK_PUNT.x = nx; else SK_PUNT.spd *= 0.7;
+  if (skPuntWaterOk(SK_PUNT.x, nz)) SK_PUNT.z = nz; else SK_PUNT.spd *= 0.7;
+  P.x = SK_PUNT.x; P.z = SK_PUNT.z;
+  P.fy = skPuntY() + 0.44;
+  P.heading = SK_PUNT.ang;
+}
+
+/* ── THE REEF WASH: the phase-3 sea language ashore — a telegraphed set
+   sweeps the low shelf; the cost is a knockdown toward the water, never
+   hearts. Timing is kid-fair: 3 s of white warning, 2.2 s of wash,
+   9.8 s of clear climbing between. ── */
+const SK_WASH = { period: 15, tele: 3.0, dur: 2.2, t: 7, hitThisWash: false, saidOnce: false, n: 0, shoveT: 0, shX: 0, shZ: 0 };
+let skWashRing = null, skWashLine = null;
+(function skBuildWash() {
+  /* the wash: a foam ring around the stack's low shelf */
+  const md = MD(), uvs = [];
+  const B = SK_B[1];
+  for (let s = 0; s < 18; s++) {
+    const a0 = s / 18 * TAU, a1 = (s + 1) / 18 * TAU;
+    const r0 = 6.5, r1 = 14.5;
+    const uv = [[0, 0], [1, 0], [1, 1], [0, 1]];
+    const q = [
+      [Math.sin(a0) * r0, Math.cos(a0) * r0], [Math.sin(a1) * r0, Math.cos(a1) * r0],
+      [Math.sin(a1) * r1, Math.cos(a1) * r1], [Math.sin(a0) * r1, Math.cos(a0) * r1],
+    ];
+    for (const i of [0, 1, 2, 0, 2, 3]) {
+      md.p.push(q[i][0], 0, q[i][1]);
+      md.c.push(0.85, 0.92, 0.95);
+      uvs.push(uv[i][0], uv[i][1]);
+    }
+  }
+  skWashRing = skGlowMesh(md, uvs, 0);
+  skWashRing.position.set(B.x, SK_WL + 0.32, B.z);
+  skWashRing.renderOrder = 3;
+  skWashRing.visible = false;
+  scene.add(skWashRing);
+  /* the telegraph: a hard white swell line standing off the rock */
+  const md2 = MD(), uvs2 = [];
+  skFlatQuad(md2, 0, 0, 0, 0, 1, 26, 2.2, [0.9, 0.96, 1.0], uvs2);
+  skWashLine = skGlowMesh(md2, uvs2, 0);
+  skWashLine.position.set(B.x - 30, SK_WL + 0.5, B.z);
+  skWashLine.visible = false;
+  scene.add(skWashLine);
+})();
+function skWashPhase() {
+  const t = SK_WASH.t % SK_WASH.period;
+  if (t < SK_WASH.tele) return { ph: 'tele', k: t / SK_WASH.tele };
+  if (t < SK_WASH.tele + SK_WASH.dur) return { ph: 'wash', k: (t - SK_WASH.tele) / SK_WASH.dur };
+  return { ph: 'clear', k: 0 };
+}
+function skTickWash() {
+  const B = SK_B[1];
+  if (SK_WASH.shoveT > 0 && state === 'play' && !P.sailing && !P.skPunting) {
+    SK_WASH.shoveT -= DT;
+    const k2 = SK_WASH.shoveT / 0.55;
+    const nx2 = P.x + SK_WASH.shX * 9 * k2 * DT, nz2 = P.z + SK_WASH.shZ * 9 * k2 * DT;
+    if (!worldSolidAt(nx2, nz2)) {
+      P.x = nx2; P.z = nz2;
+      P.fy = Math.max(P.fy - 3 * DT, supportYAt(P.x, P.z, P.fy + 0.3));
+    }
+  }
+  const d2p = Math.hypot(P.x - B.x, P.z - B.z);
+  if (d2p > 160) { skWashRing.visible = false; skWashLine.visible = false; return; }
+  const was = skWashPhase().ph;
+  SK_WASH.t += DT;
+  const now = skWashPhase();
+  if (was !== 'tele' && now.ph === 'tele') {
+    SK_WASH.hitThisWash = false;
+    if (d2p < 90) { SFX.splash(); SFX.gullCry && SFX.gullCry(); }
+  }
+  if (was === 'tele' && now.ph === 'wash') {
+    SK_WASH.n++;
+    if (d2p < 90) { SFX.thump(true); rumble({ duration: 200, strong: 0.3, weak: 0.5 }, 'wash'); }
+  }
+  /* the telegraph line rolls in from the west, the ring floods on the wash */
+  if (now.ph === 'tele') {
+    skWashLine.visible = true;
+    skWashLine.material.opacity = 0.25 + now.k * 0.5;
+    skWashLine.position.x = B.x - 46 + now.k * 32;
+    skWashRing.visible = false;
+  } else if (now.ph === 'wash') {
+    skWashLine.visible = false;
+    skWashRing.visible = true;
+    skWashRing.material.opacity = 0.75 * Math.sin(clamp(now.k, 0, 1) * Math.PI);
+    skWashRing.scale.setScalar(0.85 + now.k * 0.35);
+    if ((simTick % 8) === 0) {
+      const a = Math.random() * TAU;
+      psSpray.spawn(B.x + Math.sin(a) * 10, SK_WL + 0.6, B.z + Math.cos(a) * 10,
+        -Math.sin(a) * 1.4, 1.2, -Math.cos(a) * 1.4, 0.6);
+    }
+    /* the knockdown: on the low shelf when the set arrives = swept toward
+       the sea. A stagger and a soaking — never hearts (the dunk-bounce
+       catches whoever goes all the way in). */
+    if (!SK_WASH.hitThisWash && !P.sailing && !P.skPunting && !P.air &&
+        d2p < 15.5 && P.fy < SK_WL + 1.7 && state === 'play') {
+      SK_WASH.hitThisWash = true;
+      const dx = (P.x - B.x) / (d2p || 1), dz = (P.z - B.z) / (d2p || 1);
+      SK_WASH.shoveT = 0.55; SK_WASH.shX = dx; SK_WASH.shZ = dz;
+      P.hitstop = 4;
+      CAM.shake = Math.max(CAM.shake, 0.3);
+      SFX.splash();
+      burst(psSpray, P.x, SK_WL + 0.5, P.z, 22, 2.4, 2.0, 0.8);
+      rumble({ duration: 320, strong: 0.6, weak: 0.7 }, 'wash-hit');
+      if (!SK_WASH.saidOnce) {
+        SK_WASH.saidOnce = true;
+        showCaption('The sets sweep the low shelf. Climb between the washes.', 3600);
+      }
+    }
+  } else {
+    skWashRing.visible = false;
+    skWashLine.visible = false;
+  }
+}
+</script>
+<script>
+/* ═══════════ p6k/6 — the hostile pockets: MOTH-WISPS, NIGHT GULLS, SNAPPERS ═══════════ */
+
+/* ── MOTH-WISPS — ash-grey dusk moths that keep the dead towers. They
+   dive at your lantern; two slashes and they fizz into silver mist.
+   NOT sun imps: nothing here pops them for standing in the dark — they
+   are viable in every light their pockets see (the shade-fizzle law). ── */
+function skBuildWisp() {
+  const root = new THREE.Group();
+  const mdB = MD();
+  const grey = [0.42, 0.43, 0.47], grey2 = [0.3, 0.3, 0.34], pale = [0.75, 0.78, 0.85];
+  lathe(mdB, [[0, -0.3], [0.1, -0.12], [0.12, 0.08], [0.07, 0.24], [0, 0.3]],
+    { seg: 6, ex: 1.4, col: grey, cols: [grey2, grey, pale] });
+  for (const s of [-1, 1]) {
+    box(mdB, { x: s * 0.05, y: 0.24, z: 0.16, w: 0.015, d: 0.14, h: 0.015, rx: 0.5, rz: s * 0.4, col: pale });
+  }
+  const body = mdMesh(mdB, TOON);
+  body.frustumCulled = false;
+  root.add(body);
+  const wing = (side) => {
+    const n = node(root, side * 0.08, 0.08, 0);
+    const md = MD(), uvs = [];
+    const q = [[0, 0], [side * 0.62, 0.18], [side * 0.78, -0.1], [side * 0.4, -0.3]];
+    const uv = [[0, 0], [1, 0], [1, 1], [0, 1]];
+    for (const i of [0, 1, 2, 0, 2, 3]) {
+      md.p.push(q[i][0], 0.02, q[i][1] * 1.2);
+      md.c.push(0.8, 0.88, 1.0);
+      uvs.push(uv[i][0], uv[i][1]);
+    }
+    for (const i of [0, 1, 2, 0, 2, 3]) {
+      md.p.push(q[i][0] * 0.7, -0.02, q[i][1] * 1.2 - 0.28);
+      md.c.push(0.6, 0.68, 0.9);
+      uvs.push(uv[i][0], uv[i][1]);
+    }
+    const m = skGlowMesh(md, uvs, 0.85);
+    n.add(m);
+    return n;
+  };
+  const wingL = wing(-1), wingR = wing(1);
+  root.visible = false;
+  scene.add(root);
+  return { root, body, wingL, wingR };
+}
+const SK_WISPS = [];
+window.__skWispLog = [];          // { i, tele, dive } sim ticks — the telegraph recorder
+(function skSpawnWisps() {
+  const homes = [
+    /* the Harbor Star's swarm: the approach water + the tower court */
+    [-192, 103, 0], [-197, 96, 0], [-203.5, 115.5, 0], [-209, 124, 0],
+    /* the Far Star's keepers: the cove + the door court */
+    [-2287, -991, 3], [-2293, -997, 3], [-2303, -1010, 3], [-2309, -1017, 3],
+  ];
+  for (let i = 0; i < homes.length; i++) {
+    const [hx, hz, bi] = homes[i];
+    SK_WISPS.push({
+      c: skBuildWisp(), i, bi, hx, hz,
+      x: hx, z: hz, y: 0, ang: 0, hp: 2, st: 'drift', t: Math.random() * 3,
+      cd: 0, dead: false, ph: Math.random() * TAU, dir: [0, 0, 0], teleTick: 0,
+    });
+  }
+  for (const w of SK_WISPS) w.y = Math.max(skGroundAt(w.hx, w.hz), SK_WL) + 2.6;
+})();
+function skWispSurface(w) { return Math.max(skGroundAt(w.x, w.z), SK_WL); }
+function skWispReset(w) {
+  w.dead = false; w.hp = 2; w.st = 'drift'; w.t = 0; w.cd = 0;
+  w.x = w.hx; w.z = w.hz; w.y = Math.max(skGroundAt(w.hx, w.hz), SK_WL) + 2.6;
+  w.c.root.visible = false;
+}
+function skFizzWisp(w) {
+  w.dead = true;
+  w.c.root.visible = false;
+  burst(psSparkle, w.x, w.y, w.z, 18, 1.7, 1.0, 1.1);
+  burst(psSpark, w.x, w.y, w.z, 8, 1.2, 0.8, 0.5);
+  SFX.pop(); SFX.chime(1.4);
+  rumble({ duration: 70, strong: 0.25, weak: 0.35 });
+  if (typeof nmDropSalt === 'function') {
+    nmDropSalt(w.hx + (Math.random() - 0.5) * 2, w.hz + (Math.random() - 0.5) * 2,
+      Math.max(skGroundAt(w.hx, w.hz), SK_WL) + 0.15);
+  }
+}
+function skHitWisp(w) {
+  if (w.dead) return false;
+  w.hp--;
+  P.hitstop = 3;
+  SFX.hit();
+  burst(psSpark, w.x, w.y, w.z, 8, 1.4, 1.0, 0.5);
+  if (w.hp <= 0) { skFizzWisp(w); return true; }
+  w.st = 'knock'; w.t = 0;
+  return true;
+}
+function skTickWisp(w) {
+  if (w.dead) return;
+  const tx = P.sailing ? BOAT.x : P.x, tz = P.sailing ? BOAT.z : P.z;
+  const d2p = Math.hypot(tx - w.x, tz - w.z);
+  if (d2p > 120) return;                      // asleep past the fog
+  w.t += DT;
+  if (w.cd > 0) w.cd -= DT;
+  const surf = skWispSurface(w);
+  if (w.st === 'drift') {
+    w.ph += DT * 0.9;
+    const r = 2.6 + Math.sin(w.t * 0.5) * 1.1;
+    w.x = w.hx + Math.cos(w.ph) * r;
+    w.z = w.hz + Math.sin(w.ph) * r;
+    w.y += ((Math.max(skGroundAt(w.x, w.z), SK_WL) + 2.4 + Math.sin(w.t * 1.7) * 0.5) - w.y) * 0.06;
+    w.ang = w.ph + Math.PI / 2;
+    if (d2p < 13 && w.cd <= 0 && state === 'play') {
+      w.st = 'tele'; w.t = 0; w.cd = 5.5;
+      w.teleTick = simTick;
+      SFX.chirp();
+    }
+  } else if (w.st === 'tele') {
+    /* THE TELEGRAPH — it rises, flares silver, holds ≥ 0.95 s */
+    w.y += ((surf + 3.6) - w.y) * 0.08;
+    w.ang = Math.atan2(tx - w.x, tz - w.z);
+    if ((simTick % 9) === 0) psSparkle.spawn(w.x, w.y - 0.2, w.z, 0, -0.4, 0, 0.35);
+    if (w.t >= 0.95) {
+      w.st = 'dive'; w.t = 0;
+      window.__skWispLog.push({ i: w.i, tele: w.teleTick, dive: simTick });
+      if (window.__skWispLog.length > 40) window.__skWispLog.shift();
+      const ty = P.sailing ? SK_WL + 2.6 : P.fy + 1.15;
+      const dx = tx - w.x, dy = ty - w.y, dz = tz - w.z;
+      const l = Math.hypot(dx, dy, dz) || 1;
+      w.dir = [dx / l * 11.5, dy / l * 11.5, dz / l * 11.5];
+      SFX.buzz();
+    }
+  } else if (w.st === 'dive') {
+    w.x += w.dir[0] * DT; w.y += w.dir[1] * DT; w.z += w.dir[2] * DT;
+    const dNow = Math.hypot(tx - w.x, tz - w.z);
+    if (P.sailing) {
+      if (dNow < 2.4 && Math.abs(w.y - (SK_WL + 2.4)) < 2.2) {
+        BOAT.spd *= 0.85;
+        burst(psSpark, w.x, w.y, w.z, 10, 1.6, 1.0, 0.5);
+        SFX.thump(false);
+        rumble({ duration: 120, strong: 0.3, weak: 0.4 });
+        w.st = 'climb'; w.t = 0;
+      }
+    } else if (dNow < 1.0 && Math.abs(w.y - (P.fy + 1.1)) < 1.3) {
+      hurtPlayer(1, w.x, w.z, w.c.root);
+      w.st = 'climb'; w.t = 0;
+    }
+    if (w.y < surf + 0.4 || w.t > 1.3) { w.st = 'climb'; w.t = 0; }
+  } else if (w.st === 'climb') {
+    const hx = w.hx - w.x, hz = w.hz - w.z;
+    const l = Math.hypot(hx, hz) || 1;
+    w.x += hx / l * 6 * DT; w.z += hz / l * 6 * DT;
+    w.y += ((surf + 2.6) - w.y) * 0.05;
+    w.ang = Math.atan2(hx, hz);
+    if (w.t > 1.5) { w.st = 'drift'; w.t = 0; w.ph = Math.atan2(w.z - w.hz, w.x - w.hx); }
+  } else if (w.st === 'knock') {
+    w.y += DT * 1.6;
+    w.x -= Math.sin(w.ang) * 2.4 * DT;
+    w.z -= Math.cos(w.ang) * 2.4 * DT;
+    if (w.t > 0.7) { w.st = 'drift'; w.t = 0; w.cd = Math.max(w.cd, 1.4); }
+  }
+}
+
+/* ── NIGHT GULLS — the sun gulls' slate cousins, wheeling the Reef Star
+   in pairs. Same pair-dive brain (p6d's), their own colors, salt on the
+   cure (they wheel at dusk AND under sun — no light kills them). ── */
+const SK_NGULLS = [];
+(function skSpawnNightGulls() {
+  const homes = [
+    [[-897, 311], [-908, 305], 94],
+    [[-909, 326], [-896, 324], 95],
+  ];
+  for (const [a, b, pair] of homes) {
+    for (const [x, z] of [a, b]) {
+      const g = addGull(x, z, 'sea', pair, { x: (a[0] + b[0]) / 2, z: (a[1] + b[1]) / 2 });
+      g.night = true;
+      SK_NGULLS.push(g);
+      /* recolor: slate feathers, a pale moon-glow behind the eyes */
+      for (const m of g.m.parts) {
+        const ca = m.geometry.attributes.color;
+        for (let v = 0; v < ca.count; v++) {
+          ca.setXYZ(v,
+            ca.getX(v) * 0.42 + 0.14, ca.getY(v) * 0.45 + 0.16, ca.getZ(v) * 0.52 + 0.22);
+        }
+        ca.needsUpdate = true;
+      }
+      const ga = g.m.glow.geometry.attributes.color;
+      for (let v = 0; v < ga.count; v++) ga.setXYZ(v, 0.55, 0.72, 0.9);
+      ga.needsUpdate = true;
+    }
+  }
+})();
+/* night gulls hoard salt spray: the cure shakes it loose */
+const _skPopGull = popGull;
+popGull = function (g) {
+  _skPopGull(g);
+  if (g.night && typeof nmDropSalt === 'function') {
+    nmDropSalt(g.home.x + (Math.random() - 0.5) * 3, g.home.z + (Math.random() - 0.5) * 3, SK_WL + 0.15);
+  }
+};
+
+/* ── SNAPPERS on the drowned stair — the river's jaw-turtles, reused
+   whole (p6j's builder), basking where the stone stays dry ── */
+const SK_SNAPS = [];
+window.__skSnapLog = [];
+(function skSpawnSnappers() {
+  const T = SK_B[2].tower, y02 = SK_WL - 1.3;
+  const spots = [
+    [-1237, 254.5, skGroundAt(-1237, 254.5) + 1.15],                 // the spit boulder
+  ];
+  for (const s of [2, 5]) {                                           // the two wall corbels, at the stair's FOOT
+    const a = T.doorAng + 2.5 + s * 0.2;
+    const ty = 0.05 + s * 0.325;
+    const off = (ty - y02) * 0.55;
+    spots.push([T.x + off * 0.14 + Math.sin(a) * 5.0, T.z + off * 0.1 + Math.cos(a) * 5.0, ty + 0.34]);
+  }
+  for (let k = 0; k < spots.length; k++) {
+    const [px, pz, py] = spots[k];
+    const sn = {
+      c: nmBuildSnapper(), k, sx: px, sz: pz, sy: py,
+      x: px, z: pz, y: py, ang: 0, hp: 2, st: 'bask', t: Math.random() * 2,
+      cd: 0, gone: false, respawnT: 0, hitDone: false, lx: 0, lz: 0, ly: 0, coilTick: 0,
+    };
+    sn.c.root.position.set(sn.x, sn.y, sn.z);
+    SK_SNAPS.push(sn);
+  }
+})();
+function skSnapReset(sn) {
+  sn.gone = false; sn.hp = 2; sn.st = 'bask'; sn.t = 0; sn.cd = 0; sn.respawnT = 0;
+  sn.x = sn.sx; sn.z = sn.sz; sn.y = sn.sy;
+  sn.c.root.visible = false;
+}
+function skCureSnapper(sn) {
+  /* nothing dies: it slips off its stone and swims out the mouth */
+  sn.st = 'leave'; sn.t = 0;
+  SFX.chime(0.9);
+  burst(psSparkle, sn.x, sn.y + 0.5, sn.z, 14, 1.4, 1.2, 0.9);
+  if (typeof nmDropSalt === 'function') {
+    for (let k = 0; k < 2; k++) {
+      nmDropSalt(sn.sx + (Math.random() - 0.5) * 1.6, sn.sz + (Math.random() - 0.5) * 1.6, sn.sy + 0.1);
+    }
+  }
+}
+function skHitSnapper(sn) {
+  if (sn.gone || sn.st === 'leave') return false;
+  sn.hp--;
+  SFX.hit();
+  P.hitstop = 3;
+  burst(psSpark, sn.x, sn.y + 0.4, sn.z, 10, 1.6, 1.2, 0.5);
+  rumble({ duration: 110, strong: 0.4, weak: 0.3 });
+  if (sn.hp <= 0) { skCureSnapper(sn); return true; }
+  sn.st = 'stagger'; sn.t = 0;
+  return true;
+}
+function skTickSnapper(sn) {
+  if (sn.gone) {
+    sn.respawnT += DT;
+    if (sn.respawnT > 45 && Math.hypot(P.x - sn.sx, P.z - sn.sz) > 130) skSnapReset(sn);
+    return;
+  }
+  sn.t += DT;
+  if (sn.cd > 0) sn.cd -= DT;
+  const tx = P.skPunting ? SK_PUNT.x : P.x, tz = P.skPunting ? SK_PUNT.z : P.z;
+  const ty = P.skPunting ? SK_WL + 0.5 : P.fy;
+  const d2p = Math.hypot(tx - sn.x, tz - sn.z);
+  if (sn.st === 'bask') {
+    sn.y = sn.sy + Math.sin(sn.t * 1.4 + sn.k) * 0.02;
+    if (sn.cd <= 0 && d2p < 4.6 && Math.abs(ty - sn.y) < 2.2 && state === 'play') {
+      sn.st = 'coil'; sn.t = 0;
+      sn.coilTick = simTick;
+      SFX.chirp();
+    }
+  } else if (sn.st === 'coil') {
+    /* the telegraph: reared head, grinding shell, a full second */
+    sn.c.headN.rotation.x = -0.85 * smoothstep(clamp(sn.t / 0.4, 0, 1));
+    sn.ang = angLerp(sn.ang, Math.atan2(tx - sn.x, tz - sn.z), 0.15);
+    if ((simTick % 12) === 0) psDust.spawn(sn.x, sn.y + 0.2, sn.z, 0, 0.5, 0, 0.4);
+    if (sn.t >= 1.0) {
+      sn.st = 'lunge'; sn.t = 0; sn.hitDone = false;
+      window.__skSnapLog.push({ i: sn.k, coil: sn.coilTick, lunge: simTick });
+      if (window.__skSnapLog.length > 40) window.__skSnapLog.shift();
+      const dd = d2p || 1;
+      sn.lx = (tx - sn.x) / dd; sn.lz = (tz - sn.z) / dd;
+      sn.ly = clamp((ty + 0.5 - sn.y) / dd, -1.2, 1.2);
+      SFX.huff();
+    }
+  } else if (sn.st === 'lunge') {
+    sn.x += sn.lx * 7.5 * DT; sn.z += sn.lz * 7.5 * DT; sn.y += sn.ly * 7.5 * DT;
+    if (!sn.hitDone && Math.hypot(tx - sn.x, tz - sn.z) < 1.05 && Math.abs(ty + 0.4 - sn.y) < 1.2) {
+      sn.hitDone = true;
+      if (P.skPunting) {
+        SK_PUNT.spd *= 0.4;
+        SFX.thump(false);
+        rumble({ duration: 160, strong: 0.4, weak: 0.4 });
+        burst(psSpray, SK_PUNT.x, SK_WL + 0.3, SK_PUNT.z, 10, 1.6, 1.2, 0.5);
+      } else {
+        /* the bite staggers you INTO the wall, never down the well: on a
+           spiral over open water the knockback direction is the whole
+           difference between a scare and a soaking (kid-fair) */
+        const T = SK_B[2].tower;
+        const inTower = Math.hypot(P.x - T.x, P.z - T.z) < 6.4;
+        hurtPlayer(1, inTower ? T.x : sn.x, inTower ? T.z : sn.z, sn.c.root);
+      }
+    }
+    if (sn.t > 0.55) { sn.st = 'return'; sn.t = 0; }
+  } else if (sn.st === 'return' || sn.st === 'stagger') {
+    const k2 = sn.st === 'stagger' ? 0.12 : 0.06;
+    sn.x += (sn.sx - sn.x) * k2; sn.z += (sn.sz - sn.z) * k2; sn.y += (sn.sy - sn.y) * k2;
+    sn.c.headN.rotation.x *= 0.85;
+    if (sn.t > (sn.st === 'stagger' ? 0.8 : 1.2)) { sn.st = 'bask'; sn.t = 0; sn.cd = 1.1; }
+  } else if (sn.st === 'leave') {
+    /* down into the hall water and out through the mouth */
+    sn.y += (SK_WL - 0.15 - sn.y) * 0.05;
+    const T = SK_B[2].tower;
+    const mx = T.x + Math.sin(T.doorAng) * 9, mz = T.z + Math.cos(T.doorAng) * 9;
+    sn.x += (mx - sn.x) * 0.02; sn.z += (mz - sn.z) * 0.02;
+    if (sn.t > 4) { sn.gone = true; sn.c.root.visible = false; }
+  }
+  sn.c.root.position.set(sn.x, sn.y, sn.z);
+  sn.c.root.rotation.y = sn.ang;
+}
+</script>
+<script>
+/* ═══════════ p6k/7 — THE STAR ROAD: sighting, glitter lanes, beacon light ═══════════ */
+
+/* ── the sky-look: the orbit camera can only raise its eye ~25°, and the
+   constellations stand at 30–55°. With the spyglass RAISED this pass
+   re-aims the view from the same eye point, stretching the stick's
+   up-range so the dusk sky is actually reachable — from boat or shore.
+   (Position untouched: Rule 5's cull anchor still follows the camera.) */
+const _skPrevUpdateCamera = updateCamera;
+const _skLook = new THREE.Vector3();
+let skLookPitch = 0, skLookYaw = 0, skGlassUp = false;
+updateCamera = function (dtv) {
+  _skPrevUpdateCamera(dtv);
+  const gk = (typeof nmGlassK === 'number') ? nmGlassK : 0;
+  skGlassUp = gk > 0.7 && state === 'play' && CAM.mode === 'follow';
+  if (gk > 0.05 && state === 'play' && CAM.mode === 'follow') {
+    skLookYaw = CAM.yaw + Math.PI;
+    skLookPitch = -CAM.pitch * (CAM.pitch < 0 ? 2.2 : 1);
+    const k = smoothstep(clamp((gk - 0.5) / 0.4, 0, 1));
+    if (k > 0.01) {
+      const cp = Math.cos(skLookPitch);
+      _skLook.set(
+        camera.position.x + Math.sin(skLookYaw) * cp * 50,
+        camera.position.y + Math.sin(skLookPitch * k) * 50,
+        camera.position.z + Math.cos(skLookYaw) * cp * 50);
+      camera.lookAt(_skLook);
+    }
+  }
+};
+
+/* ── the sighting: sweep the raised glass across an incomplete
+   constellation → it GLEAMS and lays a silver lane on the water toward
+   its dark beacon. Free, unlimited, no text, no fail state. ── */
+let skLaneT = 0, skLaneI = -1, skLaneOx = 0, skLaneOz = 0, skLaneBearing = 0;
+const skGleam = [0, 0, 0, 0];
+let skSightings = 0;
+const SK_LANE_N = 26;
+let skLaneMesh = null, skLanePosA = null;
+(function skBuildLane() {
+  const g = new THREE.BufferGeometry();
+  const n = SK_LANE_N * 6;
+  const p = new Float32Array(n * 3), c = new Float32Array(n * 3), u = new Float32Array(n * 2);
+  const uv = [[0, 0], [1, 0], [1, 1], [0, 0], [1, 1], [0, 1]];
+  for (let d = 0; d < SK_LANE_N; d++) {
+    const fade = 1 - Math.abs(d - SK_LANE_N * 0.35) / (SK_LANE_N * 0.85);
+    for (let k = 0; k < 6; k++) {
+      const vi = d * 6 + k;
+      c[vi * 3] = SK_SILVER[0] * fade; c[vi * 3 + 1] = SK_SILVER[1] * fade; c[vi * 3 + 2] = SK_SILVER[2] * fade;
+      u[vi * 2] = uv[k][0]; u[vi * 2 + 1] = uv[k][1];
+    }
+  }
+  g.setAttribute('position', new THREE.BufferAttribute(p, 3));
+  g.setAttribute('color', new THREE.BufferAttribute(c, 3));
+  g.setAttribute('uv', new THREE.BufferAttribute(u, 2));
+  skLaneMesh = new THREE.Mesh(g, new THREE.MeshBasicMaterial({
+    map: DOT_TEX, vertexColors: true, transparent: true, opacity: 0, fog: false,
+    blending: THREE.AdditiveBlending, depthWrite: false,
+  }));
+  skLaneMesh.frustumCulled = false;
+  skLaneMesh.renderOrder = 3;
+  skLaneMesh.visible = false;
+  scene.add(skLaneMesh);
+  skLanePosA = g.attributes.position;
+})();
+function skLaneRebuild() {
+  const sb = Math.sin(skLaneBearing), cb = Math.cos(skLaneBearing);
+  const nx = -cb * 0.55, nz = sb * 0.55;
+  for (let d = 0; d < SK_LANE_N; d++) {
+    const t0 = 9 + d * 6.4, t1 = t0 + 3.6;
+    const x0 = skLaneOx + sb * t0, z0 = skLaneOz + cb * t0;
+    const x1 = skLaneOx + sb * t1, z1 = skLaneOz + cb * t1;
+    const y0 = SK_WL + 0.62 + (typeof swellAt === 'function' ? swellAt(x0, z0) : 0);
+    const y1 = SK_WL + 0.62 + (typeof swellAt === 'function' ? swellAt(x1, z1) : 0);
+    const q = [
+      [x0 + nx, y0, z0 + nz], [x1 + nx, y1, z1 + nz], [x1 - nx, y1, z1 - nz],
+      [x0 + nx, y0, z0 + nz], [x1 - nx, y1, z1 - nz], [x0 - nx, y0, z0 - nz],
+    ];
+    for (let k = 0; k < 6; k++) skLanePosA.setXYZ(d * 6 + k, q[k][0], q[k][1], q[k][2]);
+  }
+  skLanePosA.needsUpdate = true;
+}
+function skLayLane(i) {
+  skLaneI = i;
+  skLaneT = 20;
+  skLaneOx = P.sailing ? BOAT.x : P.x;
+  skLaneOz = P.sailing ? BOAT.z : P.z;
+  skLaneBearing = Math.atan2(SK_B[i].x - skLaneOx, SK_B[i].z - skLaneOz);
+  skLaneRebuild();
+  skSightings++;
+  SFX.glassPulse(0.8);
+  SFX.chime(1.5);
+  rumble({ duration: 180, strong: 0.2, weak: 0.5 });
+}
+const _skCamDir = new THREE.Vector3();
+const skInSight = [false, false, false, false];
+function skTickSight() {
+  if (!skGlassUp || !SAVE || !SAVE.spyglass || !skStarsSeen() || skSky() < 5 || skDuskK() < 0.3) {
+    for (let i = 0; i < 4; i++) skInSight[i] = false;
+    return;
+  }
+  camera.getWorldDirection(_skCamDir);
+  const camAz = Math.atan2(_skCamDir.x, _skCamDir.z);
+  const camEl = Math.asin(clamp(_skCamDir.y, -1, 1));
+  for (let i = 0; i < 4; i++) {
+    if (skBeaconLit()[i]) { skInSight[i] = false; continue; }
+    const C = SK_CONST[i];
+    const inside = camEl > 0.2 && skAngDiff(camAz, C.az) < 0.17 && Math.abs(camEl - C.el) < 0.45;
+    if (inside) {
+      skGleam[i] = Math.min(1.6, skGleam[i] + DT * 5);
+      if (!skInSight[i]) skLayLane(i);          // re-sighting is free, always
+    }
+    skInSight[i] = inside;
+  }
+}
+
+/* ── the lantern trues the helm: the masthead hums and brightens as the
+   boat's heading closes on the lane's beacon ── */
+let skTrueK = 0, skHumT = 0;
+function skTickLantern() {
+  if (skLaneT <= 0 || !P.sailing || !skLanternOn()) { skTrueK = Math.max(0, skTrueK - DT); return; }
+  const b = Math.atan2(SK_B[skLaneI].x - BOAT.x, SK_B[skLaneI].z - BOAT.z);
+  let da = b - BOAT.ang;
+  da = ((da % TAU) + TAU) % TAU; if (da > Math.PI) da -= TAU;
+  const want = 1 - clamp(Math.abs(da) / 1.15, 0, 1);
+  skTrueK += (want - skTrueK) * 0.06;
+  skHumT -= DT;
+  if (skTrueK > 0.35 && skHumT <= 0) {
+    skHumT = 1.9 - skTrueK * 1.25;
+    SFX.hum();
+    if (skTrueK > 0.8) rumble({ duration: 40, strong: 0.05, weak: 0.18 }, 'lantern');
+  }
+}
+
+/* ── BEACON LIGHTING — hold ✕ at a dead lamp; the beacon lights, burns
+   every dusk forever, and its constellation completes in frame ── */
+const skLampCharge = [0, 0, 0, 0], skLampSparkT = [0, 0, 0, 0];
+function skLampNearIdx() {
+  if (!skStarsSeen()) return -1;
+  for (let i = 0; i < 4; i++) {
+    if (i === 3 && !(SAVE && SAVE.mothDone)) continue;   // the guardian holds the far lamp (p6l)
+    const L = SK_LAMP[i];
+    if (Math.hypot(P.x - L.x, P.z - L.z) < 2.6 && Math.abs(P.fy - (L.y - 1.5)) < 2.6) return i;
+  }
+  return -1;
+}
+/* the beams: one clamped cone each — length ALWAYS from beamHitDist */
+const skBeamGrp = [], skBeamLen = [0, 0, 0, 0], skBeamYaw = [0.6, 2.4, 1.4, 2.9], skBeamCd = [0, 1, 2, 3];
+(function skBuildBeams() {
+  for (let i = 0; i < 4; i++) {
+    const grp = new THREE.Group();
+    const md = MD(), uvs = [];
+    /* a cross of two long tapering fins along +z, unit length (scaled live) */
+    for (const rot of [0, 1]) {
+      const q = [[-0.3, 0], [0.3, 0], [2.9, 1], [-2.9, 1]];
+      const uv = [[0, 0], [1, 0], [1, 1], [0, 1]];
+      for (const k of [0, 1, 2, 0, 2, 3]) {
+        const [w, t] = q[k];
+        const bright = 0.75 - t * 0.52;
+        if (rot === 0) md.p.push(w, t * -0.055, t);
+        else md.p.push(0.001, w * 0.4 + t * -0.055, t);
+        md.c.push(0.72 * bright, 0.8 * bright, 1.0 * bright);
+        uvs.push(uv[k][0], uv[k][1]);
+      }
+    }
+    skGlowQuad(md, 0, 0, 0, 2.4, 2.4, SK_SILVER, uvs);     // the lamp's own halo
+    const m = skGlowMesh(md, uvs, 0.7);
+    grp.add(m);
+    grp.position.set(SK_LAMP[i].x, SK_LAMP[i].y, SK_LAMP[i].z);
+    grp.visible = false;
+    scene.add(grp);
+    skBeamGrp.push(grp);
+    skBeamLen[i] = 120;
+  }
+})();
+function skUpdateBeam(i, dtv) {
+  const grp = skBeamGrp[i];
+  skBeamYaw[i] += dtv * 0.16;
+  const yaw = skBeamYaw[i];
+  /* a frame COUNTDOWN, never a simTick modulo: under turbo the frame
+     samples simTick in strides of N and a misaligned phase would skip
+     the recompute forever (the beam froze at its bootstrap length) */
+  if (--skBeamCd[i] <= 0) {
+    skBeamCd[i] = 10;
+    const L = SK_LAMP[i];
+    skBeamLen[i] = beamHitDist(L.x, L.y, L.z, Math.sin(yaw), -0.055, Math.cos(yaw), 280);
+  }
+  grp.rotation.y = yaw;
+  grp.scale.set(1, 1, Math.max(4, skBeamLen[i]));
+  grp.children[0].material.opacity = 0.12 + skDuskK() * 0.68;
+}
+function skLightBeacon(i, silent) {
+  const lit = skBeaconLit();
+  if (lit[i]) return false;
+  lit[i] = true;
+  if (SAVE) storeSave();
+  skPaintConst(i);
+  skLampCharge[i] = 0;
+  SFX.burn(); SFX.chime(1.7); SFX.bell && SFX.bell();
+  rumble({ duration: 420, strong: 0.5, weak: 0.8 }, 'beacon');
+  const L = SK_LAMP[i];
+  burst(psSparkle, L.x, L.y + 0.4, L.z, 26, 2.2, 1.8, 1.2);
+  burst(psSpark, L.x, L.y + 0.2, L.z, 12, 1.8, 1.4, 0.7);
+  const names = ['THE HARBOR STAR', 'THE REEF STAR', 'THE DROWNED STAR', 'THE FAR STAR'];
+  const n = skLitCount();
+  showCaption(names[i] + ' burns again. ' + (n < 4 ? n + ' of 4 anchors hold.' : 'The coast is lit.'), 4200);
+  if (!silent && state === 'play') startCine('skStar' + i);
+  return true;
+}
+window.__p6k.lightBeacon = (i) => skLightBeacon(clamp(i | 0, 0, 3), false);
+function skTickLampHold() {
+  const i = skLampNearIdx();
+  if (i < 0) return;
+  if (skBeaconLit()[i]) return;
+  if (IN.atkHeld && state === 'play') {
+    skLampCharge[i] += DT / 1.2;
+    skLampSparkT[i] -= DT;
+    if (skLampSparkT[i] <= 0) {
+      skLampSparkT[i] = 0.16;
+      SFX.click();
+      const L = SK_LAMP[i];
+      psSpark.spawn(L.x + (Math.random() - 0.5) * 0.5, L.y - 0.2, L.z + (Math.random() - 0.5) * 0.5,
+        (Math.random() - 0.5), 0.7, (Math.random() - 0.5), 0.4);
+    }
+    if (skLampCharge[i] >= 1) skLightBeacon(i, false);
+  } else skLampCharge[i] = Math.max(0, skLampCharge[i] - DT * 1.6);
+}
+
+/* ── the repeatable mini-payoff: ≤8 s, skippable, films the rendered
+   world — the tower burns below, the constellation completes above ── */
+const SK_CINE = { p0: [0, 0, 0], l0: [0, 0, 0], i: 0, anchDone: false };
+function skCineFrom() {
+  SK_CINE.p0 = [camera.position.x, camera.position.y, camera.position.z];
+  SK_CINE.l0 = [P.x, P.fy + 1.2, P.z];
+}
+function skLerpCam(t0, t1, t, a, b) {
+  const k = smoothstep(clamp((t - t0) / (t1 - t0), 0, 1));
+  cineCam(lerp(a[0], b[0], k), lerp(a[1], b[1], k), lerp(a[2], b[2], k),
+    lerp(a[3], b[3], k), lerp(a[4], b[4], k), lerp(a[5], b[5], k));
+  return k;
+}
+function skFinishStarCine() {
+  const i = SK_CINE.i;
+  skPaintConst(i);
+  skGleam[i] = 0;
+  endCine();
+}
+function skTickStarCine(t) {
+  const i = SK_CINE.i;
+  const L = SK_LAMP[i];
+  const A = [...SK_CINE.p0, ...SK_CINE.l0];
+  /* the vantage: out over the water, tower burning in frame */
+  const va = skBeamYaw[i] + 2.4;
+  const V = [L.x + Math.sin(va) * 16, L.y + 3.5, L.z + Math.cos(va) * 16, L.x, L.y - 0.5, L.z];
+  const cd = skConstDir(i);
+  const dusk = skDuskK() > 0.25;
+  /* the sky shot: the same eye, tilted up the anchor line */
+  const S = [V[0], V[1], V[2], V[0] + cd[0] * 140, V[1] + cd[1] * 140, V[2] + cd[2] * 140];
+  if (t > 0.9 && IN.confirm) { skFinishStarCine(); return; }
+  if (t < 1.7) skLerpCam(0.1, 1.7, t, A, V);
+  else if (t < 2.6) cineCam(V[0], V[1], V[2], V[3], V[4], V[5]);
+  else if (t < 5.2 && dusk) {
+    skLerpCam(2.6, 3.6, t, V, S);
+    if (!SK_CINE.anchDone && t > 3.7) {
+      SK_CINE.anchDone = true;
+      skPaintSpan(skStarSpans[i].anch, 1.6);
+      skGleam[i] = 1.6;
+      SFX.chime(1.9); SFX.night();
+      rumble({ duration: 260, strong: 0.3, weak: 0.6 });
+    }
+  } else if (t < 5.2) {
+    /* daylight lighting: hold the tower — the sky will show at dusk */
+    cineCam(V[0], V[1], V[2], V[3], V[4], V[5]);
+    if (!SK_CINE.anchDone && t > 3.7) { SK_CINE.anchDone = true; SFX.chime(1.9); }
+  } else if (t < 6.8) skLerpCam(5.4, 6.8, t, dusk ? S : V, A);
+  else skFinishStarCine();
+}
+const _skPrevStartCine = startCine;
+startCine = function (id) {
+  const mine = typeof id === 'string' && id.indexOf('skStar') === 0;
+  if (mine) skCineFrom();
+  _skPrevStartCine(id);
+  if (mine) {
+    SK_CINE.i = +id.slice(6) || 0;
+    SK_CINE.anchDone = false;
+    CAM.mode = 'cine';
+    dlgBox.classList.remove('on');
+  }
+};
+const _skPrevTickCine = tickCine;
+tickCine = function () {
+  if (CINE.id && String(CINE.id).indexOf('skStar') === 0) { CINE.t += DT; skTickStarCine(CINE.t); return; }
+  _skPrevTickCine();
+};
+</script>
+<script>
+/* ═══════════ p6k/8 — wiring: interact, sim, render, derive, telemetry ═══════════ */
+
+/* ── interactions ── */
+const _skPrevInteract = currentInteract;
+currentInteract = function () {
+  if (P.skPunting) {
+    if (SK_PUNT.spd < 1.2 && skPuntFooting()) return { id: 'skPuntOff', label: '✕ STEP OFF' };
+    return null;
+  }
+  const li = skLampNearIdx();
+  if (li >= 0 && !skBeaconLit()[li]) return { id: 'skLamp', label: '✕ HOLD — LIGHT THE LAMP' };
+  const base = _skPrevInteract();
+  if (base) return base;
+  if (!P.sailing && !P.skiffing &&
+      Math.hypot(P.x - SK_PUNT.x, P.z - SK_PUNT.z) < 3.6 && skIsleIdx(P.x, P.z) === 2) {
+    /* nobody boards a boat mid-bite: while a snapper is on you, ✕ stays
+       the sword (the prompt returns the moment the pocket calms) */
+    let aggro = false;
+    for (const sn of SK_SNAPS) {
+      if (sn.gone || sn.st === 'bask' || sn.st === 'leave') continue;
+      if (Math.hypot(sn.x - P.x, sn.z - P.z) < 9) { aggro = true; break; }
+    }
+    if (!aggro) return { id: 'skPuntOn', label: '✕ TAKE THE PUNT' };
+  }
+  return null;
+};
+const _skPrevDoInteract = doInteract;
+doInteract = function (ctx) {
+  if (ctx.id === 'skPuntOn') skBoardPunt();
+  else if (ctx.id === 'skPuntOff') skLeavePunt();
+  else if (ctx.id === 'skLamp') { /* a HOLD: nothing on the press */ }
+  else _skPrevDoInteract(ctx);
+};
+
+/* ── the sim ── */
+let skSaidTilt = false;
+const skLastDry = [0, 0, 0];
+const _skPrevTickPlayer = tickPlayer;
+tickPlayer = function () {
+  if (P.skPunting) {
+    skTickPunt();
+    if (typeof nmTickNightClock === 'function') nmTickNightClock();
+  } else _skPrevTickPlayer();
+  if (state !== 'play') return;
+  skTickSight();
+  skTickLantern();
+  if (skLaneT > 0) {
+    skLaneT = Math.max(0, skLaneT - DT);
+    if ((simTick % 30) === 0) skLaneRebuild();
+  }
+  skTickWash();
+  for (const w of SK_WISPS) skTickWisp(w);
+  const dB2 = Math.hypot(P.x - SK_B[2].x, P.z - SK_B[2].z);
+  if (dB2 < 300) for (const sn of SK_SNAPS) skTickSnapper(sn);
+  skTickLampHold();
+  /* the dunk-bounce law, kept honest on the islets: p6c's tide recorder
+     trusts any fy above the waterline — including MID-AIR over the
+     drowned tower's well — so a stair fall could bounce you to a spot
+     with no footing and cascade to the far spit. Here the last VALIDATED
+     standing spot wins: fall from the spiral, wake at the spiral. */
+  if (!P.sailing && !P.skPunting && skIsleIdx(P.x, P.z) >= 0) {
+    const sup2 = supportYAt(P.x, P.z, P.fy + 0.25);
+    if (!P.air && sup2 > SK_WL - 0.25 && P.fy >= sup2 - 0.06) {
+      skLastDry[0] = P.x; skLastDry[1] = P.z; skLastDry[2] = 1;
+    } else if (skLastDry[2] && typeof lastDry !== 'undefined') {
+      lastDry[0] = skLastDry[0]; lastDry[1] = skLastDry[1];
+    }
+  }
+  /* THE HALL'S OWN DUNK MERCY. Inside the drowned tower the calming wrap
+     zeroes waterDepthAt — which silently disables p6c's dunk-bounce, so a
+     fall off the spiral left a kid SWIMMING under the stair with no rescue
+     (the probe caught it; the comment above always promised otherwise).
+     The splash lands you at your last dry stair footing: fall from the
+     spiral, wake at the spiral. */
+  if (!P.sailing && !P.skPunting && !P.air && skLastDry[2] &&
+      skIsleIdx(P.x, P.z) === 2 && P.fy < SK_WL - 0.15) {
+    SFX.splash();
+    P.x = skLastDry[0]; P.z = skLastDry[1];
+    P.fy = supportYAt(P.x, P.z, P.fy + 3); P.air = false; P.jvy = 0;
+    P.vx = 0; P.vz = 0;
+  }
+  /* forward seam (MIRROR-6): the cure IS the far lamp's lighting — when
+     the moth unfurls, the lamp room floods with light off its own wings.
+     p6l sets mothDone; the beacon is p6k's, so the flame is set here,
+     silently (the cure cine is the beat — no second camera). */
+  if ((simTick % 45) === 0 && SAVE && SAVE.mothDone && !skBeaconLit()[3]) skLightBeacon(3, true);
+  /* the world's one line, where the floor gave up */
+  if (!skSaidTilt && dB2 < 40 && Math.hypot(P.x - SK_LAMP[2].x, P.z - SK_LAMP[2].z) < 4.2 &&
+      P.fy > SK_WL + 8 && !cineSeen('skTiltLine')) {
+    skSaidTilt = true;
+    markCineSeen('skTiltLine');
+    showCaption('The lamp still turns. The floor gave up first.', 4600);
+  }
+};
+
+/* ── the sword answers the pockets ── */
+const _skPrevSwingHits = swingHits;
+swingHits = function () {
+  let any = _skPrevSwingHits();
+  for (const w of SK_WISPS) {
+    if (w.dead || !w.c.root.visible) continue;
+    if (inSwingArc(w.x, w.z, 3.0, 1.6) && Math.abs(w.y - (P.fy + 1.2)) < 2.4) {
+      if (skHitWisp(w)) any = true;
+    }
+  }
+  for (const sn of SK_SNAPS) {
+    if (sn.gone || sn.st === 'leave' || !sn.c.root.visible) continue;
+    if (inSwingArc(sn.x, sn.z, 2.7, 1.5) && Math.abs(sn.y - P.fy) < 2.0) {
+      if (skHitSnapper(sn)) any = true;
+    }
+  }
+  return any;
+};
+const _skPrevBoatSwing = (typeof boatSwingHits === 'function') ? boatSwingHits : null;
+if (_skPrevBoatSwing) {
+  boatSwingHits = function () {
+    let any = _skPrevBoatSwing();
+    for (const w of SK_WISPS) {
+      if (w.dead || !w.c.root.visible) continue;
+      if (Math.hypot(w.x - BOAT.x, w.z - BOAT.z) < 5.0 && w.y > SK_WL && w.y < SK_WL + 5) {
+        if (skHitWisp(w)) any = true;
+      }
+    }
+    return any;
+  };
+}
+const _skPrevRespawn = respawnLeftBehind;
+respawnLeftBehind = function () {
+  _skPrevRespawn();
+  for (const w of SK_WISPS) {
+    if (w.dead && Math.hypot(P.x - w.hx, P.z - w.hz) > 160) skWispReset(w);
+  }
+  for (const sn of SK_SNAPS) {
+    if (sn.gone && Math.hypot(P.x - sn.sx, P.z - sn.sz) > 160) skSnapReset(sn);
+  }
+};
+
+/* ── the render frame ── */
+let skClock = performance.now(), skDbgDone = false;
+const _skPrevCull = cullChunks;
+cullChunks = function (ccx, ccz) {
+  _skPrevCull(ccx, ccz);
+  const now = performance.now();
+  const dtv = Math.min(0.1, (now - skClock) / 1000);
+  skClock = now;
+  const dusk = skDuskK();
+  for (const m of SK_NIGHT_MATS) m.color.copy(WORLD_MAT.color);
+  /* THE SKY — one mesh; the gleam is a color write on one span */
+  const starsOn = skSky() >= 5 && skStarsSeen() && dusk > 0.02 && scene.fog.near < 1e6;
+  skStarMesh.visible = starsOn;
+  if (starsOn) skStarMesh.material.opacity = dusk * 0.95;
+  for (let i = 0; i < 4; i++) {
+    if (skGleam[i] > 0.01) {
+      if (!skInSight[i]) skGleam[i] = Math.max(0, skGleam[i] - dtv * 1.4);
+      const lit = skBeaconLit()[i];
+      skPaintSpan(skStarSpans[i].base, (lit ? 1.28 : 0.8) * (1 + skGleam[i] * 0.55));
+      if (lit) skPaintSpan(skStarSpans[i].anch, 1.35 * (1 + skGleam[i] * 0.3));
+      if (skGleam[i] <= 0.01) skPaintConst(i);
+    }
+  }
+  /* the islets + towers + beams, distance-culled */
+  const lit = skBeaconLit();
+  for (let i = 0; i < 4; i++) {
+    const B = SK_B[i];
+    const dx = B.x - ccx, dz = B.z - ccz;
+    const d2 = dx * dx + dz * dz;
+    const near = d2 < 700 * 700;
+    skSheets[i].visible = near;
+    skTowerMeshes[i].visible = near;
+    skTowerGlows[i].visible = near && d2 < 260 * 260;
+    const beamOn = lit[i] && d2 < 900 * 900;
+    skBeamGrp[i].visible = beamOn;
+    if (beamOn) skUpdateBeam(i, dtv);
+  }
+  /* the lane */
+  skLaneMesh.visible = skLaneT > 0;
+  if (skLaneT > 0) skLaneMesh.material.opacity = 0.8 * Math.min(1, skLaneT / 4) * (0.75 + 0.25 * Math.sin(now / 160));
+  /* the punt */
+  {
+    const d2 = (SK_PUNT.x - ccx) * (SK_PUNT.x - ccx) + (SK_PUNT.z - ccz) * (SK_PUNT.z - ccz);
+    skPuntGrp.visible = d2 < 260 * 260;
+    if (skPuntGrp.visible) {
+      SK_PUNT.bobPh += dtv * 1.8;
+      skPuntGrp.position.set(SK_PUNT.x, skPuntY() - 0.12 + Math.sin(SK_PUNT.bobPh) * 0.035, SK_PUNT.z);
+      skPuntGrp.rotation.set(0, SK_PUNT.ang, Math.sin(SK_PUNT.bobPh * 0.7) * 0.02);
+    }
+  }
+  /* the moth-wisps (their ticks own position; this owns pixels) */
+  for (const w of SK_WISPS) {
+    const d2 = (w.x - ccx) * (w.x - ccx) + (w.z - ccz) * (w.z - ccz);
+    w.c.root.visible = !w.dead && d2 < 130 * 130;
+    if (w.c.root.visible) {
+      w.c.root.position.set(w.x, w.y, w.z);
+      w.c.root.rotation.y = w.ang;
+      const flap = Math.sin(now / (w.st === 'dive' ? 26 : 52) + w.i) * (w.st === 'tele' ? 1.15 : 0.8);
+      w.c.wingL.rotation.z = flap;
+      w.c.wingR.rotation.z = -flap;
+    }
+  }
+  for (const sn of SK_SNAPS) {
+    const d2 = (sn.x - ccx) * (sn.x - ccx) + (sn.z - ccz) * (sn.z - ccz);
+    sn.c.root.visible = !sn.gone && d2 < 110 * 110;
+  }
+  /* THE STAR LANTERN + the silver pool */
+  skLantGrp.visible = skLanternOn();
+  if (skLantGrp.visible) {
+    const pulse = skTrueK > 0.05 ? skTrueK * (0.7 + 0.3 * Math.sin(now / 140)) : 0;
+    skLantGlow.material.opacity = clamp(dusk * (0.42 + pulse * 0.55) + 0.04, 0, 1);
+    skLantGlow.scale.setScalar(1 + pulse * 0.3);
+  }
+  const poolOn = skLanternOn() && dusk > 0.3 && state !== 'title' && scene.fog.near < 1e6;
+  skPoolMesh.visible = poolOn;
+  if (poolOn) {
+    const px = P.sailing ? BOAT.x : P.x, pz = P.sailing ? BOAT.z : P.z;
+    const py = P.sailing ? SK_WL + 0.14 : P.fy + 0.08;   // feet, not groundH: the pool must hold in the off-world arena too
+    skPoolMesh.position.set(px, py, pz);
+    skPoolMesh.material.opacity = 0.5 + 0.14 * Math.sin(now / 300);
+  }
+  skExtendDebugOnce();
+};
+
+/* ═══ THE ONE DERIVATION — phase six part one, from the save, both ways ═══ */
+let skHookErr = null, skHookRuns = 0;
+function skDeriveWorld(S) {
+  skBeaconLit();                 // normalize in place
+  skPaintSky();
+  skStarMesh.visible = false;    // the frame pass re-derives visibility
+  skLaneT = 0; skLaneI = -1;
+  skLaneMesh.visible = false;
+  for (let i = 0; i < 4; i++) {
+    skGleam[i] = 0; skInSight[i] = false;
+    skLampCharge[i] = 0;
+    skBeamGrp[i].visible = false;
+  }
+  skTrueK = 0;
+  /* the punt goes home; nobody stays aboard a derived world */
+  P.skPunting = false;
+  skPuntMoor();
+  /* the pockets reset (nothing here persists — Zelda-pocket law) */
+  for (const w of SK_WISPS) skWispReset(w);
+  for (const sn of SK_SNAPS) skSnapReset(sn);
+  for (const g of SK_NGULLS) {
+    if (g.dead) {
+      g.dead = false; g.st = 'wheel'; g.t = 0; g.cd = 0;
+      g.x = g.sx; g.z = g.sz; g.y = SK_WL + 11;
+      g.m.root.visible = false; g.m.root.scale.setScalar(1);
+    }
+  }
+  SK_WASH.t = 7; SK_WASH.hitThisWash = false;
+  skWashRing.visible = false; skWashLine.visible = false;
+  skLantGrp.visible = !!(S && S.starLantern);
+  skLantGlow.material.opacity = 0;
+  skPoolMesh.visible = false;
+  skSaidTilt = false;
+}
+window.__worldStateHooks.push(function (S) {
+  skHookRuns++;
+  try { skDeriveWorld(S); skHookErr = null; }
+  catch (e) { skHookErr = String(e && e.message || e); throw e; }
+});
+
+/* ═══ telemetry ═══ */
+window.__telemetryHooks.push(function (T) {
+  const lit = skBeaconLit();
+  T.beaconLit = lit.map(b => b ? 1 : 0).join('');
+  T.beaconN = skLitCount();
+  T.starLantern = skLanternOn();
+  T.starsSeen = skStarsSeen();
+  T.skStarsVis = skStarMesh.visible;
+  T.skStarOp = +(skStarMesh.material.opacity || 0).toFixed(2);
+  T.skSightings = skSightings;
+  T.skLaneT = +skLaneT.toFixed(1);
+  T.skLaneI = skLaneT > 0 ? skLaneI : -1;
+  T.skGleamMax = +Math.max(skGleam[0], skGleam[1], skGleam[2], skGleam[3]).toFixed(2);
+  T.skTrueK = +skTrueK.toFixed(2);
+  T.skGlassUp = skGlassUp;
+  T.skWispAlive = SK_WISPS.filter(w => !w.dead).length;
+  T.skSnapAlive = SK_SNAPS.filter(s => !s.gone).length;
+  T.skNGullAlive = SK_NGULLS.filter(g => !g.dead).length;
+  T.skPunting = !!P.skPunting;
+  T.skPuntX = +SK_PUNT.x.toFixed(1);
+  T.skPuntZ = +SK_PUNT.z.toFixed(1);
+  T.skWashPh = skWashPhase().ph;
+  T.skWashN = SK_WASH.n;
+  T.skBeamLen = skBeamLen.map(v => Math.round(v)).join(',');
+  T.skLampNear = skLampNearIdx();
+  T.skWispLogN = window.__skWispLog.length;
+  T.skSnapLogN = window.__skSnapLog.length;
+  T.skHookErr = skHookErr; T.skHookRuns = skHookRuns;
+});
+
+/* ═══ debug ═══ */
+function skExtendDebugOnce() {
+  if (skDbgDone || !window.__fmDebug) return;
+  skDbgDone = true;
+  const D = window.__fmDebug;
+  /* the pinned warp entries: __fmDebug.warp.beacon1..4 / .farstar */
+  const spots = [[-189, 98], [-902, 307], [-1236, 252], [-2288, -993]];
+  for (let i = 0; i < 4; i++) {
+    D.warp['beacon' + (i + 1)] = () => { D.warp(spots[i][0], spots[i][1]); return D.skInfo(); };
+  }
+  D.warp.farstar = () => { D.warp(-2288, -993, 0); return D.skInfo(); };
+  Object.assign(D, {
+    skInfo() {
+      return {
+        beacons: skBeaconLit().slice(), stars: skStarMesh.visible, dusk: +skDuskK().toFixed(2),
+        lane: skLaneT > 0 ? { i: skLaneI, t: +skLaneT.toFixed(1) } : null,
+        wisps: SK_WISPS.filter(w => !w.dead).length,
+        snaps: SK_SNAPS.filter(s => !s.gone).length,
+        punt: [+SK_PUNT.x.toFixed(1), +SK_PUNT.z.toFixed(1), P.skPunting ? 'aboard' : 'moored'],
+        wash: skWashPhase().ph,
+        lamps: SK_LAMP.map(L => [+L.x.toFixed(1), +L.y.toFixed(1), +L.z.toFixed(1)]),
+      };
+    },
+    warpBeacon(i) {
+      const s = spots[clamp(i | 0, 0, 3)];
+      D.warp(s[0], s[1]);
+      return D.skInfo();
+    },
+    /* setup only — forces a lane, never the lighting */
+    sightNow(i) {
+      skLayLane(clamp(i | 0, 0, 3));
+      return D.skInfo();
+    },
+  });
+}
+</script>
+<script>
+/* ═══════════════════════════════════════════════════════════════════════
+   PHASE 6, PART TWO — THE WANING LANTERN (p6l-moth)
+
+   Owns: the ARC FLOW of phase six (quests 23→27 — Pearl's rooftop reveal,
+   the tinker's STAR LANTERN beat, the beacon-quest compass answers, the
+   carry home, sky step 6, the 6/8 end card), THE FAR STAR LAMP ROOM (an
+   off-world capped interior in the rooms strip), and THE LANTERN MOTH —
+   the guardian that WEARS the phase: a great ash-grey moth asleep around
+   THE WANING LANTERN. Nothing dies: cured, the ash blows off silver-blue
+   and it keeps the tower as its roost.
+
+   Concatenated AFTER p6k-stars.html (the sky, the constellations, the
+   spyglass sighting, the four beacon islets) and BEFORE p7-flow. p6k's
+   interfaces are consumed by FEATURE DETECTION ONLY — this file builds
+   and runs whether or not p6k has landed: __p6k.lanternPoolAt /
+   lanternPoolR / farStarDoor / beaconPos / sightingActive / laneTarget
+   all have graceful fallbacks (the pinned-interface law).
+
+   Derives EVERYTHING from the save, both ways, via __worldStateHooks.
+   ═══════════════════════════════════════════════════════════════════════ */
+window.__worldStateHooks = window.__worldStateHooks || [];
+window.__telemetryHooks = window.__telemetryHooks || [];
+window.__WORLD_REG = window.__WORLD_REG || [];
+window.__PORTALS = window.__PORTALS || [];
+
+/* ── the quest banners (assigned, not edited into p6-game — the DLG law) ── */
+QUEST_TEXT[23] = 'THE CHALK WAS RIGHT';
+QUEST_TEXT[24] = 'LIGHT THE FOUR DARK BEACONS';
+QUEST_TEXT[25] = 'THE LAMP ROOM IS OCCUPIED';
+QUEST_TEXT[26] = 'CARRY THE LANTERN TO THE MOONWHEEL';
+QUEST_TEXT[27] = '6/8 PHASES RESTORED';
+
+/* ── pinned geography ── */
+const ML_REVEAL = { x: 4.5, z: -3.5 };        // the quay by Pearl's shore spot
+const ML_ROOF = { x: 6, z: -38 };             // the harbor-row house whose roof frames the sky
+/* fallback beacon line, bay → open west (only read until p6k lands;
+   b3 = the Far Star fallback, standing on Long Strand's far shore so the
+   probes have real footing pre-integration) */
+const ML_BEACON_FB = [
+  { x: -240, z: 80 }, { x: -700, z: -150 }, { x: -1300, z: -500 }, { x: -2118, z: -772 },
+];
+const ML_FAR_DOOR_FB = { x: -2118, z: -772, outX: -2116.5, outZ: -768.6, heading: 0.4 };
+const ML_BAY_OUT = { x: -70, z: 40 };         // the bay mouth (CROSS_LANE's origin)
+
+/* ── p6k consumption — all through these shims, nowhere else ── */
+function mlK() { return window.__p6k || null; }
+function mlBeaconPos(i) {
+  const k = mlK();
+  if (k && Array.isArray(k.beaconPos) && k.beaconPos[i]) return k.beaconPos[i];
+  return ML_BEACON_FB[i];
+}
+function mlFarDoor() {
+  const k = mlK();
+  if (k && k.farStarDoor) return k.farStarDoor;
+  return ML_FAR_DOOR_FB;
+}
+function mlPoolR() {
+  const k = mlK();
+  return (k && typeof k.lanternPoolR === 'number') ? k.lanternPoolR : 3.0;
+}
+/* the fight's own fallback pool: the star lantern's light POOLS where you
+   stand. When a dark wave gathers, the light PLANTS where you are standing
+   (the pool visibly stays put) — hold your ground inside it and the dark
+   passes over; run out of it mid-wave and the dark catches you. Standing
+   still is always, deterministically safe (kid-fair). */
+const ML_POOL = { x: 0, z: 0, live: false, anchored: false };
+function mlFallbackPoolAt(x, z) {
+  if (!ML_POOL.live) return false;
+  return Math.hypot(x - ML_POOL.x, z - ML_POOL.z) < mlPoolR();
+}
+function mlPoolAt(x, z) {
+  /* INTERFACE NOTE (deliberate deviation, reported): p6k's lanternPoolAt
+     travels with the BEARER — under a player-centred pool the dark waves
+     could never catch anyone and the teach would be dead. In the lamp
+     room the light PLANTS when the dark gathers (the anchored pool below
+     is the authority); p6k's live pool is consulted only as extra ground
+     for a second bearer (the co-op edge), never for the anchor's owner. */
+  if (!mlInMothRoom()) {
+    const k = mlK();
+    if (k && typeof k.lanternPoolAt === 'function') {
+      try { if (k.lanternPoolAt(x, z)) return true; } catch (e) {}
+    }
+  }
+  return mlFallbackPoolAt(x, z);
+}
+function mlBeaconLitArr() {
+  return (SAVE && Array.isArray(SAVE.beaconLit)) ? SAVE.beaconLit : [];
+}
+function mlLitCount() { return mlBeaconLitArr().filter(Boolean).length; }
+function mlNextDarkIdx() {
+  const a = mlBeaconLitArr();
+  for (let i = 0; i < 4; i++) if (!a[i]) return i;
+  return -1;
+}
+const mlCarry6 = () => !!(SAVE && SAVE.lantern6 && SAVE.sky < 6);
+
+/* ── THE ARC IS ONE LONG NIGHT (the phase-5 precedent: q18–21 held dusk
+   down for the whole market arc; the star road holds it for 23–26) ── */
+const _mlPrevNightTarget = nmNightTarget;
+nmNightTarget = function () {
+  if (SAVE && SAVE.q >= 23 && SAVE.q < 27) return 1;
+  return _mlPrevNightTarget();
+};
+
+/* ── the deepened dusk of sky step 6 rides p6k's star-field; this part
+   only sets the flags (sky/ph = 6) and lets the owners answer ── */
+</script>
+<script>
+/* ═══════════ p6l/2 — THE FAR STAR LAMP ROOM (off-world interior) ═══════════
+   A capped room: no sky from inside — the panes are BAKED dusk, warm
+   toward the lamp, cold at the rim (the warm-vs-dark bake). The rail and
+   the round wall are the fight's "no fall fail": interiorResolve clamps
+   the circle, so the worst a wing-gust does is press you against iron. */
+const ML_C = { x: 330, z: -360 };             // arena centre, rooms strip
+const ML_R = 10.5, ML_WALL_H = 6.4;
+const ML_COLL = [];
+/* the floor is this room's ground truth: sample the strip terrain under
+   the whole footprint and cap it, so the authored floor is ALWAYS the
+   standing surface (rendered == physics, RULE 1) */
+const ML_FLOOR_Y = (function () {
+  let m = -1e9;
+  for (let dx = -12; dx <= 12; dx += 6) for (let dz = -12; dz <= 12; dz += 6) {
+    m = Math.max(m, groundH(ML_C.x + dx, ML_C.z + dz));
+  }
+  return m + 0.35;
+})();
+const mlInRoomRect = (x, z) => x > 316 && x < 344 && z > -376 && z < -344;
+const _mlPrevGroundH = groundH;
+groundH = function (x, z) {
+  if (mlInRoomRect(x, z)) return ML_FLOOR_Y;
+  return _mlPrevGroundH(x, z);
+};
+/* the room heals like every interior: the lamp room is shelter */
+const _mlPrevInShade = inShadeAt;
+inShadeAt = function (x, z) {
+  if (mlInRoomRect(x, z)) return true;
+  return _mlPrevInShade(x, z);
+};
+/* SUNSTRUCK in the lamp room wakes you at the door, never across the sea
+   (the boat waits at the islet — the dunk-orphan law's indoor cousin) */
+const _mlPrevNearShade = nearestShadeSpot;
+nearestShadeSpot = function (x, z) {
+  if (mlInRoomRect(x, z)) return { x: 330, z: -351.4 };
+  return _mlPrevNearShade(x, z);
+};
+
+const mothRoom = {
+  id: 'mothroom', promptId: 'mlDoor',
+  x: ML_C.x, z: ML_C.z, r: ML_R, wallH: ML_FLOOR_Y + ML_WALL_H,
+  spawn: { x: 330, z: -351.4, heading: Math.PI },
+  inDoor: { x: 330, z: -350.6 },
+  /* ext re-derived from the sibling's door every doorOut (mlSeatExt) */
+  ext: { outX: ML_FAR_DOOR_FB.outX, outZ: ML_FAR_DOOR_FB.outZ, heading: ML_FAR_DOOR_FB.heading },
+  coll: ML_COLL, mesh: null, glow: null, vis: [],
+};
+function mlSeatExt() {
+  const d = mlFarDoor();
+  /* p6k pins {x, z, yaw} (outward-facing doorway yaw); the fallback
+     carries explicit out fields */
+  const yaw = (typeof d.yaw === 'number') ? d.yaw : null;
+  mothRoom.ext = {
+    outX: (typeof d.outX === 'number') ? d.outX : (yaw !== null ? d.x + Math.sin(yaw) * 1.6 : d.x),
+    outZ: (typeof d.outZ === 'number') ? d.outZ : (yaw !== null ? d.z + Math.cos(yaw) * 1.6 : d.z + 2.2),
+    heading: (typeof d.heading === 'number') ? d.heading : (yaw !== null ? yaw : 0),
+  };
+}
+function mlInMothRoom() { return roomAt(P.x, P.z) === mothRoom; }
+
+(function mlBuildRoom() {
+  const md = MD();
+  const cx = ML_C.x, cz = ML_C.z, R = ML_R, y0 = ML_FLOOR_Y, H = ML_WALL_H;
+  const IRON = [0.24, 0.245, 0.28], IRON_D = [0.155, 0.16, 0.19];
+  const FLOOR_W = [0.46, 0.40, 0.33], FLOOR_C = [0.235, 0.25, 0.30];
+  const PANE = [0.075, 0.10, 0.185], PANE_D = [0.045, 0.06, 0.12];
+  const BRASS = [0.56, 0.45, 0.24], BRASS_D = [0.38, 0.30, 0.17];
+  /* floor disc: warm near the lamp, cold slate at the rim — 16 wedges,
+     3 radial bands so the warmth is a gradient, not a decal */
+  for (let i = 0; i < 16; i++) {
+    const a0 = i / 16 * TAU, a1 = (i + 1) / 16 * TAU;
+    let r0 = 0;
+    for (const [r1, kWarm] of [[3.2, 1], [6.8, 0.42], [R + 0.3, 0.1]]) {
+      const cA = mix3(FLOOR_C, FLOOR_W, kWarm * (0.85 + 0.15 * ((i % 2) ? 1 : 0.8)));
+      pushTri(md, cx + Math.cos(a0) * r0, y0 + 0.01, cz + Math.sin(a0) * r0,
+        cx + Math.cos(a0) * r1, y0 + 0.01, cz + Math.sin(a0) * r1,
+        cx + Math.cos(a1) * r1, y0 + 0.01, cz + Math.sin(a1) * r1, cA);
+      pushTri(md, cx + Math.cos(a0) * r0, y0 + 0.01, cz + Math.sin(a0) * r0,
+        cx + Math.cos(a1) * r1, y0 + 0.01, cz + Math.sin(a1) * r1,
+        cx + Math.cos(a1) * r0, y0 + 0.01, cz + Math.sin(a1) * r0, cA);
+      r0 = r1;
+    }
+  }
+  /* twelve iron uprights + baked dusk panes between (no sky from inside —
+     the "glass" is painted night, star-flecked, PERFECT and waiting) */
+  for (let i = 0; i < 12; i++) {
+    const a = i / 12 * TAU;
+    box(md, { x: cx + Math.cos(a) * R, y: y0, z: cz + Math.sin(a) * R,
+      w: 0.16, d: 0.16, h: H, ry: -a, col: IRON });
+  }
+  const rnd = mulberry32(660);
+  for (let i = 0; i < 12; i++) {
+    const a0 = i / 12 * TAU, a1 = (i + 1) / 12 * TAU;
+    const p0 = [cx + Math.cos(a0) * R, cz + Math.sin(a0) * R];
+    const p1 = [cx + Math.cos(a1) * R, cz + Math.sin(a1) * R];
+    pushQuad(md, [p0[0], y0 + 0.9, p0[1]], [p1[0], y0 + 0.9, p1[1]],
+      [p1[0], y0 + H - 0.5, p1[1]], [p0[0], y0 + H - 0.5, p0[1]], PANE, PANE_D);
+    /* star flecks baked into the pane — tiny bright quads, not lights */
+    for (let s = 0; s < 4; s++) {
+      const t = 0.15 + rnd() * 0.7, hgt = y0 + 1.6 + rnd() * (H - 2.8);
+      const sx = p0[0] + (p1[0] - p0[0]) * t, sz = p0[1] + (p1[1] - p0[1]) * t;
+      const nx = Math.cos((a0 + a1) / 2) * -0.03, nz = Math.sin((a0 + a1) / 2) * -0.03;
+      const b = 0.35 + rnd() * 0.4;
+      box(md, { x: sx + nx, y: hgt, z: sz + nz, w: 0.035, d: 0.02, h: 0.035, col: [b, b, b + 0.12] });
+    }
+    /* sill and header bands */
+    pushQuad(md, [p0[0], y0, p0[1]], [p1[0], y0, p1[1]],
+      [p1[0], y0 + 0.9, p1[1]], [p0[0], y0 + 0.9, p0[1]], IRON_D);
+  }
+  /* the door bay: a framed opening with a warm floor cue (RULE 2 — a
+     passable opening must READ as an opening) */
+  box(md, { x: cx - 1.05, y: y0, z: cz + R - 0.1, w: 0.18, d: 0.2, h: 2.6, col: BRASS_D });
+  box(md, { x: cx + 1.05, y: y0, z: cz + R - 0.1, w: 0.18, d: 0.2, h: 2.6, col: BRASS_D });
+  box(md, { x: cx, y: y0 + 2.6, z: cz + R - 0.1, w: 1.25, d: 0.2, h: 0.22, col: BRASS });
+  pushQuad(md, [cx - 0.9, y0 + 0.02, cz + R - 1.6], [cx + 0.9, y0 + 0.02, cz + R - 1.6],
+    [cx + 0.9, y0 + 0.02, cz + R + 0.1], [cx - 0.9, y0 + 0.02, cz + R + 0.1],
+    mix3(FLOOR_W, BRASS, 0.5));
+  /* pane above the door, wall below the frame's sides handled by the ring */
+  /* the cap: a full cone — NO sky from inside */
+  lathe(md, [[R + 0.25, y0 + H - 0.5], [R + 0.25, y0 + H], [R * 0.45, y0 + H + 1.3], [0, y0 + H + 1.7]],
+    { seg: 14, x: cx, y: 0, z: cz, col: IRON_D, cols: [IRON, IRON_D, PANE_D] });
+  /* the lean rail — the thing that catches you (visual; the clamp is law) */
+  for (let i = 0; i < 12; i++) {
+    const a = (i + 0.5) / 12 * TAU;
+    box(md, { x: cx + Math.cos(a) * (R - 0.55), y: y0 + 0.92, z: cz + Math.sin(a) * (R - 0.55),
+      w: 2.6, d: 0.07, h: 0.07, ry: -a + Math.PI / 2, col: IRON });
+    box(md, { x: cx + Math.cos(a) * (R - 0.55), y: y0, z: cz + Math.sin(a) * (R - 0.55),
+      w: 0.07, d: 0.07, h: 0.92, col: IRON_D });
+  }
+  /* THE GREAT LAMP — a brass column and drum at centre; the Waning
+     Lantern hangs in its heart (its own mesh, below) */
+  lathe(md, [[1.6, y0], [1.35, y0 + 0.18], [0.62, y0 + 0.5], [0.5, y0 + 1.7], [0.95, y0 + 1.95], [0.95, y0 + 2.5], [0.62, y0 + 2.75], [0.2, y0 + 2.9]],
+    { seg: 12, x: cx, y: 0, z: cz, col: BRASS_D, cols: [IRON_D, BRASS_D, BRASS, BRASS_D] });
+  for (let i = 0; i < 6; i++) {
+    const a = i / 6 * TAU;
+    box(md, { x: cx + Math.cos(a) * 0.86, y: y0 + 1.95, z: cz + Math.sin(a) * 0.86,
+      w: 0.07, d: 0.07, h: 0.55, col: BRASS });
+  }
+  ML_COLL.push([cx, cz, 1.5]);
+  mothRoom.mesh = mdMesh(md, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide, fog: false }), false);
+  mothRoom.mesh.matrixAutoUpdate = false; mothRoom.mesh.updateMatrix();
+  mothRoom.mesh.frustumCulled = false;
+  mothRoom.mesh.visible = false;
+  scene.add(mothRoom.mesh);
+  /* the glow layer: the lamp's warmth + the door cue, swelled by state */
+  const mdG = MD();
+  lathe(mdG, [[0, y0 + 0.03], [2.6, y0 + 0.02]], { seg: 12, x: cx, y: 0, z: cz, col: [1.0, 0.8, 0.45] });
+  for (const [ox, oz] of [[0.7, 0], [0, 0.7]]) {
+    pushQuad(mdG, [cx - ox, y0 + 1.9, cz - oz], [cx + ox, y0 + 1.9, cz + oz],
+      [cx + ox, y0 + 2.6, cz + oz], [cx - ox, y0 + 2.6, cz - oz], [1.0, 0.85, 0.55]);
+  }
+  mothRoom.glow = mdMesh(mdG, new THREE.MeshBasicMaterial({
+    vertexColors: true, transparent: true, opacity: 0.22, fog: false,
+    blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+  }), false);
+  mothRoom.glow.matrixAutoUpdate = false; mothRoom.glow.updateMatrix();
+  mothRoom.glow.visible = false;
+  scene.add(mothRoom.glow);
+  ROOMS.push(mothRoom);
+})();
+
+/* the lamp room is its own ground owner over the strip (RULE 1: the wrap
+   above must be DECLARED, so the conformance sweep judges it) */
+window.__WORLD_REG.push({
+  name: 'p6l-lamproom', kind: 'ground', over: ['rooms-strip'],
+  owns: (x, z) => mlInRoomRect(x, z),
+  ground: () => ML_FLOOR_Y,
+  note: 'the Far Star lamp room — capped floor over the strip terrain; solid is interiorResolve',
+});
+/* RULE 2: the tower door threshold is registered by p6k ('far-star-door',
+   with the shell that frames it); registering it twice would double the
+   portal walk. The interior side carries the frame + floor cue above. */
+
+/* ═══ THE WANING LANTERN — the relic itself ═══ */
+let mlRelic = null, mlRelicGlow = null;
+(function mlBuildRelic() {
+  const g = new THREE.Group();
+  const md = MD();
+  const BRASS = [0.66, 0.53, 0.28], BRASS_D = [0.42, 0.33, 0.18], GLASS = [0.9, 0.82, 0.6];
+  lathe(md, [[0.16, 0], [0.2, 0.05], [0.14, 0.09]], { seg: 8, col: BRASS_D });
+  for (let i = 0; i < 4; i++) {
+    const a = i / 4 * TAU;
+    box(md, { x: Math.cos(a) * 0.15, y: 0.09, z: Math.sin(a) * 0.15, w: 0.025, d: 0.025, h: 0.3, col: BRASS });
+  }
+  lathe(md, [[0.1, 0.1], [0.13, 0.24], [0.09, 0.36]], { seg: 8, col: GLASS });
+  lathe(md, [[0.17, 0.39], [0.1, 0.46], [0.03, 0.5]], { seg: 8, col: BRASS_D });
+  box(md, { x: 0, y: 0.5, z: 0, w: 0.02, d: 0.06, h: 0.1, col: BRASS });
+  const m = mdMesh(md, new THREE.MeshBasicMaterial({ vertexColors: true, fog: false }), false);
+  m.frustumCulled = false;
+  g.add(m);
+  const mdG = MD();
+  lathe(mdG, [[0, 0.23], [0.34, 0.22]], { seg: 8, col: [1.0, 0.82, 0.5] });
+  mlRelicGlow = mdMesh(mdG, new THREE.MeshBasicMaterial({
+    vertexColors: true, transparent: true, opacity: 0.55, fog: false,
+    blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+  }), false);
+  mlRelicGlow.frustumCulled = false;
+  g.add(mlRelicGlow);
+  g.visible = false;
+  scene.add(g);
+  mlRelic = g;
+})();
+function mlRelicHome() {
+  mlRelic.position.set(ML_C.x, ML_FLOOR_Y + 1.95, ML_C.z);
+  mlRelic.rotation.set(0, 0, 0);
+  mlRelic.scale.setScalar(1.6);
+}
+</script>
+<script>
+/* ═══════════ p6l/3 — THE LANTERN MOTH: the build ═══════════
+   A GREAT SILVER MOTH, not a grey blob (the drowned-moon lesson: overlap
+   and contrast). Ash-grey dusk fur, wing rims picked out pale; underneath
+   the ash the silver-blue is already there — the cure lerps every vertex
+   toward its stored silver target. */
+SFX.mothCry = function () { if (!AC) return; const t = AC.currentTime;
+  tone(620, t, 0.5, 0.05, 'sine'); tone(930, t + 0.1, 0.55, 0.04, 'sine');
+  noiseBurst(t, 0.5, 0.02, 1800, 500, 0.6, 'bandpass'); };
+SFX.mothWing = function () { if (!AC) return; const t = AC.currentTime;
+  noiseBurst(t, 0.42, 0.1, 420, 140, 0.85, 'lowpass'); };
+SFX.mothTele = function () { if (!AC) return; const t = AC.currentTime;
+  tone(440, t, 0.3, 0.035, 'triangle'); tone(660, t + 0.16, 0.34, 0.035, 'triangle');
+  tone(990, t + 0.32, 0.4, 0.03, 'triangle'); };
+SFX.darkWave = function () { if (!AC) return; const t = AC.currentTime;
+  noiseBurst(t, 1.4, 0.08, 220, 60, 1.2, 'lowpass'); tone(72, t, 1.3, 0.05, 'sine'); };
+
+const ML_ASH = {
+  body: col(0x565460), fur: col(0x7a7488), wing: col(0x6e6a78),
+  wing2: col(0x524e5c), rim: col(0xb8bfd2), eye: col(0x9aa4bc),
+  spot: col(0xa9b3c8), ring: col(0x3a3844),
+};
+const ML_SILVER = {
+  body: col(0xa8bdd4), fur: col(0xd4e2f0), wing: col(0xb6c9e0),
+  wing2: col(0x8fa8c6), rim: col(0xeef6ff), eye: col(0xdff0ff),
+  spot: col(0xe8f2ff), ring: col(0x5878a0),
+};
+function mlBuildMoth() {
+  const mat = new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide, fog: false });
+  const root = new THREE.Group();
+  const parts = {};
+  /* ── BODY — fat, furred, collared: a GREAT moth, not an insect ── */
+  const mdB = MD();
+  /* abdomen + thorax, built along y then pitched level (lathe axis = y) */
+  lathe(mdB, [[0.0, -1.35], [0.22, -1.15], [0.42, -0.6], [0.55, 0.0], [0.46, 0.5], [0.3, 0.78], [0.0, 0.92]],
+    { seg: 10, col: ML_ASH.body, cols: [ML_ASH.body, ML_ASH.body, ML_ASH.fur, ML_ASH.fur, ML_ASH.body] });
+  /* abdomen fur rings */
+  for (let r = 0; r < 3; r++) {
+    const ry = -1.05 + r * 0.34;
+    for (let i2 = 0; i2 < 8; i2++) {
+      const a = i2 / 8 * TAU + r * 0.4;
+      box(mdB, { x: Math.cos(a) * (0.3 + r * 0.07), y: ry, z: Math.sin(a) * (0.3 + r * 0.07),
+        w: 0.06, d: 0.06, h: 0.16, rz: a, col: r % 2 ? ML_ASH.fur : ML_ASH.body });
+    }
+  }
+  /* the COLLAR RUFF — the pale shoulder mane every great moth wears */
+  for (let i2 = 0; i2 < 12; i2++) {
+    const a = i2 / 12 * TAU;
+    box(mdB, { x: Math.cos(a) * 0.4, y: 0.62, z: Math.sin(a) * 0.4,
+      w: 0.1, d: 0.09, h: 0.3, rz: a * 0 + (Math.cos(a) * 0.5), col: ML_ASH.rim });
+  }
+  /* head + the great eyes */
+  lathe(mdB, [[0.0, 0.88], [0.2, 0.98], [0.17, 1.16], [0.0, 1.24]], { seg: 8, col: ML_ASH.body });
+  for (const sgn of [-1, 1]) {
+    box(mdB, { x: 0.15 * sgn, y: 1.05, z: 0.13, w: 0.11, d: 0.11, h: 0.13, col: ML_ASH.eye });
+    /* feathered antenna comb: a raked spine with five teeth */
+    for (let k = 0; k < 5; k++) {
+      box(mdB, { x: (0.12 + k * 0.07) * sgn, y: 1.24 + k * 0.13, z: 0.05 - k * 0.015,
+        w: 0.26 - k * 0.03, d: 0.016, h: 0.016, ry: sgn * (0.6 + k * 0.1), col: ML_ASH.rim });
+    }
+  }
+  /* forelegs — the pair that will hand the Lantern down */
+  for (const sgn of [-1, 1]) {
+    box(mdB, { x: 0.26 * sgn, y: 0.5, z: 0.34, w: 0.05, d: 0.055, h: 0.44, rz: sgn * 0.5, col: ML_ASH.body });
+    box(mdB, { x: 0.44 * sgn, y: 0.12, z: 0.48, w: 0.045, d: 0.045, h: 0.34, rz: sgn * 0.16, col: ML_ASH.body });
+  }
+  const body = mdMesh(mdB, mat, false);
+  body.frustumCulled = false;
+  const bodyN = new THREE.Group();
+  bodyN.add(body);
+  body.rotation.x = Math.PI / 2 - 0.25;
+  root.add(bodyN);
+  parts.body = body; parts.bodyN = bodyN;
+  /* ── WINGS — broad two-panel fans with a dihedral fold, pale rims,
+     eye-spots, and the long moon-moth TAIL streamers ── */
+  const dihe = (x) => Math.max(0, Math.abs(x) - 1.5) * 0.3;
+  const wingV = (x, z) => [x, dihe(x), z];
+  const mkWing = (S) => {
+    const md = MD();
+    /* FOREWING: root chord z 0.15..1.05, tip at x = S*3.3 */
+    const fore = [
+      [S * 0.3, 1.05], [S * 1.3, 1.0], [S * 2.3, 0.72], [S * 3.05, 0.4],
+      [S * 3.3, -0.05], [S * 2.7, -0.32], [S * 1.7, -0.42], [S * 0.75, -0.35], [S * 0.3, -0.2],
+    ];
+    for (let i2 = 0; i2 + 1 < fore.length; i2++) {
+      const a = wingV(fore[i2][0], fore[i2][1]);
+      const b = wingV(fore[i2 + 1][0], fore[i2 + 1][1]);
+      /* rim band on the outer half of the edge, base tones inboard */
+      const cc = (i2 === 3 || i2 === 4) ? ML_ASH.rim : (i2 % 2 ? ML_ASH.wing : ML_ASH.wing2);
+      pushTri(md, S * 0.3, 0, 0.3, a[0], a[1], a[2], b[0], b[1], b[2], cc);
+    }
+    /* inner fill so the rim band reads as a BORDER, not the whole wing */
+    const fill = [
+      [S * 0.3, 0.95], [S * 1.25, 0.9], [S * 2.15, 0.62], [S * 2.85, 0.32],
+      [S * 3.05, -0.05], [S * 2.5, -0.24], [S * 1.6, -0.32], [S * 0.72, -0.27],
+    ];
+    for (let i2 = 0; i2 + 1 < fill.length; i2++) {
+      const a = wingV(fill[i2][0], fill[i2][1]);
+      const b = wingV(fill[i2 + 1][0], fill[i2 + 1][1]);
+      const cc = i2 % 2 ? ML_ASH.wing : ML_ASH.wing2;
+      pushTri(md, S * 0.28, 0.012, 0.28, a[0], a[1] + 0.012, a[2], b[0], b[1] + 0.012, b[2], cc);
+    }
+    /* HINDWING: smaller fan behind, with the tail streamer */
+    const hind = [
+      [S * 0.28, -0.3], [S * 1.15, -0.55], [S * 1.85, -0.95], [S * 1.6, -1.35], [S * 0.9, -1.3], [S * 0.3, -1.0],
+    ];
+    for (let i2 = 0; i2 + 1 < hind.length; i2++) {
+      const a = wingV(hind[i2][0], hind[i2][1]);
+      const b = wingV(hind[i2 + 1][0], hind[i2 + 1][1]);
+      const cc = i2 === 2 ? ML_ASH.rim : (i2 % 2 ? ML_ASH.wing2 : ML_ASH.wing);
+      pushTri(md, S * 0.26, -0.006, -0.35, a[0], a[1] - 0.006, a[2], b[0], b[1] - 0.006, b[2], cc);
+    }
+    /* the TAIL: a long curved streamer — the silhouette that says MOTH */
+    let px = S * 1.2, pz = -1.32, w = 0.22;
+    for (let k = 0; k < 4; k++) {
+      const nx = px + S * 0.16, nz = pz - 0.55 + k * 0.06;
+      const cc = k >= 2 ? ML_ASH.rim : ML_ASH.wing2;
+      pushQuad(md, wingVq(px - S * w, pz), wingVq(px + S * w, pz), wingVq(nx + S * w * 0.7, nz), wingVq(nx - S * w * 0.7, nz), cc);
+      px = nx; pz = nz; w *= 0.72;
+    }
+    /* EYE-SPOT: the moon mark — pale disc, dark ring, bright pip, riding
+       the dihedral of the mid-forewing */
+    const ex = S * 1.7, ez = 0.25, ey = dihe(ex);
+    lathe(md, [[0, ey + 0.02], [0.46, ey + 0.019]], { seg: 10, x: ex, y: 0, z: ez, col: ML_ASH.ring });
+    lathe(md, [[0, ey + 0.028], [0.34, ey + 0.027]], { seg: 10, x: ex, y: 0, z: ez, col: ML_ASH.spot });
+    lathe(md, [[0, ey + 0.036], [0.12, ey + 0.035]], { seg: 8, x: ex, y: 0, z: ez, col: ML_ASH.rim });
+    const m = mdMesh(md, mat, false);
+    m.frustumCulled = false;
+    const n = new THREE.Group();
+    n.position.set(S * 0.22, 0.32, 0.1);
+    n.add(m);
+    root.add(n);
+    return { n, m };
+  };
+  function wingVq(x, z) { const v = wingV(x, z); return [v[0], v[1], v[2]]; }
+  const wr = mkWing(1), wl = mkWing(-1);
+  parts.wingR = wr.n; parts.wingL = wl.n;
+  parts.wingRM = wr.m; parts.wingLM = wl.m;
+  /* wing-edge glow: additive strips along both leading edges + the eyes */
+  const mdRim = MD();
+  for (const S of [-1, 1]) {
+    pushQuad(mdRim, [S * 0.4, 0.32, 1.15], [S * 3.3, 0.32 + dihe(3.3), 0.05],
+      [S * 3.2, 0.38 + dihe(3.2), -0.15], [S * 0.4, 0.38, 0.95], [0.55, 0.62, 0.82]);
+  }
+  const rim = mdMesh(mdRim, new THREE.MeshBasicMaterial({
+    vertexColors: true, transparent: true, opacity: 0.22, fog: false,
+    blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+  }), false);
+  rim.frustumCulled = false;
+  root.add(rim);
+  parts.rim = rim;
+  root.visible = false;
+  scene.add(root);
+  /* stash colour targets for the cure lerp */
+  parts.silverable = [body, wr.m, wl.m];
+  for (const m of parts.silverable) {
+    const colA = m.geometry.attributes.color;
+    m.userData.ash = colA.array.slice();
+    const tgt = colA.array.slice();
+    const map = [
+      [ML_ASH.body, ML_SILVER.body], [ML_ASH.fur, ML_SILVER.fur],
+      [ML_ASH.wing, ML_SILVER.wing], [ML_ASH.wing2, ML_SILVER.wing2],
+      [ML_ASH.rim, ML_SILVER.rim], [ML_ASH.eye, ML_SILVER.eye],
+      [ML_ASH.spot, ML_SILVER.spot], [ML_ASH.ring, ML_SILVER.ring],
+    ];
+    for (let i2 = 0; i2 < tgt.length; i2 += 3) {
+      let best = null, bd = 1e9;
+      for (const [a] of map) {
+        const d = Math.abs(tgt[i2] - a[0]) + Math.abs(tgt[i2 + 1] - a[1]) + Math.abs(tgt[i2 + 2] - a[2]);
+        if (d < bd) { bd = d; best = a; }
+      }
+      const to = map.find(pp => pp[0] === best)[1];
+      tgt[i2] = to[0]; tgt[i2 + 1] = to[1]; tgt[i2 + 2] = to[2];
+    }
+    m.userData.silver = tgt;
+  }
+  return { root, parts };
+}
+function mlMothAshK(k) {
+  const c = MOTH.c;
+  if (!c || k === MOTH.silverShown) return;
+  MOTH.silverShown = k;
+  for (const m of c.parts.silverable) {
+    const colA = m.geometry.attributes.color;
+    const a = m.userData.ash, s = m.userData.silver, out = colA.array;
+    for (let i = 0; i < out.length; i++) out[i] = a[i] + (s[i] - a[i]) * k;
+    colA.needsUpdate = true;
+  }
+  c.parts.rim.material.opacity = 0.28 + k * 0.5;
+}
+</script>
+<script>
+/* ═══════════ p6l/4 — fight furniture: markers, waves, the pool, the veil ═══════════ */
+
+/* the gust ripple: a silver ring that IS the telegraph and the wave */
+let mlRing = null;
+(function () {
+  const md = MD();
+  for (let i = 0; i < 20; i++) {
+    const a0 = i / 20 * TAU, a1 = (i + 1) / 20 * TAU;
+    pushQuad(md, [Math.cos(a0) * 0.92, 0, Math.sin(a0) * 0.92], [Math.cos(a1) * 0.92, 0, Math.sin(a1) * 0.92],
+      [Math.cos(a1) * 1.0, 0, Math.sin(a1) * 1.0], [Math.cos(a0) * 1.0, 0, Math.sin(a0) * 1.0],
+      [0.7, 0.8, 1.0]);
+  }
+  mlRing = mdMesh(md, new THREE.MeshBasicMaterial({
+    vertexColors: true, transparent: true, fog: false, opacity: 0.0,
+    blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+  }), false);
+  mlRing.frustumCulled = false;
+  mlRing.visible = false;
+  scene.add(mlRing);
+})();
+/* the dive marker: a soft disc that tracks, then LOCKS (the dodge window) */
+let mlMark = null;
+(function () {
+  const md = MD();
+  lathe(md, [[0, 0.001], [1.0, 0]], { seg: 12, col: [0.85, 0.9, 1.0] });
+  mlMark = mdMesh(md, new THREE.MeshBasicMaterial({
+    vertexColors: true, transparent: true, fog: false, opacity: 0.0, map: DOT_TEX,
+    blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+  }), false);
+  mlMark.frustumCulled = false;
+  mlMark.visible = false;
+  scene.add(mlMark);
+})();
+/* the player's lantern pool: safe ground, rendered */
+let mlPoolMesh = null;
+(function () {
+  const md = MD();
+  const N = 6;
+  for (let k = 0; k < N; k++) {
+    const r = 1.0 - k * 0.12;
+    lathe(md, [[0, 0.02 + k * 0.004], [r, 0.018 + k * 0.004]], { seg: 12, col: [0.5 + k * 0.06, 0.6 + k * 0.05, 0.8] });
+  }
+  mlPoolMesh = mdMesh(md, new THREE.MeshBasicMaterial({
+    vertexColors: true, transparent: true, fog: false, opacity: 0.16, map: DOT_TEX,
+    blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+  }), false);
+  mlPoolMesh.frustumCulled = false;
+  mlPoolMesh.visible = false;
+  scene.add(mlPoolMesh);
+})();
+/* the dark wave: a floor-riding slab of true dark with a violet lip */
+let mlWaveMesh = null;
+(function () {
+  const g = new THREE.Group();
+  const md = MD();
+  pushQuad(md, [-12, 0.05, -0.9], [12, 0.05, -0.9], [12, 2.6, 0.2], [-12, 2.6, 0.2], [0.012, 0.014, 0.03]);
+  pushQuad(md, [-12, 0.05, -2.4], [12, 0.05, -2.4], [12, 0.05, -0.9], [-12, 0.05, -0.9], [0.012, 0.014, 0.03]);
+  const dark = mdMesh(md, new THREE.MeshBasicMaterial({
+    vertexColors: true, transparent: true, fog: false, opacity: 0.9, depthWrite: false, side: THREE.DoubleSide,
+  }), false);
+  dark.frustumCulled = false;
+  g.add(dark);
+  const mdL = MD();
+  pushQuad(mdL, [-12, 0.06, -0.95], [12, 0.06, -0.95], [12, 0.5, -0.75], [-12, 0.5, -0.75], [0.42, 0.3, 0.7]);
+  const lip = mdMesh(mdL, new THREE.MeshBasicMaterial({
+    vertexColors: true, transparent: true, fog: false, opacity: 0.7,
+    blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+  }), false);
+  lip.frustumCulled = false;
+  g.add(lip);
+  g.visible = false;
+  scene.add(g);
+  mlWaveMesh = g;
+})();
+/* the moth-spiral: a ribbon of little moths crossing at knee height */
+let mlSpiralMesh = null;
+(function () {
+  const md = MD();
+  for (let i = 0; i < 14; i++) {
+    const x = -11 + i * (22 / 13);
+    const fl = (i % 2) ? 0.12 : -0.12;
+    for (const S of [-1, 1]) {
+      pushTri(md, x, 0.45, 0, x + S * 0.3, 0.6 + fl, -0.18, x + S * 0.3, 0.6 + fl, 0.18, [0.8, 0.85, 1.0]);
+    }
+    box(md, { x, y: 0.42, z: 0, w: 0.05, d: 0.14, h: 0.07, col: [0.55, 0.55, 0.65] });
+  }
+  mlSpiralMesh = mdMesh(md, new THREE.MeshBasicMaterial({
+    vertexColors: true, transparent: true, fog: false, opacity: 0.9,
+    blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+  }), false);
+  mlSpiralMesh.frustumCulled = false;
+  mlSpiralMesh.visible = false;
+  scene.add(mlSpiralMesh);
+})();
+/* the douse veil: DOM, zero draw calls (the p6j vignette pattern) */
+let mlVeilEl = null;
+(function () {
+  mlVeilEl = document.createElement('div');
+  mlVeilEl.id = 'mlVeil';
+  mlVeilEl.style.cssText = 'position:absolute;inset:0;pointer-events:none;opacity:0;z-index:4;' +
+    'background:radial-gradient(circle at 50% 46%, rgba(0,0,0,0) 30%, rgba(4,6,16,0.55) 60%, rgba(2,3,10,0.9) 82%);' +
+    'transition:opacity 0.5s ease;';
+  stage.appendChild(mlVeilEl);
+})();
+</script>
+<script>
+/* ═══════════ p6l/5 — THE FIGHT ═══════════
+   Three phases, and the guardian WEARS them: P1 wing-gusts + dives (the
+   rail catches, the sword answers), P2 the dark waves (your own light is
+   the safe ground — shade-heal inverted), P3 the moth-spiral (jump it;
+   it tires after every pass). HP 84, notch convention 84/56/28. Body
+   chips ALWAYS land. Cold-7-year-old telegraphs, ≥0.9 s each. */
+const MOTH_HP = 84;
+const MOTH = {
+  c: null, active: false, defeated: false, phase: 0, st: 'sleep', t: 0,
+  hp: MOTH_HP, hpMax: MOTH_HP, x: ML_C.x, y: ML_FLOOR_Y + 2.15, z: ML_C.z,
+  ang: Math.PI, flash: 0, barShown: false, bodyHits: 0, silverShown: -1,
+  homeA: 0.6, nextGust: true, gustR: 0, gustHit: false,
+  dive: { tx: ML_C.x, tz: ML_C.z, lock: false }, diveHit: false,
+  wave: { ax: 1, az: 0, s: -99, on: false, hit: false, chimed: false }, waveN: 0,
+  spiral: { ax: 1, az: 0, s: -99, on: false }, spiralN: 0,
+  gustN: 0, diveN: 0, p2n: 0, p3n: 0, hintGust: false, hintPool: false, hintSpiral: false,
+  wingK: 0.05, wingT: 0, flapHz: 2.2,
+};
+MOTH.c = mlBuildMoth();
+window.__mlStLog = [];        // { st, tick } transitions — the telegraph recorder
+function mlSetSt(st) {
+  MOTH.st = st; MOTH.t = 0;
+  if (window.__mlStLog.length < 400) window.__mlStLog.push({ st, tick: simTick });
+}
+function mlMothPhaseHp(ph) { return ph <= 1 ? MOTH_HP : ph === 2 ? 56 : 28; }
+
+let mlBarW = -1, mlBarFlashT = null;
+function mlRefreshBar(hitFlash) {
+  const want = MOTH.active && !MOTH.defeated;
+  if (want !== MOTH.barShown) {
+    MOTH.barShown = want;
+    bossBarEl.classList.toggle('on', want);
+    if (want) bossNameEl.textContent = 'THE LANTERN MOTH';
+    if (!want) bossBarEl.classList.remove('hit');
+    mlBarW = -1;
+  }
+  if (!want) return;
+  const w = Math.round(clamp(MOTH.hp / MOTH.hpMax, 0, 1) * 1000) / 10;
+  if (w !== mlBarW) {
+    mlBarW = w;
+    bossFillEl.style.width = `calc((100% - 4px) * ${w / 100})`;
+  }
+  if (hitFlash) {
+    bossBarEl.classList.add('hit');
+    clearTimeout(mlBarFlashT);
+    mlBarFlashT = setTimeout(() => bossBarEl.classList.remove('hit'), 130);
+  }
+}
+function mlMothReset(keepPhase) {
+  const M = MOTH;
+  M.active = false;
+  mlSetSt('sleep');
+  M.phase = keepPhase ? M.phase : 0;
+  M.hp = mlMothPhaseHp(Math.max(1, M.phase));
+  if (!keepPhase) M.hp = MOTH_HP;
+  M.x = ML_C.x; M.z = ML_C.z; M.y = ML_FLOOR_Y + 2.15; M.ang = Math.PI;
+  M.gustR = 0; M.wave.on = false; M.spiral.on = false; M.wingK = 0.05;
+  mlVeilEl.style.opacity = '0';
+  ML_POOL.live = false;
+  mlRefreshBar(false);
+}
+function mlDealMothDamage(n) {
+  const M = MOTH;
+  if (!M.active || M.defeated) return;
+  M.hp = Math.max(0, M.hp - n);
+  mlRefreshBar(true);
+  if (M.hp <= 0) { startCine('mlCure'); return; }
+  if (M.phase === 1 && M.hp <= 56) {
+    M.phase = 2; mlSetSt('roar');
+    SFX.mothCry(); CAM.shake = 0.3;
+  } else if (M.phase === 2 && M.hp <= 28) {
+    M.phase = 3; mlSetSt('roar2');
+    SFX.mothCry(); CAM.shake = 0.34;
+  }
+}
+const ML_VULN = { low: 1, stoop: 1, tired: 1 };
+function mlHitMothBody() {
+  const M = MOTH;
+  M.bodyHits++;
+  M.flash = 0.18;
+  SFX.hit();
+  P.hitstop = 3;
+  CAM.shake = 0.12;
+  rumble({ duration: 80, strong: 0.4, weak: 0.3 });
+  burst(psSpark, M.x, M.y + 0.4, M.z, 10, 1.8, 1.4, 0.45);
+  mlDealMothDamage(3);
+}
+function mlHitMothVuln() {
+  const M = MOTH;
+  M.flash = 0.24;
+  SFX.clawHit();
+  SFX.chime(1.1);
+  P.hitstop = 5;
+  CAM.shake = 0.24;
+  rumble({ duration: 150, strong: 0.75, weak: 0.45 });
+  burst(psSpark, M.x, M.y + 0.5, M.z, 16, 2.4, 1.8, 0.5);
+  burst(psSparkle, M.x, M.y + 0.8, M.z, 12, 1.4, 1.2, 0.85);
+  mlDealMothDamage(12);
+}
+function mlMothSwingHits() {
+  const M = MOTH;
+  if (!mlInMothRoom() || !M.active || M.defeated) return false;
+  if (!inSwingArc(M.x, M.z, 4.2, 1.5)) return false;
+  if (ML_VULN[M.st]) { mlHitMothVuln(); return true; }
+  mlHitMothBody();                     // body chips ALWAYS land — the law
+  return true;
+}
+function mlKeepMothIn(o, margin) {
+  const dx = o.x - ML_C.x, dz = o.z - ML_C.z;
+  const d = Math.hypot(dx, dz) || 1;
+  const mx = ML_R - margin;
+  if (d > mx) { o.x = ML_C.x + dx / d * mx; o.z = ML_C.z + dz / d * mx; }
+}
+/* the pool follows with a lag: stand still and the light gathers under
+   you; sprint through the dark and you leave it behind (the teach) */
+function mlTickPool() {
+  if (!mlInMothRoom() || !MOTH.active || MOTH.defeated || !SAVE || !SAVE.starLantern) {
+    ML_POOL.live = false;
+    return;
+  }
+  if (!ML_POOL.live) { ML_POOL.x = P.x; ML_POOL.z = P.z; ML_POOL.live = true; }
+  /* during a wave the light is PLANTED — it followed you until the dark
+     gathered; now it holds where you chose to stand */
+  ML_POOL.anchored = (MOTH.st === 'waveTele' || MOTH.st === 'wave');
+  if (!ML_POOL.anchored) {
+    const k = Math.min(1, DT * 4.5);
+    ML_POOL.x += (P.x - ML_POOL.x) * k;
+    ML_POOL.z += (P.z - ML_POOL.z) * k;
+  }
+}
+function mlWaveProj(x, z, W) { return (x - ML_C.x) * W.ax + (z - ML_C.z) * W.az; }
+function mlTickMoth() {
+  const M = MOTH;
+  if (!M.c || M.defeated) return;
+  const inR = mlInMothRoom();
+  if (!M.active) {
+    /* proximity ALWAYS wakes a reachable guardian — the v4 law */
+    if (inR && Math.hypot(P.x - ML_C.x, P.z - ML_C.z) < 8.2 && state === 'play') {
+      M.active = true;
+      if (M.phase === 0) M.phase = 1;
+      M.hp = mlMothPhaseHp(M.phase);
+      mlSetSt('wake');
+      SFX.mothCry(); SFX.mothWing();
+      CAM.shake = 0.3;
+      rumble({ duration: 420, strong: 0.6, weak: 0.7 });
+      mlRefreshBar(false);
+      if (SAVE && SAVE.q >= 23 && SAVE.q < 25) setQuest(25);
+    }
+    return;
+  }
+  if (!inR) {
+    /* stepping out re-arms it at the phase you left it on (the stag
+       checkpoint rule) */
+    mlMothReset(true);
+    return;
+  }
+  M.t += DT;
+  const py = ML_FLOOR_Y;
+  const distP = Math.hypot(P.x - M.x, P.z - M.z);
+  const faceP = () => { M.ang = Math.atan2(P.x - M.x, P.z - M.z); };
+  switch (M.st) {
+    case 'wake': {
+      M.wingK = Math.min(1, M.t / 1.2);
+      M.y = py + 1.6 + M.wingK * 0.8;
+      if (M.t > 1.6) { mlSetSt('hover'); }
+      break;
+    }
+    case 'roar': case 'roar2': {
+      faceP();
+      M.wingK = 1.15;
+      M.y = py + 2.6 + Math.sin(M.t * 6) * 0.1;
+      M.x += (ML_C.x - M.x) * Math.min(1, DT * 2);
+      M.z += (ML_C.z - M.z) * Math.min(1, DT * 2);
+      if (M.st === 'roar' && M.t > 0.4) mlVeilEl.style.opacity = '1';
+      if (M.t > 1.3) { mlSetSt(M.st === 'roar' ? 'waveTele' : 'spiralTele'); }
+      break;
+    }
+    case 'hover': {
+      M.homeA += DT * 0.55;
+      const hr = 4.6;
+      const hx = ML_C.x + Math.cos(M.homeA) * hr, hz = ML_C.z + Math.sin(M.homeA) * hr;
+      M.x += (hx - M.x) * Math.min(1, DT * 1.8);
+      M.z += (hz - M.z) * Math.min(1, DT * 1.8);
+      M.y = py + 1.75 + Math.sin(M.t * 1.7) * 0.22;
+      faceP();
+      const dwell = M.phase === 1 ? 2.1 : 1.7;
+      if (M.t > dwell) {
+        if (M.phase === 1) {
+          mlSetSt(M.nextGust ? 'gustTele' : 'diveTele');
+          M.nextGust = !M.nextGust;
+        } else if (M.phase === 2) {
+          mlSetSt((M.p2n % 3 === 2) ? 'diveTele' : 'waveTele');
+          M.p2n++;
+        } else {
+          mlSetSt((M.p3n % 3 === 2) ? 'diveTele' : 'spiralTele');
+          M.p3n++;
+        }
+        if (M.st === 'diveTele') { M.dive.lock = false; M.diveHit = false; }
+      }
+      break;
+    }
+    case 'gustTele': {                    /* ≥0.9 s, visible silver ripple */
+      faceP();
+      M.wingK = 0.35;
+      M.y = py + 1.9;
+      if (M.t < 0.05 && M.t - DT <= 0) SFX.mothTele();
+      M.gustR = 0.6 + M.t * 0.7;          // the ring breathes at its feet
+      if (M.t > 1.05) {
+        mlSetSt('gust');
+        M.gustR = 0.8; M.gustHit = false;
+        SFX.mothWing();
+      }
+      break;
+    }
+    case 'gust': {
+      M.wingK = 1.25;
+      M.gustR += DT * 12;
+      /* the shove: jump it, or let the rail catch you — never hearts */
+      if (!M.gustHit && !P.air && Math.abs(distP - M.gustR) < 1.0) {
+        M.gustHit = true;
+        const d = distP || 1;
+        P.vx += (P.x - M.x) / d * 9.5;
+        P.vz += (P.z - M.z) / d * 9.5;
+        rumble({ duration: 160, strong: 0.2, weak: 0.5 });
+        if (!M.hintGust && !cineSeen('mlHintGust')) {
+          M.hintGust = true; markCineSeen('mlHintGust');
+          showCaption('Jump the wing-gust — or lean on the rail and let it catch you.', 3600);
+        }
+      }
+      M.gustN += (M.t < DT * 1.5) ? 1 : 0;
+      if (M.gustR > ML_R + 1.5) { mlSetSt('hover'); }
+      break;
+    }
+    case 'diveTele': {                    /* tracks, then LOCKS 0.35 s out */
+      faceP();
+      M.wingK = 0.5;
+      M.y += (py + 3.6 - M.y) * Math.min(1, DT * 3.5);
+      if (M.t < 0.05 && M.t - DT <= 0) SFX.mothTele();
+      if (!M.dive.lock) {
+        M.dive.tx = P.x; M.dive.tz = P.z;
+        if (M.t > 0.65) M.dive.lock = true;
+      }
+      if (M.t > 1.0) {
+        mlSetSt('dive');
+        M.diveN++;
+        M.diveFrom = [M.x, M.y, M.z];
+        const dx = M.dive.tx - M.x, dz = M.dive.tz - M.z;
+        const d = Math.hypot(dx, dz) || 1;
+        M.diveOut = [M.dive.tx + dx / d * 2.6, M.dive.tz + dz / d * 2.6];
+        SFX.mothWing();
+      }
+      break;
+    }
+    case 'dive': {
+      const k = Math.min(1, M.t / 0.7);
+      const F = M.diveFrom, O = M.diveOut;
+      M.x = lerp(lerp(F[0], M.dive.tx, k), lerp(M.dive.tx, O[0], k), k);
+      M.z = lerp(lerp(F[2], M.dive.tz, k), lerp(M.dive.tz, O[1], k), k);
+      M.y = py + 0.55 + Math.abs(k - 0.5) * 2 * (F[1] - py - 0.55) * 0.55;
+      M.ang = Math.atan2(O[0] - F[0], O[1] - F[2]);
+      mlKeepMothIn(M, 1.2);
+      if (!M.diveHit && M.y < py + 1.3 && Math.hypot(P.x - M.x, P.z - M.z) < 1.3) {
+        M.diveHit = true;
+        hurtPlayer(1, M.x, M.z, M.c.root);
+      }
+      if (k >= 1) { mlSetSt('low'); M.y = py + 0.5; }
+      break;
+    }
+    case 'low': {                         /* grounded after the swoop — the window */
+      M.wingK = 0.18 + Math.sin(M.t * 9) * 0.04;
+      M.y = py + 0.5;
+      if (M.t > 1.5) { mlSetSt('hover'); }
+      break;
+    }
+    case 'waveTele': {                    /* the dark gathers at one wall */
+      faceP();
+      M.wingK = 1.1;
+      M.y = py + 3.0;
+      M.x += (ML_C.x - M.x) * Math.min(1, DT * 2.4);
+      M.z += (ML_C.z - M.z) * Math.min(1, DT * 2.4);
+      if (M.t < 0.05 && M.t - DT <= 0) {
+        const a = Math.random() * TAU;
+        M.wave.ax = Math.cos(a); M.wave.az = Math.sin(a);
+        M.wave.s = -(ML_R + 1.2);
+        SFX.mothTele();
+      }
+      if (M.t > 1.2) {
+        mlSetSt('wave');
+        M.wave.on = true; M.wave.hit = false; M.wave.chimed = false;
+        SFX.darkWave();
+      }
+      break;
+    }
+    case 'wave': {
+      const W = M.wave;
+      W.s += DT * 6.2;
+      const pp = mlWaveProj(P.x, P.z, W);
+      if (pp <= W.s && pp > W.s - 2.2) {
+        /* the dark is AT you: your own light is the only shelter. One
+           bite a wave (iframes make it one anyway); the chime once too. */
+        if (!mlPoolAt(P.x, P.z)) {
+          if (!W.hit && mlWaveMesh.visible && P.iframes <= 0) {
+            W.hit = true;
+            /* the wave is the damage source, and it spans the room: the
+               dmgvis law is honored by ITS render state, not the moth's */
+            hurtPlayer(1, P.x - W.ax * 2.5, P.z - W.az * 2.5);
+            if (!M.hintPool && !cineSeen('mlHintPool')) {
+              M.hintPool = true; markCineSeen('mlHintPool');
+              showCaption('Your lantern-light is safe ground — stand in the silver and let the dark pass.', 4200);
+            }
+          }
+        } else if (!W.chimed) {
+          W.chimed = true;
+          SFX.chime(1.4);
+          burst(psSparkle, P.x, ML_FLOOR_Y + 0.6, P.z, 10, 1.2, 0.8, 0.8);
+        }
+      }
+      M.y = py + 3.0 + Math.sin(M.t * 5) * 0.15;
+      if (W.s > ML_R + 2.5) {
+        W.on = false;
+        M.waveN++;
+        mlSetSt('stoop');
+      }
+      break;
+    }
+    case 'stoop': {                       /* it stoops by the lamp — strike */
+      M.wingK = 0.2;
+      M.x += (ML_C.x + 2.2 - M.x) * Math.min(1, DT * 3);
+      M.z += (ML_C.z - M.z) * Math.min(1, DT * 3);
+      M.y += (py + 0.55 - M.y) * Math.min(1, DT * 4);
+      if (M.t > 1.9) { mlSetSt('hover'); }
+      break;
+    }
+    case 'spiralTele': {
+      faceP();
+      M.wingK = 1.05;
+      M.y = py + 2.8;
+      if (M.t < 0.05 && M.t - DT <= 0) {
+        const a = Math.random() * TAU;
+        M.spiral.ax = Math.cos(a); M.spiral.az = Math.sin(a);
+        M.spiral.s = -(ML_R + 1.2);
+        SFX.mothTele(); SFX.mothWing();
+      }
+      if (M.t > 1.1) { mlSetSt('spiral'); M.spiral.on = true; }
+      break;
+    }
+    case 'spiral': {
+      const W = M.spiral;
+      const prev = W.s;
+      W.s += DT * 5.4;
+      const pp = mlWaveProj(P.x, P.z, W);
+      const grounded = !P.air;               // airborne clears it, always (kid-fair)
+      if (pp > prev - 0.3 && pp <= W.s && Math.abs(pp - W.s) < 0.8 && grounded && P.iframes <= 0) {
+        if (mlSpiralMesh.visible) hurtPlayer(1, P.x - W.ax * 2.5, P.z - W.az * 2.5);
+        if (!M.hintSpiral && !cineSeen('mlHintSpiral')) {
+          M.hintSpiral = true; markCineSeen('mlHintSpiral');
+          showCaption('JUMP the moth-line — the great moth tires after every pass.', 3800);
+        }
+      }
+      M.y = py + 2.8 + Math.sin(M.t * 4) * 0.2;
+      if (W.s > ML_R + 2.5) {
+        W.on = false;
+        M.spiralN++;
+        mlSetSt('tired');
+      }
+      break;
+    }
+    case 'tired': {                       /* the big window */
+      M.wingK = 0.12;
+      M.x += (ML_C.x + 1.8 - M.x) * Math.min(1, DT * 3);
+      M.z += (ML_C.z + 1.2 - M.z) * Math.min(1, DT * 3);
+      M.y += (py + 0.5 - M.y) * Math.min(1, DT * 4);
+      if (M.t > 2.5) { mlSetSt('hover'); }
+      break;
+    }
+  }
+  mlKeepMothIn(M, 1.4);
+  /* the veil rests once phase two is done dousing */
+  if (M.phase >= 2 && M.st !== 'wave' && M.st !== 'waveTele') {
+    mlVeilEl.style.opacity = M.phase === 2 ? '0.75' : '0.45';
+  }
+  if (M.phase === 1) mlVeilEl.style.opacity = '0';
+}
+</script>
+<script>
+/* ═══════════ p6l/6 — the arena camera (the sail-camera pattern) ═══════════
+   The default room camera hugs at 2.15 m — right for a bedroom, blind for
+   a boss. In the lamp room the follow cam stands further back and a
+   little higher, clamped by the same circle. */
+function mlArenaCamera(dtv) {
+  const wantDist = 4.6;
+  CAM.dist += (wantDist - CAM.dist) * Math.min(1, dtv * 3);
+  let manual = false;
+  if (state === 'play') {
+    const sx = clamp(IN.cx, -1, 1), sy = clamp(IN.cy, -1, 1);
+    if (sx || sy) { CAM.yaw -= sx * 3.1 * dtv; CAM.pitch += sy * 2.0 * dtv; manual = true; }
+    if (CAMIN.mdx || CAMIN.mdy) { CAM.yaw -= CAMIN.mdx * 0.0034; CAM.pitch += CAMIN.mdy * 0.0026; manual = true; }
+    if (CAMIN.tdx || CAMIN.tdy) { CAM.yaw -= CAMIN.tdx * 0.0085; CAM.pitch += CAMIN.tdy * 0.0065; manual = true; }
+  }
+  CAMIN.mdx = CAMIN.mdy = CAMIN.tdx = CAMIN.tdy = 0;
+  if (manual || CAMIN.touching) CAM.stickAge = 0; else CAM.stickAge += dtv;
+  CAM.pitch = clamp(CAM.pitch, PITCH_MIN, PITCH_MAX);
+  const ty = P.fy + 1.35;
+  const tx = P.x, tz = P.z;
+  const cp = Math.cos(CAM.pitch), spv = Math.sin(CAM.pitch);
+  const dx = Math.sin(CAM.yaw) * cp, dz = Math.cos(CAM.yaw) * cp;
+  let dist = CAM.dist;
+  for (let s = 0.2; s <= 1.0; s += 0.1) {
+    const sx2 = tx + dx * dist * s, sz2 = tz + dz * dist * s;
+    if (Math.hypot(sx2 - ML_C.x, sz2 - ML_C.z) > ML_R - 0.3) {
+      dist = Math.max(1.2, dist * (s - 0.1)); break;
+    }
+  }
+  const cx = tx + dx * dist, cz = tz + dz * dist;
+  let cy = ty + spv * dist;
+  cy = clamp(cy, ML_FLOOR_Y + 0.5, ML_FLOOR_Y + ML_WALL_H - 0.4);
+  const k = CAM.ready ? Math.min(1, dtv * (manual ? 15 : 6.5)) : 1;
+  CAM.x += (cx - CAM.x) * k; CAM.y += (cy - CAM.y) * k; CAM.z += (cz - CAM.z) * k;
+  CAM.ready = true;
+  camera.position.set(
+    CAM.x + (Math.random() - 0.5) * CAM.shake,
+    CAM.y + (Math.random() - 0.5) * CAM.shake * 0.6,
+    CAM.z + (Math.random() - 0.5) * CAM.shake);
+  CAM.shake = Math.max(0, CAM.shake - dtv * 1.6);
+  _mlCamLook.set(tx, ty, tz);
+  camera.lookAt(_mlCamLook);
+}
+const _mlCamLook = new THREE.Vector3();
+const _mlPrevUpdateCamera = updateCamera;
+updateCamera = function (dtv) {
+  if (CAM.mode === 'follow' && mlInMothRoom()) { mlArenaCamera(dtv); return; }
+  _mlPrevUpdateCamera(dtv);
+};
+</script>
+<script>
+/* ═══════════ p6l/7 — q23: PEARL'S ROOFTOP REVEAL, and the tinker's beat ═══════════ */
+
+/* the chart in her hands — the prop that has been gaining stars since v4.5 */
+let mlChart = null, mlChartMarks = [];
+(function mlBuildChart() {
+  const g = new THREE.Group();
+  const md = MD();
+  pushQuad(md, [-0.32, -0.22, 0], [0.32, -0.22, 0], [0.32, 0.22, 0], [-0.32, 0.22, 0], [0.86, 0.8, 0.66]);
+  for (let i = 0; i < 8; i++) {
+    const x = (hash2(i, 3) * 0.5) * 0.5, y = (hash2(i, 7) * 0.5) * 0.32;
+    box(md, { x, y, z: 0.006, w: 0.014, d: 0.006, h: 0.014, col: [0.3, 0.32, 0.4] });
+  }
+  const m = mdMesh(md, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide, fog: false }), false);
+  m.frustumCulled = false;
+  g.add(m);
+  mlChartMarks = [];
+  for (let i = 0; i < 4; i++) {
+    const mdM = MD();
+    lathe(mdM, [[0, 0.012], [0.045, 0.011]], { seg: 10, col: [0.95, 0.75, 0.28] });
+    lathe(mdM, [[0, 0.013], [0.018, 0.0125]], { seg: 8, col: [0.5, 0.36, 0.12] });
+    const mk = mdMesh(mdM, new THREE.MeshBasicMaterial({
+      vertexColors: true, transparent: true, opacity: 0.95, fog: false,
+      depthWrite: false, side: THREE.DoubleSide,
+    }), false);
+    mk.frustumCulled = false;
+    mk.rotation.x = Math.PI / 2;
+    mk.position.set(-0.18 + i * 0.12, -0.1 + (i % 2) * 0.14, 0.01);
+    mk.visible = false;
+    g.add(mk);
+    mlChartMarks.push(mk);
+  }
+  g.scale.setScalar(0.72);
+  g.visible = false;
+  scene.add(g);
+  mlChart = g;
+})();
+/* the incomplete constellation — an authored sky prop for the reveal (and
+   a graceful stand-in until p6k's real constellations ride the dome) */
+let mlConstel = null, mlConstelGap = null;
+(function mlBuildConstel() {
+  const g = new THREE.Group();
+  const R = 415;
+  const pts = [[-0.9, 0.62], [-0.55, 0.78], [-0.15, 0.7], [0.2, 0.82], [0.55, 0.66], [0.35, 0.5]];
+  const gap = [0.05, 0.58];                    // the missing anchor
+  const md = MD();
+  const _q = new THREE.Quaternion(), _z = new THREE.Vector3(0, 0, 1), _n = new THREE.Vector3();
+  const put = (md2, ax, ay, s, cc) => {
+    /* west over the sea: azimuth π (−x), elevation ~0.55 */
+    const az = Math.PI + ax * 0.28, el = 0.42 + ay * 0.3;
+    const cx = Math.cos(el), sx = Math.sin(el);
+    const px = Math.cos(az) * cx * R, py = sx * R, pz = Math.sin(az) * cx * R;
+    _n.set(-px, -py, -pz).normalize();
+    _q.setFromUnitVectors(_z, _n);
+    const quad = [[-s, -s], [s, -s], [s, s], [-s, -s], [s, s], [-s, s]];
+    for (let k = 0; k < 6; k++) {
+      const v = new THREE.Vector3(quad[k][0], quad[k][1], 0).applyQuaternion(_q);
+      md2.p.push(px + v.x, py + v.y, pz + v.z);
+      md2.c.push(cc[0], cc[1], cc[2]);
+    }
+  };
+  for (const [ax, ay] of pts) put(md, ax, ay, 5.2, [1.0, 1.0, 1.0]);
+  const suv = [];
+  for (let i = 0; i < pts.length; i++) for (const k of [[0, 0], [1, 0], [1, 1], [0, 0], [1, 1], [0, 1]]) suv.push(k[0], k[1]);
+  const sGeo = new THREE.BufferGeometry();
+  sGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(md.p), 3));
+  sGeo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(md.c), 3));
+  sGeo.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(suv), 2));
+  const star = new THREE.Mesh(sGeo, new THREE.MeshBasicMaterial({
+    map: DOT_TEX, vertexColors: true, transparent: true, opacity: 0.0, fog: false,
+    blending: THREE.AdditiveBlending, depthWrite: false,
+  }));
+  star.frustumCulled = false;
+  g.add(star);
+  g.userData.starMat = star.material;
+  const mdG = MD();
+  put(mdG, gap[0], gap[1], 10.5, [0.6, 0.72, 1.0]);
+  const guv = [];
+  for (let k = 0; k < 6; k++) guv.push([[0, 0], [1, 0], [1, 1], [0, 0], [1, 1], [0, 1]][k][0], [[0, 0], [1, 0], [1, 1], [0, 0], [1, 1], [0, 1]][k][1]);
+  mdG.uv = guv;
+  const gGeo = new THREE.BufferGeometry();
+  gGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(mdG.p), 3));
+  gGeo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(mdG.c), 3));
+  gGeo.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(guv), 2));
+  mlConstelGap = new THREE.Mesh(gGeo, new THREE.MeshBasicMaterial({
+    map: DOT_TEX, vertexColors: true, transparent: true, opacity: 0.0, fog: false,
+    blending: THREE.AdditiveBlending, depthWrite: false,
+  }));
+  mlConstelGap.frustumCulled = false;
+  mlConstelGap.frustumCulled = false;
+  g.add(mlConstelGap);
+  g.visible = false;
+  skyGrp.add(g);
+  mlConstel = g;
+})();
+
+DLG.mlTinker = { name: 'THE TINKER', lines: [
+  'A masthead light, cold-silver — for the boat that gave the river back its mouth. No charge.',
+  'Star-work wants a steady flame. Hold her into the dark and the light POOLS on the water.',
+], onDone: () => mlGrantStarLantern() };
+function mlGrantStarLantern() {
+  if (!SAVE || SAVE.starLantern) return;
+  SAVE.starLantern = true; storeSave();
+  itemToast('THE STAR LANTERN', 'Mounted at the masthead — the boat’s build completes upward.');
+  SFX.itemGet();
+  rumble({ duration: 300, strong: 0.3, weak: 0.6 });
+  if (SAVE.q < 24) setQuest(24);
+}
+
+const ML_CINE = { p0: [0, 0, 0], l0: [0, 0, 0] };
+function mlCineFrom() {
+  ML_CINE.p0 = [camera.position.x, camera.position.y, camera.position.z];
+  ML_CINE.l0 = [P.x, groundH(P.x, P.z) + 1.2, P.z];
+  ML_CINE.pearlBaseY0 = pearl.baseY;
+}
+function mlLerpCam(t0, t1, t, a, b) {
+  const k = smoothstep(clamp((t - t0) / (t1 - t0), 0, 1));
+  cineCam(lerp(a[0], b[0], k), lerp(a[1], b[1], k), lerp(a[2], b[2], k),
+    lerp(a[3], b[3], k), lerp(a[4], b[4], k), lerp(a[5], b[5], k));
+  return k;
+}
+function mlRevealTrigger() {
+  if (!SAVE || SAVE.q !== 22 || SAVE.sky < 5 || !SAVE.tbc5Seen || SAVE.starsSeen) return;
+  if (state !== 'play' || P.sailing || P.skiffing || roomAt(P.x, P.z)) return;
+  if (Math.hypot(P.x - ML_REVEAL.x, P.z - ML_REVEAL.z) < 26) startCine('mlReveal');
+}
+function mlFinishReveal() {
+  if (SAVE) {
+    if (!SAVE.spyglass) {
+      SAVE.spyglass = true;
+      itemToast('THE SPYGLASS', 'Her grandmother’s brass one. “Star-work needs old glass.”');
+      SFX.itemGet();
+    }
+    SAVE.starsSeen = true; storeSave();
+  }
+  const pr = pearl.char.root;
+  if (typeof ML_CINE.pearlBaseY0 === 'number') pearl.baseY = ML_CINE.pearlBaseY0;
+  pr.position.set(pearl.x, pearl.baseY, pearl.z);
+  pr.rotation.y = pearl.home;
+  mlChart.visible = false;
+  mlConstel.visible = false;
+  mlConstel.userData.starMat.opacity = 0;
+  mlConstelGap.material.opacity = 0;
+  floatEl.classList.remove('on');
+  markCineSeen('mlReveal');
+  setQuest(23);
+  endCine();
+}
+function mlTickReveal(t) {
+  if (cineSeen('mlReveal') && t > 0.9 && IN.confirm) { mlFinishReveal(); return; }
+  /* dusk falls with her footsteps (the q18 pattern: the cine brings it) */
+  nmNightK = Math.max(nmNightK, smoothstep(clamp((t - 0.4) / 3.2, 0, 1)));
+  window.__nightK = nmNightK;
+  const A = [...ML_CINE.p0, ...ML_CINE.l0];
+  const pr = pearl.char.root;
+  const gy = groundH(P.x, P.z);
+  const from = [P.x + 20, P.z + 13];
+  const arrive = [P.x + 1.3, P.z + 1.7];
+  const gh = groundH(ML_ROOF.x, ML_ROOF.z);
+  const roofY = gh + 3.95;
+  if (t < 3.1) {
+    /* HER SPRINT OPENS IT: she tears along the quay to find you */
+    const k = smoothstep(clamp((t - 0.3) / 2.5, 0, 1));
+    const px = lerp(from[0], arrive[0], k), pz = lerp(from[1], arrive[1], k);
+    pearl.baseY = groundH(px, pz) + Math.abs(Math.sin(t * 9)) * 0.1;
+    pr.position.set(px, pearl.baseY, pz);
+    pr.rotation.y = Math.atan2(P.x - px, P.z - pz);
+    pr.rotation.x = 0.16 * (1 - k);
+    if ((simTick % 8) === 0) burst(psDust, px, groundH(px, pz) + 0.1, pz, 3, 0.8, 0.4, 0.3);
+    const vantage = [P.x - 3.4, gy + 1.8, P.z - 2.6, (P.x + px) / 2, gy + 1.1, (P.z + pz) / 2];
+    mlLerpCam(0.0, 1.2, t, A, vantage);
+    if (CINE.step === 0 && t > 1.9) {
+      CINE.step = 1;
+      floatEl.textContent = '“It’s FILLING! The sky is FILLING—” — Pearl, out of breath';
+      floatEl.classList.add('on');
+    }
+  } else if (t < 5.2) {
+    /* the chart: her chalk stars — and four marks that are NOT stars.
+       She stands the ridge, chart up; the camera reads it over her arm */
+    if (CINE.step === 1) {
+      CINE.step = 2;
+      floatEl.classList.remove('on');
+      pr.position.set(ML_ROOF.x, roofY, ML_ROOF.z - 0.4);
+      pearl.baseY = roofY;                 // the NPC pass owns her Y — move its anchor
+      pr.rotation.set(0, Math.PI * 0.82, 0);          // faces south-east, up the shot
+      mlChart.visible = true;
+      SFX.page();
+    }
+    const py2 = pr.rotation.y;
+    /* the chart rests at her chest, tilted up into the high shot — her
+       head clears its top edge, so the reader and the girl share frame */
+    mlChart.position.set(ML_ROOF.x - Math.sin(py2) * 0.4 + Math.cos(py2) * 0.26, roofY + 1.02,
+      ML_ROOF.z - 0.4 - Math.cos(py2) * 0.4 - Math.sin(py2) * 0.26);
+    mlChart.rotation.y = py2;
+    mlChart.rotation.x = -0.3;
+    const k = smoothstep(clamp((t - 3.1) / 0.9, 0, 1));
+    /* eye-level three-quarter: the girl and her chart share the frame */
+    cineCam(ML_ROOF.x - Math.sin(py2) * lerp(2.6, 2.1, k) + 0.85, roofY + 1.62,
+      ML_ROOF.z - 0.4 - Math.cos(py2) * lerp(2.6, 2.1, k) - 0.5,
+      mlChart.position.x - 0.12, mlChart.position.y + 0.16, mlChart.position.z);
+    const mi = Math.floor((t - 3.4) / 0.42);
+    for (let i = 0; i < 4; i++) {
+      if (i <= mi && !mlChartMarks[i].visible) {
+        mlChartMarks[i].visible = true;
+        SFX.chime(0.8 + i * 0.2);
+        const wp = new THREE.Vector3();
+        mlChartMarks[i].getWorldPosition(wp);
+        burst(psSparkle, wp.x, wp.y, wp.z, 5, 0.25, 0.2, 0.5);
+      }
+    }
+  } else if (t < 8.6) {
+    /* up over the roofline: the constellation rises INCOMPLETE */
+    mlConstel.visible = true;
+    const k = smoothstep(clamp((t - 5.2) / 1.4, 0, 1));
+    mlConstel.userData.starMat.opacity = k;
+    mlConstelGap.material.opacity = (0.42 + Math.sin(t * 5) * 0.2) * k;
+    cineCam(ML_ROOF.x + 4.5, lerp(roofY + 1.4, roofY + 2.6, k), ML_ROOF.z + 3.5,
+      lerp(mlChart.position.x, ML_ROOF.x - 60, k), lerp(mlChart.position.y, roofY + 46, k), lerp(mlChart.position.z, ML_ROOF.z - 4, k));
+    if (CINE.step === 2 && t > 6.4) {
+      CINE.step = 3;
+      floatEl.textContent = 'Rising incomplete — its brightest stars are missing. They are not in the sky.';
+      floatEl.classList.add('on');
+      SFX.night();
+    }
+    if (CINE.step === 3 && t > 7.6) {
+      CINE.step = 4;
+      floatEl.textContent = 'THE DARK BEACONS. Light the coast — finish the sky.';
+      for (let i = 0; i < 4; i++) {
+        const b = mlBeaconPos(i);
+        const d = Math.hypot(b.x, b.z) || 1;
+        burst(psSparkle, b.x / d * 150, 3.5, b.z / d * 150, 8, 1.6, 1.2, 1.4);
+      }
+      SFX.chime(0.6); SFX.chime(1.2);
+    }
+  } else if (t < 10.6) {
+    if (CINE.step === 4) {
+      CINE.step = 5;
+      floatEl.classList.remove('on');
+      if (SAVE && !SAVE.spyglass) {
+        SAVE.spyglass = true; storeSave();
+        itemToast('THE SPYGLASS', 'Her grandmother’s brass one. “Star-work needs old glass.”');
+        SFX.itemGet();
+      } else {
+        floatEl.textContent = '“Better glass for star-work.” — hers is older, and truer.';
+        floatEl.classList.add('on');
+      }
+      pr.position.set(arrive[0], groundH(arrive[0], arrive[1]), arrive[1]);
+      pearl.baseY = groundH(arrive[0], arrive[1]);
+      pr.rotation.set(0, Math.atan2(P.x - arrive[0], P.z - arrive[1]), 0);
+      mlChart.visible = false;
+    }
+    mlLerpCam(8.7, 10.4, t, [ML_ROOF.x + 4.5, roofY + 2.6, ML_ROOF.z + 3.5, ML_ROOF.x - 60, roofY + 46, ML_ROOF.z - 4], A);
+  } else {
+    mlFinishReveal();
+  }
+}
+</script>
+<script>
+/* ═══════════ p6l/8 — THE CURE: nothing dies ═══════════
+   The ash blows off silver-blue, the lamp room floods with light off its
+   own wings, and it lifts the Waning Lantern DOWN to you — given, like
+   the fifth sliver, because letting go is the cure. It keeps the tower. */
+function mlPerchMoth() {
+  const M = MOTH;
+  M.defeated = true;
+  M.active = false;
+  M.st = 'roost';
+  M.x = ML_C.x; M.z = ML_C.z - 3.2; M.y = ML_FLOOR_Y + 4.6;
+  M.ang = Math.PI;
+  M.wingK = 0.75;
+  mlMothAshK(1);
+  mlVeilEl.style.opacity = '0';
+  ML_POOL.live = false;
+  mlRefreshBar(false);
+}
+function mlGrantLantern() {
+  if (!SAVE || SAVE.mothDone) return;
+  SAVE.mothDone = true;
+  SAVE.lantern6 = true;
+  storeSave();
+  itemToast('THE WANING LANTERN', 'Kept warm the only way it knew. Yours now to carry home.');
+  SFX.itemGet();
+  rumble({ duration: 420, strong: 0.4, weak: 0.8 });
+}
+function mlFinishCure() {
+  mlGrantLantern();
+  mlPerchMoth();
+  markCineSeen('mlCure');
+  floatEl.classList.remove('on');
+  if (SAVE && SAVE.q < 26) setQuest(26);
+  endCine();
+}
+function mlTickCure(t) {
+  if (cineSeen('mlCure') && t > 0.9 && IN.confirm) { mlFinishCure(); return; }
+  const M = MOTH;
+  const py = ML_FLOOR_Y;
+  const A = [...ML_CINE.p0, ...ML_CINE.l0];
+  if (t < 1.4) {
+    /* it sinks to the lamp's foot, wings folding around itself */
+    M.x += (ML_C.x + 1.9 - M.x) * Math.min(1, DT * 3);
+    M.z += (ML_C.z - M.z) * Math.min(1, DT * 3);
+    M.y += (py + 0.5 - M.y) * Math.min(1, DT * 3);
+    M.wingK = Math.max(0.08, M.wingK - DT * 1.2);
+    mlVeilEl.style.opacity = '0';
+    mlLerpCam(0.1, 1.4, t, A, [M.x + 2.6, py + 1.3, M.z + 2.2, M.x, py + 0.8, M.z]);
+  } else if (t < 4.6) {
+    /* THE ASH BLOWS OFF — silver-blue underneath, all along */
+    const k = smoothstep(clamp((t - 1.4) / 2.8, 0, 1));
+    mlMothAshK(k);
+    if ((simTick % 3) === 0) {
+      const a = Math.random() * TAU;
+      psDust.spawn(M.x + Math.cos(a) * 0.8, M.y + 0.6 + Math.random() * 0.8, M.z + Math.sin(a) * 0.8,
+        Math.cos(a) * 1.2, 1.4, Math.sin(a) * 1.2, 1.4);
+      psSparkle.spawn(M.x + Math.cos(a) * 0.6, M.y + 0.5, M.z + Math.sin(a) * 0.6, 0, 0.8, 0, 1.2);
+    }
+    if (CINE.step === 0 && t > 2.0) { CINE.step = 1; SFX.night(); SFX.chime(0.7); }
+    cineCam(M.x + 2.6 - (t - 1.4) * 0.15, py + 1.3, M.z + 2.2, M.x, py + 0.9, M.z);
+  } else if (t < 6.8) {
+    /* THE UNFURL — the room floods with light off its own wings */
+    const k = smoothstep(clamp((t - 4.6) / 1.6, 0, 1));
+    M.wingK = 0.08 + k * 1.35;
+    M.y = py + 0.5 + k * 1.1;
+    mothRoom.glow.material.opacity = 0.22 + k * 0.6;
+    if (CINE.step === 1 && t > 5.0) {
+      CINE.step = 2;
+      SFX.mothCry(); SFX.relief ? SFX.relief() : SFX.chime(1.3);
+      rumble({ duration: 500, strong: 0.3, weak: 0.8 });
+      burst(psSparkle, M.x, M.y + 1.2, M.z, 24, 2.6, 2.0, 1.4);
+    }
+    cineCam(M.x + 3.4, py + 1.1 + k * 0.9, M.z + 3.0, M.x, M.y + 0.6, M.z);
+  } else if (t < 9.4) {
+    /* it lifts the Lantern down to you with its forelegs — the moth
+       eases back and UP so the little light's crossing reads clean */
+    const k = smoothstep(clamp((t - 6.8) / 2.0, 0, 1));
+    const wy = groundH(P.x, P.z) + 1.3;
+    M.wingK = 0.85;
+    M.x += (ML_C.x - M.x) * Math.min(1, DT * 2);
+    M.z += (ML_C.z - 1.6 - M.z) * Math.min(1, DT * 2);
+    M.y += (ML_FLOOR_Y + 2.6 - M.y) * Math.min(1, DT * 2);
+    mlRelic.position.set(
+      lerp(ML_C.x, P.x, k),
+      lerp(ML_FLOOR_Y + 2.1, wy, k) + Math.sin(k * Math.PI) * 0.7,
+      lerp(ML_C.z, P.z, k));
+    mlRelic.visible = true;
+    if (CINE.step === 2 && t > 7.0) { CINE.step = 3; SFX.chime(1.5); }
+    if (CINE.step === 3 && k >= 1) { CINE.step = 4; mlGrantLantern(); }
+    /* a low three-quarter: Wick, the descending lantern, the moth above */
+    cineCam(P.x + 3.2, ML_FLOOR_Y + 1.5, P.z + 3.6,
+      mlRelic.position.x, mlRelic.position.y + 0.1, mlRelic.position.z);
+  } else if (t < 11.4) {
+    mlGrantLantern();
+    /* the lantern settles into his hand (the carry idiom), the moth
+       takes the cap as a roost — the tower has a keeper again */
+    mlRelic.scale.setScalar(1.1);
+    mlRelic.position.set(P.x - Math.sin(P.heading) * 0.32, groundH(P.x, P.z) + 1.05, P.z - Math.cos(P.heading) * 0.32);
+    const k = smoothstep(clamp((t - 9.4) / 1.6, 0, 1));
+    M.x = lerp(M.x, ML_C.x, k); M.z = lerp(M.z, ML_C.z - 3.2, k);
+    M.y = lerp(M.y, ML_FLOOR_Y + 4.6, k);
+    M.wingK = 0.75 + Math.sin(t * 3) * 0.2 * (1 - k);
+    if (CINE.step === 4 && t > 10.0) {
+      CINE.step = 5;
+      floatEl.textContent = 'The Far Star has a keeper again.';
+      floatEl.classList.add('on');
+    }
+    mlLerpCam(9.5, 11.3, t, [P.x + 2.2, ML_FLOOR_Y + 1.6, P.z + 2.6, M.x, M.y, M.z], A);
+  } else {
+    mlFinishCure();
+  }
+}
+</script>
+<script>
+/* ═══════════ p6l/9 — q26: THE WHEEL TAKES ITS SIXTH — and the 6/8 card ═══════════ */
+
+let mlSeatK = -1;
+function mlSeat6(k) {
+  if (typeof hWheelSeat !== 'function') return;
+  mlSeatK = k;
+  wheelRing.rotation.z = -(5 * Math.PI / 4) - k * (Math.PI / 4);
+  const put = (item, ang, sc, ry) => {
+    if (!item) return;
+    const b = hWheelSeat(ang);
+    item.visible = true;
+    item.scale.setScalar(sc);
+    item.position.set(b[0], b[1], b[2]);
+    item.rotation.set(0, wheelRing.rotation.y + (ry || 0), 0);
+  };
+  put(mlRelic, Math.PI / 2 - k * Math.PI / 4, 1.6);
+  put(typeof nmItem5 !== 'undefined' ? nmItem5 : null, Math.PI / 4 - k * Math.PI / 4, 0.9);
+  put(typeof sliverProp !== 'undefined' ? sliverProp : null, -k * Math.PI / 4, 0.9);
+  put(typeof gibbousItem !== 'undefined' ? gibbousItem : null, -Math.PI / 4 - k * Math.PI / 4, 0.9);
+  put(typeof shieldItem !== 'undefined' ? shieldItem : null, -Math.PI / 2 - k * Math.PI / 4, 0.9, Math.PI / 2);
+  const cr = hWheelSeat(-3 * Math.PI / 4 - k * Math.PI / 4);
+  crescentItem.visible = true;
+  crescentItem.scale.setScalar(0.8);
+  crescentItem.position.set(cr[0], cr[1], cr[2]);
+}
+function mlPayoff6() {
+  QUEST.phases = 6;
+  if (SAVE) { SAVE.ph = 6; SAVE.sky = 6; storeSave(); }
+  if (typeof nmMoonLitPh !== 'undefined') nmMoonLitPh = -1;   // the moon re-reads
+  markCineSeen('mlWheel6');
+  setQuest(27);
+}
+function mlFinishWheel6() {
+  mlPayoff6();
+  mlSeat6(1);
+  floatEl.classList.remove('on');
+  endCine();
+  mlShowTBC6();
+}
+function mlTickWheel6(t) {
+  const wx = WHEEL_POS.x, wz = WHEEL_POS.z;
+  const wy = groundH(wx, wz) + 4.2;
+  if (cineSeen('mlWheel6') && t > 0.9 && IN.confirm) { mlFinishWheel6(); return; }
+  if (t < 1.5) {
+    if (CINE.step === 0) { CINE.step = 1; mlRelic.visible = true; SFX.chime(0.8); }
+    const k = smoothstep(clamp(t / 1.4, 0, 1));
+    const s2 = (typeof hWheelSeat === 'function') ? hWheelSeat(Math.PI / 2) : [wx, wy, wz];
+    const sy = groundH(P.x, P.z) + 1.5;
+    mlRelic.scale.setScalar(lerp(1.2, 1.6, k));
+    mlRelic.position.set(lerp(P.x, s2[0], k), lerp(sy, s2[1], k) + Math.sin(k * Math.PI) * 1.4, lerp(P.z, s2[2], k));
+    cineCam(wx + 5.0, wy + 1.0, wz + 6.2, wx, wy + 2.6, wz);
+    if (t > 1.4 && CINE.step === 1) {
+      CINE.step = 2;
+      SFX.chime(1.5);
+      burst(psSparkle, s2[0], s2[1], s2[2], 20, 1.6, 1.0, 1.2);
+    }
+  } else if (t < 3.1) {
+    if (CINE.step === 2) { CINE.step = 3; SFX.grind(); rumble({ duration: 600, strong: 0.5, weak: 0.8 }); }
+    const k = smoothstep(clamp((t - 1.55) / 1.35, 0, 1));
+    mlSeat6(k);
+    CAM.shake = 0.05;
+    cineCam(lerp(wx + 5.0, wx + 7.5, k), lerp(wy + 1.0, wy + 2.4, k), lerp(wz + 6.2, wz + 8.0, k),
+      wx, lerp(wy + 2.6, wy + 2.0, k), wz);
+    if (t > 2.9 && CINE.step === 3) {
+      CINE.step = 4;
+      SFX.bell();
+      rumble({ duration: 900, strong: 0.9, weak: 0.9 });
+      CAM.shake = 0.25;
+    }
+  } else if (t < 8.8) {
+    /* THE SKY FILLS — the deepest dusk yet; every constellation completes
+       at once (p6k reads sky ≥ 6 and answers; the star-field swells) */
+    const k = smoothstep(clamp((t - 3.1) / 2.4, 0, 1));
+    if (CINE.step === 4) {
+      CINE.step = 5;
+      if (SAVE) { SAVE.ph = 6; SAVE.sky = 6; storeSave(); }
+      if (typeof nmMoonLitPh !== 'undefined') nmMoonLitPh = -1;
+      /* every constellation completes AT ONCE — p6k repaints from sky=6 */
+      try { if (typeof skPaintSky === 'function') skPaintSky(); } catch (e) {}
+      SFX.night();
+    }
+    if (typeof nmStarMat !== 'undefined' && nmStarMat) {
+      nmStarMat.opacity = Math.max(nmStarMat.opacity, k * 0.95);
+    }
+    if (!LOWFX && (simTick % 4) === 0) {
+      const a = Math.random() * TAU, r2 = 6 + Math.random() * 16;
+      psSparkle.spawn(wx + Math.cos(a) * r2, wy + 6 + Math.random() * 10, wz + Math.sin(a) * r2, 0, 0.5, 0, 2.0);
+    }
+    const ck = smoothstep(clamp((t - 3.1) / 3.6, 0, 1));
+    cineCam(lerp(wx + 7.5, wx + 3.0, ck), lerp(wy + 2.4, wy + 6.4, ck), lerp(wz + 8.0, wz + 10.8, ck),
+      wx, lerp(wy + 2.0, wy + 12.0, ck), wz - 8 * ck);
+    if (CINE.step === 5 && t > 6.6) {
+      CINE.step = 6;
+      floatEl.textContent = 'Six of eight — and the coast keeps the sky lit now: every beacon, every dusk, forever.';
+      floatEl.classList.add('on');
+      SFX.relief ? SFX.relief() : SFX.chime(1.2);
+    }
+  } else {
+    mlFinishWheel6();
+  }
+}
+
+/* ═══ THE END CARD — 6/8, and the first red word of OLD BONE ═══ */
+const ML_TBC6_SUB = 'Six phases ride the wheel, and four beacons keep the coast burning under a finished sky. ' +
+  'Far south, past the last lit water, hangs a red glow the stars refuse to touch. They call it OLD BONE. ' +
+  'Tonight, for the first time, it flickered — as if something down there is cooling.';
+function mlDrawTBCArt6() {
+  const cv = el('tbcArt'), g = cv.getContext('2d');
+  const W = cv.width, H = cv.height;
+  /* the finished night */
+  const sky = g.createLinearGradient(0, 0, 0, H * 0.66);
+  sky.addColorStop(0, '#050917'); sky.addColorStop(0.65, '#131b3c'); sky.addColorStop(1, '#39304e');
+  g.fillStyle = sky; g.fillRect(0, 0, W, H * 0.66);
+  /* a FULL star-field, and the constellations drawn home */
+  g.fillStyle = '#e8ecf2';
+  for (let i = 0; i < 110; i++) {
+    const x = (hash2(i, 5) * 0.5 + 0.5) * W, y = (hash2(i, 11) * 0.5 + 0.5) * H * 0.56;
+    g.globalAlpha = 0.2 + (hash2(i, 3) * 0.5 + 0.5) * 0.8;
+    g.fillRect(x, y, 2, 2);
+  }
+  g.globalAlpha = 1;
+  const constel = (pts, ox, oy, s) => {
+    g.strokeStyle = 'rgba(190,210,255,0.4)'; g.lineWidth = 1.2;
+    g.beginPath();
+    for (let i = 0; i < pts.length; i++) {
+      const [px, py2] = pts[i];
+      if (i === 0) g.moveTo(ox + px * s, oy + py2 * s); else g.lineTo(ox + px * s, oy + py2 * s);
+    }
+    g.stroke();
+    g.fillStyle = '#f2f6ff';
+    for (const [px, py2] of pts) {
+      g.beginPath(); g.arc(ox + px * s, oy + py2 * s, 2.4, 0, TAU); g.fill();
+      const gl = g.createRadialGradient(ox + px * s, oy + py2 * s, 0.5, ox + px * s, oy + py2 * s, 7);
+      gl.addColorStop(0, 'rgba(210,225,255,0.6)'); gl.addColorStop(1, 'rgba(210,225,255,0)');
+      g.fillStyle = gl; g.beginPath(); g.arc(ox + px * s, oy + py2 * s, 7, 0, TAU); g.fill();
+      g.fillStyle = '#f2f6ff';
+    }
+  };
+  constel([[0, 0.5], [0.5, 0], [1.1, 0.25], [1.6, 0.05], [2.0, 0.55], [1.35, 0.8], [0, 0.5]], W * 0.12, H * 0.12, 26);
+  constel([[0, 0], [0.6, 0.35], [1.2, 0.15], [1.8, 0.5]], W * 0.42, H * 0.3, 22);
+  constel([[0, 0.6], [0.45, 0], [0.9, 0.6], [0.45, 0.95], [0, 0.6]], W * 0.56, H * 0.08, 24);
+  if (typeof tbcMoon === 'function') tbcMoon(g, W * 0.8, H * 0.16, 36, 6);
+  /* the sea, and four beams sweeping the lanes */
+  const sea = g.createLinearGradient(0, H * 0.66, 0, H);
+  sea.addColorStop(0, '#25384e'); sea.addColorStop(1, '#0a1422');
+  g.fillStyle = sea; g.fillRect(0, H * 0.66, W, H * 0.34);
+  const beam = (bx, bh, dir, len) => {
+    /* headland silhouette + tower + a swept beam */
+    g.fillStyle = '#070c16';
+    g.beginPath();
+    g.moveTo(bx - 34, H * 0.66 + 2);
+    g.quadraticCurveTo(bx, H * 0.66 - bh, bx + 34, H * 0.66 + 2);
+    g.closePath(); g.fill();
+    g.fillRect(bx - 2.5, H * 0.66 - bh - 16, 5, 16);
+    const ty = H * 0.66 - bh - 16;
+    const grd = g.createLinearGradient(bx, ty, bx + dir * len, ty + 12);
+    grd.addColorStop(0, 'rgba(255,240,200,0.85)'); grd.addColorStop(1, 'rgba(255,240,200,0)');
+    g.fillStyle = grd;
+    g.beginPath();
+    g.moveTo(bx, ty);
+    g.lineTo(bx + dir * len, ty - 7);
+    g.lineTo(bx + dir * len, ty + 17);
+    g.closePath(); g.fill();
+    const gl = g.createRadialGradient(bx, ty, 1, bx, ty, 12);
+    gl.addColorStop(0, 'rgba(255,244,214,0.9)'); gl.addColorStop(1, 'rgba(255,244,214,0)');
+    g.fillStyle = gl; g.beginPath(); g.arc(bx, ty, 12, 0, TAU); g.fill();
+  };
+  beam(W * 0.16, 14, 1, W * 0.3);
+  beam(W * 0.38, 26, -1, W * 0.24);
+  beam(W * 0.6, 10, 1, W * 0.26);
+  beam(W * 0.86, 30, -1, W * 0.34);
+  /* moonlit swell lines */
+  g.fillStyle = 'rgba(220,232,240,0.14)';
+  for (let i = 0; i < 10; i++) {
+    const y = H * 0.7 + i * (H * 0.26 / 10);
+    g.fillRect(W * (0.1 + hash2(i, 8) * 0.1), y, W * (0.2 + hash2(i, 4) * 0.12), 2);
+  }
+  /* and far south: OLD BONE — the glow the stars will not touch */
+  const rb = g.createRadialGradient(W * 0.5, H * 0.665, 4, W * 0.5, H * 0.665, W * 0.2);
+  rb.addColorStop(0, 'rgba(190,50,34,0.5)');
+  rb.addColorStop(0.5, 'rgba(140,32,26,0.22)');
+  rb.addColorStop(1, 'rgba(120,24,20,0)');
+  g.save();
+  g.translate(W * 0.5, H * 0.665); g.scale(1, 0.22); g.translate(-W * 0.5, -H * 0.665);
+  g.fillStyle = rb; g.fillRect(W * 0.28, H * 0.55, W * 0.44, H * 0.24);
+  g.restore();
+  g.fillStyle = 'rgba(230,80,52,0.85)';
+  g.fillRect(W * 0.487, H * 0.657, 8, 2.4);
+  g.fillRect(W * 0.51, H * 0.66, 4, 1.8);
+}
+function mlShowTBC6() {
+  if (SAVE && !SAVE.tbc6Seen) { SAVE.tbc6Seen = true; storeSave(); }
+  const keep = drawTBCArt;
+  drawTBCArt = mlDrawTBCArt6;
+  drawTBCArt();
+  drawTBCArt = keep;
+  setState('tbc');
+  tbcT = 0;
+  el('tbcGo').textContent = '';
+  setTimeout(() => el('tbc').classList.add('on'), 30);
+  CAM.mode = 'cine';
+  el('tbcSub').textContent = ML_TBC6_SUB;
+}
+</script>
+<script>
+/* ═══════════ p6l/10 — wiring: prompts, the sim, the compass ═══════════ */
+
+function mlNear(x, z, r) { return Math.hypot(P.x - x, P.z - z) < r; }
+function mlTinkerStall() {
+  if (typeof NM_MARKET === 'undefined') return null;
+  for (const st of NM_MARKET.stalls) {
+    if (st.id === 'nmHeart') return { x: st.x - NM_MARKET.ox * 2.7, z: st.z - NM_MARKET.oz * 2.7 };
+  }
+  return null;
+}
+const _mlPrevInteract = currentInteract;
+currentInteract = function () {
+  if (SAVE) {
+    /* the tinker's beat outranks the heart stall for exactly one grant */
+    if (SAVE.q >= 23 && SAVE.starsSeen && !SAVE.starLantern && SAVE.marketOpen) {
+      const ts = mlTinkerStall();
+      if (ts && mlNear(ts.x, ts.z, 2.1)) {
+        return { id: 'mlTinker', label: '✕ THE TINKER — THE STAR LANTERN' };
+      }
+    }
+    if (mlInMothRoom()) {
+      if (mlNear(mothRoom.inDoor.x, mothRoom.inDoor.z, 1.6)) {
+        return { id: 'mlOut', label: '✕ LEAVE THE LAMP ROOM' };
+      }
+      return null;                        // nothing else answers in the arena
+    }
+    if (!P.sailing && !P.skiffing) {
+      const d = mlFarDoor();
+      if (mlNear(d.x, d.z, 2.6)) {
+        return { id: 'mlIn', label: '✕ ENTER THE LAMP ROOM' };
+      }
+    }
+    if (mlCarry6() && QUEST.q >= 26 && mlNear(WHEEL_POS.x, WHEEL_POS.z, 5.2)) {
+      return { id: 'mlWheel6', label: '✕ SET THE WANING LANTERN' };
+    }
+  }
+  return _mlPrevInteract();
+};
+const _mlPrevDoInteract = doInteract;
+doInteract = function (ctx) {
+  if (!ctx || typeof ctx.id !== 'string' || ctx.id.indexOf('ml') !== 0) { _mlPrevDoInteract(ctx); return; }
+  if (ctx.id === 'mlTinker') startDialog('mlTinker', null);
+  else if (ctx.id === 'mlIn') { mlSeatExt(); CINE.room = mothRoom; startCine('doorIn'); }
+  else if (ctx.id === 'mlOut') { mlSeatExt(); CINE.room = mothRoom; startCine('doorOut'); }
+  else if (ctx.id === 'mlWheel6') startCine('mlWheel6');
+};
+
+/* ── cinematic dispatch ── */
+const _mlPrevStartCine = startCine;
+startCine = function (id) {
+  if (id === 'mlReveal' || id === 'mlCure' || id === 'mlWheel6') mlCineFrom();
+  if (id === 'mlCure') { MOTH.defeated = true; MOTH.active = false; mlRefreshBar(false); }
+  if (id === 'sunstruck' && MOTH.active && !MOTH.defeated) {
+    /* the moth checkpoint: it re-arms at the phase you fell on, and the
+       wake spot is the DOOR of its own room, never across the sea */
+    mlMothReset(true);
+  }
+  _mlPrevStartCine(id);
+  if (id === 'mlReveal' || id === 'mlCure' || id === 'mlWheel6') {
+    CAM.mode = 'cine';
+    dlgBox.classList.remove('on');
+  }
+};
+const _mlPrevTickCine = tickCine;
+tickCine = function () {
+  if (CINE.id === 'mlReveal') { CINE.t += DT; mlTickReveal(CINE.t); return; }
+  if (CINE.id === 'mlCure') { CINE.t += DT; mlTickCure(CINE.t); return; }
+  if (CINE.id === 'mlWheel6') { CINE.t += DT; mlTickWheel6(CINE.t); return; }
+  _mlPrevTickCine();
+};
+
+/* ── the sword answers in the arena ── */
+const _mlPrevSwingHits = swingHits;
+swingHits = function () {
+  if (mlInMothRoom()) {
+    if (MOTH.active && !MOTH.defeated) return mlMothSwingHits();
+    return false;
+  }
+  return _mlPrevSwingHits();
+};
+
+/* ── LIVE forward seams (MIRROR-6, at play speed): flags never disagree
+   with the quest in a way that dead-ends the arc ── */
+function mlTickSeams() {
+  if (!SAVE || (simTick % 45) !== 0) return;
+  if (SAVE.starsSeen && SAVE.q === 22) setQuest(23);
+  if (SAVE.starLantern && SAVE.q === 23) setQuest(24);
+  const lit = mlLitCount();
+  if (lit > 0 && SAVE.q < 24) {
+    if (!SAVE.starsSeen || !SAVE.starLantern) { SAVE.starsSeen = true; SAVE.starLantern = true; storeSave(); }
+    setQuest(24);
+  }
+  if (lit >= 4 && SAVE.q === 24) {
+    setQuest(25);
+    if (!cineSeen('ml4lit')) {
+      markCineSeen('ml4lit');
+      showCaption('Four beacons burn. One tower stays dark — the farthest one, past the Hourless Isles.', 4600);
+    }
+  }
+  if (SAVE.mothDone && SAVE.q < 26) {
+    if (!SAVE.lantern6) { SAVE.lantern6 = true; storeSave(); }
+    setQuest(26);
+  }
+  if (SAVE.sky >= 6 && SAVE.q < 27) setQuest(27);
+}
+
+const _mlPrevTickPlayer = tickPlayer;
+tickPlayer = function () {
+  _mlPrevTickPlayer();
+  if (state !== 'play') return;
+  mlTickSeams();
+  mlRevealTrigger();
+  mlTickMoth();
+  mlTickPool();
+};
+
+/* ── THE COMPASS ANSWERS EVERY STATE (MIRROR-4) ──
+   The sea is a path too: staged bay mouth → beacon → beacon (the doors
+   law over water — never through a headland, always the next mark). */
+function mlSeaChain(uptoIdx) {
+  const pts = [{ x: ML_BAY_OUT.x, z: ML_BAY_OUT.z }];
+  for (let i = 0; i < uptoIdx; i++) pts.push(mlBeaconPos(i));
+  return pts;
+}
+function mlChainNext(pts, finalPt) {
+  /* the road only ever points FORWARD: the first unreached mark that
+     genuinely advances toward the goal (nearest-point staging pointed a
+     half-lit road backward at the first beacon — the compass probe
+     caught it) */
+  const chain = pts.concat([finalPt]);
+  const px = P.sailing ? BOAT.x : P.x, pz = P.sailing ? BOAT.z : P.z;
+  const dF = (x, z) => Math.hypot(x - finalPt.x, z - finalPt.z);
+  const mine = dF(px, pz);
+  for (const c of chain) {
+    if (Math.hypot(px - c.x, pz - c.z) < 26) continue;    // reached: move on
+    if (dF(c.x, c.z) < mine - 8) return c;                // it advances the road
+  }
+  return finalPt;
+}
+function mlBoatPoint() {
+  if (P.sailing) return null;
+  const bx = (SAVE && SAVE.boatX != null) ? SAVE.boatX : (typeof WAKE_BOAT !== 'undefined' ? WAKE_BOAT.x : 8.5);
+  const bz = (SAVE && SAVE.boatZ != null) ? SAVE.boatZ : (typeof WAKE_BOAT !== 'undefined' ? WAKE_BOAT.z : 6);
+  return { x: bx, z: bz };
+}
+function mlSeaNext(finalPt, uptoIdx) {
+  /* on land, east of the bay mouth: the boat is the door to the sea */
+  if (!P.sailing && P.x > -30 && !mlInMothRoom()) {
+    const b = mlBoatPoint();
+    if (b && Math.hypot(P.x - finalPt.x, P.z - finalPt.z) > 120) return b;
+  }
+  return mlChainNext(mlSeaChain(uptoIdx), finalPt);
+}
+function mlSeaHome() {
+  if (mlInMothRoom()) return { x: mothRoom.inDoor.x, z: mothRoom.inDoor.z };
+  if (P.x < -60) {
+    /* the reversed lane: back past the lit beacons to the bay mouth */
+    const pts = [];
+    for (let i = 3; i >= 0; i--) pts.push(mlBeaconPos(i));
+    pts.push({ x: ML_BAY_OUT.x, z: ML_BAY_OUT.z });
+    return mlChainNext(pts, { x: WHEEL_POS.x, z: WHEEL_POS.z });
+  }
+  return { x: WHEEL_POS.x, z: WHEEL_POS.z };
+}
+function mlToMarketStall() {
+  const ts = mlTinkerStall();
+  if (!ts) return null;
+  if (typeof NM_MARKET !== 'undefined' && mlNear(NM_MARKET.qx, NM_MARKET.qz, 46)) return ts;
+  if (typeof nmRiverNextD === 'function') return nmRiverNextD(N5_FERRY_D);
+  return ts;
+}
+const _mlPrevObjPoint = objectivePoint;
+objectivePoint = function () {
+  if (SAVE) {
+    const q = QUEST.q;
+    /* the done-but-next-not-begun seam: 5/8 stands, the reveal waits */
+    if (q === 22 && SAVE.sky >= 5 && SAVE.tbc5Seen && !SAVE.starsSeen) {
+      return { x: ML_REVEAL.x, z: ML_REVEAL.z };
+    }
+    if (q === 23) {
+      if (!SAVE.starsSeen) return { x: ML_REVEAL.x, z: ML_REVEAL.z };
+      const m = mlToMarketStall();
+      if (m) return m;
+    }
+    if (q === 24) {
+      const k = mlK();
+      if (k && typeof k.sightingActive === 'function' && typeof k.laneTarget === 'function') {
+        try {
+          if (k.sightingActive()) {
+            /* p6k's laneTarget() answers with the sighted beacon INDEX */
+            const lt = k.laneTarget();
+            if (typeof lt === 'number' && lt >= 0) return mlBeaconPos(lt);
+            if (lt && typeof lt.x === 'number') return lt;
+          }
+        } catch (e) {}
+      }
+      const i = mlNextDarkIdx();
+      if (i >= 0) { const b = mlBeaconPos(i); return mlSeaNext({ x: b.x, z: b.z }, i); }
+      const d = mlFarDoor();
+      return mlSeaNext({ x: d.x, z: d.z }, 4);       // all lit, q25 not begun
+    }
+    if (q === 25) {
+      /* inside the arena the guardian IS the answer — a beacon marker
+         bobbing over the moth read as a phantom will-o'-wisp (found by
+         raycasting the "mystery orb" in the fight screenshots) */
+      if (mlInMothRoom()) return null;
+      const d = mlFarDoor();
+      return mlSeaNext({ x: d.x, z: d.z }, 4);
+    }
+    if (q === 26) return mlSeaHome();
+    if (q >= 27 && SAVE.sky >= 6) return null;       // 6/8 rests — free play
+  }
+  return _mlPrevObjPoint();
+};
+</script>
+<script>
+/* ═══════════ p6l/11 — the render frame, the derivation, the registries ═══════════ */
+
+let mlClock = performance.now(), mlSeat6Shown = false;
+const _mlPrevCull = cullChunks;
+cullChunks = function (ccx, ccz) {
+  _mlPrevCull(ccx, ccz);
+  const now = performance.now();
+  const dtv = Math.min(0.1, (now - mlClock) / 1000);
+  mlClock = now;
+  mlExtendDebugOnce();
+  const M = MOTH;
+  const nearRoom = (ML_C.x - ccx) * (ML_C.x - ccx) + (ML_C.z - ccz) * (ML_C.z - ccz) < 32 * 32;
+  /* a CAPPED interior: no sky from inside — the whole sky group rests
+     while the view is in the lamp room (and its seam-leaks with it),
+     which is also a fistful of draw calls back. Idempotent both ways. */
+  if (scene.fog.near < 1e6) skyGrp.visible = !nearRoom;
+  /* the moth lives only in its room (and its cure) */
+  const mothVis = nearRoom && (M.active || M.defeated || mlInMothRoom() || CINE.id === 'mlCure');
+  M.c.root.visible = mothVis;
+  if (mothVis && !SIM_FREEZE) {
+    const c = M.c;
+    c.root.position.set(M.x, M.y, M.z);
+    c.root.rotation.y = M.ang;
+    /* the flap: sim decides wingK targets; the render breathes them */
+    M.wingT += dtv * (M.st === 'hover' || M.st === 'wake' ? 5.2 : M.st === 'gust' || M.st === 'dive' ? 11 : 2.6);
+    const flap = Math.sin(M.wingT) * (M.st === 'low' || M.st === 'tired' || M.st === 'stoop' || M.st === 'roost' ? 0.06 : 0.5);
+    const spread = clamp(M.wingK, 0.05, 1.22);
+    c.parts.wingR.rotation.z = -(1.35 - spread) - flap * spread * 0.55;
+    c.parts.wingL.rotation.z = (1.35 - spread) + flap * spread * 0.55;
+    c.parts.bodyN.rotation.x = (M.st === 'dive') ? 0.5 : Math.sin(M.wingT * 0.5) * 0.05;
+    c.parts.rim.rotation.z = c.parts.wingR.rotation.z * 0.5 + c.parts.wingL.rotation.z * 0.5;
+    if (M.flash > 0) {
+      M.flash -= dtv;
+      /* hit feedback without a material swap: a tight scale pulse */
+      c.root.scale.setScalar(1 + (M.flash > 0 ? Math.sin(now / 18) * 0.03 : 0));
+    } else c.root.scale.setScalar(1);
+    /* her sprint pose, laid over the idle the NPC pass already applied */
+    if (CINE.id === 'mlReveal' && CINE.t < 3.2 && !SIM_FREEZE) {
+      poseHumanoid(pearl.char, 'walk', dtv, 1, { sprint: true });
+    }
+  }
+  /* fight furniture */
+  const inFight = mothVis && M.active && !M.defeated;
+  /* ONE pool tells the truth in here: p6k's bearer-following pool mesh
+     would contradict the anchored safe ground mid-wave */
+  if (inFight && typeof skPoolMesh !== 'undefined' && skPoolMesh) skPoolMesh.visible = false;
+  mlRing.visible = inFight && (M.st === 'gustTele' || M.st === 'gust');
+  if (mlRing.visible) {
+    mlRing.position.set(M.x, ML_FLOOR_Y + 0.06, M.z);
+    mlRing.scale.set(M.gustR, 1, M.gustR);
+    mlRing.material.opacity = M.st === 'gustTele' ? 0.35 + Math.sin(now / 90) * 0.15 : 0.55;
+  }
+  mlMark.visible = inFight && (M.st === 'diveTele');
+  if (mlMark.visible) {
+    mlMark.position.set(M.dive.tx, ML_FLOOR_Y + 0.05, M.dive.tz);
+    const lk = M.dive.lock;
+    mlMark.scale.setScalar(lk ? 1.35 : 1.0 + Math.sin(now / 80) * 0.1);
+    mlMark.material.opacity = lk ? 0.75 : 0.35;
+  }
+  mlPoolMesh.visible = inFight && ML_POOL.live && !!(SAVE && SAVE.starLantern);
+  if (mlPoolMesh.visible) {
+    mlPoolMesh.position.set(ML_POOL.x, ML_FLOOR_Y, ML_POOL.z);
+    mlPoolMesh.scale.set(mlPoolR(), 1, mlPoolR());
+    mlPoolMesh.material.opacity = 0.2 + Math.sin(now / 300) * 0.05 + (M.st === 'wave' ? 0.14 : 0);
+  }
+  mlWaveMesh.visible = inFight && M.wave.on;
+  if (mlWaveMesh.visible) {
+    const W2 = M.wave;
+    mlWaveMesh.position.set(ML_C.x + W2.ax * W2.s, ML_FLOOR_Y, ML_C.z + W2.az * W2.s);
+    mlWaveMesh.rotation.y = -Math.atan2(W2.az, W2.ax) + Math.PI / 2;
+  }
+  mlSpiralMesh.visible = inFight && M.spiral.on;
+  if (mlSpiralMesh.visible) {
+    const W2 = M.spiral;
+    mlSpiralMesh.position.set(ML_C.x + W2.ax * W2.s, ML_FLOOR_Y, ML_C.z + W2.az * W2.s);
+    mlSpiralMesh.rotation.y = -Math.atan2(W2.az, W2.ax) + Math.PI / 2;
+    mlSpiralMesh.material.opacity = 0.8 + Math.sin(now / 60) * 0.2;
+  }
+  /* the relic: wrapped, carried, or seated */
+  if (SAVE) {
+    if (!SAVE.mothDone) {
+      if (CINE.id !== 'mlCure' && CINE.id !== 'mlWheel6') {
+        mlRelic.visible = nearRoom;
+        if (nearRoom) { mlRelicHome(); mlRelicGlow.material.opacity = 0.35 + Math.sin(now / 400) * 0.12; }
+      }
+    } else if (mlCarry6() && state === 'play') {
+      mlRelic.visible = true;
+      mlRelic.scale.setScalar(1.1);
+      mlRelicGlow.material.opacity = 0.5;
+      if (P.skiffing && typeof SKF !== 'undefined') {
+        mlRelic.position.set(SKF.x - Math.sin(SKF.ang) * 0.9, skiffGrp.position.y + 1.05, SKF.z - Math.cos(SKF.ang) * 0.9);
+        mlRelic.rotation.set(0, SKF.ang, 0);
+      } else {
+        mlRelic.position.set(P.x - Math.sin(P.heading) * 0.32, groundH(P.x, P.z) + 1.1, P.z - Math.cos(P.heading) * 0.32);
+        mlRelic.rotation.set(0, P.heading, 0);
+      }
+    } else if (SAVE.sky >= 6) {
+      /* the wheel keeps six once it has six (the p6j correction, advanced) */
+      const nw = (WHEEL_POS.x - ccx) * (WHEEL_POS.x - ccx) + (WHEEL_POS.z - ccz) * (WHEEL_POS.z - ccz) < 150 * 150;
+      if (CINE.id !== 'mlWheel6') {
+        if (nw && (!mlSeat6Shown || (simTick % 90) === 0)) mlSeat6(1);
+        if (!nw && mlSeat6Shown) mlRelic.visible = false;
+        mlSeat6Shown = nw;
+      } else if (mlSeatK >= 0) mlSeat6(mlSeatK);
+    } else if (state === 'play' && !mlCarry6() && SAVE.sky < 6 && CINE.id !== 'mlCure') {
+      if (!nearRoom) mlRelic.visible = false;
+    }
+  }
+};
+
+/* ═══ THE ONE DERIVATION — phase six, from the save, both ways ═══ */
+let mlHookErr = null, mlHookRuns = 0;
+function mlDeriveWorld(S) {
+  /* the guardian */
+  MOTH.defeated = !!S.mothDone;
+  if (S.mothDone) {
+    mlPerchMoth();
+  } else {
+    MOTH.silverShown = -1;
+    mlMothAshK(0);
+    mlMothReset(false);
+  }
+  MOTH.c.root.visible = false;
+  mlVeilEl.style.opacity = '0';
+  ML_POOL.live = false;
+  mlRing.visible = false; mlMark.visible = false;
+  mlWaveMesh.visible = false; mlSpiralMesh.visible = false; mlPoolMesh.visible = false;
+  mothRoom.glow.material.opacity = S.mothDone ? 0.5 : 0.22;
+  /* the relic */
+  mlRelic.visible = false;
+  if (!S.mothDone) mlRelicHome();
+  mlSeat6Shown = false;
+  mlSeatK = -1;
+  /* the reveal props */
+  mlChart.visible = false;
+  mlConstel.visible = false;
+  mlConstel.userData.starMat.opacity = 0;
+  mlConstelGap.material.opacity = 0;
+  /* the ext teleport follows the sibling's door wherever it lands */
+  mlSeatExt();
+  /* the end card belongs to its moment */
+  if (S.sky >= 6 && !S.tbc6Seen) { S.tbc6Seen = true; storeSave(); }
+}
+window.__worldStateHooks.push(function (S) {
+  mlHookRuns++;
+  try { mlDeriveWorld(S); mlHookErr = null; }
+  catch (e) { mlHookErr = String(e && e.message || e); throw e; }
+});
+
+/* ═══ telemetry ═══ */
+window.__telemetryHooks.push(function (T) {
+  T.starsSeen = !!(SAVE && SAVE.starsSeen);
+  T.starLantern = !!(SAVE && SAVE.starLantern);
+  T.beaconLitN = mlLitCount();
+  T.beaconLitList = mlBeaconLitArr().map(b => b ? 1 : 0).join('');
+  T.mothDone = !!(SAVE && SAVE.mothDone);
+  T.lantern6 = !!(SAVE && SAVE.lantern6);
+  T.carry6 = mlCarry6();
+  T.tbc6Seen = !!(SAVE && SAVE.tbc6Seen);
+  T.inMothRoom = mlInMothRoom();
+  T.mothActive = MOTH.active;
+  T.mothDefeated = MOTH.defeated;
+  T.mothHp = MOTH.hp;
+  T.mothPhase = MOTH.phase;
+  T.mothSt = MOTH.st;
+  T.mothX = +MOTH.x.toFixed(1);
+  T.mothZ = +MOTH.z.toFixed(1);
+  T.mothBody = MOTH.bodyHits;
+  T.mothWaveN = MOTH.waveN;
+  T.mothSpiralN = MOTH.spiralN;
+  T.mothDiveN = MOTH.diveN;
+  T.poolLive = ML_POOL.live;
+  T.poolX = +ML_POOL.x.toFixed(1);
+  T.poolZ = +ML_POOL.z.toFixed(1);
+  T.poolR6 = mlPoolR();
+  T.p6kSeen = !!mlK();
+  T.farDoorX = +mlFarDoor().x.toFixed(1);
+  T.farDoorZ = +mlFarDoor().z.toFixed(1);
+  T.mlHookErr = mlHookErr; T.mlHookRuns = mlHookRuns;
+});
+
+/* ═══ debug ═══ */
+let mlDbgDone = false;
+function mlExtendDebugOnce() {
+  if (mlDbgDone || !window.__fmDebug) return;
+  mlDbgDone = true;
+  Object.assign(window.__fmDebug, {
+    warpMothroom() {
+      window.__fmDebug.warp(mothRoom.spawn.x, mothRoom.spawn.z);
+      P.heading = Math.PI;
+      return { x: P.x, z: P.z, floor: +ML_FLOOR_Y.toFixed(2) };
+    },
+    warpFarStar() {
+      const d = mlFarDoor();
+      const ox = (typeof d.outX === 'number') ? d.outX : d.x;
+      const oz = (typeof d.outZ === 'number') ? d.outZ : d.z + 2.2;
+      window.__fmDebug.warp(ox, oz);
+      return { x: P.x, z: P.z, door: [d.x, d.z] };
+    },
+    mothInfo() {
+      return {
+        st: MOTH.st, hp: MOTH.hp, phase: MOTH.phase, active: MOTH.active,
+        defeated: MOTH.defeated, x: +MOTH.x.toFixed(1), z: +MOTH.z.toFixed(1),
+        y: +MOTH.y.toFixed(1), body: MOTH.bodyHits,
+        waves: MOTH.waveN, spirals: MOTH.spiralN, dives: MOTH.diveN,
+        pool: [+ML_POOL.x.toFixed(1), +ML_POOL.z.toFixed(1), ML_POOL.live],
+      };
+    },
+    arcInfo() {
+      return {
+        q: SAVE ? SAVE.q : -1, starsSeen: !!(SAVE && SAVE.starsSeen),
+        starLantern: !!(SAVE && SAVE.starLantern), lit: mlBeaconLitArr(),
+        mothDone: !!(SAVE && SAVE.mothDone), lantern6: !!(SAVE && SAVE.lantern6),
+        sky: SAVE ? SAVE.sky : -1, tbc6: !!(SAVE && SAVE.tbc6Seen),
+        p6k: !!mlK(),
+      };
     },
   });
 }
