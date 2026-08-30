@@ -1064,6 +1064,28 @@ function loadSave() {
   } catch (e) { return null; }
 }
 function storeSave() {
+  /* THE BOAT IS SAVED WHERE SHE FLOATS (a rule, not two beats). Only the
+     crossing cine and the isle rescue reliably wrote SAVE.boatX/Z — every
+     other autosave kept whatever old moor was last written, so a rescue or
+     a drift left the save 150 m from where she truly floated and a reload
+     teleported her away from the player. Snapshot the LIVE vessels on
+     every serialize instead. Guards: only during real play (boot/title/
+     cine derive or film the boat — not the player's truth), never
+     mid-voyage/handoff (authored travel writes its own beats), and
+     typeof-guarded because this part evals long before the boats exist. */
+  try {
+    if (SAVE && typeof BOAT !== 'undefined' &&
+        (state === 'play' || state === 'pause' || state === 'dialog') &&
+        typeof FLOODLIVE !== 'undefined' && FLOODLIVE.boatDone &&
+        !(typeof VOYAGE !== 'undefined' && VOYAGE.active) &&
+        !(typeof AUTORUN !== 'undefined' && AUTORUN.active)) {
+      SAVE.boatX = BOAT.x; SAVE.boatZ = BOAT.z; SAVE.boatAng = BOAT.ang;
+      if (typeof SKF !== 'undefined' && typeof riverWet === 'function' && riverWet() &&
+          !(typeof P !== 'undefined' && P.skiffing)) {
+        SAVE.skiffX = SKF.x; SAVE.skiffZ = SKF.z;
+      }
+    }
+  } catch (e) {}
   try { localStorage.setItem(SAVE_KEY, JSON.stringify(SAVE)); } catch (e) {}
 }
 SAVE = loadSave();
@@ -5315,8 +5337,14 @@ function tickPlayer() {
   const inShade = inShadeAt(P.x, P.z);
   P.prevShade = P.shade; P.shade = inShade;
   if (!inShade && P.prevShade) {
-    // stepping into the glare
-    flashGlare(P.everSun ? 0.14 : 0.6, P.everSun ? 0.5 : 1.3);
+    // stepping into the glare — Crescent-era feedback teaching SUN = DANGER.
+    // Once the swelter retires (the Sliver payoff, sky 4), sun exposure means
+    // nothing anywhere, so the flash retires WITH it: walking the re-greened
+    // canopy crossed a shade edge every few strides and flashed each time
+    // (John, live report). World-changes are permanent — including this one.
+    if (!(typeof swelterRetired !== 'undefined' && swelterRetired)) {
+      flashGlare(P.everSun ? 0.14 : 0.6, P.everSun ? 0.5 : 1.3);
+    }
     P.everSun = true;
   }
   if (P.iframes > 0) P.iframes--;
@@ -12568,6 +12596,8 @@ function tickBoatFollows() {
       const bx = P.x + Math.sin(a) * r, bz = P.z + Math.cos(a) * r;
       if (waterDepthAt(bx, bz) < 1.3) continue;
       if (!boatMooringOK(bx, bz)) continue;
+      if (typeof window.__boatSurfaceYAt === 'function' &&
+          Math.abs(window.__boatSurfaceYAt(bx, bz) - WL) > 0.05) continue;   // sea water only — never up a river
       BOAT.x = bx; BOAT.z = bz;
       sailboat.group.position.set(BOAT.x, WL - 0.18, BOAT.z);
       sailboatColl.x = BOAT.x; sailboatColl.z = BOAT.z; sailboatColl.off = false;
@@ -12576,9 +12606,72 @@ function tickBoatFollows() {
     }
   }
 }
+/* ── the one validated bring-her-to-my-shore search, shared by every
+   rescue: deep enough to float (≥0.9), never inside a solid, and never in
+   ANOTHER water authority's elevated water (the river stands above WL —
+   a rescue that moors her up a river mouth strands her all over again;
+   __boatSurfaceYAt is registered by the river-mouth part, typeof-guarded
+   here because this part evals first). ── */
+function boatComesToShore() {
+  for (let rr = 3; rr <= 12; rr += 0.7) {
+    for (let ii = 0; ii < 24; ii++) {
+      const aa = ii * (TAU / 24);
+      const fx = P.x + Math.sin(aa) * rr, fz = P.z + Math.cos(aa) * rr;
+      if (worldSolidAt(fx, fz)) continue;
+      if (waterDepthAt(fx, fz) < 0.9) continue;
+      if (typeof window.__boatSurfaceYAt === 'function' &&
+          Math.abs(window.__boatSurfaceYAt(fx, fz) - WL) > 0.05) continue;
+      BOAT.x = fx; BOAT.z = fz; BOAT.spd = 0;
+      sailboat.group.position.set(BOAT.x, WL - 0.18, BOAT.z);
+      sailboatColl.x = BOAT.x; sailboatColl.z = BOAT.z; sailboatColl.off = false;
+      if (SAVE) { SAVE.boatX = BOAT.x; SAVE.boatZ = BOAT.z; storeSave(); }
+      return true;
+    }
+  }
+  return false;
+}
+/* ═══ THE STRANDED-BY-MERCY RULE (a standing rule, not a gate — John's
+   law). The dunk-instant orphan guard below only ever ran INSIDE the dunk
+   handler: John stood WADING on a knee-deep shoal with the boat floating
+   11 m away across unwadeable water, and every swim attempt dunk-bounced
+   him back to that same shoal — the guard's moment had passed, so no
+   rescue ever came. This rule OWNS the space instead: whenever you are in
+   or at the water, she is 6–80 m off, and the straight path to her
+   crosses water too deep to wade, a strand timer runs; at ~4 s she comes
+   to your shore by the same validated search. Checked every half second,
+   sample-based, zero allocation; never while sailing/punting/skiffing,
+   during Pearl's voyage, indoors, in the hollow or the Foundry, and only
+   on a flooded world with the boat afloat. ═══ */
+let strandT = 0, strandCapTick = -99999;
+function tickStrandRule() {
+  if ((simTick % 30) !== 0) return;
+  if (P.sailing || P.skiffing || P.skPunting || VOYAGE.active) { strandT = 0; return; }
+  if (!flooded() || !FLOODLIVE.boatDone) { strandT = 0; return; }
+  if (typeof roomAt === 'function' && roomAt(P.x, P.z)) { strandT = 0; return; }
+  if (inHollowAt(P.x, P.z)) { strandT = 0; return; }
+  if (typeof inFoundryAt === 'function' && inFoundryAt(P.x, P.z)) { strandT = 0; return; }
+  const inWater = waterDepthAt(P.x, P.z) > 0.05 || P.fy < WL + 0.12;
+  if (!inWater) { strandT = 0; return; }
+  const bd = Math.hypot(P.x - BOAT.x, P.z - BOAT.z);
+  if (bd < 6 || bd > 80) { strandT = 0; return; }
+  let crossing = false;
+  for (let s = 2; s < bd - 2; s += 1.6) {
+    const sx = P.x + (BOAT.x - P.x) / bd * s, sz = P.z + (BOAT.z - P.z) / bd * s;
+    if (waterDepthAt(sx, sz) > 0.62) { crossing = true; break; }
+  }
+  if (!crossing) { strandT = 0; return; }
+  strandT += 0.5;
+  if (strandT < 4) return;
+  strandT = 0;
+  if (boatComesToShore() && simTick - strandCapTick > 1800) {
+    strandCapTick = simTick;
+    showCaption('She noses over to you.', 3200);
+  }
+}
 function tickTide() {
   if (state !== 'play') return;
   tickBoatFollows();
+  tickStrandRule();
   /* the resonance: with the Crescent thread alive, the forecourt answers */
   if (SAVE && !SAVE.basinOpen && QUEST.q >= 2 && !P.sailing) {
     if (Math.hypot(P.x - HUM_SPOT.x, P.z - HUM_SPOT.z) < 11) {
@@ -12628,19 +12721,7 @@ function tickTide() {
             if (waterDepthAt(sx, sz) > 0.62) { crossing = true; break; }
           }
         }
-        if (crossing) {
-          outer: for (let rr = 3; rr <= 12; rr += 0.7) {
-            for (let ii = 0; ii < 24; ii++) {
-              const aa = ii * (TAU / 24);
-              const fx = P.x + Math.sin(aa) * rr, fz = P.z + Math.cos(aa) * rr;
-              if (worldSolidAt(fx, fz)) continue;
-              if (waterDepthAt(fx, fz) < 0.9) continue;
-              BOAT.x = fx; BOAT.z = fz; BOAT.spd = 0;
-              storeSave();
-              break outer;
-            }
-          }
-        }
+        if (crossing) boatComesToShore();   // the fast path of the strand rule
       }
     }
   }
@@ -13689,7 +13770,12 @@ function refreshHullClamp(cx, cz) {
       const hx = H.x(), hz = H.z();
       if (Math.abs(hx - cx) > WG_SPAN / 2 + 24 || Math.abs(hz - cz) > WG_SPAN / 2 + 24) continue;
       _hulX[_hulN] = hx; _hulZ[_hulN] = hz;
-      _hulY[_hulN] = H.waterlineY() - WL;         // relative to WL, like h
+      /* relative to WL, like h — LESS the hull's tilt reach: the clamp is a
+         flat plane at her centre waterline, but at paddle speed she trims
+         by the bow (spd*0.008) and rides swell gradients, so her bow liner
+         can sit half a metre BELOW that plane. A hull may declare how far
+         its waterline dips when tilted; the water yields that much more. */
+      _hulY[_hulN] = H.waterlineY() - WL - (H.tiltDrop ? H.tiltDrop() : 0);
       _hulRIn[_hulN] = H.r + WG_CELL;
       _hulROut[_hulN] = H.r + WG_CELL + 6;
       _hulN++;
@@ -13830,7 +13916,16 @@ let farSeaMesh = null;
     }
   }
   farSeaMesh = mdMesh(md, new THREE.MeshBasicMaterial({ vertexColors: true }), false);
-  farSeaMesh.position.y = WL - 0.55;
+  /* RULE 4: this sheet is STATIC and runs under the entire open sea — it
+     cannot consult __HULLS, so it must sit below any hull's deepest ride.
+     At WL−0.55 every swell trough deeper than half a metre pushed it up
+     through the sailing hull's deck (John's photos). Three swells sum to
+     −1.71, a big set's leading dip adds −0.96; the hull's heave is floored
+     at −2.1 (updateSeaFrame), so WL−2.4 is below every waterline that can
+     exist. Visually free: its top surface only shows beyond the swell
+     grid's rim (≥160 m), where 2 m of depth is under a pixel of grazing
+     angle, and the rim already dissolves into this sheet's colour. */
+  farSeaMesh.position.y = WL - 2.4;
   farSeaMesh.matrixAutoUpdate = false; farSeaMesh.updateMatrix();
   farSeaMesh.frustumCulled = false;
   farSeaMesh.visible = false;
@@ -15301,15 +15396,26 @@ function updateSeaFrame(dtv) {
   if (!P.sailing) { SEAFX.heave = 0; SEAFX.pitch = 0; SEAFX.roll = 0; SEAFX.deckY = WL - 0.18; return; }
   const f = 1.5, s = 0.9;
   const fx = Math.sin(BOAT.ang), fz = Math.cos(BOAT.ang);
-  const hM = swellAt(BOAT.x, BOAT.z);
-  const hB = swellAt(BOAT.x + fx * f, BOAT.z + fz * f);
-  const hS = swellAt(BOAT.x - fx * f, BOAT.z - fz * f);
-  const hP = swellAt(BOAT.x - fz * s, BOAT.z + fx * s);
-  const hT = swellAt(BOAT.x + fz * s, BOAT.z - fx * s);
+  /* THE SWELL BELONGS TO THE OPEN SEA. seaShoalAt answers with FULL
+     amplitude at any far coordinate — including the bay's flat plane and
+     the river's standing reaches, where John's refit boat heaved and
+     pitched over water that renders dead flat (and in the river the
+     phantom trough sank her half a metre under the surface she rides).
+     The hull's swell response ramps in only west of the headland, where
+     the swell grid actually draws it. */
+  const swellK = clamp((-104 - BOAT.x) / 28, 0, 1);
+  const hM = swellAt(BOAT.x, BOAT.z) * swellK;
+  const hB = swellAt(BOAT.x + fx * f, BOAT.z + fz * f) * swellK;
+  const hS = swellAt(BOAT.x - fx * f, BOAT.z - fz * f) * swellK;
+  const hP = swellAt(BOAT.x - fz * s, BOAT.z + fx * s) * swellK;
+  const hT = swellAt(BOAT.x + fz * s, BOAT.z - fx * s) * swellK;
   SEAFX.heave = hM;
+  /* vessel-side floor (Rule 4, static sheets): she may never ride below
+     the far-sea underlayment, whatever three swells and a big set add to */
+  if (SEAFX.heave < -2.1) SEAFX.heave = -2.1;
   SEAFX.pitch = Math.atan2(hB - hS, f * 2) * 0.85;
   SEAFX.roll = Math.atan2(hT - hP, s * 2) * 0.75;
-  SEAFX.deckY = WL - 0.18 + hM;
+  SEAFX.deckY = WL - 0.18 + SEAFX.heave;
 }
 /* the boat's visual transform: heave, pitch and roll off the swell gradient
    at the hull. Composed as a quaternion so pitch/roll stay in the HULL's
@@ -15954,6 +16060,15 @@ cullChunks = function (ccx, ccz) {
   }
   seamMesh.visible = west && near2(-110, CHAN.z, 300);
   farSeaMesh.visible = flooded() && ccx < 40;
+  /* RULE 4 ordering: pose the hull FIRST, then let the water consult her.
+     p6c's older sailing pose (no heave) runs inside the delegate chain
+     above, and the clamp used to read the boat's Y right there — a phantom
+     waterline a full swell-height wrong in a trough, which is exactly how
+     the rendered sea sliced through the deck at paddle speed (the moored
+     gate never caught it: moored, both poses agree). The TRUE pose (heave,
+     pitch, the river lift) must be on the group before refreshHullClamp
+     reads it. */
+  poseBoatOnSwell(now);
   /* THE SWELL GRID — written in place, only where there is open sea to see.
      West of the headland it owns the surface; inside the bay, the bay's own
      plane does, and the harbour gap gets its static patch. */
@@ -16005,8 +16120,7 @@ cullChunks = function (ccx, ccz) {
     }
   }
   bellwright.char.root.visible = west && near2(bellwright.x, bellwright.z, 40);
-  /* the boat on the swell, and her keel under her */
-  poseBoatOnSwell(now);
+  /* (the boat was already posed above, BEFORE the water consulted her) */
   if (sailboat.group.visible && refitDone()) {
     sail2.scale.y += (((P.sailing && BOAT.sailK > 0.5) ? 1 : 0.12) - sail2.scale.y) * Math.min(1, dtv * 3);
   }
@@ -16249,6 +16363,11 @@ window.__HULLS.push({
   underway: () => !!(P.sailing || VOYAGE.active),
   x: () => BOAT.x, z: () => BOAT.z,
   waterlineY: () => sailboat.group.position.y + 0.04,
+  /* how far below the centre waterline her liner can reach when she pitches
+     (half-length 3.2 m) and rolls (half-beam 1.1 m) — zero when moored */
+  tiltDrop: () => Math.min(0.9,
+    Math.abs(SEAFX.pitch + BOAT.spd * 0.008) * 3.2 +
+    Math.abs(SEAFX.roll - BOAT.heel) * 1.1),
   /* mooring law (Rule 6): she floats in ≥1.3 m or she is re-moored */
   depthOk: () => waterDepthAt(BOAT.x, BOAT.z) >= 1.3,
   rescue: () => rescueStrandedBoat(),
@@ -26251,6 +26370,45 @@ const LR_W = {
 };
 const LR_NAVD = { head: 0, r1: 1.15, r2: 1.1, rap: 0.95, glide: 0.5, pool: 0, chan: 1.6 };
 
+/* THE HEAD SPILL — the lane the falling river cuts from the upper reach
+   into the head pool. The old dead-end bank stands across the corridor
+   with a hand's depth of water over it: the ONE pinch that made
+   "sailable from the mouth pool to the first ford" untrue (the refit
+   boat grinds to a halt on it; measured 0.15 m over the bar). A year of
+   the river pouring through the gates cuts its own spill channel — carve
+   it like every other lane: analytic here, measured + boosted below, cut
+   into the rendered sheets by the same pass. The shape fades out east of
+   x≈281 so it lives entirely inside the mouth mask. */
+const HEAD_SPILL = [282.5, 67.6, 278.2, 65.2, 273.6, 63.2];
+let HS_BOOST = 0;
+function headSpillDist(x, z) {
+  let bd2 = 1e18;
+  for (let i = 0; i + 3 < HEAD_SPILL.length; i += 2) {
+    const ax = HEAD_SPILL[i], az = HEAD_SPILL[i + 1];
+    const bx = HEAD_SPILL[i + 2], bz = HEAD_SPILL[i + 3];
+    const dx = bx - ax, dz = bz - az;
+    const t = clamp(((x - ax) * dx + (z - az) * dz) / (dx * dx + dz * dz), 0, 1);
+    const px = ax + dx * t, pz = az + dz * t;
+    const d2 = (x - px) * (x - px) + (z - pz) * (z - pz);
+    if (d2 < bd2) bd2 = d2;
+  }
+  return Math.sqrt(bd2);
+}
+/* the spill's standing surface: the head pool's level at the pool end,
+   easing up to meet the river's own sheet at the east hand-off */
+function moSpillSurfY(x) { return lerp(4.77, 4.90, clamp((x - 273.6) / 8.9, 0, 1)); }
+function headSpillCut(x, z, h) {
+  const d = headSpillDist(x, z);
+  if (d >= 6.0) return h;
+  const bed = 3.92 - HS_BOOST;
+  let t = d <= 2.2 ? 1 : 1 - smoothstep((d - 2.2) / 3.8);
+  /* fade to NOTHING before x=282 — the rendered-sheet cut pass only
+     touches x<282, and rendered must equal authority everywhere. The
+     river's own bed is already boat-deep by x≈280 on this line. */
+  t *= 1 - smoothstep(clamp((x - 279.0) / 2.4, 0, 1));
+  return lerp(h, Math.min(h, bed), t);
+}
+
 /* nearest point on the spine: {i, t, d (unsigned), off (signed), s, surf} */
 function lrNear(x, z) {
   let bi = 0, bt = 0, bd2 = 1e18;
@@ -26363,6 +26521,8 @@ function moCarveRaw(x, z, base) {
       h = lerp(h, Math.min(h, bed), w);
     }
   }
+  /* the head spill lane (upper reach ↔ head pool) */
+  h = headSpillCut(x, z, h);
   /* THE FOOT ROAD KEEPS ITS CROSSING: the family's walk line bay ↔ pass
      crosses this water exactly once — over the glide and the pool's
      south shelf. Whatever the shapes above carved, the walk band wades:
@@ -26394,7 +26554,7 @@ const MO_WALK = [[95, 34], [108, 35.2], [120, 36.3], [132, 37.4], [146, 38.6]];
       const x = MOM_X0 + ix * MOM_S + MOM_S / 2, z = MOM_Z0 + iz * MOM_S + MOM_S / 2;
       const r = lrNear(x, z);
       const dp = Math.hypot(x - MOUTH_POOL.x, z - MOUTH_POOL.z);
-      if (r.d < 16 || dp < MOUTH_POOL.r + 6) MOMASK[iz * MOM_W + ix] = 1;
+      if (r.d < 16 || dp < MOUTH_POOL.r + 6 || headSpillDist(x, z) < 12) MOMASK[iz * MOM_W + ix] = 1;
     }
   }
 })();
@@ -26449,6 +26609,30 @@ const LR_LANE_MIN = { r1: 0.7, r2: 0.7, rap: 0.62, glide: 0.45, chan: 1.3 };
     }
     if (!deficits) break;
     for (let i = 0; i < LRN.length; i++) LR_BOOST[i] += add[i];
+    moRebuildFields();
+  }
+})();
+/* the head spill measures like every lane: keel-water (0.62) across a
+   boat-width on the INTERPOLATED field, or the pinch is still the pinch */
+(function tuneSpill() {
+  const N = HEAD_SPILL.length / 2 - 1;
+  for (let it = 0; it < 8; it++) {
+    let worst = 9;
+    for (let seg = 0; seg < N; seg++) {
+      const ax = HEAD_SPILL[seg * 2], az = HEAD_SPILL[seg * 2 + 1];
+      const bx = HEAD_SPILL[seg * 2 + 2], bz = HEAD_SPILL[seg * 2 + 3];
+      const L = Math.hypot(bx - ax, bz - az);
+      const nx = -(bz - az) / L, nz = (bx - ax) / L;
+      for (let t = 0; t <= 1.0001; t += 0.12) {
+        const x = lerp(ax, bx, t), z = lerp(az, bz, t);
+        if (x > 278.6) continue;                       // the east fade is the river's own deep water
+        for (const u of [-1.1, 0, 1.1]) {
+          worst = Math.min(worst, 4.77 - mouthGroundAt(x + nx * u, z + nz * u));
+        }
+      }
+    }
+    if (worst >= 0.62) break;
+    HS_BOOST += (0.62 - worst) + 0.14;
     moRebuildFields();
   }
 })();
@@ -26705,6 +26889,45 @@ const moWaterHead = moSheet(0, 1, { foam: false });
 const moWaterR1 = moSheet(1, 4, { foam: true });
 const moWaterR2 = moSheet(4, 7, { foam: true });
 const moWaterRun = moSheet(7, 17, { foam: true });
+/* THE SPILL SHEET — rendered water over the head-spill lane, the same
+   strip the physics answers (lowerSurfaceAt) and the carve dug
+   (headSpillCut). Never water without pixels: a hull floating on an
+   invisible surface is Rule 4 inverted. */
+const moWaterSpill = (function () {
+  const md = MD();
+  const HW = 3.4, SP = 3;
+  for (let i = 0; i + 3 < HEAD_SPILL.length; i += 2) {
+    const ax = HEAD_SPILL[i], az = HEAD_SPILL[i + 1];
+    const bx = HEAD_SPILL[i + 2], bz = HEAD_SPILL[i + 3];
+    const L = Math.hypot(bx - ax, bz - az);
+    const nx = -(bz - az) / L, nz = (bx - ax) / L;
+    for (let k = 0; k < SP; k++) {
+      const u0 = -HW + 2 * HW * (k / SP), u1 = -HW + 2 * HW * ((k + 1) / SP);
+      const node = (px, pz, u) => {
+        const x = px + nx * u, z = pz + nz * u;
+        const sy = moSpillSurfY(x);
+        const gy = groundH(x, z);
+        const dep = sy - gy;
+        const y = dep <= 0.05 ? Math.min(sy, gy + 0.06) : sy;
+        return { p: [x, y, z], c: lrColAt(Math.max(0, dep), vnoise(x * 0.07, z * 0.07)) };
+      };
+      const A = node(ax, az, u0), B = node(ax, az, u1), C = node(bx, bz, u1), D = node(bx, bz, u0);
+      pushQuad(md, A.p, B.p, C.p, D.p, A.c);
+      const cA = md.c.length / 3 - 6;
+      const set = (slot, cc) => { md.c[(cA + slot) * 3] = cc[0]; md.c[(cA + slot) * 3 + 1] = cc[1]; md.c[(cA + slot) * 3 + 2] = cc[2]; };
+      set(0, A.c); set(1, B.c); set(2, C.c); set(3, A.c); set(4, C.c); set(5, D.c);
+    }
+  }
+  const mesh = mdMesh(md, new THREE.MeshBasicMaterial({
+    vertexColors: true, transparent: true, opacity: 0.92, depthWrite: false,
+  }), false);
+  mesh.renderOrder = 2;
+  mesh.frustumCulled = false;
+  mesh.visible = false;
+  mesh.matrixAutoUpdate = false; mesh.updateMatrix();
+  scene.add(mesh);
+  return { mesh, base: new Float32Array(mesh.geometry.attributes.color.array) };
+})();
 /* the tide sheet: pool bowl + channel, a fan at WL over the carved bed */
 let moWaterTide = null, moTideBase = null;
 (function buildTideSheet() {
@@ -27139,6 +27362,11 @@ function lowerSurfaceAt(x, z) {
   } else if (r.zone === 'pool' || r.zone === 'chan') {
     if ((SAVE && SAVE.sky >= 2) && (inPool || ad < zw[1] + 1.5)) y = WL;
   }
+  /* the head spill: whenever the river runs, its water stands in the
+     spill lane too — the upper reach and the head pool are ONE water
+     (physics answer here, rendered by moWaterSpill; carved by
+     headSpillCut — all three from the same shape) */
+  if (y === null && riverWet() && headSpillDist(x, z) < 5.8) y = moSpillSurfY(x);
   if (y === null && tidal) y = WL;
   if (y === null) return null;
   if (y - groundH(x, z) <= 0) return null;
@@ -27286,17 +27514,22 @@ let moPaddleGrp = null, moPaddleSpin = null, moPaddleK = 0, moPaddlePh = 0, moCl
 
 /* ── the boat rides the LOWER RIVER's surface, not the sea's ── */
 let moBoatDy = 0;
-function moBoatWaterY() {
-  if (moRectQ(BOAT.x, BOAT.z)) {
-    const y = lowerSurfaceAt(BOAT.x, BOAT.z);
+/* the LOCAL water surface for any hull at any point — the sea's WL unless
+   a river authority stands here. Published on window so p6c's rescues
+   (which eval long before this part) can refuse to moor her in elevated
+   water, and so probes can read the same truth the hull rides. */
+window.__boatSurfaceYAt = function (x, z) {
+  if (moRectQ(x, z)) {
+    const y = lowerSurfaceAt(x, z);
     if (y !== null) return y;
   }
-  if (moUpperRectQ(BOAT.x, BOAT.z) && riverWet()) {
-    const y = riverSurfaceAt(BOAT.x, BOAT.z);
+  if (moUpperRectQ(x, z) && riverWet()) {
+    const y = riverSurfaceAt(x, z);
     if (y !== null) return y;
   }
   return WL;
-}
+};
+function moBoatWaterY() { return window.__boatSurfaceYAt(BOAT.x, BOAT.z); }
 /* the keel-scaled depth: with the keel swung UP, the same checks fire at
    HALF the water — 0.55/0.45 become 0.28/0.22 without touching p6c */
 const MO_KEEL_SCALE = 0.55 / 0.28;
@@ -27304,6 +27537,7 @@ let _moDepthRealFn = null;
 function moKeelScaledDepth(x, z) { return _moDepthRealFn(x, z) * MO_KEEL_SCALE; }
 
 let moFordCd = 0, moFordSaid = false, moPaddleWasOn = false;
+let moGrindX = 0, moGrindZ = 0, moGrindT = 0;   // pinned-at-the-ford detector
 const _moTickSailing = tickSailing;
 tickSailing = function () {
   const east = BOAT.x > -40;
@@ -27370,7 +27604,28 @@ tickSailing = function () {
           SFX.splash();
           rumble({ duration: 220, strong: 0.3, weak: 0.55 });
         }
-      }
+      } else if (over > -12 && moveVec() > 0.1) {
+        /* Maria's law: the stop must EXPLAIN itself. In practice the
+           chute's own shallow water pins her a couple of metres before the
+           push band — with the wheel still churning at full speed — so the
+           caption above never spoke and John pressed against a silent
+           wall. BOAT.spd stays high while she is pinned, so detect the
+           grind by actual MOVEMENT: throttled toward the ford, near the
+           limit, not gaining ground for ~1 s → say the one line. */
+        const gd = Math.hypot(BOAT.x - moGrindX, BOAT.z - moGrindZ);
+        moGrindX = BOAT.x; moGrindZ = BOAT.z;
+        moGrindT = gd < 0.04 ? moGrindT + 1 : 0;
+        if (moGrindT > 55 && moFordCd <= 0) {
+          moGrindT = 0;
+          moFordCd = 480;
+          if (!moFordSaid) {
+            moFordSaid = true;
+            showCaption('Her beam is too broad for the white water — the skiff knows the way.', 4200);
+          }
+          SFX.splash();
+          rumble({ duration: 220, strong: 0.3, weak: 0.55 });
+        }
+      } else { moGrindT = 0; }
     }
   }
   if (moFordCd > 0) moFordCd--;
@@ -27385,6 +27640,17 @@ const _moPoseBoat = poseBoatOnSwell;
 poseBoatOnSwell = function (now) {
   _moPoseBoat(now);
   if (typeof sailboat === 'undefined' || !sailboat.group.visible) return;
+  /* THE LIFT IS A RULE, NOT A SAILING SIDE-EFFECT. moBoatDy used to update
+     only inside tickSailing — moor her in a reach (or resume a save moored
+     there) and the lift froze at whatever it last was: John reloaded to a
+     boat sunk to her masthead in the upper reach, riding the SEA's
+     waterline 1.4 m under the river. The pose itself now tracks the local
+     surface whenever the sim isn't already doing it; the first frame after
+     a load snaps (no visible rise), ordinary transitions ease. */
+  if (!P.sailing) {
+    const tgt = Math.max(0, moBoatWaterY() - WL);
+    moBoatDy += (tgt - moBoatDy) * (Math.abs(tgt - moBoatDy) > 0.8 ? 1 : 0.2);
+  }
   if (moBoatDy > 0.005) sailboat.group.position.y += moBoatDy;
   /* the swing keel: folds up along the hull as the water thins */
   if (moKeel.ok) {
@@ -27903,6 +28169,7 @@ cullChunks = function (ccx, ccz) {
   const wet = !!(SAVE && SAVE.sky >= 2);
   /* sheets — the small reach sheets only matter within sight of the works */
   moWaterHead.mesh.visible = riverWet() && worksClose;
+  moWaterSpill.mesh.visible = riverWet() && worksClose;
   moWaterR1.mesh.visible = riverWet() && moFill[0] > 0 && worksClose;
   moWaterR2.mesh.visible = riverWet() && moFill[1] > 0 && worksClose;
   moWaterRun.mesh.visible = (window.__mouthOpenNow() || moRunFrontS >= 0) && moFill[2] > 0 && (nearWorks || nearMouth);
@@ -27954,6 +28221,7 @@ cullChunks = function (ccx, ccz) {
     if (moWaterR2.mesh.visible) moWaterMod(moWaterR2, tsec);
     if (moWaterRun.mesh.visible) moWaterMod(moWaterRun, tsec);
     if (moWaterHead.mesh.visible) moWaterMod(moWaterHead, tsec);
+    if (moWaterSpill.mesh.visible) moWaterMod(moWaterSpill, tsec);
     if (moWaterTide.visible) {
       const colA = moWaterTide.geometry.attributes.color;
       const arr = colA.array;
