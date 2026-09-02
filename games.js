@@ -119,5 +119,13 @@ window.GAMES_DATA = [
     "status": "PRESS START",
     "icon": "moon",
     "source": "https://fallenmoon.onrender.com/"
+  },
+  {
+    "slug": "ring-racer",
+    "title": "RING RACER",
+    "genre": "RACING",
+    "status": "PRESS START",
+    "icon": "saturn",
+    "source": "https://ringracer.onrender.com/"
   }
 ];
