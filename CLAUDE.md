@@ -108,11 +108,14 @@ count. Use the `/new-game` skill for the full checklist.
 
 ## How to build here (any model)
 
-Verification/check/audit agents run on OPUS (model:"opus"), a standing
-rule from John 2026-09-03: builds may use the session model, but the
-harness-running, gate-checking, and sweep agents go to Opus to preserve
-the primary model's budget. (Born the night a session limit killed a
-verifier mid-run.)
+Agent model tiers (standing rule from John, 2026-09-03): OPUS for
+anything that might need to diagnose or fix — verification closers,
+gate triage, sweeps, audits (a red gate here is an investigation, not
+a re-run). SONNET allowed for mechanical chores with crisp pass/fail
+and no debugging expected — variance re-runs of known suites, deploy
+polling, bundle-marker checks, screenshot capture batches. The session
+model does design and orchestration. Rationale: preserves the primary
+budget; born the night a session limit killed a verifier mid-run.
 
 Decide the design FIRST (mechanics, controls, rules — written down), then
 delegate implementation to an agent whose brief contains: the decided
