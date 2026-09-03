@@ -108,6 +108,12 @@ count. Use the `/new-game` skill for the full checklist.
 
 ## How to build here (any model)
 
+Verification/check/audit agents run on OPUS (model:"opus"), a standing
+rule from John 2026-09-03: builds may use the session model, but the
+harness-running, gate-checking, and sweep agents go to Opus to preserve
+the primary model's budget. (Born the night a session limit killed a
+verifier mid-run.)
+
 Decide the design FIRST (mechanics, controls, rules — written down), then
 delegate implementation to an agent whose brief contains: the decided
 design, the conventions above, and the mandatory self-verification loop.
