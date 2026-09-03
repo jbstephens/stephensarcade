@@ -202,6 +202,18 @@
     100% { opacity: 0; }
   }
 
+  /* SOLAR FLARE screen flash (global, both halves) */
+  #flareFx {
+    position: absolute; inset: 0; background: #fff8e0;
+    opacity: 0; pointer-events: none; z-index: 6;
+  }
+  #flareFx.show { animation: flarepop 0.6s ease-out forwards; }
+  @keyframes flarepop {
+    0% { opacity: 0.9; }
+    35% { opacity: 0.45; }
+    100% { opacity: 0; }
+  }
+
   /* countdown (global, both halves share it) */
   #countdownEl {
     position: absolute; left: 0; right: 0; top: 216px;
@@ -515,6 +527,7 @@
   </div>
   <div id="splitBar"></div>
 
+  <div id="flareFx"></div>
   <div id="countdownEl"></div>
   <div id="toast"></div>
 
@@ -858,7 +871,7 @@ const TRACK_DEFS = [
           { s: sT(149), lat: 0, len: 9, halfW: 7 },
           { s: sT(156), lat: 0, len: 9, halfW: 7 },
         ],
-        jumpPads: [{ s: sT(162.5), lat: -5.5, len: 10, halfW: 4 }],
+        jumpPads: [{ s: sT(162.5), lat: -5.5, len: 10, halfW: 4, land: 'branch' }],
         branchEntryS: sT(164.5), branchExitS: sT(215),
         openEdges: [
           { s0: sT(240), s1: sT(254), side: 1 },
@@ -892,7 +905,7 @@ const TRACK_DEFS = [
         jumpPads: [
           { s: sT(71) - 12, lat: 0, len: 10, halfW: 10, vy: 15.5 },
           { s: sT(173.5) - 12, lat: 0, len: 10, halfW: 10, vy: 15.5 },
-          { s: sT(240), lat: -5, len: 10, halfW: 4.5 },     // upper-lane launcher
+          { s: sT(240), lat: -5, len: 10, halfW: 4.5, land: 'branch' },  // upper-lane launcher
         ],
         branchEntryS: sT(242), branchExitS: sT(284),
         openEdges: [
@@ -1823,6 +1836,51 @@ W.buildTrackWorld = function () {
     W.itemBoxes = { mesh, meta };
   }
 
+  /* TRACKSIDE TICK-MARKERS (RR-JUICE-1): instanced posts along straights so
+     motion reads FAST. One InstancedMesh = one draw call; track layer (no
+     collision), hugging the road just outside the nubs. */
+  {
+    const spots = [];
+    const straightK = 1 / 200;
+    for (let i = 0; i < n; i += 4) {
+      const s = i * T.SAMPLE_DS;
+      if (T.inGap(s)) continue;
+      let ks = 0;
+      for (let o = -4; o <= 4; o++) ks += Math.abs(M[(i + o + n) % n].k);
+      if (ks / 9 > straightK) continue;                    // straights only
+      const p = M[i % n];
+      for (const side of [1, -1]) {
+        if (T.edgeOpen(s, side)) continue;
+        spots.push({ x: p.x + p.lx * (p.w + 2.5) * side, y: p.y, z: p.z + p.lz * (p.w + 2.5) * side,
+          ry: Math.atan2(p.tx, p.tz) });
+        if (spots.length >= 360) break;
+      }
+      if (spots.length >= 360) break;
+    }
+    if (spots.length) {
+      const geo = new THREE.BoxGeometry(0.5, 1.7, 0.16);
+      const col = new Float32Array(geo.attributes.position.count * 3);
+      const pos2 = geo.attributes.position;
+      const ca2 = new THREE.Color('#59e8ff'), cb2 = new THREE.Color('#ffffff');
+      for (let i = 0; i < pos2.count; i++) {
+        const t = (pos2.getY(i) + 0.85) / 1.7;
+        const c = ca2.clone().lerp(cb2, t);
+        col[i * 3] = c.r; col[i * 3 + 1] = c.g; col[i * 3 + 2] = c.b;
+      }
+      geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+      const mk = new THREE.InstancedMesh(geo, flatMat, spots.length);
+      mk.frustumCulled = false;
+      const mm = new THREE.Matrix4();
+      for (let i = 0; i < spots.length; i++) {
+        mm.makeRotationY(spots[i].ry);
+        mm.setPosition(spots[i].x, spots[i].y + 0.85, spots[i].z);
+        mk.setMatrixAt(i, mm);
+      }
+      mk.instanceMatrix.needsUpdate = true;
+      trackGroup.add(mk);
+    }
+  }
+
   /* SHEPHERD MOONLET + shadow + warning arc (track 3) */
   W.moonlet = null;
   if (F.moonlet) {
@@ -1896,6 +1954,7 @@ W.statsOf = function (cfg) {
     stab: [0.94, 1.0, 1.08][h],
     driftRate: [1.22, 1.0, 0.92][f],
     air: [0.92, 1.0, 1.25][f],
+    mass: [0.88, 1.0, 1.16][h],     // hull weight — drives collision shoves
   };
 };
 
@@ -2057,9 +2116,33 @@ W.wellMeshes = poolOf(4, () => {
 const flashMat = new THREE.MeshBasicMaterial({ color: '#7dffa8', transparent: true, opacity: 0.9,
   blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide });
 W.flashMeshes = poolOf(3, () => new THREE.Mesh(new THREE.TorusGeometry(1.6, 0.4, 6, 18), flashMat.clone()));
+/* PLASMA TRIPLE bolts: hot cyan darts */
+W.plasmaMeshes = poolOf(4, () => {
+  const geo = mergeParts([
+    { geo: new THREE.ConeGeometry(0.4, 1.9, 6), color: '#59e8ff', rx: Math.PI / 2 },
+    { geo: new THREE.SphereGeometry(0.34, 6, 5), color: '#eaffff', z: 0.5, shade: false },
+  ]);
+  return new THREE.Mesh(geo, flatMat);
+});
+/* BLACK HOLES: dark core + spinning violet accretion ring (blue-shell analog) */
+const holeRingMat = new THREE.MeshBasicMaterial({ color: '#b06eff', transparent: true, opacity: 0.9,
+  blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide });
+W.holeMeshes = poolOf(2, () => {
+  const grp = new THREE.Group();
+  const core = new THREE.Mesh(new THREE.SphereGeometry(1.0, 12, 9),
+    new THREE.MeshBasicMaterial({ color: '#08030f' }));
+  grp.add(core);
+  const ring = new THREE.Mesh(new THREE.TorusGeometry(1.7, 0.22, 5, 16), holeRingMat);
+  grp.add(ring);
+  const ring2 = new THREE.Mesh(new THREE.TorusGeometry(1.15, 0.14, 5, 12), holeRingMat);
+  ring2.rotation.x = Math.PI / 2;
+  grp.add(ring2);
+  grp.userData.ring = ring; grp.userData.ring2 = ring2;
+  return grp;
+});
 
 /* ── pooled particles (drift sparks, boost flames, probe streaks…) ── */
-const PART_N = LOWFX ? 80 : 160;
+const PART_N = LOWFX ? 80 : 240;    // headroom for speed-line streaks + shove sparks
 {
   const pos = new Float32Array(PART_N * 3);
   const col = new Float32Array(PART_N * 3);
@@ -2338,6 +2421,7 @@ G.rumbleFor = function (r, opts) {
 
 /* ───────────────────────── audio (lazy WebAudio synth) ───────────────────── */
 const AUD = { ctx: null };
+G.AUD = AUD;                                 // p8-music taps master + ctx
 function ensureAudio() {
   if (AUD.ctx) { if (AUD.ctx.state === 'suspended') AUD.ctx.resume(); return; }
   const AC2 = window.AudioContext || window.webkitAudioContext;
@@ -2353,7 +2437,7 @@ function ensureAudio() {
     const o2 = ctx.createOscillator(); o2.type = 'triangle'; o2.frequency.value = 63.5;
     o1.connect(lp); o2.connect(lp); lp.connect(eg); eg.connect(master);
     o1.start(); o2.start();
-    AUD.engine = { o1, o2, gain: eg };
+    AUD.engine = { o1, o2, gain: eg, lp };
     const buf = ctx.createBuffer(1, ctx.sampleRate / 4, ctx.sampleRate);
     const d = buf.getChannelData(0);
     for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
@@ -2397,8 +2481,16 @@ G.fanfare = function () {
   for (const [f, w] of seq) beep(f, 0.24, 'triangle', 0.16, w);
 };
 G.chirp = function () { beep(880, 0.09, 'sine', 0.16); beep(1320, 0.12, 'sine', 0.16, 0.09); };
-G.bwoop = function () {                      // the hit-spin sound
-  beep(320, 0.1, 'sawtooth', 0.14); beep(180, 0.22, 'sawtooth', 0.13, 0.08);
+G.bwoop = function () {                      // the hit-spin sound (punched up)
+  beep(320, 0.1, 'sawtooth', 0.16); beep(180, 0.22, 'sawtooth', 0.15, 0.08);
+  beep(84, 0.18, 'sine', 0.24);              // low body thump
+};
+G.thunk = function () {                      // cart-collision shove
+  beep(120, 0.09, 'triangle', 0.2); beep(72, 0.14, 'sine', 0.22, 0.02);
+  whoosh(0.16, 1400, 300, 0.14);
+};
+G.crunch = function () {                     // barrier scrape
+  beep(140, 0.1, 'triangle', 0.15); whoosh(0.14, 2200, 500, 0.12);
 };
 G.arpeggio = function () {                   // item pickup
   beep(660, 0.06, 'triangle', 0.12); beep(880, 0.06, 'triangle', 0.12, 0.06);
@@ -2406,9 +2498,11 @@ G.arpeggio = function () {                   // item pickup
 };
 G.engineTick = function (speed, maxSpd, drifting) {
   if (!AUD.ctx || !AUD.engine) return;
-  const f = 58 + (speed / maxSpd) * 130;
+  const frac = Math.min(1.15, speed / maxSpd);
+  const f = 52 + frac * 195;                 // wider pitch range: speed is AUDIBLE
   AUD.engine.o1.frequency.value = f;
   AUD.engine.o2.frequency.value = f * 1.013 + 1.2;
+  AUD.engine.lp.frequency.value = 480 + frac * 980;
   AUD.engine.gain.gain.value = G.state === 'race' || G.state === 'count' ? 0.055 : 0;
   if (AUD.skid) AUD.skid.gain.gain.value = drifting ? 0.09 : 0;
 };
@@ -2416,16 +2510,19 @@ G.engineTick = function (speed, maxSpd, drifting) {
 /* ───────────────────────── race model ───────────────────────── */
 const DT = 1 / 60;
 const DIFFS = ['CRUISE', 'RACE', 'TURBO'];
+/* RR-JUICE-1: top speeds up ~22%, accel up ~15%, AI scaled to match
+   (same human/AI ratios as before so field balance + kid-bot law hold).
+   latA and turn rates raised so corner speed stays proportional. */
 const DIFF_CFG = {
-  CRUISE: { max: 20.5, aiMax: 17.2, latA: 6.5, lo: 0.82, hi: 1.04, band: 520, aiItem: 0.45 },
-  RACE:   { max: 23.0, aiMax: 21.6, latA: 9.0, lo: 0.92, hi: 1.08, band: 420, aiItem: 1.0 },
-  TURBO:  { max: 26.0, aiMax: 25.2, latA: 12,  lo: 0.95, hi: 1.10, band: 380, aiItem: 1.4 },
+  CRUISE: { max: 25.0, aiMax: 21.0, latA: 9.0,  lo: 0.82, hi: 1.04, band: 520, aiItem: 0.6 },
+  RACE:   { max: 28.0, aiMax: 26.3, latA: 12.5, lo: 0.92, hi: 1.08, band: 420, aiItem: 1.25 },
+  TURBO:  { max: 31.5, aiMax: 30.6, latA: 17,   lo: 0.95, hi: 1.10, band: 380, aiItem: 1.7 },
 };
 G.DIFFS = DIFFS; G.DIFF_CFG = DIFF_CFG;
 const SPEED_DISPLAY = 5.8;            // sim m/s → display km/h
 G.SPEED_DISPLAY = SPEED_DISPLAY;
-const ACCEL = 13, BRAKE_A = 22, REV_MAX = -6;
-const TURN_LO = 2.7, TURN_HI = 1.25;
+const ACCEL = 15, BRAKE_A = 22, REV_MAX = -6;
+const TURN_LO = 2.7, TURN_HI = 1.5;
 const GRIP = 0.84, GRIP_DRIFT = 0.972;
 const HOP_VY = 3.4, GRAV = 20, JUMP_VY = 14, JUMP_G = 15;
 const LAPS = 3;
@@ -2471,8 +2568,9 @@ function mkRacer(i, cfg) {
     rescue: null, rescueN: 0,
     item: null, itemN: 0, rouT: 0, shieldT: 0,
     itemsPicked: 0, itemsUsed: 0, itemCool: 0, hitsTaken: 0, spinEject: 0,
-    lap: 0, prog: 0, prevS: 0, finished: false, finishT: 0, pos: 1, prevPos: 1,
+    lap: 0, prog: 0, prevS: 0, finished: false, finishT: 0, pos: 1, prevPos: 1, shoveGuard: 0,
     ai: AI_PERS[i], rubber: 1, aiDriftHold: 0,
+    aiStuckT: 0, aiStuckRef: -1e9, aiUnstick: 0,
     bob: Math.random() * 6, bank: 0, nose: 0,
   };
 }
@@ -2502,12 +2600,16 @@ G.wrapDS = wrapDS;
 /* ── HIT-SPIN (the kid-proofing law): position FROZEN for the whole spin,
    so an item hit can NEVER push a racer off an edge — not even an open one.
    The twirl itself is purely visual (spinVis drives the body yaw). ── */
-G.stats = { hits: 0, shieldBlocks: 0, spinEjections: 0, aiPickups: 0, aiUses: 0, boxesTaken: 0 };
+G.stats = { hits: 0, shieldBlocks: 0, spinEjections: 0, aiPickups: 0, aiUses: 0, boxesTaken: 0,
+            shoves: 0, barrierHits: 0, speedLines: 0 };
 G.hitsBy = {};
 G.lastHit = null;
-G.spinHit = function (r, cause) {
+G.hitstop = 0;                              // brief freeze frames on juicy hits
+G.spinHit = function (r, cause, dur, attackerIdx) {
   if (r.rescue || r.finished || G.state !== 'race') return false;
   if (r.spin > 0 || r.invulnT > 0) return false;
+  const attacker = (attackerIdx !== undefined && attackerIdx >= 0) ? G.racers[attackerIdx] : null;
+  const humanInvolved = r.isHuman || (attacker && attacker.isHuman);
   if (r.shieldT > 0) {
     r.shieldT = 0;
     r.invulnT = 1.2;                       // one hit means ONE hit
@@ -2521,7 +2623,8 @@ G.spinHit = function (r, cause) {
     }
     return false;
   }
-  r.spin = 1.2; r.spinVis = 0;
+  r.spin = dur || 1.2; r.spinVis = 0;
+  r.spinDur = r.spin;
   r.spinDir = Math.random() > 0.5 ? 1 : -1;
   r.latV = 0; r.vy = 0;
   r.fw *= 0.25;
@@ -2529,8 +2632,19 @@ G.spinHit = function (r, cause) {
   r.hitsTaken++;
   G.stats.hits++;
   G.hitsBy[cause] = (G.hitsBy[cause] || 0) + 1;
-  G.lastHit = { victim: r.idx, cause, tick: G.tick };
-  if (r.isHuman) { G.bwoop(); G.rumbleFor(r, { duration: 300, strong: 0.8, weak: 0.5 }); }
+  G.lastHit = { victim: r.idx, cause, tick: G.tick, dur: r.spin, attacker: attacker ? attacker.idx : -1 };
+  /* the JUICE: bigger burst, brief hitstop + rumble on BOTH pads when humans are involved */
+  for (let i = 0; i < (LOWFX ? 8 : 18); i++) {
+    const a = Math.random() * Math.PI * 2, v = 3 + Math.random() * 6;
+    W.particles.spawn(r.x, r.y + 0.9, r.z, Math.cos(a) * v, 2.5 + Math.random() * 4, Math.sin(a) * v,
+      1, 0.55 + Math.random() * 0.3, 0.2, 0.45);
+  }
+  if (humanInvolved) {
+    G.hitstop = Math.max(G.hitstop, 4);
+    G.bwoop();
+    if (r.isHuman) G.rumbleFor(r, { duration: 320, strong: 0.9, weak: 0.6 });
+    if (attacker && attacker.isHuman) G.rumbleFor(attacker, { duration: 180, strong: 0.4, weak: 0.6 });
+  }
   G.onSpinHit && G.onSpinHit(r, cause);
   return true;
 };
@@ -2585,6 +2699,7 @@ function stepRescue(r) {
 function stepRacer(r, input, cfg) {
   if (r.rescue) { stepRescue(r); return; }
   if (r.invulnT > 0) r.invulnT -= DT;
+  if (r.shoveGuard > 0) r.shoveGuard--;      // collision CLAMP LAW window
   if (r.spin > 0) {                        // FROZEN twirl — the kid law
     r.spin -= DT;
     r.spinVis += DT;
@@ -2596,7 +2711,7 @@ function stepRacer(r, input, cfg) {
   if (frozen) input = ZERO_IN;
 
   const maxBase = (r.isHuman ? cfg.max : cfg.aiMax * r.rubber) * r.st.top;
-  const curMax = maxBase + (r.boostT > 0 ? 8 : 0);
+  const curMax = maxBase + (r.boostT > 0 ? 10 : 0);   // surge ~+25% harder
 
   /* drift state machine: ○ hop → hold near the ground while steering */
   if (input.drift && !r.wasDrift && r.grounded) {
@@ -2606,8 +2721,8 @@ function stepRacer(r, input, cfg) {
   if (r.drifting) {
     if (!input.drift || r.fw < 7) {
       const tier = r.driftT >= 1.8 ? 2 : r.driftT >= 0.8 ? 1 : 0;
-      if (tier === 2) { r.boostT = 1.6; if (r.isHuman) { whoosh(0.5, 300, 2400, 0.3); G.rumbleFor(r, { duration: 260, strong: 0.7, weak: 0.5 }); } }
-      else if (tier === 1) { r.boostT = 0.95; if (r.isHuman) { whoosh(0.4, 260, 1800, 0.24); G.rumbleFor(r, { duration: 160, strong: 0.4, weak: 0.4 }); } }
+      if (tier === 2) { r.boostT = 2.0; if (r.isHuman) { whoosh(0.5, 300, 2400, 0.3); G.rumbleFor(r, { duration: 260, strong: 0.7, weak: 0.5 }); } }
+      else if (tier === 1) { r.boostT = 1.2; if (r.isHuman) { whoosh(0.4, 260, 1800, 0.24); G.rumbleFor(r, { duration: 160, strong: 0.4, weak: 0.4 }); } }
       r.drifting = false; r.driftT = 0;
     } else {
       r.driftT += DT * r.st.driftRate;     // fins: drift charge rate
@@ -2634,7 +2749,7 @@ function stepRacer(r, input, cfg) {
   const fx = Math.sin(r.heading), fz = Math.cos(r.heading);
   const rx = Math.cos(r.heading), rz = -Math.sin(r.heading);
   if (input.thrust && r.fw < curMax) {
-    r.fw += (ACCEL * r.st.accel + (r.boostT > 0 ? 20 : 0)) * (1 - Math.max(0, r.fw) / curMax) * DT;
+    r.fw += (ACCEL * r.st.accel + (r.boostT > 0 ? 26 : 0)) * (1 - Math.max(0, r.fw) / curMax) * DT;
   } else if (!input.thrust) {
     r.fw *= 1 - 0.55 * DT;
   }
@@ -2673,10 +2788,18 @@ function stepRacer(r, input, cfg) {
     if (Math.abs(r.lat) > w) {
       const side = r.lat > 0 ? 1 : -1;
       /* the raised lane is RISKY: its middle span has open edges (rescue!) */
-      const open = r.lane === 0
+      const openRaw = r.lane === 0
         ? T.edgeOpen(r.s, side)
         : (r.s > T.BRANCH_LEN * 0.18 && r.s < T.BRANCH_LEN * 0.82);
-      if (open || Math.abs(r.lat) > w + 6) {
+      /* THE CLAMP LAW: a collision shove can NEVER push a racer off the road.
+         While the shove-guard is live, an open edge acts as a solid wall AND
+         the guard is RE-ARMED every tick the ship is still beyond the deck —
+         so no matter how far the shove's lateral momentum carries it, it is
+         reflected back on-road before the guard can lapse and let it fall. */
+      const shoved = r.shoveGuard > 0;
+      if (shoved) r.shoveGuard = 12;                 // hold until back inside the deck
+      const open = openRaw && !shoved;
+      if (open || (Math.abs(r.lat) > w + 6 && !shoved)) {
         if (open) {
           r.grounded = false; r.airType = 3; r.vy = 1.5;
         } else {
@@ -2687,11 +2810,32 @@ function stepRacer(r, input, cfg) {
         r.lat = side * w;
         r.x = fr.x + fr.lx * r.lat; r.z = fr.z + fr.lz * r.lat;
         r.latV = -Math.abs(r.latV) * 0.45 * side + -side * 1.6;
-        r.fw *= 0.965;
+        r.fw *= 0.965;                       // forgiving speed retention (kid-proof)
+        /* walls GUIDE the AI, never trap it (kid law): a bot scraping
+           nose-first has its heading eased toward the road tangent, so the
+           zero-progress wall-pin fixed point cannot hold a bot — kid-bot
+           included. Humans keep full manual authority (no auto-steer fight). */
+        if (!r.isHuman) {
+          const tdot = fx * fr.tx + fz * fr.tz;
+          if (tdot < 0.5) {
+            const ht = Math.atan2(fr.tx, fr.tz);
+            let dh = ht - r.heading;
+            while (dh > Math.PI) dh -= 2 * Math.PI;
+            while (dh < -Math.PI) dh += 2 * Math.PI;
+            r.heading += Math.max(-1, Math.min(1, dh)) * 3 * DT;
+          }
+        }
         if (r.isHuman && !r.bounceCool) {
-          beep(140, 0.1, 'triangle', 0.12);
-          G.rumbleFor(r, { duration: 90, strong: 0.3, weak: 0.2 });
+          G.crunch();
+          G.stats.barrierHits++;
+          G.rumbleFor(r, { duration: 130, strong: 0.5, weak: 0.35 });
           r.bounceCool = 12;
+          for (let bi2 = 0; bi2 < (LOWFX ? 3 : 7); bi2++) {
+            W.particles.spawn(r.x + fr.lx * side * 0.8, r.y + 0.5, r.z + fr.lz * side * 0.8,
+              -fr.lx * side * (2 + Math.random() * 3), 2 + Math.random() * 3,
+              -fr.lz * side * (2 + Math.random() * 3),
+              1, 0.8, 0.4, 0.35);
+          }
         }
       }
     }
@@ -2722,14 +2866,19 @@ function stepRacer(r, input, cfg) {
     if (r.lane === 0 && r.padCool <= 0) {
       for (const bp of T.FEAT.boostPads) {
         if (r.s >= bp.s && r.s <= bp.s + bp.len && Math.abs(r.lat - bp.lat) < bp.halfW) {
-          r.boostT = Math.max(r.boostT, 1.45); r.padCool = 0.8;
+          r.boostT = Math.max(r.boostT, 1.8); r.padCool = 0.8;
           if (r.isHuman) { whoosh(0.5, 320, 2600, 0.32); G.rumbleFor(r, { duration: 200, strong: 0.6, weak: 0.4 }); }
         }
       }
       for (const jp of T.FEAT.jumpPads) {
         if (r.s >= jp.s && r.s <= jp.s + jp.len && Math.abs(r.lat - jp.lat) < jp.halfW) {
           r.vy = jp.vy || JUMP_VY; r.grounded = false; r.airType = 2;
-          r.fw = Math.min(curMax + 5, r.fw + 5); r.padCool = 1.2;
+          /* branch-landing ramps cap horizontal speed to the ORIGINAL launch
+             window (~23-26) so the arc still lands on the short raised lane at
+             the new faster top speeds — too slow undershoots onto the main lane,
+             too fast overflies it; gap-lip launchers keep their full punch. */
+          r.fw = jp.land === 'branch' ? Math.min(26, r.fw + 5) : Math.min(curMax + 5, r.fw + 5);
+          r.padCool = 1.2;
           if (r.isHuman) { whoosh(0.7, 200, 1400, 0.3); G.rumbleFor(r, { duration: 240, strong: 0.5, weak: 0.7 }); }
           break;
         }
@@ -2815,6 +2964,23 @@ G.ZERO_IN = ZERO_IN;
 /* ── AI driver: same physics, honest inputs ── */
 const aiIn = { steer: 0, thrust: false, brake: false, drift: false };
 function aiDrive(r, cfg, leadProg) {
+  /* UNSTICK (honest inputs): higher corner speeds can pin a ship nose-first
+     against a barrier at a zero-progress fixed point. When progress stalls,
+     reverse out for a second while rotating the nose back toward the road —
+     exactly what a human would do. */
+  if (r.aiUnstick > 0) {
+    r.aiUnstick -= DT;
+    aiIn.thrust = false; aiIn.brake = true; aiIn.drift = false;
+    aiIn.steer = r.lat > 0 ? 1 : -1;         // rotate the nose off the wall
+    return aiIn;
+  }
+  if (G.state === 'race' && !r.rescue && r.spin <= 0 && !r.finished) {
+    if (r.prog - r.aiStuckRef > 2) { r.aiStuckRef = r.prog; r.aiStuckT = 0; }
+    else {
+      r.aiStuckT += DT;
+      if (r.aiStuckT > 1.5) { r.aiUnstick = 1.0; r.aiStuckT = 0; r.aiStuckRef = r.prog; }
+    }
+  } else { r.aiStuckRef = r.prog; r.aiStuckT = 0; }
   const gap = leadProg - r.prog;
   const t = Math.max(-1, Math.min(1, gap / cfg.band));
   r.rubber = t >= 0 ? 1 + t * (cfg.hi - 1) : 1 + t * (1 - cfg.lo);
@@ -2877,8 +3043,16 @@ function aiDrive(r, cfg, leadProg) {
 }
 G.aiDrive = aiDrive;
 
-/* gentle racer-racer separation — a bounce, never a spin.
-   A spinning racer is frozen in place (the kid law), so it acts immovable. */
+/* RR-JUICE-1: REAL cart collisions — a momentum-weighted SHOVE, never a spin.
+   Heavier hull + higher speed pushes the lighter/slower ship laterally aside.
+   Boost-ramming shoves harder. A spinning racer is frozen (the kid law), so
+   it acts immovable. THE CLAMP LAW: shoved racers get a shoveGuard window in
+   which open edges act as barriers — a shove can NEVER eject anyone. */
+G.lastShove = null;
+/* per-race shove accumulators (so the harness never races a sampling poll):
+   sums + counts of shove magnitude against a human victim, split boosted/plain */
+G.shoveStats = { plainN: 0, plainSum: 0, boostN: 0, boostSum: 0,
+                 lightN: 0, lightSum: 0, heavyN: 0, heavySum: 0 };
 function collide(racers) {
   for (let i = 0; i < racers.length; i++) {
     const a = racers[i];
@@ -2889,17 +3063,61 @@ function collide(racers) {
       const dx = b.x - a.x, dz = b.z - a.z;
       const d2 = dx * dx + dz * dz;
       if (d2 > 7.3 || d2 < 1e-6) continue;
-      const d = Math.sqrt(d2), nx = dx / d, nz = dz / d;
+      const d = Math.sqrt(d2), nx = dx / d, nz = dz / d;   // normal a → b
       const push = (2.7 - d) * 0.5;
       const aM = a.spin > 0 ? 0 : 1, bM = b.spin > 0 ? 0 : 1;
-      const tot = aM + bM || 1;
-      a.x -= nx * push * 2 * (aM / tot); a.z -= nz * push * 2 * (aM / tot);
-      b.x += nx * push * 2 * (bM / tot); b.z += nz * push * 2 * (bM / tot);
-      if (aM) { a.latV *= 0.9; a.fw *= 0.985; }
-      if (bM) { b.latV *= 0.9; b.fw *= 0.985; }
+      /* momentum = hull mass × speed (+ boost weight) */
+      const pa = a.st.mass * (Math.max(0, a.fw) + (a.boostT > 0 ? 6 : 0));
+      const pb = b.st.mass * (Math.max(0, b.fw) + (b.boostT > 0 ? 6 : 0));
+      /* separation shares: the bigger momentum moves less */
+      let wa = aM * (pb + 1), wb = bM * (pa + 1);
+      const tot = wa + wb;
+      if (tot <= 0) continue;
+      wa /= tot; wb /= tot;
+      a.x -= nx * push * 2 * wa; a.z -= nz * push * 2 * wa;
+      b.x += nx * push * 2 * wb; b.z += nz * push * 2 * wb;
+      /* the SHOVE: attacker = higher momentum, victim slides laterally aside */
+      const att = pa >= pb ? a : b, vic = pa >= pb ? b : a;
+      const sgn = att === a ? 1 : -1;        // normal direction att → vic
+      const relV = Math.abs(a.fw - b.fw);
+      const boosted = att.boostT > 0;
+      let mag = 1.6 + relV * 0.22 + (att.st.mass - vic.st.mass) * 2.5;
+      if (boosted) mag *= 1.6;               // boost-ram = bigger shove (never a spin)
+      mag = Math.max(0.6, Math.min(6.5, mag));
+      if (vic.spin <= 0) {
+        const vrx = Math.cos(vic.heading), vrz = -Math.sin(vic.heading);
+        vic.latV += (nx * vrx + nz * vrz) * sgn * mag;
+        if (vic.latV > 8) vic.latV = 8; if (vic.latV < -8) vic.latV = -8;
+        vic.shoveGuard = 12;                 // the CLAMP LAW window
+        vic.fw *= 0.955;                     // small speed rub…
+      }
+      if (att.spin <= 0) { att.fw *= 0.988; att.shoveGuard = Math.max(att.shoveGuard || 0, 6); }
+      G.stats.shoves++;
+      if (boosted) G.stats.boostContacts = (G.stats.boostContacts || 0) + 1;
+      G.lastShove = { attacker: att.idx, victim: vic.idx, mag, boosted, relV, tick: G.tick };
+      /* momentum evidence for the harness: the shove MAGNITUDE (which carries
+         (att.mass − vic.mass)·2.5) recorded against a human victim, keyed by the
+         victim's own hull mass. A lighter hull → larger mass gap vs the attacker
+         → bigger shove. Geometry-independent (unlike the applied lateral kick). */
+      if (vic.isHuman && vic.spin <= 0) {
+        const S = G.shoveStats;
+        if (boosted) { S.boostN++; S.boostSum += mag; } else { S.plainN++; S.plainSum += mag; }
+        if (vic.st.mass < 0.94) { S.lightN++; S.lightSum += mag; }   // COMET hull 0.88
+        else { S.heavyN++; S.heavySum += mag; }                       // ORBITER+ ≥ 1.0
+      }
+      /* sparks at the contact point */
+      const cx = (a.x + b.x) / 2, cz = (a.z + b.z) / 2;
+      const nSp = (a.isHuman || b.isHuman) ? (LOWFX ? 4 : 9) : 2;
+      for (let k = 0; k < nSp; k++) {
+        const aa = Math.random() * Math.PI * 2, v = 3 + Math.random() * 5;
+        W.particles.spawn(cx, a.y + 0.7, cz, Math.cos(aa) * v, 1.5 + Math.random() * 3, Math.sin(aa) * v,
+          1, 0.85, 0.45, 0.3 + Math.random() * 0.15);
+      }
       if ((a.isHuman || b.isHuman) && !G.bumpCool) {
-        beep(180, 0.07, 'triangle', 0.09);
-        G.bumpCool = 14;
+        G.thunk();
+        if (a.isHuman) G.rumbleFor(a, { duration: 110, strong: 0.45, weak: 0.3 });
+        if (b.isHuman) G.rumbleFor(b, { duration: 110, strong: 0.45, weak: 0.3 });
+        G.bumpCool = 12;
       }
     }
   }
@@ -2967,6 +3185,7 @@ function moonletTick() {
 
 /* full sim tick */
 G.simTick = function () {
+  if (G.hitstop > 0) { G.hitstop--; G.tick++; return; }   // brief impact freeze
   const cfg = DIFF_CFG[DIFFS[G.diffIdx]];
   const racers = G.racers;
   gatherHeld();
@@ -3017,7 +3236,11 @@ G.initRacers = function (shipCfgs) {
   G.moonlet.hits = 0; G.moonlet.cycleN = 0; G.moonlet.dangerCycle = -1;
   G.stats.hits = 0; G.stats.shieldBlocks = 0; G.stats.aiPickups = 0;
   G.stats.aiUses = 0; G.stats.boxesTaken = 0;
-  G.hitsBy = {}; G.lastHit = null;
+  G.stats.shoves = 0; G.stats.barrierHits = 0; G.stats.speedLines = 0;
+  G.hitsBy = {}; G.lastHit = null; G.lastShove = null; G.lastFlare = null;
+  G.hitstop = 0;
+  G.shoveStats = { plainN: 0, plainSum: 0, boostN: 0, boostSum: 0,
+                   lightN: 0, lightSum: 0, heavyN: 0, heavySum: 0 };
   if (G.items) G.items.reset();
 };
 G.tick = 0;
@@ -3038,19 +3261,25 @@ const NAMES = {
   comet: 'COMET BOOST', triple: 'TRIPLE COMETS', meteor: 'METEOR',
   seeker: 'SEEKER PROBE', shield: 'STAR SHIELD', well: 'GRAVITY WELL',
   wormhole: 'WORMHOLE',
+  flare: 'SOLAR FLARE', plasma: 'PLASMA TRIPLE', hole: 'BLACK HOLE',
 };
 
-/* ── catch-up weighting: posFrac 0 = 1st, 1 = last ── */
+/* ── catch-up weighting: posFrac 0 = 1st, 1 = last (ten items, RR-JUICE-1) ──
+   SOLAR FLARE (lightning analog) + BLACK HOLE (blue-shell analog) are NEVER
+   granted to 1st-3rd; flare is last-place-weighted. */
 function weightsFor(pos, field) {
   const f = (pos - 1) / Math.max(1, field - 1);
   return {
-    comet: 30,
+    comet: 24,
     triple: 4 + 26 * f,
-    meteor: 8 + 14 * Math.sin(Math.PI * Math.min(1, f * 1.15)),
+    meteor: 7 + 12 * Math.sin(Math.PI * Math.min(1, f * 1.15)),
+    plasma: 5 + 12 * Math.sin(Math.PI * Math.min(1, f * 1.2)),
     seeker: 4 + 20 * Math.max(0, f - 0.2),
-    shield: 22,
+    shield: 20,
     well: 2 + 26 * (1 - f),
-    wormhole: f >= 0.85 ? 18 : 0,
+    wormhole: f >= 0.85 ? 16 : 0,
+    flare: f >= 0.7 ? 6 + 10 * f : 0,
+    hole: f >= 0.42 ? 3 + 10 * f : 0,
   };
 }
 function rollFor(pos, field) {
@@ -3063,14 +3292,16 @@ function rollFor(pos, field) {
 }
 window.__rrItemRoll = pos => rollFor(pos, 8);   // pure table, for the harness
 
-/* deterministic grants for verification: ?itemseq=comet,meteor,… (humans only —
-   the pickup, roulette and fire paths stay fully real) */
-const seq = (() => {
+/* deterministic grants for verification: ?itemseq=comet,meteor,… (P1 only) and
+   ?itemseq2=… (P2 only) — the pickup, roulette and fire paths stay fully real */
+const parseSeq = key => {
   try {
-    const q = new URLSearchParams(location.search).get('itemseq');
+    const q = new URLSearchParams(location.search).get(key);
     return q ? q.split(',').map(s => s.trim()).filter(s => NAMES[s]) : [];
   } catch (e) { return []; }
-})();
+};
+const seq = parseSeq('itemseq');
+const seq2 = parseSeq('itemseq2');
 
 /* ── item icons (tiny canvas art, baked once) ── */
 function icon(draw) {
@@ -3138,16 +3369,45 @@ const ICONS = {
     g.strokeStyle = '#d8ffe8'; g.lineWidth = 2;
     g.beginPath(); g.ellipse(20, 20, 8, 4.4, 0.5, 0, 7); g.stroke();
   }),
+  flare: icon(g => {
+    g.strokeStyle = '#ffd166'; g.lineWidth = 2.6; g.lineCap = 'round';
+    for (let i = 0; i < 8; i++) {
+      const a = i * Math.PI / 4;
+      g.beginPath();
+      g.moveTo(20 + Math.cos(a) * 9, 20 + Math.sin(a) * 9);
+      g.lineTo(20 + Math.cos(a) * (i % 2 ? 15 : 18), 20 + Math.sin(a) * (i % 2 ? 15 : 18));
+      g.stroke();
+    }
+    g.fillStyle = '#fff2c4'; g.beginPath(); g.arc(20, 20, 7, 0, 7); g.fill();
+    g.fillStyle = '#ffd166'; g.beginPath(); g.arc(20, 20, 4, 0, 7); g.fill();
+  }),
+  plasma: icon(g => {
+    for (const [x, y] of [[11, 11], [27, 15], [16, 28]]) {
+      g.strokeStyle = '#59e8ff'; g.lineWidth = 2; g.lineCap = 'round';
+      g.beginPath(); g.moveTo(x - 7, y + 6); g.lineTo(x - 1, y + 1); g.stroke();
+      g.fillStyle = '#bffaff'; g.beginPath(); g.arc(x, y, 4.6, 0, 7); g.fill();
+      g.fillStyle = '#eaffff'; g.beginPath(); g.arc(x + 1, y - 1, 2, 0, 7); g.fill();
+    }
+  }),
+  hole: icon(g => {
+    g.strokeStyle = '#b06eff'; g.lineWidth = 3;
+    g.beginPath(); g.ellipse(20, 20, 15, 6.5, -0.4, 0, 7); g.stroke();
+    g.fillStyle = '#08030f'; g.beginPath(); g.arc(20, 20, 8.5, 0, 7); g.fill();
+    g.strokeStyle = '#e0c8ff'; g.lineWidth = 1.6;
+    g.beginPath(); g.ellipse(20, 20, 10.5, 4.4, -0.4, 0, 7); g.stroke();
+  }),
 };
 const KEYS = Object.keys(NAMES);
 G.itemIcons = ICONS; G.itemNames = NAMES;
 
 /* ── projectile state pools (fixed-size, no allocation at fire time) ── */
-const METS = [], PRBS = [], WELLS = [], FLASHES = [];
+const METS = [], PRBS = [], WELLS = [], FLASHES = [], PLAS = [], HOLES = [];
 for (let i = 0; i < 4; i++) METS.push({ active: false, x: 0, y: 0, z: 0, vx: 0, vz: 0, t: 0, owner: -1 });
 for (let i = 0; i < 4; i++) PRBS.push({ active: false, s: 0, lat: 0, y: 0, t: 0, owner: -1, target: -1 });
 for (let i = 0; i < 4; i++) WELLS.push({ active: false, x: 0, y: 0, z: 0, s: 0, t: 0, armT: 0, owner: -1 });
 for (let i = 0; i < 3; i++) FLASHES.push({ active: false, x: 0, y: 0, z: 0, t: 0 });
+for (let i = 0; i < 4; i++) PLAS.push({ active: false, x: 0, y: 0, z: 0, vx: 0, vz: 0, t: 0, owner: -1 });
+for (let i = 0; i < 2; i++) HOLES.push({ active: false, s: 0, lat: 0, t: 0, owner: -1 });
 
 function flashAt(x, y, z) {
   for (const f of FLASHES) {
@@ -3224,6 +3484,44 @@ function fire(r) {
     r.invulnT = 0.8;
     flashAt(r.x, r.y + 1, r.z);
     if (r.isHuman) { G.whoosh(0.5, 1800, 240, 0.3); G.rumbleFor(r, { duration: 260, strong: 0.5, weak: 0.7 }); }
+  } else if (kind === 'flare') {
+    /* SOLAR FLARE — screen-wide flash; every racer AHEAD spins (in place) */
+    const hit = [], skipped = [];
+    for (const o of G.racers) {
+      if (o === r || o.finished) continue;
+      if (o.pos < r.pos) {
+        if (G.spinHit(o, 'flare', 1.0, r.idx)) hit.push(o.idx);
+        else skipped.push(o.idx);
+      }
+    }
+    G.lastFlare = { tick: G.tick, userPos: r.pos, user: r.idx, hit, skipped };
+    G.onFlareFx && G.onFlareFx(r);
+    if (r.isHuman) G.rumbleFor(r, { duration: 220, strong: 0.5, weak: 0.7 });
+    G.whoosh(0.7, 3000, 300, 0.3);
+    G.beep(1600, 0.3, 'sawtooth', 0.12); G.beep(2200, 0.4, 'sawtooth', 0.09, 0.05);
+  } else if (kind === 'plasma') {
+    /* PLASMA TRIPLE — three straight shots, one per △ press */
+    let m = null;
+    for (const q of PLAS) if (!q.active) { m = q; break; }
+    if (!m) return false;
+    const fx = Math.sin(r.heading), fz = Math.cos(r.heading);
+    m.active = true; m.owner = r.idx; m.t = 0;
+    m.x = r.x + fx * 2.4; m.z = r.z + fz * 2.4; m.y = r.y + 1.0;
+    const spd = Math.max(24, r.fw + 22);
+    m.vx = fx * spd; m.vz = fz * spd;
+    if (r.isHuman) { G.beep(1400, 0.06, 'square', 0.13); G.whoosh(0.22, 2400, 500, 0.18); }
+    r.itemN--;
+    consumed = r.itemN <= 0;
+  } else if (kind === 'hole') {
+    /* BLACK HOLE — rides the track hunting the RACE LEADER (blue shell) */
+    let h = null;
+    for (const q of HOLES) if (!q.active) { h = q; break; }
+    if (!h) return false;
+    h.active = true; h.owner = r.idx; h.t = 0;
+    h.s = T.wrapS(progSOf(r) + 6);
+    h.lat = Math.max(-8, Math.min(8, r.lat));
+    if (r.isHuman) { G.whoosh(0.7, 300, 60, 0.3); G.rumbleFor(r, { duration: 200, strong: 0.4, weak: 0.6 }); }
+    G.beep(60, 0.5, 'sine', 0.18);
   }
   r.itemsUsed++;
   if (!r.isHuman) G.stats.aiUses++;
@@ -3236,10 +3534,20 @@ function fire(r) {
 /* ── AI item brain: honest, difficulty-scaled, modest ── */
 function aiMaybeUse(r, cfg) {
   if (!r.item || r.itemCool > 0 || r.rouT > 0) return;
-  const p = Math.min(1, (1 / 220) * cfg.aiItem);
+  const p = Math.min(1, (1 / 160) * cfg.aiItem);   // slightly more aggressive (JUICE)
   if (Math.random() > p) return;
   const kind = r.item;
-  if (kind === 'comet' || kind === 'triple') {
+  if (kind === 'flare') {
+    if (r.pos >= 5) fire(r);
+  } else if (kind === 'hole') {
+    if (r.pos > 1) fire(r);
+  } else if (kind === 'plasma') {
+    for (const o of G.racers) {
+      if (o.pos !== r.pos - 1) continue;
+      const ds = G.wrapDS(progSOf(o) - progSOf(r));
+      if (ds > 4 && ds < 46) fire(r);
+    }
+  } else if (kind === 'comet' || kind === 'triple') {
     /* boost only when the road ahead is open */
     let kMax = 0;
     const n = T.MAIN.length;
@@ -3283,10 +3591,11 @@ function tick(cfg) {
         if (r.rouT <= 0) {
           r.rouT = 0;
           let kind = null;
-          if (r.isHuman && seq.length) kind = seq.shift();
+          if (r.isHuman && r.idx === 0 && seq.length) kind = seq.shift();
+          if (r.isHuman && r.idx === 1 && seq2.length) kind = seq2.shift();
           if (!kind) kind = rollFor(r.pos, 8);
           r.item = kind;
-          r.itemN = kind === 'triple' ? 3 : 1;
+          r.itemN = (kind === 'triple' || kind === 'plasma') ? 3 : 1;
           if (r.isHuman) {
             G.arpeggio();
             G.lastRouletteTicks = G.tick - (r.rouStartTick || 0);
@@ -3331,7 +3640,48 @@ function tick(cfg) {
       if (o.rescue) continue;
       const dx = o.x - m.x, dz = o.z - m.z;
       if (dx * dx + dz * dz < 7.3 && Math.abs(o.y + 0.8 - m.y) < 2.8) {
-        if (G.spinHit(o, 'meteor')) { m.active = false; break; }
+        if (G.spinHit(o, 'meteor', 1.2, m.owner)) { m.active = false; break; }
+      }
+    }
+  }
+  /* plasma bolts: meteor-class straight shots */
+  for (const m of PLAS) {
+    if (!m.active) continue;
+    m.t += DT;
+    if (m.t > 2.2) { m.active = false; continue; }
+    m.x += m.vx * DT; m.z += m.vz * DT;
+    for (const o of G.racers) {
+      if (o.idx === m.owner && m.t < 0.4) continue;
+      if (o.rescue) continue;
+      const dx = o.x - m.x, dz = o.z - m.z;
+      if (dx * dx + dz * dz < 7.3 && Math.abs(o.y + 0.8 - m.y) < 2.8) {
+        if (G.spinHit(o, 'plasma', 1.2, m.owner)) { m.active = false; break; }
+      }
+    }
+  }
+  /* black holes: ride the track, hunt the RACE LEADER, swallow = long spin */
+  for (const h of HOLES) {
+    if (!h.active) continue;
+    h.t += DT;
+    if (h.t > 20) { h.active = false; continue; }
+    h.s = T.wrapS(h.s + 58 * DT);
+    let lead = null;
+    for (const o of G.racers) if (o.pos === 1 && !o.finished) lead = o;
+    if (lead && !lead.rescue) {
+      const tLat = lead.lane === 0 ? lead.lat : 0;
+      h.lat += (Math.max(-8.5, Math.min(8.5, tLat)) - h.lat) * Math.min(1, 3 * DT);
+      const ds = G.wrapDS(progSOf(lead) - h.s);
+      if (Math.abs(ds) < 2.8) {
+        /* STAR SHIELD blocks it; the spin is LONGER (~1.8s) but still in place */
+        G.spinHit(lead, 'hole', 1.8, h.owner);
+        h.active = false;
+        const p = T.sampleAt(0, h.s);
+        for (let k = 0; k < (LOWFX ? 6 : 16); k++) {
+          const a = Math.random() * Math.PI * 2;
+          W.particles.spawn(p.x + p.lx * h.lat, p.y + 1, p.z + p.lz * h.lat,
+            Math.cos(a) * 4, 3 + Math.random() * 4, Math.sin(a) * 4,
+            0.7, 0.42, 1, 0.55);
+        }
       }
     }
   }
@@ -3347,7 +3697,7 @@ function tick(cfg) {
       p.lat += (Math.max(-8.5, Math.min(8.5, tLat)) - p.lat) * Math.min(1, 3.5 * DT);
       const ds = G.wrapDS(progSOf(tr) - p.s);
       if (Math.abs(ds) < 2.6 && tr.lane === 0 && Math.abs(tr.lat - p.lat) < 2.4) {
-        G.spinHit(tr, 'seeker');
+        G.spinHit(tr, 'seeker', 1.2, p.owner);
         p.active = false;
         continue;
       }
@@ -3357,7 +3707,7 @@ function tick(cfg) {
       for (const o of G.racers) {
         if (o.idx === p.owner || o.rescue || o.lane !== 0) continue;
         if (Math.abs(G.wrapDS(progSOf(o) - p.s)) < 2.4 && Math.abs(o.lat - p.lat) < 2.2) {
-          G.spinHit(o, 'seeker');
+          G.spinHit(o, 'seeker', 1.2, p.owner);
           p.active = false;
           break;
         }
@@ -3376,7 +3726,7 @@ function tick(cfg) {
       if (o.idx === wl.owner && wl.t < 1.6) continue;
       const dx = o.x - wl.x, dz = o.z - wl.z;
       if (dx * dx + dz * dz < 10.5) {
-        if (G.spinHit(o, 'well')) {
+        if (G.spinHit(o, 'well', 1.2, wl.owner)) {
           wl.active = false;
           for (let k = 0; k < (LOWFX ? 5 : 12); k++) {
             const a = Math.random() * Math.PI * 2;
@@ -3424,6 +3774,31 @@ function render(dt) {
       if (!LOWFX && (G.tick & 1)) {
         W.particles.spawn(m.x, m.y, m.z, -m.vx * 0.06, 0.5, -m.vz * 0.06, 1, 0.6, 0.3, 0.28);
       }
+    }
+  }
+  for (let i = 0; i < PLAS.length; i++) {
+    const m = PLAS[i], mesh = W.plasmaMeshes[i];
+    mesh.visible = m.active;
+    if (m.active) {
+      mesh.position.set(m.x, m.y, m.z);
+      mesh.rotation.y = Math.atan2(m.vx, m.vz);
+      mesh.rotation.z += dt * 11;
+      if (!LOWFX && (G.tick & 1)) {
+        W.particles.spawn(m.x, m.y, m.z, -m.vx * 0.05, 0.4, -m.vz * 0.05, 0.4, 0.95, 1, 0.24);
+      }
+    }
+  }
+  for (let i = 0; i < HOLES.length; i++) {
+    const h = HOLES[i], grp = W.holeMeshes[i];
+    grp.visible = h.active;
+    if (h.active) {
+      const fr = T.sampleAt(0, h.s);
+      const hx = fr.x + fr.lx * h.lat, hz = fr.z + fr.lz * h.lat;
+      grp.position.set(hx, fr.y + 1.4 + Math.sin(h.t * 6) * 0.12, hz);
+      grp.userData.ring.rotation.y += dt * 3.4;
+      grp.userData.ring.rotation.x += dt * 1.1;
+      grp.userData.ring2.rotation.z += dt * 5;
+      W.particles.spawn(hx, fr.y + 1.4, hz, -fr.tx * 7, 0.6, -fr.tz * 7, 0.65, 0.4, 1, 0.32);
     }
   }
   for (let i = 0; i < PRBS.length; i++) {
@@ -3484,6 +3859,8 @@ function reset() {
   for (const p of PRBS) p.active = false;
   for (const wl of WELLS) wl.active = false;
   for (const f of FLASHES) f.active = false;
+  for (const m of PLAS) m.active = false;
+  for (const h of HOLES) h.active = false;
   if (W.itemBoxes) for (const b of W.itemBoxes.meta) b.cool = 0;
   G.stats.spinEjections = 0;
 }
@@ -3501,12 +3878,14 @@ function slotInfo(r) {
 
 G.items = {
   tick, render, reset, fire, slotInfo,
-  pools: { METS, PRBS, WELLS },
+  pools: { METS, PRBS, WELLS, PLAS, HOLES },
   activeCounts() {
     return {
       meteors: METS.filter(m => m.active).length,
       probes: PRBS.filter(p => p.active).length,
       wells: WELLS.filter(w => w.active).length,
+      plasmas: PLAS.filter(m => m.active).length,
+      holes: HOLES.filter(h => h.active).length,
     };
   },
 };
@@ -3585,8 +3964,10 @@ G.makeChaseCam = function (cam) {
         const k = player.rescue ? 2.2 : 7;
         camPos.lerp(tmpV, Math.min(1, dt * k));
         camLook.set(player.x + fx * 6.5, player.y + 1.2, player.z + fz * 6.5);
-        const targetFov = fovBase + (spd / 26) * 6 + (player.boostT > 0 ? 8 : 0);
-        st.fov += (targetFov - st.fov) * Math.min(1, dt * 5);
+        /* RR-JUICE-1 sense of speed: FOV stretches ~+12° at top speed with an
+           extra kick on boost — smoothed so it breathes, never snaps */
+        const targetFov = fovBase + (spd / 30) * 12 + (player.boostT > 0 ? 9 : 0);
+        st.fov += (targetFov - st.fov) * Math.min(1, dt * (player.boostT > 0 ? 8 : 5));
       }
       cam.position.copy(camPos);
       cam.lookAt(camLook);
@@ -3741,6 +4122,481 @@ G.garageRender = function (dt) {
 G.podiumRender = function (dt) {
   for (const m of W.podiumView.ships) m.rotation.y += dt * 0.6;
   renderer.render(W.podiumView.scene, W.podiumView.cam);
+};
+})();
+</script>
+<script>
+/* ═══════════════ RING RACER — MUSIC (RR-JUICE-1, the headline) ═══════════════
+   A pattern-based WebAudio sequencer: 16th-note steps, BPM-driven, scheduled
+   with the classic lookahead pattern (25ms tick, 140ms lookahead against
+   audioCtx.currentTime) so it never clicks or starves regardless of frame
+   rate. All voices synthesized: detuned square lead, triangle pluck arp,
+   triangle+square bass, noise hats/snare, sine-drop kick, soft chord pad.
+   Songs are DATA — tiny note tables of [step, note, len, vel].
+
+   Themes: TITLE (spacey 100), T1 bright major 128, T2 driving minor 132,
+   T3 intense 140, FINAL LAP = +8% tempo AND up a whole step (the Mario Kart
+   idiom, switched at the bar), PODIUM fanfare jingle. The race theme DROPS
+   exactly on the GO! beat. Music plays in LOWFX (it is not an fx) and ducks
+   ~60% in pause. Lazily created on first input like all game audio. */
+'use strict';
+(function () {
+const G = window.RRG;
+
+const FR = m => 440 * Math.pow(2, (m - 69) / 12);   // midi → Hz
+const LOOKAHEAD = 0.14, TICK_MS = 25;
+const BUS_VOL = 0.30;                                // sits under SFX (~-8 dB)
+
+/* ═════════════════════════ THE SONGS (note tables) ═════════════════════════
+   lead/arp/bass: [step, midi, lenSteps, vel?]   pad: [step, [midis], lenSteps]
+   kick/snare: [step, vel?]                      hat: [step, open?] */
+
+function bassDrive(bar, r, out) {                    // pumping 8ths, octave pop
+  const b = bar * 16;
+  out.push([b, r, 2, 1], [b + 2, r, 1, 0.6], [b + 4, r, 2, 0.9], [b + 6, r + 12, 1, 0.7],
+           [b + 8, r, 2, 1], [b + 10, r, 1, 0.6], [b + 12, r, 2, 0.9], [b + 14, r + 7, 1, 0.7]);
+}
+function bassGallop(bar, r, out) {                   // dotted gallop (intense)
+  const b = bar * 16;
+  out.push([b, r, 2, 1], [b + 3, r, 1, 0.7], [b + 4, r, 2, 0.85], [b + 7, r + 12, 1, 0.7],
+           [b + 8, r, 2, 1], [b + 11, r, 1, 0.7], [b + 12, r, 2, 0.85], [b + 15, r + 7, 1, 0.7]);
+}
+function fourFloor(bars, kick, snare, hat, fillBars) {
+  for (let bar = 0; bar < bars; bar++) {
+    const b = bar * 16;
+    kick.push([b, 1], [b + 4, 0.9], [b + 8, 1], [b + 12, 0.9]);
+    snare.push([b + 4, 1], [b + 12, 1]);
+    for (let s = 0; s < 16; s += 2) hat.push([b + s, 0]);
+    hat.push([b + 14, 1]);                           // open on the and-of-4
+    if (fillBars.includes(bar)) {                    // drum fill every 4th bar
+      snare.push([b + 13, 0.5], [b + 14, 0.7], [b + 15, 1]);
+      kick.push([b + 14, 0.6]);
+    }
+  }
+}
+
+const SONGS = {};
+
+/* ── TITLE — "Set the Grid": energetic + adventurous, 116 BPM, bright D major.
+   Progression climbs then lifts: D F#m G A | Bm G D/A A (I-iii-IV-V | vi-IV-I-V).
+   A hooky, hummable call-and-response lead over a driving-but-light beat — menu
+   music a kid doesn't want to skip. Deliberately distinct from the race themes. */
+SONGS.title = (() => {
+  const lead = [
+    /* THE CALL (bars 1-2): a rising, singable hook up to F# */
+    [0, 69, 2], [2, 74, 2], [4, 78, 3], [8, 76, 2], [12, 74, 2],
+    [16, 78, 2], [18, 73, 1], [20, 74, 4], [26, 73, 2],
+    /* THE ANSWER (bars 3-4): reaches up, then breathes home */
+    [32, 71, 2], [34, 74, 2], [36, 79, 3], [40, 78, 2], [44, 74, 2],
+    [48, 76, 3], [52, 74, 2], [56, 73, 6],
+    /* THE LIFT (bars 5-6): same shape, a third higher — the adventure kick */
+    [64, 78, 2], [66, 81, 2], [68, 83, 3], [72, 81, 2], [76, 78, 2],
+    [80, 79, 2], [82, 78, 2], [84, 74, 4], [90, 71, 2],
+    /* HOME RUN (bars 7-8): peak then land on the tonic */
+    [96, 74, 2], [98, 78, 2], [100, 81, 3], [104, 78, 2], [108, 74, 2],
+    [112, 73, 2], [114, 76, 2], [116, 74, 6],
+  ];
+  /* bright triads with movement (mid register) */
+  const chords = [[50, 54, 57], [54, 57, 61], [55, 59, 62], [57, 61, 64],
+                  [59, 62, 66], [55, 59, 62], [57, 62, 66], [57, 61, 64]];
+  const roots = [38, 42, 43, 45, 47, 43, 45, 45];
+  const pad = [], arp = [], bass = [], kick = [], snare = [], hat = [];
+  for (let bar = 0; bar < 8; bar++) {
+    const ch = chords[bar], r = roots[bar], b = bar * 16;
+    pad.push([b, ch, 14]);
+    /* light sparkle arp — top of the chord, off-beats only (keeps it airy) */
+    const top = [ch[2] + 12, ch[1] + 12, ch[2] + 12, ch[0] + 24];
+    for (let s = 0; s < 4; s++) arp.push([b + 2 + s * 4, top[s], 1, 0.42]);
+    /* bouncy root+fifth bass, locked to the kick */
+    bass.push([b, r, 2, 0.9], [b + 4, r, 2, 0.7], [b + 6, r + 7, 1, 0.6],
+              [b + 8, r, 2, 0.9], [b + 12, r, 2, 0.7], [b + 14, r + 12, 1, 0.6]);
+    /* light driving beat: kick 1 & 3, soft snare 2 & 4, easy hats */
+    kick.push([b, 0.85], [b + 8, 0.8]);
+    snare.push([b + 4, 0.6], [b + 12, 0.6]);
+    for (let s = 2; s < 16; s += 4) hat.push([b + s, 0]);
+    hat.push([b + 14, bar % 2 ? 1 : 0]);
+    if (bar === 3 || bar === 7) { snare.push([b + 13, 0.4], [b + 14, 0.6], [b + 15, 0.85]); kick.push([b + 14, 0.6]); }
+  }
+  return { bpm: 116, len: 128, lead, arp, bass, pad, kick, snare, hat };
+})();
+
+/* ── T1 — "A-Ring Sprint": bright A major, 128 BPM, I-IV-vi-V,
+      4-bar call-and-response lead, fills on bars 4 and 8 ── */
+SONGS.t1 = (() => {
+  const lead = [
+    [0, 76, 3], [4, 73, 1], [6, 74, 1], [8, 76, 2], [12, 81, 3],       // the CALL
+    [16, 80, 2], [20, 78, 1], [22, 76, 1], [24, 78, 5],                // answer
+    [32, 74, 2, 0.8], [36, 73, 1, 0.8], [38, 74, 1, 0.8], [40, 76, 2, 0.8], [44, 69, 3, 0.8],
+    [48, 71, 2], [52, 73, 2], [56, 76, 4],                             // the turn
+    [64, 76, 3], [68, 73, 1], [70, 74, 1], [72, 76, 2], [76, 81, 3],   // call again
+    [80, 81, 2], [84, 80, 1], [86, 78, 1], [88, 81, 4],                // lift
+    [96, 83, 2], [100, 81, 1], [102, 80, 1], [104, 78, 2], [108, 76, 2],  // peak
+    [112, 78, 1], [114, 80, 1], [116, 81, 6],                          // climb home
+  ];
+  const pad = [], bass = [], kick = [], snare = [], hat = [];
+  const chords = [[57, 61, 64], [57, 62, 66], [57, 61, 66], [56, 59, 64],
+                  [57, 61, 64], [57, 62, 66], [56, 59, 64], [56, 59, 64]];
+  const roots = [45, 50, 42, 40, 45, 50, 40, 40];
+  for (let bar = 0; bar < 8; bar++) {
+    pad.push([bar * 16, chords[bar], 14]);
+    bassDrive(bar, roots[bar], bass);
+  }
+  fourFloor(8, kick, snare, hat, [3, 7]);
+  return { bpm: 128, len: 128, lead, arp: [], bass, pad, kick, snare, hat };
+})();
+
+/* ── T2 — "Cassini Divide": driving E minor, 132 BPM, Em C G D | Em C D B7,
+      B7 turnaround pulls the loop home ── */
+SONGS.t2 = (() => {
+  const lead = [
+    [0, 64, 2], [2, 67, 2], [4, 71, 3], [8, 69, 2], [10, 67, 1], [12, 69, 3],
+    [16, 72, 3], [20, 71, 2], [22, 69, 1], [24, 67, 4],
+    [32, 74, 2], [34, 71, 2], [36, 74, 2], [40, 79, 3],
+    [48, 78, 3], [52, 74, 2], [56, 71, 4],
+    [64, 64, 2], [66, 67, 2], [68, 71, 3], [72, 69, 2], [74, 67, 1], [76, 69, 3],
+    [80, 72, 2], [82, 74, 1], [84, 76, 3], [88, 74, 2], [90, 72, 1], [92, 71, 2],
+    [96, 74, 2], [100, 78, 2], [104, 81, 3], [108, 79, 1],
+    [112, 78, 2], [116, 75, 3], [120, 71, 2], [124, 75, 3],   // D# leads home to E
+  ];
+  const pad = [], bass = [], kick = [], snare = [], hat = [];
+  const chords = [[52, 55, 59], [48, 52, 55], [55, 59, 62], [50, 54, 57],
+                  [52, 55, 59], [48, 52, 55], [50, 54, 57], [47, 51, 57]];
+  const roots = [40, 48, 43, 50, 40, 48, 50, 47];
+  for (let bar = 0; bar < 8; bar++) {
+    pad.push([bar * 16, chords[bar], 14]);
+    bassDrive(bar, roots[bar], bass);
+  }
+  fourFloor(8, kick, snare, hat, [3, 7]);
+  for (const bar of [3, 7]) kick.push([bar * 16 + 10, 0.7]);   // extra push
+  return { bpm: 132, len: 128, lead, arp: [], bass, pad, kick, snare, hat };
+})();
+
+/* ── T3 — "Shepherd's Fury": A harmonic minor, 140 BPM, Am G F E descent,
+      gallop bass, 16th hats — the intense one ── */
+SONGS.t3 = (() => {
+  const lead = [
+    [0, 69, 1], [2, 72, 1], [4, 76, 2], [8, 74, 1], [10, 72, 1], [12, 74, 2],
+    [16, 74, 1], [18, 71, 1], [20, 74, 2], [24, 79, 3],
+    [32, 77, 2], [36, 76, 1], [38, 74, 1], [40, 72, 3],
+    [48, 80, 2], [52, 76, 2], [56, 71, 2], [60, 68, 2],
+    [64, 81, 2], [68, 76, 2], [72, 77, 1], [74, 76, 1], [76, 74, 2],
+    [80, 79, 2], [84, 74, 2], [88, 71, 2], [92, 74, 1], [94, 76, 1],
+    [96, 77, 2], [100, 72, 2], [104, 74, 1], [106, 76, 1], [108, 77, 2],
+    [112, 80, 2], [116, 76, 1], [118, 74, 1], [120, 71, 1], [122, 68, 1],
+  ];
+  const pad = [], bass = [], kick = [], snare = [], hat = [];
+  const chords = [[57, 60, 64], [55, 59, 62], [53, 57, 60], [52, 56, 59]];
+  const roots = [45, 43, 41, 40];
+  for (let bar = 0; bar < 8; bar++) {
+    const b = bar * 16;
+    pad.push([b, chords[bar % 4], 14]);
+    bassGallop(bar, roots[bar % 4], bass);
+    kick.push([b, 1], [b + 4, 0.9], [b + 8, 1], [b + 12, 0.9], [b + 14, 0.55]);
+    snare.push([b + 4, 1], [b + 12, 1]);
+    for (let s = 0; s < 16; s++) hat.push([b + s, s === 7 ? 1 : 0]);
+    if (bar === 3 || bar === 7) {
+      snare.push([b + 13, 0.5], [b + 14, 0.75], [b + 15, 1]);
+      kick.push([b + 15, 0.7]);
+    }
+  }
+  return { bpm: 140, len: 128, lead, arp: [], bass, pad, kick, snare, hat };
+})();
+
+/* ── PODIUM — short triumphant fanfare jingle (one-shot, 2 bars @ 120) ── */
+SONGS.podium = {
+  bpm: 120, len: 32,
+  lead: [[0, 72, 2], [2, 76, 2], [4, 79, 2], [6, 84, 8], [16, 83, 2], [18, 79, 2], [20, 84, 10]],
+  arp: [[6, 76, 8, 0.5], [20, 79, 10, 0.5]],
+  bass: [[0, 36, 4], [8, 41, 4], [16, 43, 4], [20, 36, 10]],
+  pad: [[0, [48, 52, 55], 5], [8, [41, 48, 53, 57], 6], [16, [43, 50, 55, 59], 4], [20, [48, 52, 55, 60], 12]],
+  kick: [[0, 1], [8, 1], [16, 1], [20, 1]],
+  snare: [[4, 0.8], [12, 0.8], [18, 0.9]],
+  hat: [[2, 0], [6, 0], [10, 0], [14, 0], [20, 1]],
+};
+
+/* precompute per-step event maps (once, at load) */
+for (const name in SONGS) {
+  const s = SONGS[name];
+  const map = new Array(s.len);
+  for (let i = 0; i < s.len; i++) map[i] = { lead: [], arp: [], bass: [], pad: [], kick: [], snare: [], hat: [] };
+  const put = (list, key) => {
+    for (const ev of (list || [])) {
+      const st = Math.round(ev[0]);
+      if (st >= 0 && st < s.len) map[st][key].push(ev);
+    }
+  };
+  put(s.lead, 'lead'); put(s.arp, 'arp'); put(s.bass, 'bass'); put(s.pad, 'pad');
+  put(s.kick, 'kick'); put(s.snare, 'snare'); put(s.hat, 'hat');
+  s.map = map;
+}
+
+/* ═════════════════════ the synth engine (any BaseAudioContext) ═════════════════════ */
+function mkEngine(ctx, out) {
+  const noiseBuf = ctx.createBuffer(1, ctx.sampleRate, ctx.sampleRate);
+  {
+    const d = noiseBuf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  }
+  function env(g, t, peak, hold, rel) {
+    g.gain.setValueAtTime(0, t);
+    g.gain.linearRampToValueAtTime(peak, t + 0.012);
+    g.gain.setTargetAtTime(peak * 0.6, t + 0.03, 0.1);
+    g.gain.setTargetAtTime(0, t + hold, rel);
+  }
+  function lead(t, m, dur, vel) {
+    for (const det of [-1, 1]) {
+      const o = ctx.createOscillator();
+      o.type = 'square';
+      o.frequency.value = FR(m) * (1 + det * 0.0012);       // slight detune = width
+      const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 2700;
+      const g = ctx.createGain();
+      env(g, t, 0.05 * vel, Math.max(0.05, dur - 0.03), 0.03);
+      o.connect(lp); lp.connect(g); g.connect(out);
+      o.start(t); o.stop(t + dur + 0.25);
+    }
+  }
+  function arp(t, m, dur, vel) {
+    const o = ctx.createOscillator();
+    o.type = 'triangle';
+    o.frequency.value = FR(m);
+    const g = ctx.createGain();
+    env(g, t, 0.06 * vel, Math.max(0.04, dur * 0.6), 0.04);
+    o.connect(g); g.connect(out);
+    o.start(t); o.stop(t + dur + 0.25);
+  }
+  function bass(t, m, dur, vel) {
+    const o = ctx.createOscillator(); o.type = 'triangle'; o.frequency.value = FR(m);
+    const o2 = ctx.createOscillator(); o2.type = 'square'; o2.frequency.value = FR(m);
+    const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 520;
+    const g = ctx.createGain(), g2 = ctx.createGain();
+    env(g, t, 0.16 * vel, Math.max(0.05, dur - 0.02), 0.03);
+    g2.gain.value = 0.22;                                    // square adds definition
+    o.connect(g); o2.connect(g2); g2.connect(lp); lp.connect(g);
+    g.connect(out);
+    o.start(t); o.stop(t + dur + 0.2); o2.start(t); o2.stop(t + dur + 0.2);
+  }
+  function padChord(t, notes, dur) {
+    for (const m of notes) {
+      const o = ctx.createOscillator(); o.type = 'triangle'; o.frequency.value = FR(m);
+      const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 1000;
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0, t);
+      g.gain.linearRampToValueAtTime(0.02, t + 0.08);
+      g.gain.setTargetAtTime(0, t + Math.max(0.1, dur - 0.1), 0.12);
+      o.connect(lp); lp.connect(g); g.connect(out);
+      o.start(t); o.stop(t + dur + 0.5);
+    }
+  }
+  function kick(t, vel) {
+    const o = ctx.createOscillator(); o.type = 'sine';
+    o.frequency.setValueAtTime(165, t);
+    o.frequency.exponentialRampToValueAtTime(46, t + 0.09);
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.42 * vel, t);
+    g.gain.setTargetAtTime(0, t + 0.02, 0.05);
+    o.connect(g); g.connect(out);
+    o.start(t); o.stop(t + 0.3);
+  }
+  function snare(t, vel) {
+    const src = ctx.createBufferSource(); src.buffer = noiseBuf;
+    src.playbackRate.value = 1;
+    const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 1900; bp.Q.value = 0.7;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.16 * vel, t);
+    g.gain.setTargetAtTime(0, t + 0.005, 0.045);
+    src.connect(bp); bp.connect(g); g.connect(out);
+    src.start(t, Math.random() * 0.4, 0.25);
+    const o = ctx.createOscillator(); o.type = 'triangle'; o.frequency.value = 210;
+    const g2 = ctx.createGain();
+    g2.gain.setValueAtTime(0.06 * vel, t);
+    g2.gain.setTargetAtTime(0, t + 0.005, 0.03);
+    o.connect(g2); g2.connect(out);
+    o.start(t); o.stop(t + 0.15);
+  }
+  function hat(t, open) {
+    const src = ctx.createBufferSource(); src.buffer = noiseBuf;
+    const hp = ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 7200;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(open ? 0.05 : 0.042, t);
+    g.gain.setTargetAtTime(0, t + 0.004, open ? 0.05 : 0.012);
+    src.connect(hp); hp.connect(g); g.connect(out);
+    src.start(t, Math.random() * 0.5, open ? 0.25 : 0.06);
+  }
+  /* one 16th-note step of a song at absolute time t */
+  function scheduleStep(song, stepIdx, t, spb, transpose) {
+    const slot = song.map[stepIdx];
+    for (const ev of slot.lead) lead(t, ev[1] + transpose, ev[2] * spb * 0.92, ev[3] || 1);
+    for (const ev of slot.arp) arp(t, ev[1] + transpose, ev[2] * spb * 0.9, ev[3] || 1);
+    for (const ev of slot.bass) bass(t, ev[1] + transpose, ev[2] * spb * 0.9, ev[3] || 1);
+    for (const ev of slot.pad) padChord(t, transpose ? ev[1].map(n => n + transpose) : ev[1], ev[2] * spb);
+    for (const ev of slot.kick) kick(t, ev[1] || 1);
+    for (const ev of slot.snare) snare(t, ev[1] || 1);
+    for (const ev of slot.hat) hat(t, ev[1]);
+  }
+  return { scheduleStep };
+}
+
+/* ═════════════════════ the live player ═════════════════════ */
+const RACE_THEMES = ['t1', 't2', 't3'];
+const MUS = {
+  playing: null, bpm: 0, transpose: 0, step: 0, nextT: 0, firstBeatT: 0,
+  minAhead: 1e9, skips: 0, ducked: false, jinglePlays: 0, jingleDone: false,
+  pendFinal: false, finalReqStep: -1, switched: null, lastGo: null,
+  gain: null, engine: null, timer: 0,
+};
+function ensureEngine() {
+  const A = G.AUD;
+  if (!A || !A.ctx) return false;
+  if (!MUS.engine) {
+    MUS.gain = A.ctx.createGain();
+    MUS.gain.gain.value = BUS_VOL;
+    MUS.gain.connect(A.master);
+    MUS.engine = mkEngine(A.ctx, MUS.gain);
+    MUS.timer = setInterval(tick, TICK_MS);
+  }
+  return true;
+}
+function tick() {
+  const A = G.AUD;
+  if (!A || !A.ctx || !MUS.playing || !MUS.engine) return;
+  const ctx = A.ctx;
+  const song = SONGS[MUS.playing];
+  const gap = MUS.nextT - ctx.currentTime;
+  if (gap < MUS.minAhead) MUS.minAhead = gap;
+  if (gap < -0.3) {                                  // macro-stall (hidden tab): realign silently
+    while (MUS.nextT < ctx.currentTime - 0.02) { MUS.nextT += 60 / MUS.bpm / 4; MUS.step++; MUS.skips++; }
+  }
+  while (MUS.nextT < ctx.currentTime + LOOKAHEAD) {
+    const sIdx = MUS.step % song.len;
+    if (sIdx % 16 === 0 && MUS.pendFinal) {          // final-lap switch lands ON a bar
+      MUS.bpm = Math.round(song.bpm * 1.15);   // FINAL LAP: +15% tempo (panic, in a good way)
+      MUS.transpose = 2;                        // …and up a whole step
+      MUS.pendFinal = false;
+      MUS.switched = { step: MUS.step, reqStep: MUS.finalReqStep, t: MUS.nextT };
+    }
+    MUS.engine.scheduleStep(song, sIdx, MUS.nextT, 60 / MUS.bpm / 4, MUS.transpose);
+    MUS.nextT += 60 / MUS.bpm / 4;
+    MUS.step++;
+  }
+}
+function play(name) {
+  if (!ensureEngine()) return false;
+  const song = SONGS[name];
+  if (!song) return false;
+  MUS.playing = name;
+  MUS.bpm = song.bpm; MUS.transpose = 0; MUS.step = 0;
+  MUS.pendFinal = false; MUS.switched = null;
+  MUS.nextT = G.AUD.ctx.currentTime + 0.04;          // downbeat lands NOW
+  MUS.firstBeatT = MUS.nextT;
+  tick();
+  return true;
+}
+function stop() { MUS.playing = null; }
+function duck(on) {
+  if (MUS.ducked === on || !MUS.gain || !G.AUD || !G.AUD.ctx) return;
+  MUS.ducked = on;
+  const g = MUS.gain.gain, t = G.AUD.ctx.currentTime;
+  g.cancelScheduledValues(t);
+  g.setTargetAtTime(on ? BUS_VOL * 0.4 : BUS_VOL, t, 0.08);   // ~60% duck in pause
+}
+function playJingle() {
+  if (!ensureEngine()) return;
+  const ctx = G.AUD.ctx, song = SONGS.podium;
+  const spb = 60 / song.bpm / 4;
+  const t0 = ctx.currentTime + 0.04;
+  for (let i = 0; i < song.len; i++) MUS.engine.scheduleStep(song, i, t0 + i * spb, spb, 0);
+  MUS.jinglePlays++;
+}
+
+G.music = {
+  startRace(trackIdx) {                              // called at the GO! beat
+    if (!ensureEngine()) return;
+    MUS.jingleDone = false;
+    MUS.lastGo = { ctxT: G.AUD.ctx.currentTime };
+    play(RACE_THEMES[trackIdx] || 't1');
+    MUS.lastGo.firstBeatT = MUS.firstBeatT;
+  },
+  finalLap() {
+    if (RACE_THEMES.includes(MUS.playing) && !MUS.switched && !MUS.pendFinal) {
+      MUS.pendFinal = true;
+      MUS.finalReqStep = MUS.step;
+    }
+  },
+  /* per-frame state → music mapping (idempotent; guarded by the caller) */
+  sync(state, trackIdx) {
+    if (!G.AUD || !G.AUD.ctx) return;                // audio not born yet (lazy law)
+    if (!ensureEngine()) return;
+    if (state === 'title' || state === 'tracksel' || state === 'garage') {
+      MUS.jingleDone = false;
+      if (MUS.playing !== 'title') play('title');
+      duck(false);
+    } else if (state === 'count') {
+      if (MUS.playing) stop();                       // beeps own the grid; theme drops on GO
+    } else if (state === 'race') {
+      if (MUS.playing !== RACE_THEMES[trackIdx]) {   // safety net (startRace is the real path)
+        play(RACE_THEMES[trackIdx]);
+      }
+      duck(false);
+    } else if (state === 'pause') {
+      duck(true);
+    } else if (state === 'finish' || state === 'standings' || state === 'podium') {
+      duck(false);
+      if (!MUS.jingleDone) { stop(); playJingle(); MUS.jingleDone = true; }
+    }
+  },
+  stop, play, duck,
+};
+
+/* ── harness telemetry (read-only) ── */
+window.__rrMusic = function () {
+  return {
+    playing: MUS.playing, bpm: MUS.bpm, transpose: MUS.transpose, step: MUS.step,
+    minAhead: MUS.minAhead === 1e9 ? null : MUS.minAhead, skips: MUS.skips,
+    ducked: MUS.ducked, jinglePlays: MUS.jinglePlays,
+    lastGo: MUS.lastGo, switched: MUS.switched, pendFinal: MUS.pendFinal,
+    busGain: MUS.gain ? MUS.gain.gain.value : null,
+    engineOn: !!MUS.engine, ctxTime: (G.AUD && G.AUD.ctx) ? G.AUD.ctx.currentTime : null,
+    ctxState: (G.AUD && G.AUD.ctx) ? G.AUD.ctx.state : null,
+  };
+};
+window.__rrMusicReset = function () { MUS.minAhead = 1e9; MUS.skips = 0; };
+
+/* ── OfflineAudioContext render → 16-bit WAV base64 (for John's ears; the
+   harness saves these under test/music-samples/, they never ship) ── */
+window.__rrRenderSample = async function (name, seconds, finalVariant) {
+  const song = SONGS[name];
+  if (!song) throw new Error('no song ' + name);
+  const rate = 44100;
+  const off = new OfflineAudioContext(1, Math.ceil(rate * seconds), rate);
+  const out = off.createGain(); out.gain.value = 0.85; out.connect(off.destination);
+  const eng = mkEngine(off, out);
+  let bpm = song.bpm, trans = 0;
+  if (finalVariant) { bpm = Math.round(song.bpm * 1.15); trans = 2; }
+  const spb = 60 / bpm / 4;
+  let t = 0.05, step = 0;
+  while (t < seconds - 0.2) {
+    eng.scheduleStep(song, step % song.len, t, spb, trans);
+    t += spb; step++;
+  }
+  const buf = await off.startRendering();
+  const ch = buf.getChannelData(0);
+  const n = ch.length;
+  const bytes = new Uint8Array(44 + n * 2);
+  const dv = new DataView(bytes.buffer);
+  const wstr = (o, s) => { for (let i = 0; i < s.length; i++) dv.setUint8(o + i, s.charCodeAt(i)); };
+  wstr(0, 'RIFF'); dv.setUint32(4, 36 + n * 2, true); wstr(8, 'WAVE');
+  wstr(12, 'fmt '); dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 1, true);
+  dv.setUint32(24, rate, true); dv.setUint32(28, rate * 2, true); dv.setUint16(32, 2, true); dv.setUint16(34, 16, true);
+  wstr(36, 'data'); dv.setUint32(40, n * 2, true);
+  for (let i = 0; i < n; i++) {
+    const v = Math.max(-1, Math.min(1, ch[i]));
+    dv.setInt16(44 + i * 2, v < 0 ? v * 0x8000 : v * 0x7fff, true);
+  }
+  let b64 = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    b64 += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(b64);
 };
 })();
 </script>
@@ -4008,6 +4864,7 @@ G.onPlayerLap = function (r) {
   const pi = r.idx === 1 ? 1 : 0;
   if (r.lap === G.LAPS) {
     showBanner(pi, 'FINAL LAP!', '#ff8f5e');
+    if (G.music) G.music.finalLap();   // +8% tempo, up a whole step at the bar
     if (pi === 0) { G.beep(660, 0.14, 'square', 0.14); G.beep(880, 0.22, 'square', 0.14, 0.14); }
   } else if (r.lap > 1) {
     showBanner(pi, 'LAP ' + r.lap, '#8fd8ff');
@@ -4017,6 +4874,13 @@ G.onSpinHit = function (r, cause) {
   if (r.isHuman && r.pos >= 6 && cause !== 'moonlet') {
     /* gentle: no coaching for item hits — they're part of the fun */
   }
+};
+/* SOLAR FLARE screen flash (both viewports share the stage-wide layer) */
+G.onFlareFx = function (r) {
+  const f = el('flareFx');
+  f.classList.remove('show');
+  void f.offsetWidth;
+  f.classList.add('show');
 };
 
 /* ── menus ── */
@@ -4139,7 +5003,7 @@ function updateShips(dt) {
     const hover = 0.55 + Math.sin(r.bob) * 0.1 * (0.4 + slow);
     grp.position.set(r.x, r.y + hover, r.z);
     /* the hit-spin twirl is pure THEATER — sim position/heading are frozen */
-    const twirl = r.spin > 0 ? (r.spinVis / 1.2) * Math.PI * 4 * r.spinDir : 0;
+    const twirl = r.spin > 0 ? (r.spinVis / (r.spinDur || 1.2)) * Math.PI * 4 * r.spinDir : 0;
     grp.rotation.y = r.heading + twirl;
     body.rotation.z = r.bank;
     body.rotation.x = r.nose;
@@ -4159,6 +5023,25 @@ function updateShips(dt) {
       P.spawn(r.x - fx * 2.1, r.y + 0.4, r.z - fz * 2.1,
         -fx * (6 + Math.random() * 3), 0.6, -fz * (6 + Math.random() * 3),
         1, 0.72, 0.3, 0.3 + Math.random() * 0.2);
+    }
+    /* RR-JUICE-1 SPEED LINES: streak particles above ~70% top speed (humans,
+       full-fx only — the console skips them). They fly PAST the camera. */
+    if (r.isHuman && !window.RR_LOWFX && G.state === 'race') {
+      const cfgMax = G.DIFF_CFG[G.DIFFS[G.diffIdx]].max * (r.st ? r.st.top : 1);
+      if (r.fw > cfgMax * 0.7) {
+        const fx = Math.sin(r.heading), fz = Math.cos(r.heading);
+        const rx = Math.cos(r.heading), rz = -Math.sin(r.heading);
+        for (let sl = 0; sl < 2; sl++) {
+          const side = (Math.random() - 0.5) * 2;
+          const off = 3.5 + Math.random() * 6;
+          P.spawn(r.x + fx * (16 + Math.random() * 16) + rx * side * off,
+            r.y + 1 + Math.random() * 3.5,
+            r.z + fz * (16 + Math.random() * 16) + rz * side * off,
+            -fx * r.fw * 1.7, 3, -fz * r.fw * 1.7,
+            0.75, 0.9, 1, 0.3 + Math.random() * 0.12);
+          G.stats.speedLines++;
+        }
+      }
     }
   }
   let target = null;
@@ -4214,7 +5097,7 @@ function updateHUD(pi) {
   H.clockText.textContent = fmtT(p.finished ? p.finishT : G.raceT);
   const kmh = Math.round(Math.max(0, p.fw) * G.SPEED_DISPLAY);
   if (kmh !== H.shownSpeed) { H.shownSpeed = kmh; H.speedNum.textContent = String(kmh); }
-  if (pi === 0 && G.players === 1) drawDial(Math.max(0, p.fw) / 27);
+  if (pi === 0 && G.players === 1) drawDial(Math.max(0, p.fw) / (G.DIFF_CFG[G.DIFFS[G.diffIdx]].max + 6));
   if (G.players === 1 && pi === 0) drawMap();
   /* item slot */
   const info = G.items.slotInfo(p);
@@ -4272,6 +5155,7 @@ function stepCountdown(dt) {
     countdownEl.textContent = 'GO!';
     G.beep(880, 0.4, 'square', 0.18);
     setState('race');
+    if (G.music) G.music.startRace(T.trackIdx);   // the theme DROPS on the GO beat
     cam1.mode = 'race'; cam2.mode = 'race';
     setTimeout(() => { countdownEl.style.display = 'none'; }, 700);
   }
@@ -4442,7 +5326,7 @@ function updateTelemetry() {
     o2.finished = q.finished; o2.pos = q.pos; o2.lap = q.lap; o2.prog = q.prog;
     o2.item = q.item; o2.rouletteActive = q.rouT > 0; o2.shieldT = q.shieldT;
     o2.rescueActive = !!q.rescue; o2.spinT = q.spin; o2.rescueN = q.rescueN;
-    o2.itemsPicked = q.itemsPicked; o2.itemsUsed = q.itemsUsed;
+    o2.itemsPicked = q.itemsPicked; o2.itemsUsed = q.itemsUsed; o2.boostT = q.boostT;
   }
   RR.lastCoach = G.lastCoach; RR.lastCoachAt = G.lastCoachAt;
   RR.driftTMax = G.driftTMax || 0;
@@ -4454,6 +5338,14 @@ function updateTelemetry() {
   RR.lastHit = G.lastHit;
   RR.lastWormholeJump = G.lastWormholeJump || 0;
   RR.lastRouletteTicks = G.lastRouletteTicks || 0;
+  RR.fov = W.camera.fov;
+  RR.cfgMax = G.DIFF_CFG[G.DIFFS[G.diffIdx]].max;
+  RR.speedLines = G.stats.speedLines || 0;
+  RR.shoves = G.stats.shoves || 0;
+  RR.barrierHits = G.stats.barrierHits || 0;
+  RR.lastShove = G.lastShove || null;
+  RR.lastFlare = G.lastFlare || null;
+  RR.shoveStats = G.shoveStats || null;
   RR.itemBoxCount = W.itemBoxes ? W.itemBoxes.meta.length : 0;
   const M = G.moonlet;
   RR.moonlet = { phase: M.phase, warnTick: M.warnTick, dangerTick: M.dangerTick,
@@ -4520,7 +5412,8 @@ function frame(now) {
     if (G.players === 2) updateHUD(1);
   }
   const p = G.racers[0];
-  G.engineTick(p ? Math.max(0, p.fw) : 0, 26, p ? p.drifting : false);
+  G.engineTick(p ? Math.max(0, p.fw) : 0, G.DIFF_CFG[G.DIFFS[G.diffIdx]].max, p ? p.drifting : false);
+  if (G.music) G.music.sync(G.state, T.trackIdx);
   W.planet.rotation.y += dt * 0.008;
   if (G.state === 'garage') {
     G.renderWorld(false);
