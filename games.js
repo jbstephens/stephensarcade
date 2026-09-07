@@ -127,5 +127,13 @@ window.GAMES_DATA = [
     "status": "PRESS START",
     "icon": "saturn",
     "source": "https://ringracer.onrender.com/"
+  },
+  {
+    "slug": "castle-forge",
+    "title": "CASTLE FORGE",
+    "genre": "BUILDER",
+    "status": "PRESS START",
+    "icon": "castle",
+    "source": "https://castleforge.onrender.com/"
   }
 ];
