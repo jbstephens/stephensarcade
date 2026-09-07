@@ -55,6 +55,12 @@
       font-size:12px; letter-spacing:.6px; text-shadow:0 2px 3px rgba(0,0,0,.8); opacity:.9; }
   body.in-play.input-kb #hints { display:block; }
 
+  /* ── P2 drop-in hint (corner, only when pad 2 is connected + unjoined) ── */
+  #p2hint { position:fixed; right:14px; bottom:10px; z-index:70; display:none; color:#a3d8ff;
+      font-size:12px; font-weight:bold; letter-spacing:.8px; opacity:.85;
+      text-shadow:0 2px 3px rgba(0,0,0,.8); }
+  #p2hint.show { display:block; }
+
   /* ── toasts ── */
   #toasts { position:fixed; top:64px; left:50%; transform:translateX(-50%); z-index:40;
       display:flex; flex-direction:column; align-items:center; gap:6px; pointer-events:none; }
@@ -164,6 +170,7 @@
 </div>
 <div id="goal"><span class="star">⭐</span><span id="goalTxt">GOAL</span></div>
 <div id="hints">ARROWS/WASD WALK · X TALK+CHOP · C BUILD · V STATS · M SOUND</div>
+<div id="p2hint">🎮 P2 — PRESS ✕ TO JOIN</div>
 <div id="toasts"></div>
 <div id="banner"><div class="b1"></div><div class="b2"></div></div>
 <div id="panelWrap"><div id="panel"></div></div>
@@ -631,7 +638,10 @@ function freeTilesNear(px2, py2, sz) {
 }
 
 /* ═══════════ ENTITIES ═══════════ */
-const player = { x: WORLD / 2 - 60, y: WORLD / 2 + 60, vx: 0, vy: 0, face: 1, walkT: 0, moving: false };
+const player = { x: WORLD / 2 - 60, y: WORLD / 2 + 60, vx: 0, vy: 0, face: 1, walkT: 0, moving: false, dustT: 0 };
+/* drop-in co-ruler — pad(1) joins/leaves any time; shares everything else */
+const player2 = { x: WORLD / 2 - 14, y: WORLD / 2 + 60, vx: 0, vy: 0, face: 1, walkT: 0, moving: false, dustT: 0,
+  active: false, leaveT: 0, hatWorn: -1 };
 let cam = { x: player.x, y: player.y };
 let shake = 0;
 
@@ -641,7 +651,6 @@ let chickens = [];     // {x,y,hx,hy,ph,peckT,heartT,tx2,ty2,wanderT,hue}
 let particles = [];
 let pies = [];         // flying pies
 const dragon = { found: false, x: 2810, y: 470, vx: 0, vy: 0, ph: 0, flap: 0, mode: 'sleep' }; // sleep|follow|perch
-let bubbleT = 0;
 
 function puff(x, y, n, kind, hue) {
   for (let i = 0; i < n; i++) {
@@ -802,19 +811,19 @@ function openCrate(c) {
 }
 
 /* region discovery */
-function tickRegions() {
-  const reg = regionAt(player.x, player.y);
+function tickRegions(p) {
+  const reg = regionAt(p.x, p.y);
   if (!visitedRegions[reg]) {
     visitedRegions[reg] = true;
     banner(REGIONS[reg].name + '!', '');
     SFX.fanfare();
   }
-  if (!dragonFound && dist(player.x, player.y, POI.cave.x, POI.cave.y) < 300) {
+  if (!dragonFound && dist(p.x, p.y, POI.cave.x, POI.cave.y) < 300) {
     dragonFound = true; dragon.found = true;
     banner('A DRAGON!', 'He\'s… snoring? He looks hungry.');
     SFX.roar(); shake = 6;
   }
-  if (!starTouched && dist(player.x, player.y, POI.star.x, POI.star.y) < 90) {
+  if (!starTouched && dist(p.x, p.y, POI.star.x, POI.star.y) < 90) {
     starTouched = true;
     banner('THE FALLEN STAR!', 'It\'s warm! It hums! It misses the sky…');
     SFX.magic(); confetti(POI.star.x, POI.star.y, 30);
@@ -830,6 +839,7 @@ function save() {
       cheers, piesFired, wizardMet, dragonFound, dragonFriend, starTouched, beaconLit,
       hats, hatWorn, visitedRegions, playT,
       px: player.x, py: player.y,
+      p2: player2.active ? { x: player2.x, y: player2.y, hat: player2.hatWorn } : undefined,
       buildings: buildings.filter(b => b.key !== 'campfire').map(b => ({ k: b.key, x: b.tx, y: b.ty })),
     }));
   } catch (e) {}
@@ -849,6 +859,10 @@ function load() {
     visitedRegions = d.visitedRegions || { meadow: true };
     playT = d.playT || 0;
     player.x = d.px; player.y = d.py;
+    if (d.p2) {
+      player2.active = true; player2.x = d.p2.x; player2.y = d.p2.y;
+      player2.hatWorn = d.p2.hat ?? -1; player2.vx = player2.vy = 0; player2.leaveT = 0;
+    }
     for (const bd of d.buildings) {
       if (!BLD[bd.k]) continue;
       /* clear any objects that regrew into the footprint */
@@ -868,8 +882,9 @@ function wipe() { try { localStorage.removeItem(SAVE_KEY); } catch (e) {} }
 /* ═══════════ INPUT ═══════════ */
 const keys = {};
 let joy = { on: false, id: null, cx: 0, cy: 0, dx: 0, dy: 0 };
-let placing = null;                 // {key, cands, sel}
+let placing = null;                 // {key, cands, sel, owner}
 let panelMode = null;
+let panelOwner = 0;                 // 0=P1, 1=P2, -1=shared (pause)
 
 function inputVec() {
   let dx = 0, dy = 0;
@@ -878,13 +893,28 @@ function inputVec() {
   if (keys.ArrowUp || keys.KeyW) dy -= 1;
   if (keys.ArrowDown || keys.KeyS) dy += 1;
   if (joy.on) { dx += joy.dx; dy += joy.dy; }
-  if (PADS) for (const pd of PADS) if (pd && pd.connected) {
+  if (PADS) for (let pi = 0; pi < PADS.length; pi++) {
+    if (pi === 1 && player2.active) continue;      // pad(1) belongs to P2 once joined
+    const pd = PADS[pi];
+    if (!pd || !pd.connected) continue;
     const lx = pd.axis('lx'), ly = pd.axis('ly');
     if (Math.abs(lx) > .18) dx += lx;
     if (Math.abs(ly) > .18) dy += ly;
   }
   const m = Math.hypot(dx, dy);
   if (m > 1) { dx /= m; dy /= m; }
+  return [dx, dy];
+}
+function inputVec2() {                              // P2 = pad(1) stick only
+  let dx = 0, dy = 0;
+  const pd = PADS && PADS[1];
+  if (pd && pd.connected) {
+    const lx = pd.axis('lx'), ly = pd.axis('ly');
+    if (Math.abs(lx) > .18) dx = lx;
+    if (Math.abs(ly) > .18) dy = ly;
+    const m = Math.hypot(dx, dy);
+    if (m > 1) { dx /= m; dy /= m; }
+  }
   return [dx, dy];
 }
 
@@ -904,7 +934,14 @@ addEventListener('keyup', e => { keys[e.code] = false; });
 /* gamepads — guarded; the arcade shell hosts controller.js */
 const AC = window.ArcadeController || null;
 const PADS = AC ? [AC.pad(0), AC.pad(1)] : null;
-if (AC) AC.on('press', e => { if (e.padIndex > 1) return; ensureAudio(); onBtn(e.button); });
+if (AC) AC.on('press', e => {
+  if (e.padIndex > 1) return;
+  ensureAudio();
+  if (e.padIndex === 1) onBtnP2(e.button); else onBtn(e.button);
+});
+if (AC) AC.on('disconnect', e => {       // pad(1) vanishing mid-game shouldn't strand a ghost
+  if (e.padIndex === 1 && player2.active) leaveP2();
+});
 
 /* touch: left-half joystick + DOM buttons */
 function touchStart(ev) {
@@ -952,17 +989,59 @@ function onBtn(b) {
   if (b === 'mute') { muted = !muted; toast(muted ? '🔇 SOUND OFF' : '🔊 SOUND ON'); return; }
   if (scene === 'title') { titleBtn(b); return; }
   if (scene === 'finale') return;
-  if (panelMode) { panelBtn(b); return; }
-  if (placing) { placeBtn(b); return; }
-  if (b === 'south') interact();
-  else if (b === 'west') openBuildMenu();
-  else if (b === 'north') openStats();
+  if (panelMode) { if (panelOwner !== 1) panelBtn(b); else if (b === 'start') openPause(); return; }
+  if (placing && placing.owner !== 1) { placeBtn(b); return; }
+  if (b === 'south') interact(player);
+  else if (b === 'west') openBuildMenu(0);
+  else if (b === 'north') openStats(0);
   else if (b === 'start' || b === 'east') openPause();
 }
 
+/* ── P2 buttons (pad 1). Same verbs, own character; ○ is reserved for hold-to-leave. ── */
+function onBtnP2(b) {
+  if (scene === 'title') {
+    if (b === 'south') { ensureAudio(); startGame(hasSave()); joinP2(); }
+    return;
+  }
+  if (scene === 'finale') return;
+  if (!player2.active) {
+    if (b === 'south') joinP2();
+    else if (b === 'start') { if (panelMode) { if (panelOwner !== 0) panelBtn(b); } else openPause(); }
+    return;
+  }
+  if (panelMode) { if (panelOwner !== 0) panelBtn(b); else if (b === 'start') openPause(); return; }
+  if (placing && placing.owner === 1) { placeBtn(b); return; }
+  if (b === 'south') interact(player2);
+  else if (b === 'west') openBuildMenu(1);
+  else if (b === 'north') openStats(1);
+  else if (b === 'start') openPause();
+}
+
+function joinP2() {
+  if (player2.active || scene !== 'play') return;
+  let x = player.x + 46, y = player.y, guard = 0;
+  while (blocked(x, y) && guard++ < 24) { x = player.x + rnd(-80, 80); y = player.y + rnd(-80, 80); }
+  player2.active = true;
+  player2.x = x; player2.y = y; player2.vx = player2.vy = 0;
+  player2.face = 1; player2.leaveT = 0;
+  toast('👑 P2 JOINED THE KINGDOM!', 'gold');
+  confetti(player2.x, player2.y - 30, 20);
+  SFX.hi();
+  save();
+}
+function leaveP2() {
+  if (!player2.active) return;
+  player2.active = false; player2.leaveT = 0;
+  if (placing && placing.owner === 1) placing = null;
+  if (panelMode && panelOwner === 1) closePanel();
+  toast('👋 P2 WAVES GOODBYE!');
+  puff(player2.x, player2.y - 14, 10, 'spark', 200);
+  save();
+}
+
 /* ═══════════ INTERACTION (X) — nearest thing wins ═══════════ */
-function interact() {
-  const px = player.x, py = player.y;
+function interact(p) {
+  const px = p.x, py = p.y;
   /* chests first */
   for (const c of crates) if (c.landed && dist(px, py, c.x, c.y) < 80) { openCrate(c); return; }
   /* the wizard */
@@ -996,7 +1075,7 @@ function interact() {
     return;
   }
   /* the fallen star */
-  if (starTouched === false && dist(px, py, POI.star.x, POI.star.y) < 110) { tickRegions(); return; }
+  if (starTouched === false && dist(px, py, POI.star.x, POI.star.y) < 110) { tickRegions(p); return; }
   /* chickens!! */
   for (const ch of chickens) if (dist(px, py, ch.x, ch.y) < 55) {
     ch.heartT = 1.2; chickensPetted++;
@@ -1060,9 +1139,11 @@ function harvest(o) {
 
 /* ═══════════ BUILD PLACEMENT ═══════════ */
 function startPlacing(key) {
-  const cands = freeTilesNear(player.x, player.y, BLD[key].sz);
+  const owner = panelOwner === 1 ? 1 : 0;         // whoever owns the build menu places
+  const pl = owner === 1 ? player2 : player;
+  const cands = freeTilesNear(pl.x, pl.y, BLD[key].sz);
   if (!cands.length) { toast('NO ROOM HERE — FIND OPEN GRASS!'); SFX.deny(); return; }
-  placing = { key, cands, sel: 0 };
+  placing = { key, cands, sel: 0, owner };
   closePanel();
   toast('◀ ▶ ▲ ▼ PICK A SPOT · X BUILD · Z CANCEL');
 }
@@ -1179,8 +1260,10 @@ function hilite() {
 }
 
 /* ── build menu ── */
-function openBuildMenu() {
-  panelMode = 'build'; panelSel = 0; panelItems = [];
+function openBuildMenu(owner) {
+  owner = owner || 0;
+  if (placing && placing.owner !== owner) { SFX.deny(); return; }   // co-ruler is mid-placement
+  panelMode = 'build'; panelOwner = owner; panelSel = 0; panelItems = [];
   panelEl.innerHTML = '<h2>🔨 BUILD</h2><div class="psub">Pick something — then choose a spot on the grass!</div>';
   for (const key of BLD_KEYS) {
     const d = BLD[key];
@@ -1217,8 +1300,8 @@ function openBuildMenu() {
 }
 
 /* ── stats ── */
-function openStats() {
-  panelMode = 'stats'; panelSel = 0; panelItems = [];
+function openStats(owner) {
+  panelMode = 'stats'; panelOwner = owner || 0; panelSel = 0; panelItems = [];
   const mins = Math.floor(playT / 60);
   const rSeen = Object.keys(visitedRegions).length;
   panelEl.innerHTML = `<h2>📜 ROYAL LEDGER</h2>
@@ -1234,14 +1317,17 @@ function openStats() {
     <div class="statRow"><span>🎩 HATS</span><b>${hats.length} / ${HATS.length}</b></div>
     <div class="statRow"><span>⏱ TIME REIGNING</span><b>${mins} min</b></div>`;
   if (hats.length) {
+    const forP2 = panelOwner === 1;                 // the opener's own hat slot
+    const worn = () => forP2 ? player2.hatWorn : hatWorn;
     const hb = document.createElement('button');
     hb.className = 'pbtn blue'; hb.style.marginTop = '12px';
-    hb.textContent = '🎩 HAT: ' + (hatWorn >= 0 ? HATS[hatWorn].name : 'NONE');
+    hb.textContent = '🎩 ' + (forP2 ? 'P2 ' : '') + 'HAT: ' + (worn() >= 0 ? HATS[worn()].name : 'NONE');
     hb.addEventListener('click', () => {
       const order = [...hats, -1];
-      const cur = order.indexOf(hatWorn);
-      hatWorn = order[(cur + 1) % order.length];
-      hb.textContent = '🎩 HAT: ' + (hatWorn >= 0 ? HATS[hatWorn].name : 'NONE');
+      const cur = order.indexOf(worn());
+      const next = order[(cur + 1) % order.length];
+      if (forP2) player2.hatWorn = next; else hatWorn = next;
+      hb.textContent = '🎩 ' + (forP2 ? 'P2 ' : '') + 'HAT: ' + (worn() >= 0 ? HATS[worn()].name : 'NONE');
       SFX.ui(); save();
     });
     panelEl.appendChild(hb); panelItems.push(hb);
@@ -1251,7 +1337,7 @@ function openStats() {
 
 /* ── pause ── */
 function openPause() {
-  panelMode = 'pause'; panelSel = 0; panelItems = [];
+  panelMode = 'pause'; panelOwner = -1; panelSel = 0; panelItems = [];   // pause is shared: either pad drives it
   panelEl.innerHTML = '<h2>⏸ PAUSED</h2><div class="psub">The kingdom waits for you, Majesty.</div>';
   const mk = (label, fn, cls) => {
     const b = document.createElement('button');
@@ -1328,9 +1414,11 @@ function resetState() {
   wizardMet = dragonFound = dragonFriend = starTouched = beaconLit = false;
   hats = []; hatWorn = -1;
   visitedRegions = { meadow: true };
-  playT = 0; placing = null; panelMode = null; fogAnim = {};
+  playT = 0; placing = null; panelMode = null; panelOwner = 0; fogAnim = {};
   dragon.found = false; dragon.mode = 'sleep'; dragon.x = POI.cave.x; dragon.y = POI.cave.y;
   player.x = WORLD / 2 - 60; player.y = WORLD / 2 + 60; player.vx = player.vy = 0;
+  player2.active = false; player2.hatWorn = -1; player2.leaveT = 0;
+  player2.x = WORLD / 2 - 14; player2.y = WORLD / 2 + 60; player2.vx = player2.vy = 0;
   cam.x = player.x; cam.y = player.y;
 }
 
@@ -1345,42 +1433,71 @@ function startFinale() {
   SFX.rumble();
 }
 
+function movePlayer(p, ix, iy, dt) {
+  const SPD = 230;
+  p.vx = lerp(p.vx, ix * SPD, 1 - Math.pow(.0001, dt));
+  p.vy = lerp(p.vy, iy * SPD, 1 - Math.pow(.0001, dt));
+  const nx = p.x + p.vx * dt, ny = p.y + p.vy * dt;
+  /* escape hatch: if somehow inside something solid, let them walk right out */
+  const stuck = blocked(p.x, p.y);
+  if (stuck || !blocked(nx, p.y)) p.x = nx; else p.vx = 0;
+  if (stuck || !blocked(p.x, ny)) p.y = ny; else p.vy = 0;
+  p.moving = Math.hypot(p.vx, p.vy) > 30;
+  if (Math.abs(p.vx) > 20) p.face = p.vx > 0 ? 1 : -1;
+  p.walkT += dt * (p.moving ? 1.6 : .4);
+  /* footstep dust */
+  p.dustT -= dt;
+  if (p.dustT <= 0 && p.moving) {
+    p.dustT = .22;
+    particles.push({ x: p.x + rnd(-6, 6), y: p.y + 12, vx: rnd(-10, 10), vy: rnd(-16, -6),
+      life: 0, maxlife: .5, kind: 'dust', size: rnd(2, 4), hue: 0 });
+  }
+}
+
+/* gentle pull at the screen edge — rate-limited, never a teleport */
+function leash(p, dt) {
+  const mX = VW / 2 / SCALE - 70, mY = VH / 2 / SCALE - 95;
+  const k = Math.min(1, dt * 8);
+  const ox = p.x - cam.x, oy = p.y - cam.y;
+  let nx = p.x, ny = p.y;
+  if (ox > mX) nx -= (ox - mX) * k; else if (ox < -mX) nx -= (ox + mX) * k;
+  if (oy > mY) ny -= (oy - mY) * k; else if (oy < -mY) ny -= (oy + mY) * k;
+  if (nx !== p.x && !blocked(nx, p.y)) p.x = nx;
+  if (ny !== p.y && !blocked(p.x, ny)) p.y = ny;
+}
+
 function update(dt) {
   playT += dt;
   ambientTick(dt);
 
   if (scene === 'finale') { updateFinale(dt); updateParticles(dt); return; }
 
-  /* ── player walk ── */
-  const frozen = panelMode !== null;
+  /* ── player walk (menus freeze only their owner; pause freezes both) ── */
+  const frozen = panelMode !== null && (panelMode === 'pause' || panelOwner !== 1);
+  const frozen2 = panelMode !== null && (panelMode === 'pause' || panelOwner === 1);
   const [ix, iy] = frozen ? [0, 0] : inputVec();
-  const SPD = 230;
-  const nvx = ix * SPD, nvy = iy * SPD;
-  player.vx = lerp(player.vx, nvx, 1 - Math.pow(.0001, dt));
-  player.vy = lerp(player.vy, nvy, 1 - Math.pow(.0001, dt));
-  const nx = player.x + player.vx * dt, ny = player.y + player.vy * dt;
-  /* escape hatch: if somehow inside something solid, let them walk right out */
-  const stuck = blocked(player.x, player.y);
-  if (stuck || !blocked(nx, player.y)) player.x = nx; else player.vx = 0;
-  if (stuck || !blocked(player.x, ny)) player.y = ny; else player.vy = 0;
-  player.moving = Math.hypot(player.vx, player.vy) > 30;
-  if (Math.abs(player.vx) > 20) player.face = player.vx > 0 ? 1 : -1;
-  player.walkT += dt * (player.moving ? 1.6 : .4);
-  /* footstep dust */
-  bubbleT -= dt;
-  if (bubbleT <= 0 && player.moving) {
-    bubbleT = .22;
-    particles.push({ x: player.x + rnd(-6, 6), y: player.y + 12, vx: rnd(-10, 10), vy: rnd(-16, -6),
-      life: 0, maxlife: .5, kind: 'dust', size: rnd(2, 4), hue: 0 });
+  movePlayer(player, ix, iy, dt);
+  if (player2.active) {
+    const [jx, jy] = frozen2 ? [0, 0] : inputVec2();
+    movePlayer(player2, jx, jy, dt);
+    /* hold ○ one second to wave goodbye */
+    if (!panelMode && !placing && PADS && PADS[1].connected && PADS[1].button('east')) {
+      player2.leaveT += dt;
+      if (player2.leaveT >= 1) leaveP2();
+    } else player2.leaveT = 0;
   }
 
-  /* camera */
+  /* camera — midpoint of the royal pair, soft leash keeps both on screen */
   const k = 1 - Math.pow(.002, dt);
-  cam.x = clamp(lerp(cam.x, player.x, k), VW / 2 / SCALE, WORLD - VW / 2 / SCALE);
-  cam.y = clamp(lerp(cam.y, player.y, k), VH / 2 / SCALE, WORLD - VH / 2 / SCALE);
+  const camTX = player2.active ? (player.x + player2.x) / 2 : player.x;
+  const camTY = player2.active ? (player.y + player2.y) / 2 : player.y;
+  cam.x = clamp(lerp(cam.x, camTX, k), VW / 2 / SCALE, WORLD - VW / 2 / SCALE);
+  cam.y = clamp(lerp(cam.y, camTY, k), VH / 2 / SCALE, WORLD - VH / 2 / SCALE);
+  if (player2.active) { leash(player, dt); leash(player2, dt); }
   shake = Math.max(0, shake - dt * 14);
 
-  if (!frozen) tickRegions();
+  if (!frozen) tickRegions(player);
+  if (player2.active && !frozen2) tickRegions(player2);
   tickEconomy(dt);
   if (GOALS[goalI] && GOALS[goalI].live) updateGoalUI();
   tickGoals();
@@ -2446,16 +2563,27 @@ const OUTFIT = [null,
   { body: '#e8703f', trim: '#b04a20' },      // dragon rider
   { body: '#ffd85e', trim: '#c9962a' },      // starforged
 ];
-function drawPlayer() {
-  const o = OUTFIT[age];
-  ctx.save(); ctx.translate(player.x, player.y);
+/* P2's co-ruler palette — same silhouette, cool tunics + blond hair */
+const OUTFIT2 = [null,
+  { body: '#5e8fd0', trim: '#3a63a8' },      // river blues
+  { body: '#5eb0a8', trim: '#367a72' },      // teal farmer
+  { body: '#8f77ab', trim: '#5f4a86' },      // lilac builder
+  { body: '#b08d9b', trim: '#83596c' },      // rose knight
+  { body: '#4a9ad0', trim: '#2f6f9a' },      // sky apprentice
+  { body: '#d04a6a', trim: '#9a3050' },      // crimson rider
+  { body: '#8fd8ff', trim: '#4a9ac9' },      // ice-starforged
+];
+function drawPlayer() { drawBuilder(player, OUTFIT[age], hatWorn, '#6b4a2a'); }
+function drawPlayer2() { drawBuilder(player2, OUTFIT2[age], player2.hatWorn, '#f0c04a'); }
+function drawBuilder(p, o, worn, hair) {
+  ctx.save(); ctx.translate(p.x, p.y);
   ctx.fillStyle = 'rgba(20,40,16,.3)';
   ctx.beginPath(); ctx.ellipse(0, 3, 11, 4, 0, 0, TAU); ctx.fill();
-  const hop = player.moving ? Math.abs(Math.sin(player.walkT * 6)) * 3 : 0;
+  const hop = p.moving ? Math.abs(Math.sin(p.walkT * 6)) * 3 : 0;
   ctx.translate(0, -hop);
-  ctx.scale(player.face, 1);
+  ctx.scale(p.face, 1);
   /* legs */
-  const step = player.moving ? Math.sin(player.walkT * 6) * 4 : 0;
+  const step = p.moving ? Math.sin(p.walkT * 6) * 4 : 0;
   ctx.strokeStyle = '#5a3a18'; ctx.lineWidth = 4.5; ctx.lineCap = 'round';
   ctx.beginPath(); ctx.moveTo(-3, -8); ctx.lineTo(-3 + step, 1); ctx.stroke();
   ctx.beginPath(); ctx.moveTo(3, -8); ctx.lineTo(3 - step, 1); ctx.stroke();
@@ -2468,20 +2596,20 @@ function drawPlayer() {
   if (age >= 4) {
     ctx.fillStyle = age >= 7 ? '#fff' : age >= 6 ? '#ffb35c' : age >= 5 ? '#b89ee8' : '#e84a6a';
     ctx.beginPath(); ctx.moveTo(-7, -19);
-    ctx.quadraticCurveTo(-14 - (player.moving ? 5 : 0), -10 + Math.sin(now * 6) * 1.5, -10 - (player.moving ? 6 : 1), 0);
+    ctx.quadraticCurveTo(-14 - (p.moving ? 5 : 0), -10 + Math.sin(now * 6) * 1.5, -10 - (p.moving ? 6 : 1), 0);
     ctx.lineTo(-6, -6); ctx.closePath(); ctx.fill();
   }
   /* arm */
   ctx.strokeStyle = '#ffcf9f'; ctx.lineWidth = 4;
-  ctx.beginPath(); ctx.moveTo(6, -15); ctx.lineTo(10 + (player.moving ? step * .5 : 0), -8); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(6, -15); ctx.lineTo(10 + (p.moving ? step * .5 : 0), -8); ctx.stroke();
   /* head */
   ctx.fillStyle = '#ffcf9f'; ctx.beginPath(); ctx.arc(1, -27, 8.5, 0, TAU); ctx.fill();
-  ctx.fillStyle = '#6b4a2a'; ctx.beginPath(); ctx.arc(0, -30, 8.5, Math.PI * 1.05, Math.PI * 1.95); ctx.fill();
+  ctx.fillStyle = hair; ctx.beginPath(); ctx.arc(0, -30, 8.5, Math.PI * 1.05, Math.PI * 1.95); ctx.fill();
   ctx.fillStyle = '#000'; ctx.beginPath(); ctx.arc(4.5, -27, 1.5, 0, TAU); ctx.fill();
   ctx.strokeStyle = '#7a4a20'; ctx.lineWidth = 1.6;
   ctx.beginPath(); ctx.arc(3, -23.5, 3, .1 * Math.PI, .7 * Math.PI); ctx.stroke();
   /* age headgear (hat overrides) */
-  if (hatWorn < 0) {
+  if (worn < 0) {
     if (age === 2) {           // straw hat
       ctx.fillStyle = '#e8c85e';
       ctx.beginPath(); ctx.ellipse(1, -33, 12, 4, 0, 0, TAU); ctx.fill();
@@ -2510,7 +2638,7 @@ function drawPlayer() {
       starPath2(ctx, 1, -38, 6); ctx.fill();
     }
   } else {
-    ctx.save(); ctx.translate(1, -35); drawHat(ctx, HATS[hatWorn].key); ctx.restore();
+    ctx.save(); ctx.translate(1, -35); drawHat(ctx, HATS[worn].key); ctx.restore();
   }
   ctx.restore();
 }
@@ -2643,11 +2771,11 @@ function drawPlacing() {
   ctx.setLineDash([]);
 }
 
-function drawPrompt() {
+function drawPrompt(p) {
   if (placing || panelMode) return;
   let best = null, bd = 1e9;
   const consider = (x, y, r, yOff) => {
-    const d = dist(player.x, player.y, x, y);
+    const d = dist(p.x, p.y, x, y);
     if (d < r && d < bd) { bd = d; best = { x, y: y + (yOff || 0) }; }
   };
   for (const c of crates) if (c.landed) consider(c.x, c.y, 80, -46);
@@ -2739,7 +2867,10 @@ function render() {
   for (const c of crates)
     if (c.x > v.x0 - 40 && c.x < v.x1 + 40 && c.y > v.y0 - 40 && c.y < v.y1 + 60)
       list.push({ y: c.y, f: () => drawCrate(c) });
-  if (scene !== 'title') list.push({ y: player.y, f: drawPlayer });
+  if (scene !== 'title') {
+    list.push({ y: player.y, f: drawPlayer });
+    if (player2.active) list.push({ y: player2.y, f: drawPlayer2 });
+  }
   if (dragon.mode === 'sleep') {
     if (dragon.x > v.x0 - 150 && dragon.x < v.x1 + 150 && dragon.y > v.y0 - 100 && dragon.y < v.y1 + 120)
       list.push({ y: dragon.y + 20, f: drawDragon });
@@ -2750,7 +2881,7 @@ function render() {
   if (dragon.mode !== 'sleep') drawDragon();       // flying friend rides above it all
   drawParticles();
   const anyFog = drawFog(v);
-  if (scene === 'play') { drawPlacing(); drawPrompt(); }
+  if (scene === 'play') { drawPlacing(); drawPrompt(player); if (player2.active) drawPrompt(player2); }
   const night = drawFinaleOverlay();
   ctx.restore();
 
@@ -2774,6 +2905,15 @@ function render() {
 }
 
 /* ═══════════ MAIN LOOP + BOOT ═══════════ */
+let p2HintOn = false;
+function tickP2Hint() {
+  const want = !!(PADS && PADS[1].connected && !player2.active &&
+    (scene === 'title' || scene === 'play'));
+  if (want !== p2HintOn) {
+    p2HintOn = want;
+    document.getElementById('p2hint').classList.toggle('show', want);
+  }
+}
 let lastT = 0;
 function frame(ts) {
   requestAnimationFrame(frame);
@@ -2789,6 +2929,7 @@ function frame(ts) {
     update(dt);
     refreshHUD();
   }
+  tickP2Hint();
   render();
 }
 
