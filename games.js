@@ -135,5 +135,13 @@ window.GAMES_DATA = [
     "status": "PRESS START",
     "icon": "castle",
     "source": "https://castleforge.onrender.com/"
+  },
+  {
+    "slug": "bubble-deep",
+    "title": "BUBBLE DEEP",
+    "genre": "BUILDER",
+    "status": "PRESS START",
+    "icon": "bubble",
+    "source": "https://ses.q5labs.co/bubbledeep/index.html"
   }
 ];
