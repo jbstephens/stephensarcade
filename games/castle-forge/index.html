@@ -213,6 +213,8 @@ function resize() {
   VW = window.innerWidth; VH = window.innerHeight;
   canvas.width = VW * DPR; canvas.height = VH * DPR;
   SCALE = Math.max(.72, Math.min(VW / 1280, VH / 800, 1.15));
+  const q = Math.min(2, DPR * SCALE);               // device px per world px
+  if (Math.abs(q - BQ) > .002) { BQ = q; bakeGen++; groundChunks.clear(); uSheets.clear(); }
 }
 addEventListener('resize', resize);
 
@@ -250,6 +252,36 @@ function rr(c, x, y, w, h, r) {
   c.arcTo(x, y + h, x, y, r); c.arcTo(x, y, x + w, y, r);
   c.closePath();
 }
+
+/* ═══════════ THE SPRITE BAKERY ═══════════
+   House law: pre-render everything once into offscreen canvases, so the
+   per-frame hot path is drawImage + transforms only. Every bake uses the
+   SAME vector-draw code the game always used, at the SAME device scale
+   (BQ = DPR × SCALE), so a blit is pixel-for-pixel the old path draw.
+   Bakes are keyed by bakeGen and thrown away whenever the window resizes. */
+let BQ = 1, bakeGen = 0;
+/* one sprite sheet: cols × rows cells, each `bw × bh` world px with the
+   sprite's origin at (ox, oy) inside the cell. Drawn ONCE at bake time. */
+function bakeSheet(cols, rows, bw, bh, ox, oy, draw) {
+  const cw = Math.ceil(bw * BQ), chh = Math.ceil(bh * BQ);
+  const cv = document.createElement('canvas');
+  cv.width = cw * cols; cv.height = chh * rows;
+  const c = cv.getContext('2d');
+  const dox = Math.round(ox * BQ), doy = Math.round(oy * BQ);
+  for (let r = 0; r < rows; r++) for (let k = 0; k < cols; k++) {
+    c.setTransform(BQ, 0, 0, BQ, k * cw + dox, r * chh + doy);
+    c.save();
+    c.beginPath(); c.rect(-ox, -oy, bw, bh); c.clip();   // a cell never bleeds into its neighbour
+    draw(c, k, r);
+    c.restore();
+  }
+  return { cv, cw, ch: chh, ox: dox / BQ, oy: doy / BQ, w: cw / BQ, h: chh / BQ, gen: bakeGen };
+}
+/* blit cell (k, r) so its origin lands on world (x, y) — 1:1 device pixels */
+function blitCell(s, k, r, x, y) {
+  ctx.drawImage(s.cv, k * s.cw, r * s.ch, s.cw, s.ch, x - s.ox, y - s.oy, s.w, s.h);
+}
+const blit = (s, x, y) => blitCell(s, 0, 0, x, y);
 
 /* ═══════════ AUDIO — tiny WebAudio synth ═══════════ */
 let actx = null, master = null, muted = false;
@@ -2462,66 +2494,123 @@ function viewRange() {
   return { x0: cam.x - halfW, x1: cam.x + halfW, y0: cam.y - halfH, y1: cam.y + halfH };
 }
 
+/* one ground tile — the SAME art as ever, minus the two decorations that
+   breathe with the clock (glade motes, crater cracks); those stay live. */
+function groundTile(c, tx, ty) {
+  if (tx < 0 || ty < 0 || tx >= WT || ty >= WT) return;
+  const x = tx * TILE, y = ty * TILE;
+  const cx2 = x + TILE / 2, cy2 = y + TILE / 2;
+  const regKey = regionAt(cx2, cy2);
+  const h = hash2(tx, ty);
+  c.fillStyle = shade(REGIONS[regKey].ground, (h - .5) * .07);
+  c.fillRect(x, y, TILE + 1, TILE + 1);
+  /* scalloped blend where two lands meet */
+  const regR = regionAt(cx2 + TILE, cy2), regD = regionAt(cx2, cy2 + TILE);
+  if (regR !== regKey) {
+    c.fillStyle = shade(REGIONS[regR].ground, (h - .5) * .07);
+    for (let i = 0; i < 3; i++) {
+      const hh = hash2(tx * 5 + i, ty * 9 + i);
+      c.beginPath(); c.arc(x + TILE, y + 10 + i * 22 + hh * 8, 7 + hh * 9, 0, TAU); c.fill();
+    }
+  }
+  if (regD !== regKey) {
+    c.fillStyle = shade(REGIONS[regD].ground, (h - .5) * .07);
+    for (let i = 0; i < 3; i++) {
+      const hh = hash2(tx * 9 + i, ty * 5 + i);
+      c.beginPath(); c.arc(x + 10 + i * 22 + hh * 8, y + TILE, 7 + hh * 9, 0, TAU); c.fill();
+    }
+  }
+  /* micro decoration (deterministic, cheap) */
+  const h2 = hash2(tx * 3 + 1, ty * 5 + 2);
+  if (regKey === 'meadow' || regKey === 'farm') {
+    if (h2 < .16) {                                       // flowers
+      c.fillStyle = ['#ffe9a3', '#ff9db8', '#fff', '#ffb35c'][h * 4 | 0];
+      c.beginPath(); c.arc(x + 10 + h * 44, y + 10 + h2 * 260 % 44, 2.5, 0, TAU); c.fill();
+      c.fillStyle = 'rgba(60,120,40,.5)';
+      c.fillRect(x + 9 + h * 44, y + 13 + h2 * 260 % 44, 1.5, 4);
+    } else if (h2 < .4) {                                 // grass tufts
+      c.strokeStyle = 'rgba(48,110,40,.4)'; c.lineWidth = 1.5;
+      const gx = x + 8 + h * 46, gy = y + 8 + (h2 * 200 % 46);
+      c.beginPath();
+      c.moveTo(gx, gy + 5); c.lineTo(gx + 1, gy);
+      c.moveTo(gx + 4, gy + 5); c.lineTo(gx + 5.5, gy + 1);
+      c.stroke();
+    }
+  } else if (regKey === 'forest' && h2 < .2) {            // mushrooms + moss
+    if (h2 < .08) {
+      c.fillStyle = '#d1543f';
+      c.beginPath(); c.arc(x + 14 + h * 36, y + 16 + h2 * 500 % 36, 3, Math.PI, TAU); c.fill();
+    } else {
+      c.fillStyle = 'rgba(30,80,36,.35)';
+      c.beginPath(); c.arc(x + 12 + h * 40, y + 12 + h2 * 300 % 40, 5 + h * 5, 0, TAU); c.fill();
+    }
+  } else if (regKey === 'hills' && h2 < .22) {            // pebbles
+    c.fillStyle = 'rgba(70,72,58,.4)';
+    c.beginPath(); c.arc(x + 12 + h * 40, y + 12 + h2 * 260 % 40, 2.5 + h * 2.5, 0, TAU); c.fill();
+  } else if (regKey === 'peaks' && h2 < .3) {             // snow patches
+    c.fillStyle = 'rgba(240,246,255,.5)';
+    c.beginPath(); c.ellipse(x + 16 + h * 32, y + 16 + h2 * 180 % 32, 9 + h * 8, 5 + h * 4, 0, 0, TAU); c.fill();
+  }
+}
+
+/* the land, pre-rendered in 6×6-tile chunks — a thousand little arcs a
+   frame become a couple of dozen drawImage calls, and each chunk only
+   ever bakes once. The cache is capped so wandering can't grow forever. */
+const GCH = 6, GCHP = GCH * TILE, GCN = Math.ceil(WT / GCH), GCMAX = 40;
+const groundChunks = new Map();
+let groundFrame = 0, bakeBudget = 0;
+function groundChunk(cx, cy) {
+  const key = cx + ',' + cy;
+  let ch = groundChunks.get(key);
+  if (ch && ch.gen === bakeGen) { ch.seen = groundFrame; return ch; }
+  if (bakeBudget <= 0) return null;                  // walk on — this chunk draws live for a frame
+  bakeBudget--;
+  const cw = Math.ceil(GCHP * BQ) + 1;               // +1 device px so chunks kiss, never gap
+  const cv = document.createElement('canvas');
+  cv.width = cw; cv.height = cw;
+  const c = cv.getContext('2d');
+  c.setTransform(BQ, 0, 0, BQ, -cx * GCHP * BQ, -cy * GCHP * BQ);
+  c.beginPath(); c.rect(cx * GCHP, cy * GCHP, cw / BQ, cw / BQ); c.clip();
+  for (let ty = cy * GCH - 1; ty <= cy * GCH + GCH; ty++)
+    for (let tx = cx * GCH - 1; tx <= cx * GCH + GCH; tx++) groundTile(c, tx, ty);
+  ch = { cv, cw, sz: cw / BQ, gen: bakeGen, seen: groundFrame };
+  groundChunks.set(key, ch);
+  if (groundChunks.size > GCMAX)
+    for (const [k2, c2] of groundChunks) if (c2.seen < groundFrame) groundChunks.delete(k2);
+  return ch;
+}
 function drawGround(v) {
+  groundFrame++;
+  if ((groundFrame & 127) === 0) {            // let far-off object bakes go — memory stays bounded
+    const mx = VW / SCALE + 700, my = VH / SCALE + 700;
+    for (const o of objects)
+      if (o.bk && (Math.abs(o.x - cam.x) > mx || Math.abs(o.y - cam.y) > my)) o.bk = null;
+  }
+  bakeBudget = 3;                             // at most three chunks bake per frame — no pan hitch
+  const cx0 = Math.max(0, Math.floor(v.x0 / GCHP)), cx1 = Math.min(GCN - 1, Math.floor(v.x1 / GCHP));
+  const cy0 = Math.max(0, Math.floor(v.y0 / GCHP)), cy1 = Math.min(GCN - 1, Math.floor(v.y1 / GCHP));
+  for (let cy = cy0; cy <= cy1; cy++) for (let cx = cx0; cx <= cx1; cx++) {
+    const ch = groundChunk(cx, cy);
+    if (ch) { ctx.drawImage(ch.cv, cx * GCHP, cy * GCHP, ch.sz, ch.sz); continue; }
+    ctx.save();                               // over budget: this chunk paints its tiles for one frame
+    ctx.beginPath(); ctx.rect(cx * GCHP, cy * GCHP, GCHP, GCHP); ctx.clip();
+    for (let ty = cy * GCH - 1; ty <= cy * GCH + GCH; ty++)
+      for (let tx = cx * GCH - 1; tx <= cx * GCH + GCH; tx++) groundTile(ctx, tx, ty);
+    ctx.restore();
+  }
+  /* the two decorations that breathe with the clock stay live */
   const tx0 = Math.max(0, v.x0 / TILE | 0), tx1 = Math.min(WT - 1, v.x1 / TILE | 0);
   const ty0 = Math.max(0, v.y0 / TILE | 0), ty1 = Math.min(WT - 1, v.y1 / TILE | 0);
   for (let ty = ty0; ty <= ty1; ty++) for (let tx = tx0; tx <= tx1; tx++) {
     const x = tx * TILE, y = ty * TILE;
-    const cx2 = x + TILE / 2, cy2 = y + TILE / 2;
-    const regKey = regionAt(cx2, cy2);
-    const h = hash2(tx, ty);
-    ctx.fillStyle = shade(REGIONS[regKey].ground, (h - .5) * .07);
-    ctx.fillRect(x, y, TILE + 1, TILE + 1);
-    /* scalloped blend where two lands meet */
-    const regR = regionAt(cx2 + TILE, cy2), regD = regionAt(cx2, cy2 + TILE);
-    if (regR !== regKey) {
-      ctx.fillStyle = shade(REGIONS[regR].ground, (h - .5) * .07);
-      for (let i = 0; i < 3; i++) {
-        const hh = hash2(tx * 5 + i, ty * 9 + i);
-        ctx.beginPath(); ctx.arc(x + TILE, y + 10 + i * 22 + hh * 8, 7 + hh * 9, 0, TAU); ctx.fill();
-      }
-    }
-    if (regD !== regKey) {
-      ctx.fillStyle = shade(REGIONS[regD].ground, (h - .5) * .07);
-      for (let i = 0; i < 3; i++) {
-        const hh = hash2(tx * 9 + i, ty * 5 + i);
-        ctx.beginPath(); ctx.arc(x + 10 + i * 22 + hh * 8, y + TILE, 7 + hh * 9, 0, TAU); ctx.fill();
-      }
-    }
-    /* micro decoration (deterministic, cheap) */
+    const regKey = regionAt(x + TILE / 2, y + TILE / 2);
+    if (regKey !== 'glade' && regKey !== 'crater') continue;
     const h2 = hash2(tx * 3 + 1, ty * 5 + 2);
-    if (regKey === 'meadow' || regKey === 'farm') {
-      if (h2 < .16) {                                       // flowers
-        ctx.fillStyle = ['#ffe9a3', '#ff9db8', '#fff', '#ffb35c'][h * 4 | 0];
-        ctx.beginPath(); ctx.arc(x + 10 + h * 44, y + 10 + h2 * 260 % 44, 2.5, 0, TAU); ctx.fill();
-        ctx.fillStyle = 'rgba(60,120,40,.5)';
-        ctx.fillRect(x + 9 + h * 44, y + 13 + h2 * 260 % 44, 1.5, 4);
-      } else if (h2 < .4) {                                 // grass tufts
-        ctx.strokeStyle = 'rgba(48,110,40,.4)'; ctx.lineWidth = 1.5;
-        const gx = x + 8 + h * 46, gy = y + 8 + (h2 * 200 % 46);
-        ctx.beginPath();
-        ctx.moveTo(gx, gy + 5); ctx.lineTo(gx + 1, gy);
-        ctx.moveTo(gx + 4, gy + 5); ctx.lineTo(gx + 5.5, gy + 1);
-        ctx.stroke();
-      }
-    } else if (regKey === 'forest' && h2 < .2) {            // mushrooms + moss
-      if (h2 < .08) {
-        ctx.fillStyle = '#d1543f';
-        ctx.beginPath(); ctx.arc(x + 14 + h * 36, y + 16 + h2 * 500 % 36, 3, Math.PI, TAU); ctx.fill();
-      } else {
-        ctx.fillStyle = 'rgba(30,80,36,.35)';
-        ctx.beginPath(); ctx.arc(x + 12 + h * 40, y + 12 + h2 * 300 % 40, 5 + h * 5, 0, TAU); ctx.fill();
-      }
-    } else if (regKey === 'hills' && h2 < .22) {            // pebbles
-      ctx.fillStyle = 'rgba(70,72,58,.4)';
-      ctx.beginPath(); ctx.arc(x + 12 + h * 40, y + 12 + h2 * 260 % 40, 2.5 + h * 2.5, 0, TAU); ctx.fill();
-    } else if (regKey === 'glade' && h2 < .14) {            // sparkle motes
+    const h = hash2(tx, ty);
+    if (regKey === 'glade' && h2 < .14) {                   // sparkle motes
       const p = .5 + Math.sin(now * 2 + h * 20) * .5;
       ctx.fillStyle = `rgba(190,240,255,${.25 + p * .35})`;
       ctx.beginPath(); ctx.arc(x + 10 + h * 44, y + 10 + h2 * 400 % 44, 1.8 + p, 0, TAU); ctx.fill();
-    } else if (regKey === 'peaks' && h2 < .3) {             // snow patches
-      ctx.fillStyle = 'rgba(240,246,255,.5)';
-      ctx.beginPath(); ctx.ellipse(x + 16 + h * 32, y + 16 + h2 * 180 % 32, 9 + h * 8, 5 + h * 4, 0, 0, TAU); ctx.fill();
     } else if (regKey === 'crater' && h2 < .18) {           // ash cracks aglow
       ctx.strokeStyle = `rgba(255,200,90,${.15 + Math.sin(now * 1.5 + h * 12) * .1 + .1})`;
       ctx.lineWidth = 1.5;
@@ -2636,119 +2725,163 @@ function drawSign(s) {
 }
 
 /* ═══════════ RENDER — world objects + buildings (origin = feet) ═══════════ */
-function shadow(w, h) {
-  ctx.fillStyle = 'rgba(20,40,16,.25)';
-  ctx.beginPath(); ctx.ellipse(0, 2, w, h || w * .32, 0, 0, TAU); ctx.fill();
+function shadow(c, w, h) {
+  c.fillStyle = 'rgba(20,40,16,.25)';
+  c.beginPath(); c.ellipse(0, 2, w, h || w * .32, 0, 0, TAU); c.fill();
 }
 
-function drawObject(o) {
-  ctx.save(); ctx.translate(o.x, o.y);
-  const sway = Math.sin(now * 1.4 + o.ph) * .028 + (o.shakeT ? Math.sin(now * 40) * .06 * o.shakeT : 0);
-  const frac = o.maxhp ? o.hp / o.maxhp : 1;
+/* ── trees, rocks and friends: the SAME vector art, baked per object ──
+   Each object's still parts bake once into two little canvases — the
+   rooted half (shadow + trunk) and the half that sways in the breeze —
+   so a whole forest costs two drawImage calls apiece instead of hundreds
+   of arcs. Bakes redo themselves when the thing is chopped down a notch. */
+function objBase(c, o, frac) {                 // the rooted half
   switch (o.kind) {
-    case 'oak': {
-      shadow(24 * o.s);
-      ctx.fillStyle = '#8a5a30'; rr(ctx, -5 * o.s, -26 * o.s, 10 * o.s, 27 * o.s, 4); ctx.fill();
-      ctx.save(); ctx.rotate(sway);
-      const rr2 = (16 + 12 * frac) * o.s;
-      ctx.fillStyle = '#3e8a3a';
-      ctx.beginPath(); ctx.arc(-rr2 * .45, -34 * o.s, rr2 * .72, 0, TAU);
-      ctx.arc(rr2 * .45, -36 * o.s, rr2 * .68, 0, TAU);
-      ctx.arc(0, -46 * o.s, rr2 * .8, 0, TAU); ctx.fill();
-      ctx.fillStyle = '#54a848';
-      ctx.beginPath(); ctx.arc(-rr2 * .25, -46 * o.s, rr2 * .5, 0, TAU); ctx.fill();
-      ctx.fillStyle = 'rgba(255,255,255,.16)';
-      ctx.beginPath(); ctx.arc(-rr2 * .4, -52 * o.s, rr2 * .3, 0, TAU); ctx.fill();
-      ctx.restore();
-      break; }
-    case 'pine': {
-      shadow(22 * o.s);
-      ctx.fillStyle = '#6e4520'; rr(ctx, -4.5 * o.s, -20 * o.s, 9 * o.s, 21 * o.s, 3); ctx.fill();
-      ctx.save(); ctx.rotate(sway);
-      ctx.fillStyle = '#2c6e3c';
-      for (let i = 0; i < 3; i++) {
-        const w = (30 - i * 7) * o.s * (.6 + .4 * frac), yy = (-24 - i * 20) * o.s;
-        ctx.beginPath(); ctx.moveTo(-w, yy); ctx.lineTo(0, yy - 26 * o.s); ctx.lineTo(w, yy); ctx.closePath(); ctx.fill();
-      }
-      ctx.fillStyle = 'rgba(255,255,255,.14)';
-      ctx.beginPath(); ctx.moveTo(-8 * o.s, -66 * o.s); ctx.lineTo(0, -84 * o.s); ctx.lineTo(4 * o.s, -74 * o.s); ctx.closePath(); ctx.fill();
-      ctx.restore();
-      break; }
-    case 'sparkletree': {
-      shadow(24 * o.s);
-      ctx.fillStyle = '#7a6296'; rr(ctx, -5 * o.s, -26 * o.s, 10 * o.s, 27 * o.s, 4); ctx.fill();
-      ctx.save(); ctx.rotate(sway);
-      const rr3 = (16 + 12 * frac) * o.s;
-      ctx.fillStyle = '#5ec9b8';
-      ctx.beginPath(); ctx.arc(-rr3 * .4, -36 * o.s, rr3 * .7, 0, TAU);
-      ctx.arc(rr3 * .4, -38 * o.s, rr3 * .66, 0, TAU); ctx.arc(0, -48 * o.s, rr3 * .76, 0, TAU); ctx.fill();
-      const p = .5 + Math.sin(now * 3 + o.ph) * .5;
-      ctx.fillStyle = `rgba(220,255,250,${.4 + p * .5})`;
-      ctx.beginPath(); ctx.arc(-rr3 * .3, -50 * o.s, 2.5, 0, TAU); ctx.arc(rr3 * .35, -40 * o.s, 2, 0, TAU); ctx.arc(2, -60 * o.s, 2.2, 0, TAU); ctx.fill();
-      ctx.restore();
-      break; }
+    case 'oak':
+      shadow(c, 24 * o.s);
+      c.fillStyle = '#8a5a30'; rr(c, -5 * o.s, -26 * o.s, 10 * o.s, 27 * o.s, 4); c.fill();
+      break;
+    case 'pine':
+      shadow(c, 22 * o.s);
+      c.fillStyle = '#6e4520'; rr(c, -4.5 * o.s, -20 * o.s, 9 * o.s, 21 * o.s, 3); c.fill();
+      break;
+    case 'sparkletree':
+      shadow(c, 24 * o.s);
+      c.fillStyle = '#7a6296'; rr(c, -5 * o.s, -26 * o.s, 10 * o.s, 27 * o.s, 4); c.fill();
+      break;
     case 'rock':
-      shadow(20 * o.s);
-      ctx.fillStyle = '#8d94a0';
-      ctx.beginPath(); ctx.arc(-7 * o.s, -9 * o.s * frac - 2, (12 * frac + 5) * o.s, 0, TAU);
-      ctx.arc(8 * o.s, -6 * o.s * frac - 2, (9 * frac + 4) * o.s, 0, TAU); ctx.fill();
-      ctx.fillStyle = 'rgba(255,255,255,.25)';
-      ctx.beginPath(); ctx.arc(-9 * o.s, -12 * o.s * frac - 2, 3.5 * o.s, 0, TAU); ctx.fill();
+      shadow(c, 20 * o.s);
+      c.fillStyle = '#8d94a0';
+      c.beginPath(); c.arc(-7 * o.s, -9 * o.s * frac - 2, (12 * frac + 5) * o.s, 0, TAU);
+      c.arc(8 * o.s, -6 * o.s * frac - 2, (9 * frac + 4) * o.s, 0, TAU); c.fill();
+      c.fillStyle = 'rgba(255,255,255,.25)';
+      c.beginPath(); c.arc(-9 * o.s, -12 * o.s * frac - 2, 3.5 * o.s, 0, TAU); c.fill();
       break;
     case 'boulder':
-      shadow(26 * o.s);
-      ctx.fillStyle = '#7d8490';
-      ctx.beginPath(); ctx.arc(0, -14 * o.s, 22 * o.s, 0, TAU); ctx.arc(-14 * o.s, -6 * o.s, 13 * o.s, 0, TAU);
-      ctx.arc(15 * o.s, -7 * o.s, 12 * o.s, 0, TAU); ctx.fill();
-      ctx.fillStyle = 'rgba(255,255,255,.18)';
-      ctx.beginPath(); ctx.arc(-6 * o.s, -24 * o.s, 6 * o.s, 0, TAU); ctx.fill();
+      shadow(c, 26 * o.s);
+      c.fillStyle = '#7d8490';
+      c.beginPath(); c.arc(0, -14 * o.s, 22 * o.s, 0, TAU); c.arc(-14 * o.s, -6 * o.s, 13 * o.s, 0, TAU);
+      c.arc(15 * o.s, -7 * o.s, 12 * o.s, 0, TAU); c.fill();
+      c.fillStyle = 'rgba(255,255,255,.18)';
+      c.beginPath(); c.arc(-6 * o.s, -24 * o.s, 6 * o.s, 0, TAU); c.fill();
       break;
-    case 'bush': {
-      shadow(15 * o.s);
-      ctx.save(); ctx.rotate(sway * .6);
-      ctx.fillStyle = '#3f7e38';
-      ctx.beginPath(); ctx.arc(-8 * o.s, -8 * o.s, 9 * o.s, 0, TAU); ctx.arc(8 * o.s, -8 * o.s, 9 * o.s, 0, TAU);
-      ctx.arc(0, -13 * o.s, 10 * o.s, 0, TAU); ctx.fill();
-      if (frac > 0) {
-        ctx.fillStyle = '#e84a6a';
-        for (let i = 0; i < 3 * frac + 1; i++)
-          { ctx.beginPath(); ctx.arc((-8 + i * 6.5) * o.s, (-14 + (i % 2) * 6) * o.s, 2.4, 0, TAU); ctx.fill(); }
-      }
-      ctx.restore();
-      break; }
+    case 'bush':
+      shadow(c, 15 * o.s);
+      break;
     case 'ore':
-      shadow(20 * o.s);
-      ctx.fillStyle = '#6b6459';
-      ctx.beginPath(); ctx.arc(-6 * o.s, -8 * o.s, 13 * o.s * (0.6 + .4 * frac), 0, TAU);
-      ctx.arc(8 * o.s, -6 * o.s, 10 * o.s * (0.6 + .4 * frac), 0, TAU); ctx.fill();
-      ctx.fillStyle = '#d8a860';
+      shadow(c, 20 * o.s);
+      c.fillStyle = '#6b6459';
+      c.beginPath(); c.arc(-6 * o.s, -8 * o.s, 13 * o.s * (0.6 + .4 * frac), 0, TAU);
+      c.arc(8 * o.s, -6 * o.s, 10 * o.s * (0.6 + .4 * frac), 0, TAU); c.fill();
+      c.fillStyle = '#d8a860';
       for (let i = 0; i < 3; i++)
-        { ctx.beginPath(); ctx.arc((-9 + i * 8) * o.s, (-10 + (i % 2) * 5) * o.s, 2.6 * frac + 1, 0, TAU); ctx.fill(); }
+        { c.beginPath(); c.arc((-9 + i * 8) * o.s, (-10 + (i % 2) * 5) * o.s, 2.6 * frac + 1, 0, TAU); c.fill(); }
       break;
-    case 'crystal': {
-      shadow(16 * o.s);
-      const p = .5 + Math.sin(now * 2.5 + o.ph) * .5;
-      ctx.fillStyle = '#b98fff';
+    case 'crystal':
+      shadow(c, 16 * o.s);
+      c.fillStyle = '#b98fff';
       for (const [dx, h, w2] of [[-9, 22, 7], [2, 32, 9], [12, 17, 6]]) {
-        ctx.beginPath();
-        ctx.moveTo((dx - w2 * frac) * o.s, 0); ctx.lineTo(dx * o.s, (-h * frac - 5) * o.s); ctx.lineTo((dx + w2 * frac) * o.s, 0);
-        ctx.closePath(); ctx.fill();
+        c.beginPath();
+        c.moveTo((dx - w2 * frac) * o.s, 0); c.lineTo(dx * o.s, (-h * frac - 5) * o.s); c.lineTo((dx + w2 * frac) * o.s, 0);
+        c.closePath(); c.fill();
       }
-      ctx.fillStyle = `rgba(255,255,255,${.3 + p * .35})`;
-      ctx.beginPath(); ctx.moveTo(2 * o.s, (-32 * frac - 5) * o.s); ctx.lineTo(5 * o.s, -14 * o.s); ctx.lineTo(-1 * o.s, -12 * o.s); ctx.closePath(); ctx.fill();
-      break; }
-    case 'shard': {
-      shadow(16 * o.s);
-      const p = .5 + Math.sin(now * 3 + o.ph) * .5;
-      ctx.fillStyle = `rgba(255,220,110,${.85})`;
+      break;
+    case 'shard':
+      shadow(c, 16 * o.s);
+      c.fillStyle = `rgba(255,220,110,${.85})`;
       for (const [dx, h, w2] of [[-8, 18, 6], [3, 28, 8], [12, 14, 5]]) {
-        ctx.beginPath();
-        ctx.moveTo((dx - w2 * frac) * o.s, 0); ctx.lineTo(dx * o.s, (-h * frac - 5) * o.s); ctx.lineTo((dx + w2 * frac) * o.s, 0);
-        ctx.closePath(); ctx.fill();
+        c.beginPath();
+        c.moveTo((dx - w2 * frac) * o.s, 0); c.lineTo(dx * o.s, (-h * frac - 5) * o.s); c.lineTo((dx + w2 * frac) * o.s, 0);
+        c.closePath(); c.fill();
       }
-      ctx.fillStyle = `rgba(255,250,210,${.4 + p * .5})`;
-      ctx.beginPath(); ctx.arc(3 * o.s, -16 * o.s, (4 + p * 3) * o.s, 0, TAU); ctx.fill();
+      break;
+  }
+}
+function objSway(c, o, frac) {                 // the half that leans in the breeze
+  switch (o.kind) {
+    case 'oak': {
+      const rr2 = (16 + 12 * frac) * o.s;
+      c.fillStyle = '#3e8a3a';
+      c.beginPath(); c.arc(-rr2 * .45, -34 * o.s, rr2 * .72, 0, TAU);
+      c.arc(rr2 * .45, -36 * o.s, rr2 * .68, 0, TAU);
+      c.arc(0, -46 * o.s, rr2 * .8, 0, TAU); c.fill();
+      c.fillStyle = '#54a848';
+      c.beginPath(); c.arc(-rr2 * .25, -46 * o.s, rr2 * .5, 0, TAU); c.fill();
+      c.fillStyle = 'rgba(255,255,255,.16)';
+      c.beginPath(); c.arc(-rr2 * .4, -52 * o.s, rr2 * .3, 0, TAU); c.fill();
       break; }
+    case 'pine':
+      c.fillStyle = '#2c6e3c';
+      for (let i = 0; i < 3; i++) {
+        const w = (30 - i * 7) * o.s * (.6 + .4 * frac), yy = (-24 - i * 20) * o.s;
+        c.beginPath(); c.moveTo(-w, yy); c.lineTo(0, yy - 26 * o.s); c.lineTo(w, yy); c.closePath(); c.fill();
+      }
+      c.fillStyle = 'rgba(255,255,255,.14)';
+      c.beginPath(); c.moveTo(-8 * o.s, -66 * o.s); c.lineTo(0, -84 * o.s); c.lineTo(4 * o.s, -74 * o.s); c.closePath(); c.fill();
+      break;
+    case 'sparkletree': {
+      const rr3 = (16 + 12 * frac) * o.s;
+      c.fillStyle = '#5ec9b8';
+      c.beginPath(); c.arc(-rr3 * .4, -36 * o.s, rr3 * .7, 0, TAU);
+      c.arc(rr3 * .4, -38 * o.s, rr3 * .66, 0, TAU); c.arc(0, -48 * o.s, rr3 * .76, 0, TAU); c.fill();
+      break; }
+    case 'bush':
+      c.fillStyle = '#3f7e38';
+      c.beginPath(); c.arc(-8 * o.s, -8 * o.s, 9 * o.s, 0, TAU); c.arc(8 * o.s, -8 * o.s, 9 * o.s, 0, TAU);
+      c.arc(0, -13 * o.s, 10 * o.s, 0, TAU); c.fill();
+      if (frac > 0) {
+        c.fillStyle = '#e84a6a';
+        for (let i = 0; i < 3 * frac + 1; i++)
+          { c.beginPath(); c.arc((-8 + i * 6.5) * o.s, (-14 + (i % 2) * 6) * o.s, 2.4, 0, TAU); c.fill(); }
+      }
+      break;
+  }
+}
+/* bake boxes in world px at s = 1 — [x0, y0, x1, y1], scaled by o.s */
+const OBJ_BOX = {
+  oak:         { b: [-25, -28, 25, 11], w: [-35, -71, 35, -11] },
+  pine:        { b: [-24, -22, 24, 10], w: [-32, -92, 32, -22] },
+  sparkletree: { b: [-26, -28, 26, 11], w: [-33, -72, 33, -17] },
+  rock:        { b: [-26, -30, 24, 12] },
+  boulder:     { b: [-30, -40, 30, 14] },
+  bush:        { b: [-17, -7, 17, 9],   w: [-20, -27, 20, 5],  m: .6 },
+  ore:         { b: [-23, -25, 22, 12] },
+  crystal:     { b: [-20, -41, 22, 11] },
+  shard:       { b: [-19, -37, 21, 11] },
+};
+function bakeObj(o, frac) {
+  const bx = OBJ_BOX[o.kind], s = o.s, P = 3;
+  const mk = (box, fn) => {
+    const x0 = box[0] * s - P, y0 = box[1] * s - P, x1 = box[2] * s + P, y1 = box[3] * s + P;
+    return bakeSheet(1, 1, x1 - x0, y1 - y0, -x0, -y0, c => fn(c, o, frac));
+  };
+  return { gen: bakeGen, frac, base: mk(bx.b, objBase), sway: bx.w ? mk(bx.w, objSway) : null,
+           swayMul: bx.m || 1 };
+}
+function drawObject(o) {
+  const sway = Math.sin(now * 1.4 + o.ph) * .028 + (o.shakeT ? Math.sin(now * 40) * .06 * o.shakeT : 0);
+  const frac = o.maxhp ? o.hp / o.maxhp : 1;
+  let bk = o.bk;
+  if (!bk || bk.gen !== bakeGen || bk.frac !== frac) bk = o.bk = bakeObj(o, frac);
+  ctx.save(); ctx.translate(o.x, o.y);
+  blit(bk.base, 0, 0);
+  if (bk.sway) {
+    ctx.save(); ctx.rotate(sway * bk.swayMul);
+    blit(bk.sway, 0, 0);
+    if (o.kind === 'sparkletree') {                          // the twinkle keeps its clock
+      const rr3 = (16 + 12 * frac) * o.s, p = .5 + Math.sin(now * 3 + o.ph) * .5;
+      ctx.fillStyle = `rgba(220,255,250,${.4 + p * .5})`;
+      ctx.beginPath(); ctx.arc(-rr3 * .3, -50 * o.s, 2.5, 0, TAU); ctx.arc(rr3 * .35, -40 * o.s, 2, 0, TAU); ctx.arc(2, -60 * o.s, 2.2, 0, TAU); ctx.fill();
+    }
+    ctx.restore();
+  } else if (o.kind === 'crystal') {
+    const p = .5 + Math.sin(now * 2.5 + o.ph) * .5;
+    ctx.fillStyle = `rgba(255,255,255,${.3 + p * .35})`;
+    ctx.beginPath(); ctx.moveTo(2 * o.s, (-32 * frac - 5) * o.s); ctx.lineTo(5 * o.s, -14 * o.s); ctx.lineTo(-1 * o.s, -12 * o.s); ctx.closePath(); ctx.fill();
+  } else if (o.kind === 'shard') {
+    const p = .5 + Math.sin(now * 3 + o.ph) * .5;
+    ctx.fillStyle = `rgba(255,250,210,${.4 + p * .5})`;
+    ctx.beginPath(); ctx.arc(3 * o.s, -16 * o.s, (4 + p * 3) * o.s, 0, TAU); ctx.fill();
   }
   ctx.restore();
 }
@@ -3181,35 +3314,52 @@ function drawMenuIcons() {
 }
 
 /* ═══════════ RENDER — characters ═══════════ */
+/* villagers bake per person (their shirt colour is their own): two cells —
+   arm-at-rest and arm-off, so a waving villager swaps in a live arm.
+   The little shadow is one shared bake for everybody. */
+let vilShadow = null;
+function villagerSheet(r) {
+  if (r.bk && r.bk.gen === bakeGen) return r.bk;
+  return r.bk = bakeSheet(2, 2, 32, 44, 16, 38, (c, k, row) => {
+    c.scale(row ? 1 : -1, 1);
+    c.fillStyle = `hsl(${r.hue},55%,55%)`;
+    rr(c, -7, -16, 14, 17, 5); c.fill();
+    c.fillStyle = '#ffcf9f'; c.beginPath(); c.arc(0, -22, 8, 0, TAU); c.fill();
+    c.fillStyle = `hsl(${(r.hue + 140) % 360},45%,35%)`;
+    c.beginPath(); c.arc(0, -25, 8, Math.PI, TAU); c.fill();
+    c.fillStyle = '#000';
+    c.beginPath(); c.arc(3, -22, 1.4, 0, TAU); c.arc(-2, -22, 1.4, 0, TAU); c.fill();
+    c.strokeStyle = '#7a4a20'; c.lineWidth = 1.5;
+    c.beginPath(); c.arc(1, -19, 3, .2 * Math.PI, .8 * Math.PI); c.stroke();
+    if (k === 0) {                                   // cell 0 = arm at rest
+      c.strokeStyle = '#ffcf9f'; c.lineWidth = 4; c.lineCap = 'round';
+      c.beginPath(); c.moveTo(6, -12); c.lineTo(10, -6); c.stroke();
+    }
+  });
+}
 function drawVillager(r) {
-  ctx.save(); ctx.translate(r.x, r.y);
   const dir = player.x > r.x ? 1 : -1;
   const hop = Math.abs(Math.sin(r.ph * 3)) * 2;
-  ctx.fillStyle = 'rgba(20,40,16,.25)';
-  ctx.beginPath(); ctx.ellipse(0, 2, 10, 3.5, 0, 0, TAU); ctx.fill();
-  ctx.translate(0, -hop);
-  ctx.scale(dir, 1);
-  /* body */
-  ctx.fillStyle = `hsl(${r.hue},55%,55%)`;
-  rr(ctx, -7, -16, 14, 17, 5); ctx.fill();
-  /* head */
-  ctx.fillStyle = '#ffcf9f'; ctx.beginPath(); ctx.arc(0, -22, 8, 0, TAU); ctx.fill();
-  ctx.fillStyle = `hsl(${(r.hue + 140) % 360},45%,35%)`;
-  ctx.beginPath(); ctx.arc(0, -25, 8, Math.PI, TAU); ctx.fill();
-  ctx.fillStyle = '#000';
-  ctx.beginPath(); ctx.arc(3, -22, 1.4, 0, TAU); ctx.arc(-2, -22, 1.4, 0, TAU); ctx.fill();
-  ctx.strokeStyle = '#7a4a20'; ctx.lineWidth = 1.5;
-  ctx.beginPath(); ctx.arc(1, -19, 3, .2 * Math.PI, .8 * Math.PI); ctx.stroke();
-  /* arm */
-  ctx.strokeStyle = '#ffcf9f'; ctx.lineWidth = 4; ctx.lineCap = 'round';
-  if (r.waveT > 0) { ctx.beginPath(); ctx.moveTo(6, -12); ctx.lineTo(11, -22 + Math.sin(now * 12) * 3); ctx.stroke(); }
-  else { ctx.beginPath(); ctx.moveTo(6, -12); ctx.lineTo(10, -6); ctx.stroke(); }
-  if (r.heartT > 0) {
-    ctx.scale(dir, 1);
-    ctx.fillStyle = '#ff6b8a'; ctx.font = 'bold 14px sans-serif'; ctx.textAlign = 'center';
-    ctx.fillText('♥', 0, -38 - (1.2 - r.heartT) * 20);
+  const sh = villagerSheet(r);
+  if (!vilShadow || vilShadow.gen !== bakeGen)
+    vilShadow = bakeSheet(1, 1, 24, 14, 12, 8, c => {
+      c.fillStyle = 'rgba(20,40,16,.25)';
+      c.beginPath(); c.ellipse(0, 2, 10, 3.5, 0, 0, TAU); c.fill();
+    });
+  blit(vilShadow, r.x, r.y);
+  blitCell(sh, r.waveT > 0 ? 1 : 0, dir > 0 ? 1 : 0, r.x, r.y - hop);
+  if (r.waveT > 0) {
+    ctx.save(); ctx.translate(r.x, r.y - hop); ctx.scale(dir, 1);
+    ctx.strokeStyle = '#ffcf9f'; ctx.lineWidth = 4; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(6, -12); ctx.lineTo(11, -22 + Math.sin(now * 12) * 3); ctx.stroke();
+    ctx.restore();
   }
-  ctx.restore();
+  if (r.heartT > 0) {
+    ctx.save();
+    ctx.fillStyle = '#ff6b8a'; ctx.font = 'bold 14px sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText('♥', r.x, r.y - hop - 38 - (1.2 - r.heartT) * 20);
+    ctx.restore();
+  }
 }
 
 function drawChicken(ch) {
@@ -3583,17 +3733,142 @@ function unitCols(u) {
   const rv = RIVALS[u.home || 'bramble'];
   return { body: rv.col, trim: rv.col2, plume: rv.col2 };
 }
+/* ── the soldiers, baked ──
+   Same vector art as ever, rendered ONCE into a sheet per kind per banner:
+   one row per facing, one column per walk phase (the little hop and the
+   leg step share that phase), plus a matching strip of just the weapon
+   arm, one column per swing position. A battlefield then costs two
+   drawImage calls a man instead of a dozen arcs and strokes. */
+const UF = 24, US = 8;                     // walk phases / swing positions
+const uSheets = new Map();
+/* [w, h, ox, oy] for a body cell / an arm cell — cells are SYMMETRIC about
+   the origin so the mirrored (facing-left) row stays inside its own cell. */
+const UBOX = {
+  foot:  { b: [38, 48, 19, 40], a: [40, 28, 20, 28] },
+  big:   { b: [46, 58, 23, 50], a: [62, 46, 31, 39] },
+  horse: { b: [42, 56, 21, 48], a: [44, 34, 22, 42] },
+  wiz:   { b: [34, 58, 17, 50], a: null },
+};
+const uGroup = k => k === 'cavalry' || k === 'rcav' ? 'horse' : k === 'wizard' ? 'wiz'
+  : k === 'woodsman' || k === 'hawk' ? 'big' : 'foot';
+
+function unitBody(c, kind, col, teamLow, step, gallop) {
+  if (kind === 'cavalry' || kind === 'rcav') {              // chunky horse + rider
+    c.fillStyle = teamLow ? '#a8763f' : '#6b5a48';
+    c.beginPath(); c.ellipse(0, -9, 13, 8, 0, 0, TAU); c.fill();              // barrel
+    c.beginPath(); c.arc(11, -16, 5.5, 0, TAU); c.fill();                     // head
+    c.strokeStyle = teamLow ? '#8a5a30' : '#544639'; c.lineWidth = 3; c.lineCap = 'round';
+    c.beginPath(); c.moveTo(-7, -4); c.lineTo(-8 + gallop, 2); c.moveTo(6, -4); c.lineTo(7 - gallop, 2); c.stroke();
+    c.fillStyle = '#3d2c18';                                                  // mane + tail
+    c.beginPath(); c.moveTo(-12, -10); c.quadraticCurveTo(-19, -6 + gallop, -16, 0); c.lineTo(-11, -4); c.closePath(); c.fill();
+    c.beginPath(); c.arc(8, -20, 2.6, 0, TAU); c.fill();
+    /* rider */
+    c.fillStyle = col.body; rr(c, -5, -27, 10, 12, 4); c.fill();
+    c.fillStyle = '#c2c8ce'; c.beginPath(); c.arc(0, -31, 5, 0, TAU); c.fill();
+    c.fillStyle = col.plume; c.beginPath(); c.moveTo(-1, -36); c.lineTo(-2, -42); c.lineTo(4, -37); c.closePath(); c.fill();
+    return;
+  }
+  if (kind === 'wizard') {                                   // Wizzo marches to battle!
+    c.fillStyle = '#7a5cb8';
+    c.beginPath(); c.moveTo(-9, 2); c.quadraticCurveTo(-7, -18, 0, -20); c.quadraticCurveTo(7, -18, 9, 2); c.closePath(); c.fill();
+    c.fillStyle = '#ffcf9f'; c.beginPath(); c.arc(0, -23, 6, 0, TAU); c.fill();
+    c.fillStyle = '#e8e8f0';
+    c.beginPath(); c.moveTo(-5, -21); c.quadraticCurveTo(0, -10, 5, -21); c.quadraticCurveTo(1, -18, -5, -21); c.fill();
+    c.fillStyle = '#5a3f96';
+    c.beginPath(); c.moveTo(-8, -26); c.lineTo(3, -44); c.lineTo(8, -26); c.closePath(); c.fill();
+    c.fillStyle = '#ffe9a3'; starPath2(c, 1, -31, 2.2); c.fill();
+    c.strokeStyle = '#8a5a30'; c.lineWidth = 2.5; c.lineCap = 'round';
+    c.beginPath(); c.moveTo(10, 1); c.lineTo(12, -26); c.stroke();
+    return;
+  }
+  /* footfolk: knight/archer/raider/heroes */
+  const big = kind === 'woodsman' || kind === 'hawk' ? 1.25 : 1;
+  c.scale(big, big);
+  const archer = UNIT[kind].shoot;
+  c.fillStyle = col.body; rr(c, -6, -15, 12, 15, 4); c.fill();
+  c.fillStyle = col.trim; rr(c, -6, -6, 12, 3, 1.5); c.fill();
+  c.strokeStyle = col.trim; c.lineWidth = 3.5; c.lineCap = 'round';           // legs
+  c.beginPath(); c.moveTo(-2.5, -4); c.lineTo(-2.5 + step, 2); c.moveTo(2.5, -4); c.lineTo(2.5 - step, 2); c.stroke();
+  c.fillStyle = '#ffcf9f'; c.beginPath(); c.arc(0, -20, 6.5, 0, TAU); c.fill();
+  if (kind === 'woodsman') {                                 // Bramble's burly champion
+    c.fillStyle = '#6e4520';
+    c.beginPath(); c.moveTo(-5, -18); c.quadraticCurveTo(0, -8, 5, -18); c.quadraticCurveTo(1, -15, -5, -18); c.fill();
+    c.fillStyle = col.trim; c.beginPath(); c.arc(0, -23, 6.5, Math.PI, TAU); c.fill();
+  } else if (archer) {                                       // hooded bow-folk
+    c.fillStyle = col.trim;
+    c.beginPath(); c.arc(0, -21, 7, Math.PI * .85, TAU * 1.08); c.fill();
+    if (kind === 'hawk') { c.fillStyle = '#ffe9a3'; c.beginPath(); c.moveTo(4, -27); c.lineTo(9, -33); c.lineTo(7, -25); c.closePath(); c.fill(); }
+    c.strokeStyle = '#8a5a30'; c.lineWidth = 2;
+    c.beginPath(); c.arc(8, -14, 7, -Math.PI * .45, Math.PI * .45); c.stroke();
+  } else {                                                   // knights + raiders: helm, shield
+    c.fillStyle = '#c2c8ce'; c.beginPath(); c.arc(0, -22, 6.5, Math.PI * .9, TAU * 1.05); c.fill();
+    c.fillStyle = col.plume;
+    c.beginPath(); c.moveTo(-1, -28); c.quadraticCurveTo(-5, -34, -8, -29); c.lineTo(-2, -26); c.closePath(); c.fill();
+    c.fillStyle = col.trim;                                                  // shield
+    c.beginPath(); c.ellipse(-7, -11, 3.6, 5, 0, 0, TAU); c.fill();
+    c.fillStyle = '#ffe9a3'; c.beginPath(); c.arc(-7, -11, 1.4, 0, TAU); c.fill();
+  }
+  c.fillStyle = '#000'; c.beginPath(); c.arc(3, -20, 1.2, 0, TAU); c.fill();
+}
+/* the swinging half: sword / axe / lance, or the archer's bowstring */
+function unitArm(c, kind, col, swing, drawing) {
+  if (kind === 'cavalry' || kind === 'rcav') {
+    c.translate(5, -24); c.rotate(-.5 + swing * 1.4);                        // lance-y sword
+    c.strokeStyle = '#e8e8f0'; c.lineWidth = 2.5; c.beginPath(); c.moveTo(0, 0); c.lineTo(11, -8); c.stroke();
+    return;
+  }
+  const big = kind === 'woodsman' || kind === 'hawk' ? 1.25 : 1;
+  c.scale(big, big);
+  if (kind === 'woodsman') {
+    c.translate(6, -13); c.rotate(-.7 + swing * 1.6);
+    c.fillStyle = '#8a5a30'; rr(c, -1.5, -12, 3, 13, 1.5); c.fill();
+    c.fillStyle = '#c2c8ce'; rr(c, -6, -15, 11, 5.5, 2); c.fill();           // axe head
+  } else if (UNIT[kind].shoot) {                                             // the drawn string
+    const d2 = drawing ? 1 : 0;
+    c.strokeStyle = '#e8e8f0'; c.lineWidth = 1.2;
+    c.beginPath(); c.moveTo(8 + Math.cos(-Math.PI * .45) * 7, -14 + Math.sin(-Math.PI * .45) * 7);
+    c.lineTo(8 - d2 * 4, -14); c.lineTo(8 + Math.cos(Math.PI * .45) * 7, -14 + Math.sin(Math.PI * .45) * 7); c.stroke();
+  } else {
+    c.translate(6, -12); c.rotate(-.9 + swing * 1.8);                        // sword arm
+    c.strokeStyle = '#e8e8f0'; c.lineWidth = 2.5; c.lineCap = 'round';
+    c.beginPath(); c.moveTo(0, 0); c.lineTo(10, -6); c.stroke();
+    c.fillStyle = '#8a5a30'; c.fillRect(1, -2.4, 3.4, 4.8);
+  }
+}
+function unitSheet(kind, pal) {
+  const key = kind + '|' + pal;
+  let s = uSheets.get(key);
+  if (s && s.gen === bakeGen) return s;
+  const d = UNIT[kind], box = UBOX[uGroup(kind)];
+  const teamLow = pal.charCodeAt(0) === 112;                 // 'p0' / 'p1' = a player's banner
+  const col = teamLow ? TEAMCOL[+pal[1]]
+    : { body: RIVALS[pal].col, trim: RIVALS[pal].col2, plume: RIVALS[pal].col2 };
+  const base = bakeSheet(UF + 1, 2, box.b[0], box.b[1], box.b[2], box.b[3], (c, k, row) => {
+    const ph = k > 0 ? (k - 1) / UF * TAU : 0;
+    c.fillStyle = 'rgba(20,40,16,.25)';
+    c.beginPath(); c.ellipse(0, 2, d.hero ? 12 : 9, 3.5, 0, 0, TAU); c.fill();
+    c.translate(0, -(k > 0 ? Math.abs(Math.sin(ph * 2)) * 2.5 : 0));
+    c.scale(row ? 1 : -1, 1);
+    unitBody(c, kind, col, teamLow, k > 0 ? Math.sin(ph * 2) * 3 : 0, k > 0 ? Math.sin(ph * 3) * 3 : 0);
+  });
+  const arm = box.a ? bakeSheet(US, 2, box.a[0], box.a[1], box.a[2], box.a[3], (c, k, row) => {
+    c.scale(row ? 1 : -1, 1);
+    unitArm(c, kind, col, k / (US - 1), k > 0);
+  }) : null;
+  s = { base, arm, gen: bakeGen };
+  uSheets.set(key, s);
+  return s;
+}
 function drawUnit(u) {
-  const d = UNIT[u.kind], col = unitCols(u);
-  ctx.save(); ctx.translate(u.x, u.y);
-  ctx.fillStyle = 'rgba(20,40,16,.25)';
-  ctx.beginPath(); ctx.ellipse(0, 2, d.hero ? 12 : 9, 3.5, 0, 0, TAU); ctx.fill();
-  const hop = u.moving ? Math.abs(Math.sin(u.walkT * 6)) * 2.5 : 0;
-  ctx.translate(0, -hop);
-  ctx.scale(u.face, 1);
-  const swing = u.swingT > 0 ? Math.sin(u.swingT / .28 * Math.PI) : 0;
+  const d = UNIT[u.kind];
   const horse = u.kind === 'cavalry' || u.kind === 'rcav';
-  if (u.kind === 'drake') {                                 // Cinder's little drake (flying)
+  if (u.kind === 'drake') {                                 // Cinder's little drake (flying, all clockwork)
+    const col = unitCols(u);
+    ctx.save(); ctx.translate(u.x, u.y);
+    ctx.fillStyle = 'rgba(20,40,16,.25)';
+    ctx.beginPath(); ctx.ellipse(0, 2, 12, 3.5, 0, 0, TAU); ctx.fill();
+    ctx.translate(0, u.moving ? -Math.abs(Math.sin(u.walkT * 6)) * 2.5 : 0);
+    ctx.scale(u.face, 1);
     ctx.translate(0, -34 + Math.sin(now * 3 + u.walkT) * 5);
     const flap = Math.sin(now * 10) * .5;
     ctx.fillStyle = col.trim;
@@ -3611,82 +3886,31 @@ function drawUnit(u) {
     ctx.beginPath(); ctx.moveTo(8, -20); ctx.lineTo(7, -26); ctx.lineTo(12, -21); ctx.closePath(); ctx.fill();
     ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(14, -15, 2.4, 0, TAU); ctx.fill();
     ctx.fillStyle = '#000'; ctx.beginPath(); ctx.arc(15, -15, 1.2, 0, TAU); ctx.fill();
-    if (Math.random() < .03) particles.push({ x: u.x, y: u.y - 44, vx: -u.face * 16, vy: -8, life: 0, maxlife: .6, kind: 'smoke', size: 3, hue: 0 });
-  } else if (horse) {                                       // chunky horse + rider
-    const gallop = u.moving ? Math.sin(u.walkT * 9) * 3 : 0;
-    ctx.fillStyle = u.team < 2 ? '#a8763f' : '#6b5a48';
-    ctx.beginPath(); ctx.ellipse(0, -9, 13, 8, 0, 0, TAU); ctx.fill();        // barrel
-    ctx.beginPath(); ctx.arc(11, -16, 5.5, 0, TAU); ctx.fill();               // head
-    ctx.strokeStyle = u.team < 2 ? '#8a5a30' : '#544639'; ctx.lineWidth = 3; ctx.lineCap = 'round';
-    ctx.beginPath(); ctx.moveTo(-7, -4); ctx.lineTo(-8 + gallop, 2); ctx.moveTo(6, -4); ctx.lineTo(7 - gallop, 2); ctx.stroke();
-    ctx.fillStyle = '#3d2c18';                                                // mane + tail
-    ctx.beginPath(); ctx.moveTo(-12, -10); ctx.quadraticCurveTo(-19, -6 + gallop, -16, 0); ctx.lineTo(-11, -4); ctx.closePath(); ctx.fill();
-    ctx.beginPath(); ctx.arc(8, -20, 2.6, 0, TAU); ctx.fill();
-    /* rider */
-    ctx.fillStyle = col.body; rr(ctx, -5, -27, 10, 12, 4); ctx.fill();
-    ctx.fillStyle = '#c2c8ce'; ctx.beginPath(); ctx.arc(0, -31, 5, 0, TAU); ctx.fill();
-    ctx.fillStyle = col.plume; ctx.beginPath(); ctx.moveTo(-1, -36); ctx.lineTo(-2, -42); ctx.lineTo(4, -37); ctx.closePath(); ctx.fill();
-    ctx.save(); ctx.translate(5, -24); ctx.rotate(-.5 + swing * 1.4);         // lance-y sword
-    ctx.strokeStyle = '#e8e8f0'; ctx.lineWidth = 2.5; ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(11, -8); ctx.stroke();
     ctx.restore();
-  } else if (u.kind === 'wizard') {                          // Wizzo marches to battle!
-    ctx.fillStyle = '#7a5cb8';
-    ctx.beginPath(); ctx.moveTo(-9, 2); ctx.quadraticCurveTo(-7, -18, 0, -20); ctx.quadraticCurveTo(7, -18, 9, 2); ctx.closePath(); ctx.fill();
-    ctx.fillStyle = '#ffcf9f'; ctx.beginPath(); ctx.arc(0, -23, 6, 0, TAU); ctx.fill();
-    ctx.fillStyle = '#e8e8f0';
-    ctx.beginPath(); ctx.moveTo(-5, -21); ctx.quadraticCurveTo(0, -10, 5, -21); ctx.quadraticCurveTo(1, -18, -5, -21); ctx.fill();
-    ctx.fillStyle = '#5a3f96';
-    ctx.beginPath(); ctx.moveTo(-8, -26); ctx.lineTo(3, -44); ctx.lineTo(8, -26); ctx.closePath(); ctx.fill();
-    ctx.fillStyle = '#ffe9a3'; starPath2(ctx, 1, -31, 2.2); ctx.fill();
-    ctx.strokeStyle = '#8a5a30'; ctx.lineWidth = 2.5; ctx.lineCap = 'round';
-    ctx.beginPath(); ctx.moveTo(10, 1); ctx.lineTo(12, -26); ctx.stroke();
-    const p = .5 + Math.sin(now * 3 + u.walkT) * .5;
-    ctx.fillStyle = `rgba(140,240,255,${.5 + p * .5})`;
-    ctx.beginPath(); ctx.arc(12, -29, 3 + p * (u.wind > 0 ? 4 : 1.2), 0, TAU); ctx.fill();
-  } else {                                                   // footfolk: knight/archer/raider/heroes
-    const big = u.kind === 'woodsman' || u.kind === 'hawk' ? 1.25 : 1;
-    ctx.scale(big, big);
-    const archer = d.shoot;
-    ctx.fillStyle = col.body; rr(ctx, -6, -15, 12, 15, 4); ctx.fill();
-    ctx.fillStyle = col.trim; rr(ctx, -6, -6, 12, 3, 1.5); ctx.fill();
-    ctx.strokeStyle = col.trim; ctx.lineWidth = 3.5; ctx.lineCap = 'round';   // legs
-    const step = u.moving ? Math.sin(u.walkT * 6) * 3 : 0;
-    ctx.beginPath(); ctx.moveTo(-2.5, -4); ctx.lineTo(-2.5 + step, 2); ctx.moveTo(2.5, -4); ctx.lineTo(2.5 - step, 2); ctx.stroke();
-    ctx.fillStyle = '#ffcf9f'; ctx.beginPath(); ctx.arc(0, -20, 6.5, 0, TAU); ctx.fill();
-    if (u.kind === 'woodsman') {                             // Bramble's burly champion
-      ctx.fillStyle = '#6e4520';
-      ctx.beginPath(); ctx.moveTo(-5, -18); ctx.quadraticCurveTo(0, -8, 5, -18); ctx.quadraticCurveTo(1, -15, -5, -18); ctx.fill();
-      ctx.fillStyle = col.trim; ctx.beginPath(); ctx.arc(0, -23, 6.5, Math.PI, TAU); ctx.fill();
-      ctx.save(); ctx.translate(6, -13); ctx.rotate(-.7 + swing * 1.6);
-      ctx.fillStyle = '#8a5a30'; rr(ctx, -1.5, -12, 3, 13, 1.5); ctx.fill();
-      ctx.fillStyle = '#c2c8ce'; rr(ctx, -6, -15, 11, 5.5, 2); ctx.fill();    // axe head
-      ctx.restore();
-    } else if (archer) {                                     // hooded bow-folk
-      ctx.fillStyle = col.trim;
-      ctx.beginPath(); ctx.arc(0, -21, 7, Math.PI * .85, TAU * 1.08); ctx.fill();
-      if (u.kind === 'hawk') { ctx.fillStyle = '#ffe9a3'; ctx.beginPath(); ctx.moveTo(4, -27); ctx.lineTo(9, -33); ctx.lineTo(7, -25); ctx.closePath(); ctx.fill(); }
-      const draw2 = u.swingT > 0 ? 1 : 0;
-      ctx.strokeStyle = '#8a5a30'; ctx.lineWidth = 2;
-      ctx.beginPath(); ctx.arc(8, -14, 7, -Math.PI * .45, Math.PI * .45); ctx.stroke();
-      ctx.strokeStyle = '#e8e8f0'; ctx.lineWidth = 1.2;
-      ctx.beginPath(); ctx.moveTo(8 + Math.cos(-Math.PI * .45) * 7, -14 + Math.sin(-Math.PI * .45) * 7);
-      ctx.lineTo(8 - draw2 * 4, -14); ctx.lineTo(8 + Math.cos(Math.PI * .45) * 7, -14 + Math.sin(Math.PI * .45) * 7); ctx.stroke();
-    } else {                                                 // knights + raiders: helm, sword, shield
-      ctx.fillStyle = '#c2c8ce'; ctx.beginPath(); ctx.arc(0, -22, 6.5, Math.PI * .9, TAU * 1.05); ctx.fill();
-      ctx.fillStyle = col.plume;
-      ctx.beginPath(); ctx.moveTo(-1, -28); ctx.quadraticCurveTo(-5, -34, -8, -29); ctx.lineTo(-2, -26); ctx.closePath(); ctx.fill();
-      ctx.save(); ctx.translate(6, -12); ctx.rotate(-.9 + swing * 1.8);       // sword arm
-      ctx.strokeStyle = '#e8e8f0'; ctx.lineWidth = 2.5; ctx.lineCap = 'round';
-      ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(10, -6); ctx.stroke();
-      ctx.fillStyle = '#8a5a30'; ctx.fillRect(1, -2.4, 3.4, 4.8);
-      ctx.restore();
-      ctx.fillStyle = col.trim;                                              // shield
-      ctx.beginPath(); ctx.ellipse(-7, -11, 3.6, 5, 0, 0, TAU); ctx.fill();
-      ctx.fillStyle = '#ffe9a3'; ctx.beginPath(); ctx.arc(-7, -11, 1.4, 0, TAU); ctx.fill();
+    if (Math.random() < .03) particles.push({ x: u.x, y: u.y - 44, vx: -u.face * 16, vy: -8, life: 0, maxlife: .6, kind: 'smoke', size: 3, hue: 0 });
+  } else {
+    const sh = unitSheet(u.kind, u.team < 2 ? 'p' + u.team : (u.home || 'bramble'));
+    let k = 0;
+    if (u.moving) {
+      const ph = ((u.walkT * 3) % TAU + TAU) % TAU;
+      k = 1 + Math.round(ph / TAU * UF) % UF;
     }
-    ctx.fillStyle = '#000'; ctx.beginPath(); ctx.arc(3, -20, 1.2, 0, TAU); ctx.fill();
+    const hop = k > 0 ? Math.abs(Math.sin((k - 1) / UF * TAU * 2)) * 2.5 : 0;
+    const row = u.face > 0 ? 1 : 0;
+    blitCell(sh.base, k, row, u.x, u.y);
+    if (sh.arm) {
+      const swing = u.swingT > 0 ? Math.sin(u.swingT / .28 * Math.PI) : 0;
+      const ak = d.shoot ? (u.swingT > 0 ? 1 : 0) : Math.round(clamp(swing, 0, 1) * (US - 1));
+      blitCell(sh.arm, ak, row, u.x, u.y - hop);
+    }
+    if (u.kind === 'wizard') {                               // the staff orb keeps its own twinkle
+      const p = .5 + Math.sin(now * 3 + u.walkT) * .5;
+      ctx.save(); ctx.translate(u.x, u.y - hop); ctx.scale(u.face, 1);
+      ctx.fillStyle = `rgba(140,240,255,${.5 + p * .5})`;
+      ctx.beginPath(); ctx.arc(12, -29, 3 + p * (u.wind > 0 ? 4 : 1.2), 0, TAU); ctx.fill();
+      ctx.restore();
+    }
   }
-  ctx.restore();
   /* hurt pips (only when hurt — bloodless hearts) */
   if (u.hp < u.maxhp) {
     const w = 18, frac = clamp(u.hp / u.maxhp, 0, 1);
