@@ -33,7 +33,11 @@ if [[ -n "$NEEDLE" ]]; then
   echo "ship.sh: polling $SRC for the distinctive string (Render deploy)..."
   deployed=0
   for i in $(seq 1 60); do
-    if curl -fsSL --max-time 30 "$SRC" | grep -qF "$NEEDLE"; then
+    # NOT `curl | grep -q`: under pipefail, grep -q matching CLOSES the pipe
+    # early, curl exits 56, and the pipeline reports the match as a failure.
+    # Bit us on the first live run (15 min of discarded matches). Buffer it.
+    body=$(curl -fsSL --max-time 30 "$SRC" || true)
+    if [[ "$body" == *"$NEEDLE"* ]]; then
       echo "ship.sh: deployed (found after ~$(( (i-1) * 15 ))s)."
       deployed=1
       break
@@ -68,6 +72,6 @@ if git diff --cached --quiet; then
   exit 0
 fi
 git commit -m "$MSG"
-git pull --rebase
+git pull --rebase --autostash   # unrelated dirty files must never block a ship
 git push
 echo "ship.sh: pushed. Live shortly at https://ses.q5labs.co/games/$SLUG/ ; the Pi's local mirror syncs within 30 min."
