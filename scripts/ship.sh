@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # ship.sh <slug> ["distinctive string"] ["commit message"]
 #
+# The distinctive string must exist IN THE SERVED GAME FILE — grep the
+# game's built index.html for it before shipping. A commit-message-only
+# tag polls forever (burned 15 min on PP-LOOK-3, which was never in code).
+#
 # Steps 2-3 of the ship pipeline in one command. Run AFTER committing and
 # pushing the game's own repo (step 1). This script:
 #   1. Looks up the game's source URL in games.json.
