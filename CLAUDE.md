@@ -117,6 +117,23 @@ count. Use the `/new-game` skill for the full checklist.
 - Desktop/headless op counts MISS DOM compositing costs — final perf
   verdicts come from the Pi itself.
 
+## 3D look budget (measured on the Pi 2026-09-12; lab/ is the instrument)
+
+Measured at 720p on the real kiosk (fresh boot, lab/index.html over LAN):
+- FREE at 60fps, use liberally: ACES tone mapping + sRGB output, baked
+  vertex AO/color ramps, gradient sky dome, additive glow sprites (each
+  is a draw call — cap ~15), ONE fullscreen post pass (vignette+grade),
+  MeshLambert lit pipeline, ONE 1024px directional shadow map, MSAA,
+  75k tris. The full stack together also holds 60.4.
+- THE EDGE: shadow-map size × caster triangles. 2048 shadow at 132k tris
+  = 51.8fps (the shadow pass re-renders every caster). LAW: shadow maps
+  are 1024, casters are curated, terrain never casts.
+- Instanced vs merged scenery: equal fps at these scales — instancing
+  buys memory/variety, not speed.
+- New "can the Pi afford X?" question → add a toggle to lab/index.html,
+  serve over LAN, sweep with pi/cdp.mjs. Never guess, never extrapolate
+  from desktop.
+
 ## Verification standard (Tier 3 — the full bar)
 
 - `node --check` the extracted inline JS.
