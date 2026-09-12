@@ -6,8 +6,11 @@ description: Scaffold, build, verify, and ship a new game for Stephens Arcade en
 # New game for Stephens Arcade
 
 Read CLAUDE.md in this repo first — it holds the conventions, performance
-commandments, and verification standard this skill assumes. Follow the
-phases in order; do not skip verification gates.
+commandments, and verification standard this skill assumes. This skill is
+for Tier 3 work only (new games, render/perf changes, engine refactors) —
+smaller feature work on an existing game follows the lighter Tier 1/2
+process in CLAUDE.md instead, not these phases. Follow the phases in
+order; do not skip verification gates.
 
 ## Phase 0 — Design on paper (with the user)
 
@@ -24,7 +27,7 @@ execute decisions, they don't make them.
 ## Phase 1 — Scaffold
 
 ```sh
-cd ~/Documents/Projects/stephensgames
+cd ~/Developer/stephensgames
 mkdir <name> && cd <name> && git init
 git remote add origin https://github.com/jbstephens/<name>.git  # user creates the GH repo
 ```
@@ -78,16 +81,17 @@ gameconsole/lib/controller.js for the pad API.
 ## Phase 4 — Ship
 
 ```sh
-# game repo: review diff, commit, push, then poll until deployed
-curl -fsSL https://<name>.onrender.com/ | grep -q "<distinctive-string>"
-# gameconsole repo:
+# game repo: review diff, commit, push (Render auto-deploys)
+# gameconsole repo (cwd MUST be gameconsole):
 #   1. games.json entry: {slug, title, genre, status: "PRESS START", icon, source}
 #   2. index.html: add an ICON_BUILDERS.<icon>(cx) canvas icon (180x180,
 #      chunky, matches the game's art; no external images)
-bash scripts/bundle-games.sh   # fetch + inject overlays + regen games.js
-# verify bundle has the game + __arcade_back/__arcade_pad_exit/__arcade_lowfx
-git add -A && git commit && git pull --rebase && git push
-# poll https://ses.q5labs.co/games/<slug>/index.html until live
+#   3. commit games.json + index.html first, then:
+bash scripts/ship.sh <slug> "<distinctive-string>"
+#   ^ polls the Render deploy for the string, runs bundle-games.sh,
+#     verifies overlay markers (__arcade_back/__arcade_pad_exit/
+#     __arcade_lowfx), commits the bundle, pulls --rebase, pushes.
+# then poll https://ses.q5labs.co/games/<slug>/index.html until live
 ```
 
 ## Phase 5 — Verify on the console

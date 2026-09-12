@@ -8,35 +8,69 @@ non-negotiables.
 ## Repo map (siblings of this repo)
 
 Each game is a SINGLE self-contained HTML file in its own repo under
-`~/Developer/stephensgames/` (moved off iCloud 2026-08-16 — the old
-`~/Documents/Projects/stephensgames/` path is dead, and iCloud is not
-readable from an agent sandbox). This repo (`gameconsole`) is the
-launcher shell; its root is the web root on Render.
+`~/Developer/stephensgames/`. This repo (`gameconsole`) is the launcher
+shell; its root is the web root on Render. The authoritative game list
+is `games.json` (18 entries), not this map.
 
-Present locally: `fallenmoon`, `shatteredsun`, `phaserwars2`,
-`powderpeak`, `nyancatracing`.
+Local source repos: `bubbledeep`, `castleforge`, `fallenmoon`,
+`islandforge`, `ninthinning`, `nyancatracing`, `phaserwars`,
+`phaserwars2`, `powderpeak`, `ringracer`, `shatteredsun`. Name gotchas:
+`phaserwars` is Phaser Wars 1 (serves `fightinggame.html`; index.html is
+a meta-refresh loader); `ninthinning` is Ninth Inning (index.html and
+baseball.html must stay byte-identical).
 
-STILL IN iCLOUD, not yet moved (their ship pipeline is blocked until
-they are moved here or re-cloned from `jbstephens/<name>`):
-`fightinggame` (Phaser Wars), `meteorblaster`, `blockquarry`,
-`ghostpatrol`, `screamrocket`, `sportsgame` (Ninth Inning — index.html
-and baseball.html must stay byte-identical), `hissandrun`,
-`islandforge`, `broforce`, `candybattle`.
+STILL IN iCLOUD, sandbox-unreachable — re-clone from `jbstephens/<name>`
+before working on one: `meteorblaster`, `blockquarry`, `ghostpatrol`,
+`screamrocket`, `hissandrun`, `broforce`, `candybattle`. The old
+`~/Documents/Projects/stephensgames/` path is dead.
 
-The authoritative game list is `games.json` (15 entries), not this map.
-Fallen Moon additionally builds `index.html` from `test/src/p*.html`
-via `bash test/build.sh` — never hand-edit its index.html.
+Fallen Moon builds `index.html` from `test/src/p*.html` via
+`bash test/build.sh` — never hand-edit its index.html. Powder Peak and
+Ring Racer use the same parts+build.sh pattern (in `test/`).
+
+## Change tiers — match the process to the change
+
+Decide the tier FIRST. It sets who does the work and how much
+verification is owed. The full standard exists for changes that can
+break the console; don't spend it on changes that can't. When unsure,
+ask "can this plausibly drop the Pi below 60fps or break pad
+reachability?" — if no, it's Tier 1 or 2. Pick the lighter tier and
+escalate only on evidence.
+
+- **Tier 1 — tuning, text, small fix** (no new state/UI, render path
+  untouched): edit directly in the session. Verify: `node --check` the
+  inline JS, `node --experimental-websocket scripts/verify-game.mjs
+  <slug>`, exercise the changed behavior once. Ship. No screenshots, no
+  Pi run.
+- **Tier 2 — feature in an existing game** (new UI/state — save slots,
+  a new menu, a new mode — hot render path untouched): edit directly in
+  the session. Verify: Tier 1 + drive the NEW feature end-to-end with
+  real input (pad stub + keyboard) + one 1280x720 screenshot of the new
+  state that you actually look at. Pi FPS check only if per-frame code
+  changed.
+- **Tier 3 — new game, render/perf work, engine refactors, anything
+  touching the per-frame hot path**: the full verification standard
+  below, design-first, agent build with a complete brief, mandatory Pi
+  verification. Use the `/new-game` skill for new games.
 
 ## Ship pipeline (always this order)
 
 1. Commit+push the game repo → its Render service auto-deploys
-   (`<name>.onrender.com`). Poll the live URL for a distinctive new string.
-2. In THIS repo: `bash scripts/bundle-games.sh` (fetches every game's live
-   HTML into games/<slug>/, injects overlays, regenerates games.js).
-3. Verify the bundle got the change + overlay markers (`__arcade_back`,
-   `__arcade_pad_exit`, `__arcade_lowfx`), commit+push → arcade deploys.
-4. Verify ON THE CONSOLE (see below). A GitHub Action also re-syncs bundles
-   every 30 min — never hand-edit files under games/.
+   (`<name>.onrender.com`).
+2. In THIS repo (cwd MUST be gameconsole): `bash scripts/ship.sh <slug>
+   ["distinctive string"]` — polls the deploy for the string, re-bundles
+   via bundle-games.sh, verifies the overlay markers (`__arcade_back`,
+   `__arcade_pad_exit`, `__arcade_lowfx`), commits and pushes. Don't sit
+   idle while it polls — a GitHub Action re-syncs bundles every 30 min,
+   so a pushed game ships itself eventually; ship.sh just makes it
+   immediate. Never hand-edit files under games/.
+3. Console check per tier: Tier 1–2 = optional spot-check next time the
+   console is free; Tier 3 = mandatory Pi verification (fps + feel)
+   before calling it shipped.
+
+The Pi itself serves the arcade from a local mirror (lighttpd on
+localhost:8080, git-pull sync every 30 min when online) — pushed changes
+reach the console within the sync window without any manual step.
 
 New game: `games.json` entry (slug/title/genre/icon/source) + an
 ICON_BUILDERS canvas icon in index.html. The menu carousel scales to any
@@ -75,21 +109,30 @@ count. Use the `/new-game` skill for the full checklist.
   (Meteor Blaster went 770 path-ops → 0 and 13fps → 60 this way.)
 - No per-frame allocations in hot loops; pool particles/entities; hoist
   gradients into bakes.
+- No world-sized canvases; bake per-region/per-island. And measure the
+  COST OF EACH BAKE on the Pi, not just steady-state fps — bakes fire on
+  gameplay events, and a big canvas makes every bake super-linearly
+  slower (Island Forge: 6.5ms → 5.25s for 4x area). Static 60fps ≠
+  shippable.
 - Desktop/headless op counts MISS DOM compositing costs — final perf
   verdicts come from the Pi itself.
 
-## Verification standard (before anything ships)
+## Verification standard (Tier 3 — the full bar)
 
 - `node --check` the extracted inline JS.
 - Headless Chrome + CDP harness with stubbed `navigator.getGamepads`
   (fake standard-mapping pads injected before page scripts) — ALWAYS
   launch test Chrome with `--mute-audio` (headless still plays sound
-  through the host Mac's speakers otherwise): drive every state — menus, gameplay, pause/resume, death, restart, 2P join/down —
-  asserting zero console errors. Keyboard-only regression too.
+  through the host Mac's speakers otherwise): drive every state — menus,
+  gameplay, pause/resume, death, restart, 2P join/down — asserting zero
+  console errors. Keyboard-only regression too.
 - Instrument the 2D context prototype to count per-frame ops vs budget.
 - CDP screenshots at 1280x720 (plus tablet/phone if UI changed) — actually
   LOOK at them and iterate; overlapping HUD boxes and programmer-art are
   the recurring failure modes.
+- The committed fast harness (`scripts/verify-game.mjs <slug>|all`) is
+  the regression floor for every tier — Tier 3 builds on it, never
+  replaces it.
 
 ## Console operations
 
@@ -101,24 +144,32 @@ count. Use the `/new-game` skill for the full checklist.
 - Drive/measure the live kiosk: `ssh -f -N -L 9223:localhost:9222
   arcade@ses.local`, then `CDP_PORT=9223 node pi/cdp.mjs targets|nav|eval|fps`.
   Check `targets` FIRST — never hijack the console mid-game; park it back
-  on https://ses.q5labs.co/ when done.
+  on the menu when done.
+- A game reading ~30fps on the Pi = check display mode, then reboot,
+  BEFORE blaming code (TV drifts to 4K@30; long-uptime compositor rot
+  locks ~30 and only a reboot cures it). Watchdog crons already reboot a
+  parked idle console; never declare a perf regression off an un-rebooted
+  Pi.
 - Chromium on the Pi spoofs its UA as "CrOS x86_64" — never UA-sniff.
   Console mode = the `?fx=low` flag (persisted to localStorage
   `arcade_lowfx`), which kills glows/cursor/backdrop-filter site-wide.
 
 ## How to build here (any model)
 
-Agent model tiers (standing rule from John, 2026-09-03): OPUS for
-anything that might need to diagnose or fix — verification closers,
-gate triage, sweeps, audits (a red gate here is an investigation, not
-a re-run). SONNET allowed for mechanical chores with crisp pass/fail
-and no debugging expected — variance re-runs of known suites, deploy
-polling, bundle-marker checks, screenshot capture batches. The session
-model does design and orchestration. Rationale: preserves the primary
-budget; born the night a session limit killed a verifier mid-run.
+**Tier 1–2: work directly in the session.** No design doc, no delegation
+ceremony, no agent brief — edit, verify per tier, ship via ship.sh. The
+1.5-hour save-slots change should be a 15-minute change (John,
+2026-09-11).
 
-Decide the design FIRST (mechanics, controls, rules — written down), then
-delegate implementation to an agent whose brief contains: the decided
-design, the conventions above, and the mandatory self-verification loop.
-The quality comes from the brief + verification, not model heroics. Ship
-only what passed verification; measure performance on the Pi after deploy.
+**Tier 3: design first, then delegate.** Decide the design (mechanics,
+controls, rules — written down), then delegate implementation to an
+agent whose brief contains: the decided design, the conventions above,
+and the mandatory self-verification loop. The quality comes from the
+brief + verification, not model heroics. Agent model tiers (John,
+2026-09-03; scoped to Tier 3 on 2026-09-11): OPUS for anything that
+might need to diagnose or fix — verification closers, triage, audits (a
+red result is an investigation, not a re-run). SONNET for mechanical
+chores with crisp pass/fail — deploy polling, marker checks, screenshot
+batches. Avoid many parallel agents on this Mac: CPU contention fakes
+test regressions. Ship only what passed verification; measure
+performance on the Pi after deploy.
