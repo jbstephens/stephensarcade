@@ -142,6 +142,6 @@ window.GAMES_DATA = [
     "genre": "BUILDER",
     "status": "PRESS START",
     "icon": "bubble",
-    "source": "https://ses.q5labs.co/bubbledeep/index.html"
+    "source": "https://bubbledeep.onrender.com/"
   }
 ];
