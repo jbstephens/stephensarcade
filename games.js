@@ -143,5 +143,13 @@ window.GAMES_DATA = [
     "status": "PRESS START",
     "icon": "bubble",
     "source": "https://bubbledeep.onrender.com/"
+  },
+  {
+    "slug": "order-up",
+    "title": "ORDER UP!",
+    "genre": "COOKING",
+    "status": "PRESS START",
+    "icon": "orderup",
+    "source": "https://ses.q5labs.co/orderup/index.html"
   }
 ];
