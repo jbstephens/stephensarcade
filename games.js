@@ -150,6 +150,6 @@ window.GAMES_DATA = [
     "genre": "COOKING",
     "status": "PRESS START",
     "icon": "orderup",
-    "source": "https://ses.q5labs.co/orderup/index.html"
+    "source": "https://orderup-n6ky.onrender.com/"
   }
 ];
