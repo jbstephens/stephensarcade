@@ -151,5 +151,13 @@ window.GAMES_DATA = [
     "status": "PRESS START",
     "icon": "orderup",
     "source": "https://orderup-n6ky.onrender.com/"
+  },
+  {
+    "slug": "fairway-classic",
+    "title": "FAIRWAY CLASSIC",
+    "genre": "GOLF",
+    "status": "PRESS START",
+    "icon": "fairway",
+    "source": "https://ses.q5labs.co/fairwayclassic/index.html"
   }
 ];
