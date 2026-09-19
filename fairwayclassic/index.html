@@ -236,7 +236,7 @@ body.tp-on #shotInfo { bottom: 158px; }
    ═══════════════════════════════════════════════════════════════════════ */
 const VW = 1280, VH = 720;
 const DT = 1 / 60;
-const BUILD_TAG = 'FC-4-NOMSAA';
+const BUILD_TAG = 'FC-5-FEEL';
 window.__fcBuild = BUILD_TAG;
 
 const QS = new URLSearchParams(location.search);
@@ -317,22 +317,71 @@ window.addEventListener('resize', fitStage);
 window.addEventListener('orientationchange', () => setTimeout(fitStage, 60));
 fitStage();
 
-/* ── clubs (carry yds at 100%, loft deg) ── */
+/* ── clubs (carry yds at 100%, launch angle deg) ──
+   FC-5 flight feel: launch angles are REAL launch (driver ~13°, woods ~16°,
+   mid-irons 20–24°, wedges steeper), paired with quadratic air drag so the
+   arc rises fast, hangs, and falls steep — a broadcast tracer, not a line
+   drive.  Carry table integrity: per-club launch speeds are SOLVED
+   numerically at boot (flat ground, no wind, the exact tickBall integrator),
+   so 100%-power carries match the table by construction. */
 const CLUBS = [
-  { n: 'DR', carry: 260, loft: 12 },
-  { n: '3W', carry: 230, loft: 15 },
-  { n: '5W', carry: 210, loft: 18 },
-  { n: '4i', carry: 195, loft: 21 },
-  { n: '5i', carry: 185, loft: 24 },
-  { n: '6i', carry: 175, loft: 27 },
-  { n: '7i', carry: 162, loft: 31 },
-  { n: '8i', carry: 150, loft: 35 },
-  { n: '9i', carry: 138, loft: 39 },
-  { n: 'PW', carry: 120, loft: 44 },
-  { n: 'SW', carry: 85, loft: 54 },
+  { n: 'DR', carry: 260, loft: 13 },
+  { n: '3W', carry: 230, loft: 15.5 },
+  { n: '5W', carry: 210, loft: 16.5 },
+  { n: '4i', carry: 195, loft: 20 },
+  { n: '5i', carry: 185, loft: 21.5 },
+  { n: '6i', carry: 175, loft: 23 },
+  { n: '7i', carry: 162, loft: 24.5 },
+  { n: '8i', carry: 150, loft: 27 },
+  { n: '9i', carry: 138, loft: 30 },
+  { n: 'PW', carry: 120, loft: 34 },
+  { n: 'SW', carry: 85, loft: 44 },
 ];
-const GRAV = 10.7;              // yd/s^2
+const GRAV = 9.6;               // yd/s^2 (FC-5: paired with DRAG_K — driver hang +25%)
+const DRAG_K = 0.0032;          // quadratic air drag coeff (yd^-1) on the ball in flight
 const WIND_K = 0.085;           // wind mph -> yd/s^2 accel on ball in flight
+/* flat-ground carry for a launch speed v at loft — the tickBall fly
+   integrator verbatim (DT, semi-implicit order, drag), minus wind/terrain */
+function flatCarry(v0, loftRad) {
+  let y = 0.2, z = 0;
+  let vz = Math.cos(loftRad) * v0, vy = Math.sin(loftRad) * v0;
+  for (let i = 0; i < 3600; i++) {
+    const sp = Math.hypot(vz, vy);
+    vy -= (GRAV + DRAG_K * sp * vy) * DT;
+    vz -= DRAG_K * sp * vz * DT;
+    z += vz * DT; y += vy * DT;
+    if (y <= 0 && vy < 0) break;
+  }
+  return z;
+}
+/* per-club (carry -> launch speed) curves, solved once at boot */
+for (const c of CLUBS) {
+  const loft = c.loft * Math.PI / 180;
+  let lo = 4, hi = 400;
+  for (let i = 0; i < 42; i++) {
+    const mid = (lo + hi) / 2;
+    if (flatCarry(mid, loft) < c.carry) lo = mid; else hi = mid;
+  }
+  const vMax = (lo + hi) / 2;
+  const N = 25, vs = new Float64Array(N), cs = new Float64Array(N);
+  for (let i = 0; i < N; i++) {
+    const v = vMax * (0.05 + 0.95 * i / (N - 1));
+    vs[i] = v; cs[i] = flatCarry(v, loft);
+  }
+  cs[N - 1] = c.carry;          // exact by construction at 100%
+  c.vTab = vs; c.cTab = cs;
+}
+function clubV(c, carry) {
+  const cs = c.cTab, vs = c.vTab;
+  if (carry <= cs[0]) return vs[0] * Math.sqrt(Math.max(0.05, carry / cs[0]));
+  for (let i = 1; i < cs.length; i++) {
+    if (carry <= cs[i]) {
+      const t = (carry - cs[i - 1]) / (cs[i] - cs[i - 1] || 1);
+      return vs[i - 1] + (vs[i] - vs[i - 1]) * t;
+    }
+  }
+  return vs[vs.length - 1];
+}
 
 /* ── the 18 hole records — Magnolia National ──
    Centerline: tee at origin, opening direction +Z; bend = [[frac, deg], ...]
@@ -342,9 +391,13 @@ const WIND_K = 0.085;           // wind mph -> yd/s^2 accel on ball in flight
    bunkers: [d, off, rx, rz].  water: {t:'pond'|'creek', ...}.
    fw: fairway halfwidth.  tclump: extra tree clumps [d, off, r, n].       */
 const HOLES = [
+  /* FC-5: club: [d, off] plants THE clubhouse (cupola + veranda + live oak)
+     on the holes that see it (1 tee, 9 green, 18 approach); cabins: true
+     plants the two white cabins by the 10th tee; creeks get stone bridges
+     automatically (12/13 — the Hogan/Nelson homage). */
   { n: 1, name: 'Tea Olive', par: 4, yds: 445, bend: [[0.56, 24]], fw: 15,
     elv: [[0, 0], [0.5, 1.5], [1, 4.5]],
-    bunkers: [[295, 22, 13, 9]], water: [],
+    bunkers: [[295, 22, 13, 9]], water: [], club: [64, -40],
     green: { r: 12, sx: -0.018, sz: -0.014 },
     tclump: [[250, 40, 26, 16], [355, -34, 24, 12]] },
   { n: 2, name: 'Pink Dogwood', par: 5, yds: 575, bend: [[0.52, -20]], fw: 17,
@@ -378,11 +431,11 @@ const HOLES = [
     green: { r: 12, sx: -0.012, sz: -0.016 }, tclump: [[430, -30, 24, 12]] },
   { n: 9, name: 'Carolina Cherry', par: 4, yds: 460, bend: [[0.45, -14]], fw: 15,
     elv: [[0, 0], [0.45, -5], [1, 2]],
-    bunkers: [[420, -16, 11, 8], [438, -18, 10, 7]], water: [],
+    bunkers: [[420, -16, 11, 8], [438, -18, 10, 7]], water: [], club: [490, 12],
     green: { r: 11, sx: 0.014, sz: 0.03 }, tclump: [[240, -34, 22, 12]] },
   { n: 10, name: 'Camellia', par: 4, yds: 495, bend: [[0.4, -22]], fw: 16,
     elv: [[0, 0], [0.5, -9], [1, -16]],
-    bunkers: [[330, 18, 13, 9]], water: [],
+    bunkers: [[330, 18, 13, 9]], water: [], cabins: true,
     green: { r: 13, sx: -0.016, sz: 0.014 }, camellia: true, tclump: [[230, -38, 28, 16]] },
   { n: 11, name: 'White Dogwood', par: 4, yds: 520, bend: [[0.5, -8]], fw: 16,
     elv: [[0, 0], [0.4, -4], [1, -10]],
@@ -422,7 +475,8 @@ const HOLES = [
   { n: 18, name: 'Holly', par: 4, yds: 465, bend: [[0.55, 26]], fw: 14,
     elv: [[0, 0], [0.55, 2], [1, 7]],
     bunkers: [[252, 16, 11, 8], [268, 20, 10, 7], [438, -13, 9, 7], [452, 12, 9, 7]],
-    water: [], green: { r: 12, sx: -0.014, sz: -0.018 }, gallery: true,
+    water: [], club: [494, -16],
+    green: { r: 12, sx: -0.014, sz: -0.018 }, gallery: true,
     tclump: [[260, 44, 26, 16]] },
 ];
 
@@ -1210,6 +1264,145 @@ const C_BED_Y = col(0xe8c33a), C_BED_R = col(0xd8503a), C_BED_W = col(0xf2eee0);
 const C_STONE = col(0x8d8a80), C_STONE2 = col(0x6f6c62);
 const C_REDBUD = col(0xd8709a), C_PEACH = col(0xf0b0c0);
 
+/* ═══ FC-5 structures kit: yaw-rotated boxes, gable roofs, and the three
+   builders (THE clubhouse, white cabins, creek stone bridges).  Merged
+   baked geometry, emitted into a hole-load MD — never rebuilt mid-play. ═══ */
+function boxOut(md, cx, cy, cz, sx, sy, sz, ry, c, warm) {
+  const hx = sx / 2, hy = sy / 2, hz = sz / 2;
+  const cosR = Math.cos(ry), sinR = Math.sin(ry);
+  const W = (lx, ly, lz) => [cx + lx * cosR + lz * sinR, cy + ly, cz - lx * sinR + lz * cosR];
+  const b = [W(-hx, -hy, -hz), W(hx, -hy, -hz), W(hx, -hy, hz), W(-hx, -hy, hz)];
+  const t = [W(-hx, hy, -hz), W(hx, hy, -hz), W(hx, hy, hz), W(-hx, hy, hz)];
+  for (let i = 0; i < 4; i++) {
+    const j = (i + 1) % 4;
+    triOut(md, cx, cz, b[i], b[j], t[j], c, warm !== false);
+    triOut(md, cx, cz, b[i], t[j], t[i], c, warm !== false);
+  }
+  triOut(md, cx, cz, t[0], t[1], t[2], c, warm !== false);
+  triOut(md, cx, cz, t[0], t[2], t[3], c, warm !== false);
+}
+function gableRoof(md, cx, cy, cz, sx, sz, h, ry, cRoof, cEnd) {
+  const hx = sx / 2, hz = sz / 2;
+  const cosR = Math.cos(ry), sinR = Math.sin(ry);
+  const W = (lx, ly, lz) => [cx + lx * cosR + lz * sinR, cy + ly, cz - lx * sinR + lz * cosR];
+  const e = [W(-hx, 0, -hz), W(hx, 0, -hz), W(hx, 0, hz), W(-hx, 0, hz)];
+  const r0 = W(-hx, h, 0), r1 = W(hx, h, 0);
+  triOut(md, cx, cz, e[0], e[1], r1, cRoof, true);
+  triOut(md, cx, cz, e[0], r1, r0, cRoof, true);
+  triOut(md, cx, cz, e[3], e[2], r1, cRoof, true);
+  triOut(md, cx, cz, e[3], r1, r0, cRoof, true);
+  triOut(md, cx, cz, e[0], e[3], r0, cEnd, true);
+  triOut(md, cx, cz, e[1], e[2], r1, cEnd, true);
+}
+const C_WALL = col(0xf8f5ec), C_WALLD = col(0xe9e5d6), C_ROOFC = col(0x878d85),
+      C_ROOFD = col(0x71776f), C_SHUT = col(0x2f5c3a), C_PANE = col(0x272f36);
+/* THE white clubhouse — cupola, veranda with columns, green shutters vibe.
+   ~750 tris.  Local frame: x along the long axis, +z faces (s.fx, s.fz). */
+function buildClubhouse(md, s) {
+  const x = s.x, z = s.z;
+  const ry = Math.atan2(s.fx - x, s.fz - z);
+  const cosR = Math.cos(ry), sinR = Math.sin(ry);
+  const L = (lx, lz) => [x + lx * cosR + lz * sinR, z - lx * sinR + lz * cosR];
+  const yB = groundH(x, z) - 0.5;
+  const B = (lx, cy, lz, sx, sy, sz, c) => {
+    const p = L(lx, lz);
+    boxOut(md, p[0], yB + cy, p[1], sx, sy, sz, ry, c);
+  };
+  // main mass + hipped-read gable roof + cupola
+  B(0, 2.4, 0, 24, 5.8, 11, C_WALL);
+  {
+    const p = L(0, 0);
+    gableRoof(md, p[0], yB + 5.2, p[1], 25.8, 12.8, 2.7, ry, C_ROOFC, C_WALLD);
+  }
+  B(0, 8.9, 0, 3.2, 2.2, 3.2, C_WALL);                    // cupola drum (prominent)
+  {
+    const p = L(0, 0);
+    coneW(md, p[0], yB + 10.0, p[1], 2.35, 1.7, 8, C_ROOFD, true);  // cupola roof
+    coneW(md, p[0], yB + 11.7, p[1], 0.15, 1.0, 4, C_WALL, true);   // finial
+    // cupola windows (dark slits on 4 sides)
+    B(0, 8.9, 1.62, 1.9, 1.2, 0.08, C_PANE);
+    B(0, 8.9, -1.62, 1.9, 1.2, 0.08, C_PANE);
+    B(1.62, 8.9, 0, 0.08, 1.2, 1.9, C_PANE);
+    B(-1.62, 8.9, 0, 0.08, 1.2, 1.9, C_PANE);
+  }
+  B(-8.5, 6.6, -2.2, 1.1, 2.4, 1.1, C_WALLD);             // chimneys
+  B(8.5, 6.6, -2.2, 1.1, 2.4, 1.1, C_WALLD);
+  // veranda: floor, low roof, columns down the front
+  B(0, 0.5, 6.6, 25.2, 0.55, 3.4, C_WALL);
+  B(0, 4.35, 6.7, 25.6, 0.4, 3.8, C_WALL);
+  for (let i = -4; i <= 4; i++) B(i * 2.9, 2.4, 7.9, 0.36, 3.5, 0.36, C_WALL);
+  // door + ground-floor windows with green shutters (front face at z 5.5)
+  B(0, 1.85, 5.6, 1.5, 2.7, 0.14, C_PANE);
+  B(0, 3.35, 5.62, 2.0, 0.35, 0.12, C_WALLD);             // pediment strip
+  for (const wx of [-9.6, -6.4, -3.2, 3.2, 6.4, 9.6]) {
+    B(wx, 2.3, 5.56, 1.05, 1.5, 0.1, C_PANE);
+    B(wx - 0.75, 2.3, 5.58, 0.4, 1.5, 0.08, C_SHUT);
+    B(wx + 0.75, 2.3, 5.58, 0.4, 1.5, 0.08, C_SHUT);
+  }
+  // rear windows so the house reads from the far side too
+  for (const wx of [-8, -4, 0, 4, 8]) {
+    B(wx, 3.1, -5.56, 1.05, 1.5, 0.1, C_PANE);
+    B(wx - 0.75, 3.1, -5.58, 0.4, 1.5, 0.08, C_SHUT);
+    B(wx + 0.75, 3.1, -5.58, 0.4, 1.5, 0.08, C_SHUT);
+  }
+  B(0, 0.22, 8.9, 4.4, 0.45, 1.6, C_WALLD);               // entry steps
+}
+/* small white cabin (10 tee pair) — gabled, green shutters, ~120 tris */
+function buildCabin(md, s) {
+  const x = s.x, z = s.z;
+  const ry = Math.atan2(s.fx - x, s.fz - z);
+  const cosR = Math.cos(ry), sinR = Math.sin(ry);
+  const L = (lx, lz) => [x + lx * cosR + lz * sinR, z - lx * sinR + lz * cosR];
+  const yB = groundH(x, z) - 0.4;
+  const B = (lx, cy, lz, sx, sy, sz, c) => {
+    const p = L(lx, lz);
+    boxOut(md, p[0], yB + cy, p[1], sx, sy, sz, ry, c);
+  };
+  B(0, 1.6, 0, 7, 3.2, 5.2, C_WALL);
+  {
+    const p = L(0, 0);
+    gableRoof(md, p[0], yB + 3.15, p[1], 7.8, 6.0, 1.5, ry, C_ROOFC, C_WALLD);
+  }
+  B(0, 1.15, 2.66, 0.95, 2.1, 0.1, C_PANE);               // door
+  for (const wx of [-2.2, 2.2]) {
+    B(wx, 1.7, 2.64, 0.85, 1.05, 0.08, C_PANE);
+    B(wx - 0.6, 1.7, 2.66, 0.32, 1.05, 0.07, C_SHUT);
+    B(wx + 0.6, 1.7, 2.66, 0.32, 1.05, 0.07, C_SHUT);
+  }
+  B(-2.6, 3.9, -1.4, 0.8, 1.6, 0.8, C_WALLD);             // chimney
+}
+/* low stone creek bridge (12/13 — the Hogan/Nelson homage), ~180 tris */
+function buildBridge(md, H, s) {
+  const dA = s.d - s.w / 2 - 2.6, dB = s.d + s.w / 2 + 2.6;
+  const a = clWorld(H, dA, s.off), b = clWorld(H, dB, s.off);
+  const yA = groundH(a[0], a[1]) + 0.1, yB2 = groundH(b[0], b[1]) + 0.1;
+  const ry = Math.atan2(b[0] - a[0], b[1] - a[1]);
+  const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+  const segs = 4, segL = len / segs + 0.18;
+  const cDeck = col(0xb2ada0), cWall2 = col(0x98948a);   // light worn stone — reads at distance
+  for (let i = 0; i < segs; i++) {
+    const tm = (i + 0.5) / segs;
+    const arch = Math.sin(Math.PI * tm) * 1.2;
+    const cx2 = lerp(a[0], b[0], tm), cz2 = lerp(a[1], b[1], tm);
+    const cy2 = lerp(yA, yB2, tm) + arch;
+    boxOut(md, cx2, cy2 + 0.05, cz2, 4.4, 0.6, segL, ry, cDeck, true);
+    for (const sd of [-2.0, 2.0]) {
+      const px = cx2 + Math.cos(ry) * sd, pz = cz2 - Math.sin(ry) * sd;
+      boxOut(md, px, cy2 + 0.72, pz, 0.44, 0.85, segL, ry, cWall2, true);
+    }
+  }
+  // corner posts — the tee sees the span nearly end-on; these give it mass
+  for (const [ex, ez, ey] of [[a[0], a[1], yA], [b[0], b[1], yB2]]) {
+    for (const sd of [-2.0, 2.0]) {
+      const px = ex + Math.cos(ry) * sd, pz = ez - Math.sin(ry) * sd;
+      boxOut(md, px, ey + 0.85, pz, 0.75, 1.9, 0.75, ry, cDeck, true);
+    }
+  }
+  // abutments sunk into each bank
+  boxOut(md, a[0], yA - 0.8, a[1], 4.8, 2.0, 1.8, ry, cWall2, true);
+  boxOut(md, b[0], yB2 - 0.8, b[1], 4.8, 2.0, 1.8, ry, cWall2, true);
+}
+
 /* ── the hole builder — fires only at hole transitions ── */
 const GRID_STEP = 2.0;
 function buildHole(idx) {
@@ -1219,6 +1412,37 @@ function buildHole(idx) {
   CUR = H;
   FIELD = makeHoleField(H);
   const rng = mulberry32(1234 + idx * 977);
+
+  /* ── FC-5 structures: placements first (planting keeps clear of them) ──
+     {t, x, z, r (exclusion radius), fx/fz (facing target)} */
+  const STRUCTS = [];
+  if (H.club) {
+    const w = clWorld(H, H.club[0], H.club[1]);
+    // beside the hole → broad side faces the fairway abeam; beyond the green
+    // → broad side (veranda) faces back DOWN the hole at the approach
+    const f = H.club[0] > H.len ? clWorld(H, H.len - 60, 0) : clWorld(H, H.club[0], 0);
+    STRUCTS.push({ t: 'club', x: w[0], z: w[1], r: 27, fx: f[0], fz: f[1] });
+  }
+  if (H.cabins) {
+    for (const [d, off] of [[16, 29], [31, 39]]) {
+      const w = clWorld(H, d, off);
+      const f = clWorld(H, d, 0);
+      STRUCTS.push({ t: 'cabin', x: w[0], z: w[1], r: 10, fx: f[0], fz: f[1] });
+    }
+  }
+  for (const w of FIELD.wat) {
+    if (w.t !== 'creek') continue;
+    const c = clWorld(H, w.d, 14);   // +off = the player's LEFT (Hogan/Nelson side)
+    STRUCTS.push({ t: 'bridge', x: c[0], z: c[1], r: 13, d: w.d, w: w.w, off: 14 });
+  }
+  function structClear(x, z) {
+    for (let i = 0; i < STRUCTS.length; i++) {
+      const s = STRUCTS[i];
+      const dx = x - s.x, dz = z - s.z;
+      if (dx * dx + dz * dz < s.r * s.r) return false;
+    }
+    return true;
+  }
 
   // bounding box of centerline + corridor
   let minX = 1e9, maxX = -1e9, minZ = 1e9, maxZ = -1e9;
@@ -1423,6 +1647,7 @@ function buildHole(idx) {
     }
   }
   function safeSpot(x, z, margin) {
+    if (!structClear(x, z)) return false;   // FC-5: no trees through the clubhouse
     const s = FIELD(x, z)[1];
     if (s === 5 || s === 4 || s === 2 || s === 3 || s === 6) return false;
     const dgx = x - GREEN.x, dgz = z - GREEN.z;
@@ -1473,6 +1698,7 @@ function buildHole(idx) {
 
   /* ── LUSH PLANTING — the per-hole palette (FC-LOOK-1) ── */
   const plantable = (x, z) => {
+    if (!structClear(x, z)) return false;
     const s = FIELD(x, z)[1];
     return !(s === 5 || s === 4 || s === 2 || s === 3 || s === 6);
   };
@@ -1583,10 +1809,28 @@ function buildHole(idx) {
       const off = -34 + rng() * 68;
       const side = rng() < 0.5 ? -1 : 1;
       const p = clWorld(H, w.d + side * (w.w / 2 + 0.6 + rng() * 1.6), off);
+      if (!structClear(p[0], p[1])) continue;   // keep the bridge deck clear
       const y = groundH(p[0], p[1]);
       const sR = 0.35 + rng() * 0.5;
       ballW(sc, p[0], y + sR * 0.25, p[1], sR, 0.55, rng() < 0.5 ? C_STONE : C_STONE2, rng);
     }
+  }
+  /* ── FC-5: emit the structures (merged, baked; casts — trivial tris) ── */
+  if (STRUCTS.length) {
+    const bm = MD();
+    for (const st of STRUCTS) {
+      if (st.t === 'club') {
+        buildClubhouse(bm, st);
+        // the big live oak beside (never over) the clubhouse roofline
+        const ory = Math.atan2(st.fx - st.x, st.fz - st.z);
+        const cosR = Math.cos(ory), sinR = Math.sin(ory);
+        blobTree(st.x + 20 * cosR + 7 * sinR, st.z - 20 * sinR + 7 * cosR, 1.55, C_OAK, C_OAK2);
+      } else if (st.t === 'cabin') buildCabin(bm, st);
+      else buildBridge(bm, H, st);
+    }
+    const buildings = mdMesh(bm, MAT_SCENERY);
+    buildings.castShadow = LOOK;
+    scene.add(buildings); HOLE_OBJS.push(buildings);
   }
   const scenery = mdMesh(sc, MAT_SCENERY);
   scene.add(scenery); HOLE_OBJS.push(scenery);
@@ -1797,25 +2041,43 @@ function buildGolfer(shirtHex, capHex, slacksHex) {
 }
 const GOLFERS = [buildGolfer(0xf5f2ea, 0xc03428, 0x2c3550), buildGolfer(0x7ab0e0, 0xf2f0e8, 0xcabb98)];
 
-/* pose driver — address waggle, backswing, follow-through hold */
+/* pose driver — address waggle, backswing, follow-through hold.
+   Sign law (FC-5 swing-direction fix): the golfer's local -x is the TARGET
+   side (he faces the ball; aim = -x), and arms.rotation.z swings the club
+   tip toward +x for positive angles.  So the BACKSWING is +armZ (club up
+   and AWAY from the target, behind the shoulder), the downswing sweeps
+   through the ball to -armZ, and the follow-through wraps high on the
+   target side.  v1 had these mirrored — the club traveled backwards.
+   'pback'/'pthru'/'phold' are the FC-5 putt PENDULUM: a short low stroke,
+   amplitude scaled to meter power, no wrap either way. */
 function golferPose(g, mode, k, t, backK) {
   const arms = g.userData.arms, torso = g.userData.torso, head = g.userData.head;
-  let armZ = -0.08, armX = -0.3, torY = 0, headY = 0;
+  let armZ = 0.08, armX = -0.3, torY = 0, headY = 0;
+  g.userData.mode = mode;
   if (mode === 'back') {              // meter fill = the backswing winds up
-    armZ = -0.14 - 1.75 * k;
-    armX = -0.3 - 0.28 * k;           // club wraps behind the shoulder
-    torY = 0.55 * k;
+    armZ = 0.14 + 1.75 * k;           // away from the target, wraps behind
+    armX = -0.3 - 0.28 * k;
+    torY = 0.55 * k;                  // shoulders coil away from the target
     headY = -0.38 * k;
   } else if (mode === 'thru') {       // downswing → follow-through
     const b = backK === undefined ? 1 : backK;
-    armZ = lerp(-0.14 - 1.75 * b, 1.7, k);
+    armZ = lerp(0.14 + 1.75 * b, -1.7, k);   // THROUGH the ball, to the target side
     armX = lerp(-0.3 - 0.28 * b, -0.5, k);
     torY = lerp(0.55 * b, -0.8, k);
     headY = lerp(-0.38 * b, 0.35, k);
   } else if (mode === 'hold') {       // held finish while the ball flies
-    armZ = 1.7; armX = -0.5; torY = -0.8; headY = 0.35;
+    armZ = -1.7; armX = -0.5; torY = -0.8; headY = 0.35;
+  } else if (mode === 'pback') {      // putt pendulum: short takeaway
+    armZ = 0.1 + 0.42 * k;
+    armX = -0.3; torY = 0.05 * k; headY = 0;
+  } else if (mode === 'pthru') {      // putt pendulum: stroke through
+    const b = backK === undefined ? 1 : backK;
+    armZ = lerp(0.1 + 0.42 * b, -(0.16 + 0.34 * b), k);
+    armX = -0.3; torY = lerp(0.05 * b, -0.05, k); headY = 0;
+  } else if (mode === 'phold') {      // held putt finish — no wrap
+    armZ = -0.34; armX = -0.3; torY = -0.05; headY = 0;
   } else {                            // idle address waggle
-    armZ = -0.08 + Math.sin(t * 1.3) * 0.035;
+    armZ = 0.08 + Math.sin(t * 1.3) * 0.035;
     torY = Math.sin(t * 0.9) * 0.015;
     headY = 0;
   }
@@ -1825,37 +2087,75 @@ function golferPose(g, mode, k, t, backK) {
   head.rotation.y = headY;
 }
 
-/* the caddie bag — stands near the golfer at address */
-const BAG = (() => {
+/* ═══ FC-5: the CADDIE — Augusta look, bag strapped over the shoulder ═══
+   White boiler-suit jumpsuit, green cap, dark skin tone (per-player-slot
+   variation), PP-LOOK-3 low-poly style, ONE merged vcMesh (~550 tris),
+   shadow caster (vcMesh sets castShadow).  Stands relaxed near the golfer
+   at address with a small idle sway (driven in updateVisuals). */
+function buildCaddie(skinHex, suitHex) {
   const grp = new THREE.Group();
-  const BODY = 0x9a2f28, TRIM = 0xf2ede0, POCKET = 0x6e1f1c, STAND = 0x8a8f98;
+  const SUIT = suitHex,
+        SUIT_D = '#' + new THREE.Color(suitHex).multiplyScalar(0.82).getHexString();
+  const CAP = 0x1f5c35, SHOE = 0xf2f0ea, SOLE = 0x3a332c, HAIR = 0x241a12,
+        BAGC = 0x9a2f28, TRIM = 0xf2ede0, POCKET = 0x6e1f1c, STEEL = 0xcfd4da;
+  // the bag rides tilted over the right shoulder: build its parts in
+  // bag-local coords (cylinder along y, centered), one shared transform
+  const bagT = g => g.rotateZ(-0.62).translate(-0.05, 1.02, -0.3);
   const body = vcMesh([
-    vcCyl(0.24, 0.28, 1.35, 6, BODY).translate(0, 0.7, 0),
-    vcCyl(0.26, 0.26, 0.12, 6, TRIM).translate(0, 1.36, 0),
-    vcBox(0.16, 0.42, 0.08, POCKET).translate(0, 0.55, 0.27),
-    vcBox(0.12, 0.24, 0.07, POCKET).translate(0.16, 0.9, 0.22),
-    vcBox(0.3, 0.07, 0.05, TRIM).rotateX(0.2).translate(0, 0.95, -0.26),  // strap
-    // clubs poking out the top
-    vcCyl(0.015, 0.015, 0.5, 4, 0xcfd4da).rotateZ(0.12).translate(-0.06, 1.6, 0.04),
-    vcCyl(0.015, 0.015, 0.56, 4, 0xcfd4da).rotateZ(-0.1).translate(0.07, 1.63, -0.05),
-    vcCyl(0.015, 0.015, 0.46, 4, 0xcfd4da).translate(0.01, 1.58, 0.09),
-    vcPart(new THREE.SphereGeometry(0.055, 5, 4), 0x2e343c).translate(-0.1, 1.85, 0.04),
-    vcPart(new THREE.SphereGeometry(0.05, 5, 4), 0x2e343c).translate(0.11, 1.9, -0.06),
-    vcBox(0.05, 0.06, 0.03, 0x2e343c).translate(0.01, 1.8, 0.09),
-    // stand legs
-    vcCyl(0.02, 0.02, 1.1, 4, STAND).rotateZ(0.35).translate(-0.28, 0.5, -0.12),
-    vcCyl(0.02, 0.02, 1.1, 4, STAND).rotateZ(-0.35).translate(0.28, 0.5, -0.12),
+    // legs + shoes — relaxed stance
+    vcBox(0.15, 0.5, 0.17, SUIT).translate(-0.13, 0.68, 0),
+    vcBox(0.15, 0.5, 0.17, SUIT).translate(0.13, 0.68, 0),
+    vcBox(0.14, 0.46, 0.16, SUIT_D).translate(-0.14, 0.25, 0.01),
+    vcBox(0.14, 0.46, 0.16, SUIT_D).translate(0.14, 0.25, 0.01),
+    vcBox(0.15, 0.09, 0.3, SHOE).translate(-0.14, 0.065, 0.05),
+    vcBox(0.15, 0.09, 0.3, SHOE).translate(0.14, 0.065, 0.05),
+    vcBox(0.155, 0.035, 0.31, SOLE).translate(-0.14, 0.012, 0.05),
+    vcBox(0.155, 0.035, 0.31, SOLE).translate(0.14, 0.012, 0.05),
+    // boiler-suit torso: white, green collar, zip placket, number patch
+    vcBox(0.34, 0.34, 0.21, SUIT).translate(0, 1.1, 0),
+    vcBox(0.37, 0.3, 0.23, SUIT).rotateX(0.04).translate(0, 1.4, 0.01),
+    vcBox(0.25, 0.08, 0.19, CAP).translate(0, 1.58, 0.03),
+    vcBox(0.05, 0.5, 0.02, SUIT_D).translate(0, 1.28, 0.125),
+    vcBox(0.13, 0.1, 0.02, CAP).translate(-0.11, 1.42, 0.13),
+    // arms: left hangs loose, right hand up on the bag strap
+    vcBox(0.085, 0.14, 0.1, SUIT).translate(-0.24, 1.5, 0),
+    vcBox(0.085, 0.14, 0.1, SUIT).translate(0.24, 1.5, 0),
+    vcBox(0.065, 0.36, 0.07, SUIT).rotateZ(0.08).translate(-0.27, 1.24, 0.01),
+    vcBox(0.05, 0.16, 0.055, skinHex).rotateZ(0.08).translate(-0.29, 0.98, 0.02),
+    vcBox(0.065, 0.26, 0.07, SUIT).rotateZ(-0.5).translate(0.32, 1.34, 0.0),
+    vcBox(0.05, 0.2, 0.055, skinHex).rotateZ(-2.1).translate(0.28, 1.5, 0.06),
+    // head: face, hair, GREEN cap
+    vcBox(0.09, 0.09, 0.09, skinHex).translate(0, 1.63, 0.01),
+    vcBox(0.15, 0.24, 0.17, skinHex).translate(0, 1.8, 0.02),
+    vcBox(0.15, 0.13, 0.05, HAIR).translate(0, 1.74, -0.065),
+    vcPart(new THREE.SphereGeometry(0.165, 7, 5), CAP).scale(1, 0.62, 1.05).translate(0, 1.94, 0.01),
+    vcBox(0.14, 0.03, 0.14, CAP).rotateX(-0.12).translate(0, 1.9, 0.2),
+    vcBox(0.045, 0.045, 0.05, skinHex).translate(0, 1.79, 0.105),
+    // the bag over the shoulder (top by the right ear, base at the left hip)
+    bagT(vcCyl(0.2, 0.24, 1.3, 6, BAGC)),
+    bagT(vcCyl(0.22, 0.22, 0.1, 6, TRIM).translate(0, 0.68, 0)),
+    bagT(vcBox(0.14, 0.4, 0.07, POCKET).translate(0, -0.1, 0.24)),
+    bagT(vcCyl(0.015, 0.015, 0.5, 4, STEEL).rotateZ(0.1).translate(-0.06, 0.96, 0.03)),
+    bagT(vcCyl(0.015, 0.015, 0.56, 4, STEEL).rotateZ(-0.08).translate(0.06, 1.0, -0.04)),
+    bagT(vcPart(new THREE.SphereGeometry(0.055, 5, 4), 0x2e343c).translate(-0.09, 1.22, 0.03)),
+    bagT(vcPart(new THREE.SphereGeometry(0.05, 5, 4), 0x2e343c).translate(0.08, 1.3, -0.05)),
+    // strap across the chest, shoulder to hip
+    vcBox(0.09, 0.66, 0.045, TRIM).rotateZ(0.55).translate(0.1, 1.28, 0.13),
   ]);
   grp.add(body);
-  grp.rotation.z = -0.16;   // leaning on its stand
   grp.visible = false;
   scene.add(grp);
   return grp;
-})();
+}
+const CADDIES = [buildCaddie(0x6b4630, 0xf2efe4), buildCaddie(0x9c6b4a, 0xf7f4ec)];
 
-/* ── balls (one per player) + blob shadows ── */
+/* ── balls (one per player) + blob shadows ──
+   FC-5: radius halved (0.16 → 0.08) — reads as a golf ball, still visible
+   at address / in flight / on the green at couch distance.  BALL_R is the
+   render offset everywhere the ball sits on turf. */
+const BALL_R = 0.08;
 function makeBall() {
-  const g = new THREE.IcosahedronGeometry(0.16, 1);
+  const g = new THREE.IcosahedronGeometry(BALL_R, 1);
   const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color: 0xffffff }));
   m.visible = false;
   scene.add(m);
@@ -1870,7 +2170,7 @@ function makeBlob(r) {
   scene.add(m);
   return m;
 }
-const SHADOW_BALL = makeBlob(0.24), SHADOW_GOLFER = makeBlob(0.62);
+const SHADOW_BALL = makeBlob(0.13), SHADOW_GOLFER = makeBlob(0.62);   // ball blob scales with the FC-5 ball
 
 /* ── aim arc (FC-LOOK-1: dark-rimmed bright markers, one draw call) ──
    Point sprites carry their own dark outline in the fragment shader — a
@@ -1985,42 +2285,98 @@ const mapCtx = mapCv ? mapCv.getContext('2d') : null;
 const mapBase = document.createElement('canvas');
 mapBase.width = 168; mapBase.height = 216;
 const MAPS = { ox: 84, oy: 108, s: 1, ux: 0, uz: 1, cx: 0, cz: 0,
-               draws: 0, marker: [0, 0], dirty: true };
+               draws: 0, marker: [0, 0], dirty: true, baseDirty: true,
+               mode: 'full', zoomT: 1, anchor: [0, 0],
+               from: { s: 1, ox: 84, oy: 108 }, to: { s: 1, ox: 84, oy: 108 } };
 function mapXY(x, z, out) {
-  // world → map: u along tee→green (up), v lateral (right)
+  /* world → map: u along tee→green (up), v the data-frame lateral.  FC-5
+     aim-mirror fix: the data frame's +off is the player's LEFT as the camera
+     sees it (screen-right = (-cos aim, sin aim)), so the map's x axis takes
+     -v — aim-right now moves the marker RIGHT on the map, and doglegs match
+     what the player sees down the hole. */
   const dx = x - MAPS.cx, dz = z - MAPS.cz;
   const u = dx * MAPS.ux + dz * MAPS.uz;
   const v = dx * MAPS.uz - dz * MAPS.ux;
   out = out || [0, 0];
-  out[0] = MAPS.ox + v * MAPS.s;
+  out[0] = MAPS.ox - v * MAPS.s;
   out[1] = MAPS.oy - u * MAPS.s;
   return out;
+}
+/* ── FC-5 minimap zoom: full hole → approach window (≤120 yds) → green ──
+   Frames are computed per mode; startMapZoom eases s/ox/oy toward the new
+   frame (tickMapZoom, driven only while a transition is live). */
+function mapFrameFor(mode, p) {
+  const W2 = mapBase.width, H2 = mapBase.height;
+  let uMin, uMax, vMin, vMax, cap = 1e9;
+  const _a = [0, 0], _b = [0, 0];
+  const uv = (x, z, out) => { out[0] = x * MAPS.ux + z * MAPS.uz; out[1] = x * MAPS.uz - z * MAPS.ux; };
+  if (mode === 'green') {
+    uv(GREEN.x, GREEN.z, _a);
+    const r = Math.max(GREEN.grx, GREEN.grz) + 8;
+    uMin = _a[0] - r; uMax = _a[0] + r; vMin = _a[1] - r; vMax = _a[1] + r;
+    cap = 5.5;
+  } else if (mode === 'approach') {
+    uv(p.ball.x, p.ball.z, _a);
+    uv(GREEN.x, GREEN.z, _b);
+    const r = Math.max(GREEN.grx, GREEN.grz) + 10;
+    uMin = Math.min(_a[0] - 9, _b[0] - r); uMax = Math.max(_a[0] + 9, _b[0] + r);
+    vMin = Math.min(_a[1] - 12, _b[1] - r); vMax = Math.max(_a[1] + 12, _b[1] + r);
+    cap = 4.2;
+    MAPS.anchor[0] = p.ball.x; MAPS.anchor[1] = p.ball.z;
+  } else {
+    uMin = 1e9; uMax = -1e9; vMin = 1e9; vMax = -1e9;
+    for (const pt of CUR.pts) {
+      const u = pt[0] * MAPS.ux + pt[1] * MAPS.uz;
+      const v = pt[0] * MAPS.uz - pt[1] * MAPS.ux;
+      uMin = Math.min(uMin, u - 12); uMax = Math.max(uMax, u + 24);
+      vMin = Math.min(vMin, v - 34); vMax = Math.max(vMax, v + 34);
+    }
+    uMin = Math.min(uMin, -14);
+  }
+  let s = Math.min((H2 - 18) / (uMax - uMin), (W2 - 14) / (vMax - vMin));
+  s = Math.min(s, cap);
+  return { s, ox: W2 / 2 + ((vMin + vMax) / 2) * s, oy: H2 / 2 + ((uMin + uMax) / 2) * s };
+}
+function startMapZoom(mode, p) {
+  MAPS.mode = mode;
+  MAPS.from.s = MAPS.s; MAPS.from.ox = MAPS.ox; MAPS.from.oy = MAPS.oy;
+  const f = mapFrameFor(mode, p);
+  MAPS.to.s = f.s; MAPS.to.ox = f.ox; MAPS.to.oy = f.oy;
+  MAPS.zoomT = 0;
+}
+/* eased rescale — ticks only while a transition is live, so the frame
+   counter (event-driven-redraw law) stays honest at idle */
+function tickMapZoom(dt) {
+  if (MAPS.zoomT >= 1) return;
+  MAPS.zoomT = Math.min(1, MAPS.zoomT + dt / 0.38);
+  const e = smoothstep(MAPS.zoomT);
+  MAPS.s = lerp(MAPS.from.s, MAPS.to.s, e);
+  MAPS.ox = lerp(MAPS.from.ox, MAPS.to.ox, e);
+  MAPS.oy = lerp(MAPS.from.oy, MAPS.to.oy, e);
+  MAPS.baseDirty = true; MAPS.dirty = true;
 }
 const MAP_COLS = { rough: '#1d4520', fw: '#4da03e', fringe: '#3c8a34', green: '#63c353',
   tee: '#4da03e', sand: '#ecdfb2', water: '#2b6a9a', pin: '#f2f0e8' };
 function bakeMap(H) {
   if (!mapCtx) return;
-  const c = mapBase.getContext('2d');
-  const W2 = mapBase.width, H2 = mapBase.height;
   // frame: tee at (0,0); overall direction = tee→green
   const gp = clPoint(H, H.len);
   const gx = gp[0], gz = gp[1];
   const L = Math.hypot(gx, gz) || 1;
   MAPS.ux = gx / L; MAPS.uz = gz / L;
-  // extents of the centerline (±corridor) in this frame
-  let uMin = 1e9, uMax = -1e9, vMin = 1e9, vMax = -1e9;
-  for (const p of H.pts) {
-    const u = p[0] * MAPS.ux + p[1] * MAPS.uz;
-    const v = p[0] * MAPS.uz - p[1] * MAPS.ux;
-    uMin = Math.min(uMin, u - 12); uMax = Math.max(uMax, u + 24);
-    vMin = Math.min(vMin, v - 34); vMax = Math.max(vMax, v + 34);
-  }
-  uMin = Math.min(uMin, -14);
-  MAPS.s = Math.min((H2 - 18) / (uMax - uMin), (W2 - 14) / (vMax - vMin));
-  // center the frame
   MAPS.cx = 0; MAPS.cz = 0;
-  MAPS.ox = W2 / 2 - ((vMin + vMax) / 2) * MAPS.s;
-  MAPS.oy = H2 / 2 + ((uMin + uMax) / 2) * MAPS.s;
+  MAPS.mode = 'full'; MAPS.zoomT = 1;
+  const f = mapFrameFor('full', null);
+  MAPS.s = f.s; MAPS.ox = f.ox; MAPS.oy = f.oy;
+  drawMapBase(H);
+  MAPS.dirty = true;
+  MAPS.draws = 0;   // fresh hole, fresh counter
+}
+/* the schematic base — redrawn only at hole build and during zoom eases */
+function drawMapBase(H) {
+  const c = mapBase.getContext('2d');
+  const W2 = mapBase.width, H2 = mapBase.height;
+  MAPS.baseDirty = false;
   const P = (x, z) => mapXY(x, z);
   // rough panel
   c.clearRect(0, 0, W2, H2);
@@ -2047,7 +2403,7 @@ function bakeMap(H) {
   // radius, (tx,tz) = the along-play tangent at that station
   const ell = (x, z, rx, rz, tx, tz, fill) => {
     const m = P(x, z);
-    const sx2 = tx * MAPS.uz - tz * MAPS.ux;          // tangent on screen…
+    const sx2 = tz * MAPS.ux - tx * MAPS.uz;          // tangent on screen (map x = -v)
     const sy2 = -(tx * MAPS.ux + tz * MAPS.uz);       // (+y is down)
     const ang = Math.atan2(sy2, sx2) + Math.PI / 2;   // along-axis → vertical
     c.save();
@@ -2087,8 +2443,36 @@ function bakeMap(H) {
     c.lineWidth = 1;
     c.strokeRect(m[0] - 7, m[1] - 3, 14, 6);
   }
-  MAPS.dirty = true;
-  MAPS.draws = 0;   // fresh hole, fresh counter
+  // FC-5 green zoom: slope arrows on the map (downhill, white→red by grade)
+  if (MAPS.mode === 'green') {
+    for (let axk = -3; axk <= 3; axk++) {
+      for (let azk = -3; azk <= 3; azk++) {
+        const lx = axk * GREEN.grx / 3.4, lz = azk * GREEN.grz / 3.4;
+        if (Math.hypot(lx / GREEN.grx, lz / GREEN.grz) > 0.92) continue;
+        const x = GREEN.x + GREEN.tz * lx + GREEN.tx * lz;
+        const z = GREEN.z - GREEN.tx * lx + GREEN.tz * lz;
+        const gx2 = (groundH(x + 0.8, z) - groundH(x - 0.8, z)) / 1.6;
+        const gz2 = (groundH(x, z + 0.8) - groundH(x, z - 0.8)) / 1.6;
+        const mag = Math.hypot(gx2, gz2);
+        if (mag < 0.001) continue;
+        const dx = -gx2 / mag, dz = -gz2 / mag;         // downhill (world)
+        const mdx = -(dx * MAPS.uz - dz * MAPS.ux);     // map x = -v
+        const mdy = -(dx * MAPS.ux + dz * MAPS.uz);     // map y = -u
+        const m = P(x, z);
+        const L2 = 6.5;
+        const tipX = m[0] + mdx * L2, tipY = m[1] + mdy * L2;
+        const k2 = clamp(mag * 18, 0, 1);
+        c.strokeStyle = `rgba(255,${Math.round(255 - 150 * k2)},${Math.round(255 - 190 * k2)},0.85)`;
+        c.lineWidth = 1.4;
+        c.beginPath();
+        c.moveTo(m[0], m[1]); c.lineTo(tipX, tipY);
+        c.moveTo(tipX - mdy * 2 - mdx * 2.4, tipY + mdx * 2 - mdy * 2.4);
+        c.lineTo(tipX, tipY);
+        c.lineTo(tipX + mdy * 2 - mdx * 2.4, tipY - mdx * 2 - mdy * 2.4);
+        c.stroke();
+      }
+    }
+  }
 }
 /* overlay: ball dots + aim line + PROJECTED LANDING from the live arc sim */
 const _mp = [0, 0], _mp2 = [0, 0];
@@ -2096,6 +2480,7 @@ function redrawMap() {
   if (!mapCtx) return;
   MAPS.dirty = false;
   MAPS.draws++;
+  if (MAPS.baseDirty && CUR) drawMapBase(CUR);   // zoom ease moved the frame
   mapCtx.clearRect(0, 0, mapCv.width, mapCv.height);
   mapCtx.drawImage(mapBase, 0, 0);
   // pin
@@ -2311,7 +2696,7 @@ function launchShot(p, power) {
   const mul = lieMul(p.lie);
   const carry = Math.max(3, c.carry * mul * power);
   const loft = c.loft * Math.PI / 180;
-  const v = Math.sqrt(carry * GRAV / Math.sin(2 * loft));
+  const v = clubV(c, carry);        // FC-5: numeric solve — carry table exact under drag
   let ang = SHOT.aimAng;
   if (DIFF === 'pro') ang += (Math.random() - 0.5) * 2 * (power * power) * 0.05;   // ~±2.9 deg at full power
   if (p.lie === 0) ang += (Math.random() - 0.5) * 0.05;
@@ -2360,9 +2745,12 @@ function tickBall() {
   if (!FLIGHT.on) return null;
   FLIGHT.t += DT;
   if (FLIGHT.mode === 'fly') {
-    FLIGHT.vy -= GRAV * DT;
-    FLIGHT.vx += WIND.ax * DT;
-    FLIGHT.vz += WIND.az * DT;
+    // FC-5 tracer arc: gravity + quadratic air drag (see flatCarry — the
+    // per-club launch-speed solver integrates THESE exact lines)
+    const spD = Math.hypot(FLIGHT.vx, FLIGHT.vy, FLIGHT.vz);
+    FLIGHT.vy -= (GRAV + DRAG_K * spD * FLIGHT.vy) * DT;
+    FLIGHT.vx += (WIND.ax - DRAG_K * spD * FLIGHT.vx) * DT;
+    FLIGHT.vz += (WIND.az - DRAG_K * spD * FLIGHT.vz) * DT;
     FLIGHT.x += FLIGHT.vx * DT;
     FLIGHT.y += FLIGHT.vy * DT;
     FLIGHT.z += FLIGHT.vz * DT;
@@ -2479,7 +2867,7 @@ function simulateArc(p) {
     const mul = lieMul(p.lie);
     const carry = Math.max(3, c.carry * mul);
     const loft = c.loft * Math.PI / 180;
-    const v = Math.sqrt(carry * GRAV / Math.sin(2 * loft));
+    const v = clubV(c, carry);      // SHARED with launchShot — preview == flight
     let x = p.ball.x, y = p.ball.y + 0.2, z = p.ball.z;
     let vx = Math.sin(SHOT.aimAng) * Math.cos(loft) * v;
     let vz = Math.cos(SHOT.aimAng) * Math.cos(loft) * v;
@@ -2487,7 +2875,10 @@ function simulateArc(p) {
     const dt = 1 / 30;
     const samples = [];
     for (let i = 0; i < 400; i++) {
-      vy -= GRAV * dt; vx += WIND.ax * dt; vz += WIND.az * dt;
+      const spD = Math.hypot(vx, vy, vz);
+      vy -= (GRAV + DRAG_K * spD * vy) * dt;
+      vx += (WIND.ax - DRAG_K * spD * vx) * dt;
+      vz += (WIND.az - DRAG_K * spD * vz) * dt;
       x += vx * dt; y += vy * dt; z += vz * dt;
       samples.push(x, y, z);
       if (vy < 0 && y <= groundH(x, z)) { land = [x, groundH(x, z), z]; break; }
@@ -2662,7 +3053,7 @@ function refreshClub() {
     clubNameEl.textContent = c.n;
     clubCarryEl.textContent = Math.round(c.carry * lieMul(p.lie)) + ' yds carry';
   }
-  clubHintEl.textContent = SHOT.putter ? '' : 'L1/R1 CLUB';
+  clubHintEl.textContent = (SHOT.putter && p.lie === 2) ? '' : 'L1/R1 CLUB';
 }
 function refreshWind() {
   windTxtEl.textContent = WIND.mph + ' MPH';
@@ -3012,10 +3403,23 @@ function tickSim() {
       if (IN.aim) rot += IN.aim * 0.65 * DT;
       if (dragAimAcc) { rot += dragAimAcc * 0.0032; dragAimAcc = 0; }
       if (rot) { SHOT.aimAng -= rot; SHOT.arcDirty = true; refreshWind(); }   // minus: camera looks down +aim dir, so screen-right = decreasing aimAng
+      /* FC-5 putter-anywhere: the cycle continues past SW into the putter
+         from any turf lie (fairway/fringe/rough/tee) — no more overshooting
+         from the fringe.  Bunkers keep the loft-out restriction (9i+, never
+         the putter).  On the green the putter stays the only club. */
       if (!SHOT.putter) {
         const minClub = p.lie === 4 ? 8 : 0;   // bunker: must loft out (9i+)
         if (IN.clubUp && SHOT.club > minClub) { SHOT.club--; SHOT.arcDirty = true; SFX.menu(); refreshClub(); }
-        if (IN.clubDown && SHOT.club < CLUBS.length - 1) { SHOT.club++; SHOT.arcDirty = true; SFX.menu(); refreshClub(); }
+        if (IN.clubDown) {
+          if (SHOT.club < CLUBS.length - 1) { SHOT.club++; SHOT.arcDirty = true; SFX.menu(); refreshClub(); }
+          else if (p.lie !== 4) {
+            SHOT.putter = true;
+            SHOT.puttMax = clamp(distToPin(p.ball.x, p.ball.z) * 2.5, 6, 90);
+            SHOT.arcDirty = true; SFX.menu(); refreshClub();
+          }
+        }
+      } else if (p.lie !== 2) {
+        if (IN.clubUp) { SHOT.putter = false; SHOT.club = CLUBS.length - 1; SHOT.arcDirty = true; SFX.menu(); refreshClub(); }
       }
       if (IN.peek) {
         if (SHOT.putter) { greadOn = !greadOn; state = greadOn ? 'greenread' : 'address'; camSnap(); }
@@ -3162,7 +3566,7 @@ function updateVisuals(dt, now) {
     if (!pl || state === 'title' || state === 'diffpick' || state === 'roundpick' || pl.holed) { m.visible = false; continue; }
     m.visible = true;
     if (i === turn && (state === 'flight' || state === 'settle' && FLIGHT.on)) {
-      m.position.set(FLIGHT.x, FLIGHT.y + 0.16, FLIGHT.z);
+      m.position.set(FLIGHT.x, FLIGHT.y + BALL_R, FLIGHT.z);
     } else if (i === turn && state === 'replay') {
       const dur = Math.max(2.5, FLIGHT.pathN / 40);
       const f = clamp(replayT / dur, 0, 1) * (FLIGHT.pathN - 1);
@@ -3170,10 +3574,10 @@ function updateVisuals(dt, now) {
       const i1 = Math.min(FLIGHT.pathN - 1, i0 + 1);
       m.position.set(
         lerp(FLIGHT.path[i0 * 3], FLIGHT.path[i1 * 3], frac),
-        lerp(FLIGHT.path[i0 * 3 + 1], FLIGHT.path[i1 * 3 + 1], frac) + 0.16,
+        lerp(FLIGHT.path[i0 * 3 + 1], FLIGHT.path[i1 * 3 + 1], frac) + BALL_R,
         lerp(FLIGHT.path[i0 * 3 + 2], FLIGHT.path[i1 * 3 + 2], frac));
     } else {
-      m.position.set(pl.ball.x, pl.ball.y + 0.16, pl.ball.z);
+      m.position.set(pl.ball.x, pl.ball.y + BALL_R, pl.ball.z);
     }
   }
   const activeBall = BALLS[turn];
@@ -3193,19 +3597,28 @@ function updateVisuals(dt, now) {
     const gx = p.ball.x + lx * 0.85, gz = p.ball.z + lz * 0.85;
     g.position.set(gx, groundH(gx, gz), gz);
     g.rotation.y = Math.atan2(p.ball.x - gx, p.ball.z - gz);
-    if (state === 'meter') golferPose(g, 'back', SHOT.meterV / 100, visT);
-    else if (state === 'swing') golferPose(g, 'thru', smoothstep(swingT / 0.25), visT, swingPower);
-    else if (state === 'flight' && FLIGHT.t < 0.6) golferPose(g, 'hold', 1, visT);
+    // FC-5: putts use the short pendulum stroke states, never the full swing
+    if (state === 'meter') golferPose(g, SHOT.putter ? 'pback' : 'back', SHOT.meterV / 100, visT);
+    else if (state === 'swing') golferPose(g, SHOT.putter ? 'pthru' : 'thru', smoothstep(swingT / 0.25), visT, swingPower);
+    else if (state === 'flight' && FLIGHT.t < 0.6) golferPose(g, SHOT.putter ? 'phold' : 'hold', 1, visT);
     else golferPose(g, 'idle', 0, visT);
-    // the caddie bag stands off the golfer's left, facing play
-    BAG.visible = true;
-    const bx = p.ball.x + lx * 3.6 - aimDirX() * 1.4, bz = p.ball.z + lz * 3.6 - aimDirZ() * 1.4;
-    BAG.position.set(bx, groundH(bx, bz), bz);
-    BAG.rotation.y = SHOT.aimAng + 0.6;
+    // FC-5: the caddie (bag on shoulder) stands relaxed off the golfer,
+    // facing the play, with a small idle sway
+    const cad = CADDIES[p.i];
+    for (let ci = 0; ci < CADDIES.length; ci++) CADDIES[ci].visible = false;
+    cad.visible = true;
+    // screen-left of the golfer (clear of the minimap panel), a step back
+    const bx = p.ball.x - lx * 3.4 - aimDirX() * 2.0, bz = p.ball.z - lz * 3.4 - aimDirZ() * 2.0;
+    cad.position.set(bx, groundH(bx, bz), bz);
+    cad.rotation.y = Math.atan2(p.ball.x - bx, p.ball.z - bz) + 0.35 + Math.sin(visT * 0.55) * 0.05;
+    cad.rotation.z = Math.sin(visT * 0.8) * 0.016;
     // painted blob only when the real 1024 shadow isn't anchoring him
     SHADOW_GOLFER.visible = !(LOOK && FX.shadow);
     SHADOW_GOLFER.position.set(gx, groundH(gx, gz) + 0.05, gz);
-  } else { SHADOW_GOLFER.visible = false; BAG.visible = false; }
+  } else {
+    SHADOW_GOLFER.visible = false;
+    for (let ci = 0; ci < CADDIES.length; ci++) CADDIES[ci].visible = false;
+  }
   // aim arc
   arcPts.visible = (state === 'address' || state === 'meter') && !peekOn;
   ringMesh.visible = arcPts.visible && !SHOT.putter;
@@ -3237,7 +3650,20 @@ function updateVisuals(dt, now) {
     const fx2 = camera.position.x + _v2.x * 34, fz2 = camera.position.z + _v2.z * 34;
     aimSun(fx2, groundH(fx2, fz2), fz2);
   }
-  // hole HUD minimap: EVENT-driven redraw only (aim/club/ball/turn changes)
+  // FC-5 minimap zoom: pick the mode from the active lie/distance (only at
+  // the shot beats), ease the frame when it changes; approach re-anchors
+  // when the ball has moved.  Idle at a settled frame stays redraw-free.
+  if (CUR && GREEN && (state === 'address' || state === 'meter' || state === 'greenread')) {
+    const zp = activeP();
+    const dm = zp.lie === 2 ? 'green'
+             : distToPin(zp.ball.x, zp.ball.z) <= 120 ? 'approach' : 'full';
+    if (dm !== MAPS.mode ||
+        (dm === 'approach' && Math.hypot(zp.ball.x - MAPS.anchor[0], zp.ball.z - MAPS.anchor[1]) > 3)) {
+      startMapZoom(dm, zp);
+    }
+  }
+  tickMapZoom(dt);
+  // hole HUD minimap: EVENT-driven redraw only (aim/club/ball/turn/zoom changes)
   if (MAPS.dirty) redrawMap();
 }
 
@@ -3413,7 +3839,7 @@ window.__fc = {
   },
   surfAt: (x, z) => surfAt(x, z),
   groundH: (x, z) => groundH(x, z),
-  green: () => ({ x: GREEN.x, z: GREEN.z, grx: GREEN.grx, grz: GREEN.grz, h: GREEN.h }),
+  green: () => ({ x: GREEN.x, z: GREEN.z, grx: GREEN.grx, grz: GREEN.grz, h: GREEN.h, tx: GREEN.tx, tz: GREEN.tz }),
   clWorld: (d, off) => { const w = clWorld(CUR, d, off); return [w[0], w[1]]; },
   info: () => ({ calls: TL.calls, tris: TL.tris, fps: TL.fps }),
   lastBuild: () => window.__fcLastBuild,
@@ -3436,6 +3862,52 @@ window.__fc = {
   mapDraws: () => MAPS.draws,
   mapMarker: () => MAPS.marker.slice(),
   look: () => ({ look: LOOK, shadow: FX.shadow, post: FX.post, msaa: FX.msaa, casterTris: casterTris() }),
+  // ── FC-5 hooks ──
+  mapZoom: () => MAPS.mode,
+  mapScale: () => MAPS.s,
+  pose: () => { const g = GOLFERS[turn]; return (g && g.userData.mode) || ''; },
+  /* club range sweep — THE carry-table integrity witness.  Drives the REAL
+     launchShot + tickBall pipeline for every club at 100% power on flat
+     ground with no wind (the environment is controlled; the mechanic — the
+     flight sim — is the genuine article), plus the SHARED arc preview for
+     the same shot.  Returns per-club {table, carry, prev, apex, hang}. */
+  rangeTest: () => {
+    const savedDiff = DIFF; DIFF = 'amateur';
+    const wAx = WIND.ax, wAz = WIND.az;
+    WIND.ax = 0; WIND.az = 0;
+    const savedGround = groundH;
+    const savedTrees = TREES.slice(); TREES.length = 0;
+    const savedAim = SHOT.aimAng, savedClub = SHOT.club, savedPutter = SHOT.putter;
+    groundH = () => 0;
+    SHOT.aimAng = 0;
+    const tmp = { ball: { x: 0, y: 0, z: 0 }, lie: 1 };
+    const out = [];
+    for (let ci = 0; ci < CLUBS.length; ci++) {
+      SHOT.club = ci; SHOT.putter = false;
+      simulateArc(tmp);
+      const prev = Math.hypot(SHOT.landX, SHOT.landZ);
+      launchShot(tmp, 1);
+      let carry = 0, hang = 0, guard = 0;
+      while (FLIGHT.on && guard++ < 3600) {
+        const r = tickBall();
+        if (r && (r.ev === 'landed' || r.ev === 'bounce')) {
+          carry = Math.hypot(FLIGHT.x, FLIGHT.z); hang = FLIGHT.t; break;
+        }
+        if (r) break;
+      }
+      out.push({ club: CLUBS[ci].n, table: CLUBS[ci].carry, launch: CLUBS[ci].loft,
+        carry: +carry.toFixed(1), prev: +prev.toFixed(1),
+        apex: +FLIGHT.peakY.toFixed(1), hang: +hang.toFixed(2) });
+      FLIGHT.on = false;
+    }
+    FLIGHT.pathN = 0;
+    groundH = savedGround;
+    for (const t of savedTrees) TREES.push(t);
+    DIFF = savedDiff; WIND.ax = wAx; WIND.az = wAz;
+    SHOT.aimAng = savedAim; SHOT.club = savedClub; SHOT.putter = savedPutter;
+    SHOT.arcDirty = true; MAPS.dirty = true;
+    return out;
+  },
 };
 
 /* ── boot ── */
