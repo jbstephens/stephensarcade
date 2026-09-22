@@ -245,7 +245,7 @@ body.tp-on #hintLine { bottom: 238px; }
    ═══════════════════════════════════════════════════════════════════════ */
 const VW = 1280, VH = 720;
 const DT = 1 / 60;
-const BUILD_TAG = 'FC-8-RAIN';
+const BUILD_TAG = 'FC-8B-GLIDE';
 window.__fcBuild = BUILD_TAG;
 
 const QS = new URLSearchParams(location.search);
@@ -4126,6 +4126,27 @@ function startHole() {
     FLY.acp = acp;
     FLY.dStart = CUR.len + 34;
     FLY.dEnd = 12;
+    // FC-8 fix (John: "very bumpy"): the camera used raw groundH along the
+    // path, so the meso undulation shook the flyover.  Anchor it to a
+    // heavily-smoothed altitude profile sampled once here — the macro trend
+    // of the hole without the swales.  (Clearance is clamped at use time.)
+    {
+      const lo = FLY.dEnd - 74, hi = FLY.dStart + 6, N = 40;
+      const raw = new Float64Array(N);
+      for (let i = 0; i < N; i++) {
+        const w = clWorld(CUR, lo + (hi - lo) * i / (N - 1), 0);
+        raw[i] = groundH(w[0], w[1]);
+      }
+      const sm = Float64Array.from(raw);
+      for (let pass = 0; pass < 4; pass++) {
+        for (let i = 1; i < N - 1; i++) sm[i] = (sm[i - 1] + sm[i] * 2 + sm[i + 1]) / 4;
+      }
+      FLY.prof = d => {
+        const f = clamp((d - lo) / (hi - lo), 0, 1) * (N - 1);
+        const i0 = Math.floor(f), i1 = Math.min(N - 1, i0 + 1);
+        return lerp(sm[i0], sm[i1], f - i0);
+      };
+    }
     flyT = 0;
     flyRec = { minPitch: 90, lastD: 1e9, mono: true, endPos: null, n: 0, minClear: 1e9 };
     state = 'flyover';
@@ -4798,7 +4819,9 @@ function updateCamera(dt) {
       const acp = FLY.acp;
       const d = lerp(FLY.dStart, FLY.dEnd, e);
       const w = clWorld(CUR, d, 0);
-      const py0 = groundH(w[0], w[1]) + lerp(27, 10, e);
+      // smoothed profile for altitude (no swale bumps), raw ground only as a
+      // hard clearance floor over crests the smoothing shaved off
+      const py0 = Math.max(FLY.prof(d) + lerp(27, 10, e), groundH(w[0], w[1]) + 5);
       const blend = smoothstep(clamp((e - 0.78) / 0.22, 0, 1));
       const px = lerp(w[0], acp[0], blend), py = lerp(py0, acp[1], blend), pz = lerp(w[1], acp[2], blend);
       // look: tee-ward down the hole while flying; the last stretch sweeps
@@ -4807,7 +4830,7 @@ function updateCamera(dt) {
       // down for a beat, measured -81°)
       const ld = d - lerp(66, 46, e);   // opening beat: the green centered in frame
       const lw = clWorld(CUR, ld, 0);
-      const ly0 = groundH(lw[0], lw[1]) + lerp(2.0, 2.4, e);
+      const ly0 = FLY.prof(ld) + lerp(2.0, 2.4, e);   // smoothed: no pitch bob
       const yawPath = Math.atan2(lw[0] - px, lw[1] - pz);
       const pitPath = Math.atan2(ly0 - py, Math.hypot(lw[0] - px, lw[1] - pz) || 1e-6);
       const yawAdr = Math.atan2(acp[3] - acp[0], acp[5] - acp[2]);
@@ -4827,6 +4850,16 @@ function updateCamera(dt) {
         const pitch = Math.atan2(lyy - py, dxz) * 180 / Math.PI;
         if (pitch < flyRec.minPitch) flyRec.minPitch = pitch;
         if (d > flyRec.lastD + 0.01) flyRec.mono = false;
+        // smoothness witness (FC-8 bumpy-flyover regression): per-frame
+        // vertical kink of the camera — swale-tracking read ~0.3+, the
+        // smoothed profile reads ~0.001; gate at 0.02
+        if (flyRec.prevPy !== undefined) {
+          const dPy = py - flyRec.prevPy;
+          if (flyRec.prevDPy !== undefined)
+            flyRec.maxKink = Math.max(flyRec.maxKink || 0, Math.abs(dPy - flyRec.prevDPy));
+          flyRec.prevDPy = dPy;
+        }
+        flyRec.prevPy = py;
         flyRec.lastD = d;
         flyRec.endPos = [px, py, pz];
         // FC-7 camera-comfort witness: with real relief under the path the
