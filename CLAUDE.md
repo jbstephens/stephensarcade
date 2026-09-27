@@ -167,6 +167,13 @@ Measured at 720p on the real kiosk (fresh boot, lab/index.html over LAN):
   locks ~30 and only a reboot cures it). Watchdog crons already reboot a
   parked idle console; never declare a perf regression off an un-rebooted
   Pi.
+- NEVER read fps with a live view attached: CDP `Page.startScreencast`
+  (any continuous frame readback / "live view") costs 8–15fps flat on
+  the Pi and is INVISIBLE to JS timings and GL counts — the tax lands in
+  the compositor. It faked a ~54fps "boss regression" (ZOOMIES Cucumber
+  King, 2026-09-27) that read 60.0 clean. Re-measure with nothing
+  watching before hunting a payer; one-shot `captureScreenshot` and
+  `Performance.enable` are free.
 - Chromium on the Pi spoofs its UA as "CrOS x86_64" — never UA-sniff.
   Console mode = the `?fx=low` flag (persisted to localStorage
   `arcade_lowfx`), which kills glows/cursor/backdrop-filter site-wide.
