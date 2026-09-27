@@ -159,5 +159,13 @@ window.GAMES_DATA = [
     "status": "PRESS START",
     "icon": "fairway",
     "source": "https://ses.q5labs.co/fairwayclassic/index.html"
+  },
+  {
+    "slug": "zoomies",
+    "title": "ZOOMIES!",
+    "genre": "PLATFORMER",
+    "status": "PRESS START",
+    "icon": "zoomies",
+    "source": "https://ses.q5labs.co/zoomies/index.html"
   }
 ];
