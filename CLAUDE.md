@@ -96,6 +96,18 @@ count. Use the `/new-game` skill for the full checklist.
 - Drop-in 2P where it makes sense: "P2 PRESS ✕ TO JOIN" on title + START
   joins mid-game; shared score; down-then-respawn rather than hard death.
 - localStorage for best scores. WebAudio synth SFX, context created lazily.
+- SAVE SLOTS (house rule — two boys share this console): any game that
+  persists progress/bests ships with per-player slots (default 4), picked
+  by pad at boot and switchable from the menu. Each slot is an
+  independent copy of that game's save (its own bests, unlocks,
+  collectibles) under a kid-proof identity (a colored avatar + a short
+  arcade-style tag — pad-trivial, no keyboard). MIGRATION LAW: a legacy
+  single-save must fold into slot 1 losslessly on first load, and the old
+  key stays as a backup (never delete it — the offline-arcade save
+  caution). Zoomies is the reference implementation; a shared
+  `lib/saveslots.js` (à la controller.js) is the eventual way to make
+  this a real rule instead of per-game reinvention — retrofit older games
+  when they're next touched, not in a big sweep.
 - Don't add analytics/back-button/quit/low-fx code — the bundler injects it.
 
 ## Performance commandments (learned on real hardware)
