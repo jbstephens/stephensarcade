@@ -27,6 +27,8 @@ SRC=$(python3 - "$SLUG" <<'PY'
 import json, sys
 for g in json.load(open("games.json")):
     if g["slug"] == sys.argv[1]:
+        if "source" not in g:   # link-only card (GAME FACTORY): synced by bundle-factory.sh, not shipped
+            sys.exit(f"ship.sh: {sys.argv[1]!r} is a link-only card (no source) — nothing to ship")
         print(g["source"]); break
 else:
     sys.exit(f"ship.sh: unknown slug {sys.argv[1]!r} — not in games.json")

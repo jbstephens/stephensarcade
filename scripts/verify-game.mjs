@@ -136,7 +136,7 @@ async function main() {
   const arg = process.argv[2];
   if (!arg) { console.error('usage: verify-game.mjs <slug>|all'); process.exit(2); }
   const games = JSON.parse(fs.readFileSync(path.join(ROOT, 'games.json'), 'utf8'));
-  const slugs = arg === 'all' ? games.map(g => g.slug) : [arg];
+  const slugs = arg === 'all' ? games.filter(g => g.source).map(g => g.slug) : [arg];   // link-only cards (href, no source) have no bundle
   if (arg !== 'all' && !games.some(g => g.slug === arg) && !fs.existsSync(path.join(ROOT, 'games', arg, 'index.html'))) {
     console.error(`unknown game "${arg}" — not in games.json or games/`); process.exit(2);
   }

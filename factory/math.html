@@ -1,0 +1,748 @@
+<meta charset="utf-8">
+<title>Math Rocket</title>
+<!-- injected by scripts/inject-factory.py (HEAD, before touchpad.js) — hide phantom
+     DualShock sub-devices ("... Motion Sensors", "... Touchpad") and, when a
+     standard-mapping pad exists, every non-standard device. Original indices
+     are kept (filtered slots read null), exactly like lib/controller.js. -->
+<script id="__gf_padfilter">
+(function () {
+  var nav = window.navigator;
+  if (!nav || typeof nav.getGamepads !== 'function' || nav.__gfPadFilter) return;
+  var orig = nav.getGamepads;
+  var PHANTOM = /motion sensors|touchpad/i;
+  var out = [];                       // reused every call: no per-frame allocation
+  function filtered() {
+    var src = orig.call(nav);
+    if (!src) return src;
+    var n = src.length, anyStd = false, i, p;
+    for (i = 0; i < n; i++) { p = src[i]; if (p && p.mapping === 'standard') anyStd = true; }
+    out.length = n;
+    for (i = 0; i < n; i++) {
+      p = src[i];
+      out[i] = (!p || PHANTOM.test(p.id || '') || (anyStd && p.mapping !== 'standard')) ? null : p;
+    }
+    return out;
+  }
+  try { nav.getGamepads = filtered; } catch (e) {}
+  if (nav.getGamepads !== filtered) {
+    try { Object.defineProperty(nav, 'getGamepads', { value: filtered, configurable: true, writable: true }); } catch (e) {}
+  }
+  try { nav.__gfPadFilter = true; } catch (e) {}
+})();
+</script>
+<script src="touchpad.js?v=2"></script>
+<style>
+  html, body { height: 100%; }
+  body { margin: 0; background: #0b1026; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+  canvas { width: min(100vw, calc(100vh * 960 / 520)); height: auto; display: block; border-radius: 12px; box-shadow: 0 10px 40px rgba(0,0,0,.5); cursor: pointer; }
+</style>
+<canvas id="game" width="960" height="520"></canvas>
+<script>
+const C = document.getElementById('game'), ctx = C.getContext('2d');
+const W = 960, H = 520;
+let frame = 0;
+const ri = (a, b) => a + Math.floor(Math.random() * (b - a + 1));
+const pick = a => a[Math.floor(Math.random() * a.length)];
+const shuffle = a => { for (let i = a.length - 1; i > 0; i--) { const j = ri(0, i); [a[i], a[j]] = [a[j], a[i]]; } return a; };
+
+// ---------- Sound ----------
+let actx = null, musicOn = true, nextNote = 0, mStep = 0;
+function audio() { if (!actx) { try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch (_) {} } return actx; }
+function note(f, start, dur, wave = 'square', vol = 0.07, slide = null) {
+  if (!actx) return;
+  const t = actx.currentTime + start, o = actx.createOscillator(), g = actx.createGain();
+  o.type = wave; o.frequency.setValueAtTime(f, t); if (slide) o.frequency.exponentialRampToValueAtTime(slide, t + dur);
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g); g.connect(actx.destination); o.start(t); o.stop(t + dur);
+}
+const sfx = {
+  click: () => note(700, 0, 0.05, 'square', 0.04),
+  right: () => { note(784, 0, 0.1); note(1047, 0.1, 0.18); },
+  wrong: () => note(300, 0, 0.3, 'triangle', 0.1, 200),
+  pop: () => { note(900, 0, 0.08, 'sine', 0.12, 2000); },
+  blast: () => note(120, 0, 0.6, 'sawtooth', 0.06, 600),
+  win: () => [523, 659, 784, 1047, 784, 1047, 1319].forEach((f, i) => note(f, i * 0.12, 0.25, 'square', 0.08)),
+  streak: n => [0, 1, 2].forEach(i => note(880 + n * 40 + i * 220, i * 0.06, 0.1, 'square', 0.05)),
+};
+const TUNE = [60, 64, 67, 72, 67, 64, 62, 65, 69, 74, 69, 65, 64, 67, 71, 76, 74, 71, 72, 0, 67, 0, 64, 0];
+function playMusic() {
+  if (!actx || !musicOn) return;
+  if (nextNote < actx.currentTime) nextNote = actx.currentTime + 0.05;
+  while (nextNote < actx.currentTime + 0.2) {
+    const t = nextNote - actx.currentTime, m = TUNE[mStep % TUNE.length];
+    if (m) note(440 * Math.pow(2, (m + 12 - 69) / 12), t, 0.18, 'triangle', 0.025);
+    nextNote += 0.22; mStep++;
+  }
+}
+
+// ---------- The planets (each one teaches something) ----------
+const PLANETS = [
+  { id: 'moon', name: 'The Moon', skill: 'Adding to 10', color: '#cfd8dc', ring: false },
+  { id: 'mars', name: 'Mars', skill: 'Taking away from 10', color: '#ff7043', ring: false },
+  { id: 'jupiter', name: 'Jupiter', skill: 'Adding to 20', color: '#ffb74d', ring: false },
+  { id: 'saturn', name: 'Saturn', skill: 'Taking away from 20', color: '#ffe082', ring: true },
+  { id: 'neptune', name: 'Neptune', skill: 'Tens and big numbers', color: '#4fc3f7', ring: false },
+  { id: 'star', name: 'Star Station', skill: 'Times tables (2, 5, 10)', color: '#ce93d8', ring: true },
+  // harder planets (Mom's idea!)
+  { id: 'comet', name: 'Comet Zone', skill: 'Big adding (27 + 15)', color: '#80deea', ring: false },
+  { id: 'blackhole', name: 'Black Hole', skill: 'Big taking away (52 − 17)', color: '#7e57c2', ring: true },
+  { id: 'galaxy', name: 'Galaxy Gate', skill: 'ALL times tables', color: '#f06292', ring: true },
+];
+const OBJ = ['🍎', '⭐', '🍪', '🐟', '🎈', '🍓', '🚀', '🐞'];
+function makeQuestion(pid) {
+  let a, b, op, ans;
+  if (pid === 'moon') { ans = ri(2, 10); a = ri(0, ans); b = ans - a; op = '+'; }
+  else if (pid === 'mars') { a = ri(3, 10); b = ri(0, a); ans = a - b; op = '−'; }
+  else if (pid === 'jupiter') { ans = ri(8, 20); a = ri(Math.max(0, ans - 10), Math.min(10, ans)); b = ans - a; if (Math.random() < 0.5) [a, b] = [b, a]; op = '+'; }
+  else if (pid === 'saturn') { a = ri(10, 20); b = ri(1, 10); ans = a - b; op = '−'; }
+  else if (pid === 'neptune') {
+    const k = ri(0, 2);
+    if (k === 0) { a = ri(1, 8) * 10; b = ri(1, 9 - a / 10) * 10; op = '+'; ans = a + b; }
+    else if (k === 1) { a = ri(1, 8) * 10 + ri(0, 5); b = ri(1, 4); op = '+'; ans = a + b; }
+    else { a = ri(3, 9) * 10; b = ri(1, a / 10 - 1) * 10; op = '−'; ans = a - b; }
+  } else if (pid === 'comet') { a = ri(12, 69); b = ri(11, Math.min(39, 99 - a)); if ((a % 10) + (b % 10) < 10 && Math.random() < 0.7) b = Math.min(99 - a, b + (9 - b % 10)); op = '+'; ans = a + b; }
+  else if (pid === 'blackhole') { a = ri(31, 99); b = ri(11, a - 10); if ((a % 10) >= (b % 10) && Math.random() < 0.7 && a % 10 < 9) b = Math.floor(b / 10) * 10 + ri(a % 10 + 1, 9); if (b >= a) b = a - ri(5, 12); op = '−'; ans = a - b; }
+  else if (pid === 'galaxy') { a = ri(3, 10); b = ri(2, 10); if (Math.random() < 0.5) [a, b] = [b, a]; op = '×'; ans = a * b; }
+  else { a = pick([2, 5, 10]); b = ri(1, 10); if (Math.random() < 0.5) [a, b] = [b, a]; op = '×'; ans = a * b; }
+  const choices = new Set([ans]), step = pid === 'neptune' && ans % 10 === 0 ? 10 : pid === 'star' ? pick([1, 2, 5]) : pid === 'galaxy' ? pick([1, a, b]) : pid === 'comet' || pid === 'blackhole' ? pick([1, 1, 10]) : 1;
+  let tries = 0;
+  while (choices.size < 4 && tries++ < 50) { const c = ans + pick([-3, -2, -1, 1, 2, 3]) * step; if (c >= 0) choices.add(c); }
+  while (choices.size < 4) choices.add(ans + choices.size + 4);
+  return { a, b, op, ans, choices: shuffle([...choices]), obj: pick(OBJ) };
+}
+
+// ---------- Save ----------
+let S = { stars: {}, unlocked: 1, best: 0, stickers: [] };
+try { const s = JSON.parse(localStorage.getItem('mathRocket') || 'null'); if (s) S = Object.assign(S, s); } catch (_) {}
+S.unlocked = Math.max(S.unlocked, ...PLANETS.map((p, i) => S.stickers.includes(p.id) ? Math.min(PLANETS.length, i + 2) : 1));
+function save() { try { localStorage.setItem('mathRocket', JSON.stringify(S)); } catch (_) {} }
+
+// ---------- Game state ----------
+let scene = 'title', planet = 0, q = null, qNum = 0, mistakes = 0, triesThis = 0, streak = 0, showHelp = false, feedback = null, feedT = 0;
+let rocketX = 0, particles = [], stars = [];
+for (let i = 0; i < 90; i++) stars.push({ x: Math.random() * W, y: Math.random() * H, s: Math.random() * 2 + 0.5, t: Math.random() * 7 });
+const QUESTIONS = 10;
+const mapPos = i => i < 5 ? [70 + i * 175, 130] : [70 + (8 - i) * 175 + 87, 315];   // top-left of each planet button
+const CHEERS = ['Great job!', 'You got it!', 'Awesome!', 'Super smart!', 'Math star!', 'Wow!', 'Correct!', 'Brilliant!'];
+
+function startPlanet(i) { rocketX = 210; planet = i; qNum = 0; mistakes = 0; streak = 0; scene = 'quiz'; nextQuestion(); sfx.blast(); }
+function nextQuestion() { q = makeQuestion(PLANETS[planet].id); triesThis = 0; showHelp = PLANETS[planet].id === 'moon' || PLANETS[planet].id === 'mars'; feedback = null; }
+function answer(i) {
+  if (feedback && feedback.ok) return;
+  const c = q.choices[i];
+  if (c === q.ans) {
+    streak++; qNum++; sfx.right(); if (streak >= 3) sfx.streak(streak);
+    feedback = { ok: true, text: streak >= 3 ? `${pick(CHEERS)} 🔥 ${streak} in a row!` : pick(CHEERS) };
+    feedT = 70; burst(W / 2, 250, ['#ffd740', '#69f0ae', '#40c4ff', '#ff4081'], 24);
+  } else {
+    streak = 0; mistakes++; triesThis++; sfx.wrong();
+    q.wrong = q.wrong || []; q.wrong.push(c);
+    showHelp = true;
+    feedback = { ok: false, text: triesThis >= 2 ? `The answer is ${q.ans}. Let's count it together!` : 'Not quite! Count the pictures and try again!' };
+    feedT = 0;
+    if (triesThis >= 2) { feedback.reveal = true; }
+  }
+}
+function finishPlanet() {
+  const st = mistakes <= 1 ? 3 : mistakes <= 4 ? 2 : 1;
+  S.stars[PLANETS[planet].id] = Math.max(S.stars[PLANETS[planet].id] || 0, st);
+  if (planet + 1 >= S.unlocked && planet + 1 < PLANETS.length) S.unlocked = planet + 2;
+  const sticker = PLANETS[planet].id; if (!S.stickers.includes(sticker)) S.stickers.push(sticker);
+  save(); scene = 'landed'; landedStars = st; sfx.win(); confetti();
+}
+let landedStars = 0;
+
+// ---------- Balloon Pop ----------
+let bp = null;
+function startBalloons() {
+  bp = { score: 0, time: 60 * 60, balloons: [], q: null, wrongFlash: 0 };
+  newBalloonQ(); scene = 'balloons'; sfx.pop();
+}
+function newBalloonQ() {
+  const pool = PLANETS.slice(0, Math.max(2, S.unlocked)).map(p => p.id);
+  bp.q = makeQuestion(pick(pool));
+  bp.balloons = bp.q.choices.map((v, i) => ({ v, x: 140 + i * 225 + ri(-30, 30), y: H + 60 + ri(0, 120), vy: 0.7 + Math.random() * 0.5, c: pick(['#ff5252', '#ffd740', '#69f0ae', '#40c4ff', '#e040fb', '#ff9800']), wob: Math.random() * 7, popped: false }));
+}
+function updateBalloons() {
+  if (bp.time > 0) bp.time--;
+  if (bp.time === 0) { scene = 'balloonsDone'; if (bp.score > S.best) { S.best = bp.score; bp.newBest = true; save(); } sfx.win(); confetti(); bp.time = -1; return; }
+  if (bp.wrongFlash > 0) bp.wrongFlash--;
+  for (const b of bp.balloons) {
+    b.y -= b.vy + bp.score * 0.03; b.wob += 0.03;
+    if (b.y < 30) b.y = H + 60;             // float around again
+  }
+}
+function clickBalloon(x, y) {
+  for (const b of bp.balloons) {
+    if (b.popped) continue;
+    const bx = b.x + Math.sin(b.wob) * 12;
+    if (Math.hypot(x - bx, y - b.y) < 46) {
+      b.popped = true; burst(bx, b.y, [b.c, '#fff'], 18);
+      if (b.v === bp.q.ans) { bp.score++; sfx.pop(); sfx.right(); setTimeout(() => { if (scene === 'balloons') newBalloonQ(); }, 250); }
+      else { sfx.pop(); sfx.wrong(); bp.wrongFlash = 40; }
+      return;
+    }
+  }
+}
+
+// ---------- Particles ----------
+function burst(x, y, cols, n = 16) { for (let i = 0; i < n; i++) { const a = Math.random() * 7, s = Math.random() * 5 + 2; particles.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: 40, c: pick(cols), star: Math.random() < 0.4 }); } }
+function confetti() { for (let i = 0; i < 90; i++) particles.push({ x: Math.random() * W, y: -Math.random() * 200, vx: Math.random() - .5, vy: Math.random() * 2 + 1, life: 220, c: pick(['#ff5252', '#ffd740', '#69f0ae', '#40c4ff', '#e040fb']) }); }
+
+// ---------- Buttons & input ----------
+let buttons = [];
+function btn(x, y, w, h, label, fn, o = {}) { buttons.push({ x, y, w, h, label, fn, ...o }); }
+function buildButtons() {
+  buttons = [];
+  if (scene === 'title') {
+    btn(W / 2 - 300, 300, 280, 110, 'Space Journey', () => { scene = 'map'; }, { icon: '🚀', color: '#5c6bc0' });
+    btn(W / 2 + 20, 300, 280, 110, 'Balloon Pop', startBalloons, { icon: '🎈', color: '#ec407a' });
+  } else if (scene === 'map') {
+    PLANETS.forEach((p, i) => {
+      const [x, y] = mapPos(i), open = i < S.unlocked;
+      btn(x, y, 130, 150, p.name, () => { if (open) startPlanet(i); else { sfx.wrong(); mapMsg = 60; } }, { planet: p, open, stars: S.stars[p.id] || 0 });
+    });
+    btn(20, 20, 120, 46, '◀ Back', () => { scene = 'title'; }, { color: '#455a64', small: true });
+  } else if (scene === 'quiz') {
+    if (!(feedback && feedback.ok)) q.choices.forEach((c, i) => btn(110 + i * 190, 410, 170, 90, String(c), () => answer(i), { answer: true, key: i + 1, wrong: q.wrong && q.wrong.includes(c), right: feedback && feedback.reveal && c === q.ans }));
+    btn(20, 20, 110, 42, '◀ Map', () => { scene = 'map'; }, { color: '#455a64', small: true });
+  } else if (scene === 'landed') {
+    btn(W / 2 - 290, 410, 270, 70, planet + 1 < PLANETS.length ? 'Next planet ▶' : 'Back to map', () => { if (planet + 1 < PLANETS.length) startPlanet(planet + 1); else scene = 'map'; }, { color: '#43a047' });
+    btn(W / 2 + 20, 410, 270, 70, 'Space map 🗺️', () => { scene = 'map'; }, { color: '#5c6bc0' });
+  } else if (scene === 'balloons' || scene === 'balloonsDone') {
+    btn(20, 20, 110, 42, '◀ Back', () => { scene = 'title'; }, { color: '#455a64', small: true });
+    if (scene === 'balloonsDone') btn(W / 2 - 140, 380, 280, 70, 'Play again! 🎈', startBalloons, { color: '#ec407a' });
+  }
+  btn(W - 66, 20, 50, 42, musicOn ? '♪' : '♪̸', () => { musicOn = !musicOn; }, { color: '#455a64', small: true });
+}
+let mapMsg = 0;
+function pos(e) { const r = C.getBoundingClientRect(); return [(e.clientX - r.left) * W / r.width, (e.clientY - r.top) * H / r.height]; }
+let mouse = { x: 0, y: 0 };
+C.addEventListener('mousedown', e => {
+  audio(); buildButtons();
+  const [x, y] = pos(e);
+  for (const b of buttons) if (x > b.x && x < b.x + b.w && y > b.y && y < b.y + b.h) { sfx.click(); b.fn(); return; }
+  if (scene === 'balloons') clickBalloon(x, y);
+});
+C.addEventListener('mousemove', e => { [mouse.x, mouse.y] = pos(e); });
+addEventListener('keydown', e => {
+  audio();
+  if (e.key === 'm' || e.key === 'M') musicOn = !musicOn;
+  if (scene === 'quiz' && e.key >= '1' && e.key <= '4') answer(+e.key - 1);
+  if (scene === 'title' && (e.key === ' ' || e.key === 'Enter')) scene = 'map';
+});
+
+// ---------- Drawing ----------
+function rr(x, y, w, h, r, fill, stroke, lw = 3) { ctx.beginPath(); ctx.roundRect(x, y, w, h, r); if (fill) { ctx.fillStyle = fill; ctx.fill(); } if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lw; ctx.stroke(); } }
+function circle(x, y, r, c) { ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fillStyle = c; ctx.fill(); }
+function text(s, x, y, size, color = '#fff', align = 'center', outline = '#1b1b3a') {
+  ctx.font = `bold ${size}px "Comic Sans MS", "Chalkboard SE", sans-serif`; ctx.textAlign = align; ctx.lineJoin = 'round';
+  if (outline) { ctx.lineWidth = size / 5; ctx.strokeStyle = outline; ctx.strokeText(s, x, y); }
+  ctx.fillStyle = color; ctx.fillText(s, x, y);
+}
+function emoji(s, x, y, size) { ctx.font = `${size}px sans-serif`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(s, x, y); ctx.textBaseline = 'alphabetic'; }
+function space() {
+  const g = ctx.createLinearGradient(0, 0, 0, H); g.addColorStop(0, '#0b1026'); g.addColorStop(1, '#2a1b5c');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  for (const s of stars) { ctx.globalAlpha = 0.5 + 0.5 * Math.sin(frame * 0.04 + s.t); circle(s.x, s.y, s.s, '#fff'); }
+  ctx.globalAlpha = 1;
+}
+function drawPlanet(p, x, y, r) {
+  circle(x, y, r, p.color);
+  ctx.save(); ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.clip();
+  circle(x + r * 0.35, y + r * 0.3, r * 0.9, 'rgba(0,0,0,.15)');
+  if (p.id === 'moon') { circle(x - r * 0.3, y - r * 0.2, r * 0.18, 'rgba(0,0,0,.12)'); circle(x + r * 0.25, y + r * 0.1, r * 0.12, 'rgba(0,0,0,.12)'); }
+  if (p.id === 'jupiter') for (let k = -2; k <= 2; k++) { ctx.fillStyle = k % 2 ? 'rgba(160,80,30,.35)' : 'rgba(255,255,255,.2)'; ctx.fillRect(x - r, y + k * r * 0.3 - 4, r * 2, 8); }
+  ctx.restore();
+  if (p.ring) { ctx.strokeStyle = 'rgba(255,255,255,.7)'; ctx.lineWidth = 5; ctx.beginPath(); ctx.ellipse(x, y, r * 1.6, r * 0.38, -0.3, 0, Math.PI * 2); ctx.stroke(); }
+}
+function drawRocket(x, y, rot = 0, flame = true) {
+  ctx.save(); ctx.translate(x, y); ctx.rotate(rot);
+  if (flame) { ctx.fillStyle = frame % 6 < 3 ? '#ffab40' : '#ffeb3b'; ctx.beginPath(); ctx.moveTo(-26, -8); ctx.lineTo(-48 - Math.random() * 12, 0); ctx.lineTo(-26, 8); ctx.fill(); }
+  ctx.fillStyle = '#e53935'; ctx.beginPath(); ctx.moveTo(-14, -12); ctx.lineTo(-30, -22); ctx.lineTo(-22, -6); ctx.fill(); ctx.beginPath(); ctx.moveTo(-14, 12); ctx.lineTo(-30, 22); ctx.lineTo(-22, 6); ctx.fill();
+  ctx.fillStyle = '#eceff1'; ctx.beginPath(); ctx.ellipse(0, 0, 30, 13, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#e53935'; ctx.beginPath(); ctx.moveTo(18, -10); ctx.quadraticCurveTo(42, 0, 18, 10); ctx.fill();
+  circle(4, 0, 6, '#40c4ff'); circle(2, -2, 2, '#fff');
+  ctx.restore();
+}
+function drawObjects() {   // pictures to count
+  const { a, b, op, obj } = q, count = op === '+' ? a + b + 2 : a, gap = Math.min(44, 600 / Math.max(1, count)), sz = gap * 0.85;
+  if ((op === '+' && a + b <= 20) || (op === '−' && a <= 20)) rr(W / 2 - 320, 262, 640, 92, 22, 'rgba(255,255,255,.92)', '#b39ddb', 3);
+  if (op === '+' && a + b <= 20) {
+    const obj2 = OBJ[(OBJ.indexOf(obj) + 3) % OBJ.length], width = (a + b + 2) * gap;
+    let x = W / 2 - width / 2 + gap / 2;
+    for (let i = 0; i < a; i++, x += gap) emoji(obj, x, 300, sz);
+    text('+', x + gap * 0.4, 314, 40, '#7c4dff', 'center', null); x += gap * 2;
+    for (let i = 0; i < b; i++, x += gap) emoji(obj2, x, 300, sz);
+    text(`${a} and ${b} more. Count them all!`, W / 2, 342, 16, '#5e35b1', 'center', null);
+  } else if (op === '−' && a <= 20) {
+    let x = W / 2 - (a * gap) / 2 + gap / 2;
+    for (let i = 0; i < a; i++, x += gap) {
+      const gone = i >= a - b;
+      ctx.globalAlpha = gone ? 0.3 : 1; emoji(obj, x, 300, sz); ctx.globalAlpha = 1;
+      if (gone) { ctx.strokeStyle = '#ff1744'; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(x - 10, 290); ctx.lineTo(x + 10, 310); ctx.moveTo(x + 10, 290); ctx.lineTo(x - 10, 310); ctx.stroke(); }
+    }
+    text(`Start with ${a}, cross out ${b}. How many are left?`, W / 2, 342, 16, '#5e35b1', 'center', null);
+  } else if (op === '×' && a <= 10 && b <= 10) {
+    const rows = Math.min(a, b), cols = Math.max(a, b), s2 = 22, x0 = W / 2 - cols * (s2 + 2) / 2 + s2 / 2;
+    for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) emoji(obj, x0 + c * (s2 + 2), 285 + r * (s2 - 2) * (rows > 5 ? 0.6 : 1), s2);
+    text(`${rows} groups of ${cols}`, W / 2, 392, 18, '#b39ddb', 'center', null);
+  } else {
+    // big numbers: show tens blocks and ones
+    const drawNum = (n, cx) => {
+      const tens = Math.floor(n / 10), ones = n % 10;
+      for (let t = 0; t < tens; t++) rr(cx - tens * 9 + t * 18, 275, 14, 80, 3, '#40c4ff', '#0277bd', 2);
+      for (let o = 0; o < ones; o++) rr(cx + tens * 9 + 10 + (o % 3) * 16, 280 + Math.floor(o / 3) * 16, 13, 13, 2, '#ffd740', '#ff8f00', 2);
+    };
+    drawNum(a, W / 2 - 200); text(op, W / 2, 330, 40, '#fff'); drawNum(b, W / 2 + 160);
+    text('Blue sticks = 10    Yellow cubes = 1', W / 2, 385, 16, '#b39ddb', 'center', null);
+  }
+}
+function drawButtons() {
+  for (const b of buttons) {
+    const hover = mouse.x > b.x && mouse.x < b.x + b.w && mouse.y > b.y && mouse.y < b.y + b.h;
+    if (b.planet) {
+      const cx = b.x + b.w / 2, cy = b.y + 55;
+      if (hover && b.open) circle(cx, cy, 58, 'rgba(255,255,255,.12)');
+      ctx.globalAlpha = b.open ? 1 : 0.35; drawPlanet(b.planet, cx, cy + Math.sin(frame * 0.03 + b.x) * 4, 42); ctx.globalAlpha = 1;
+      if (!b.open) emoji('🔒', cx, cy, 30);
+      text(b.label, cx, b.y + 125, 18, b.open ? '#fff' : '#888');
+      text('★'.repeat(b.stars) + '☆'.repeat(3 - b.stars), cx, b.y + 148, 18, '#ffd740', 'center', null);
+      continue;
+    }
+    if (b.answer) {
+      const col = b.right ? '#43a047' : b.wrong ? '#9e9e9e' : hover ? '#ffca28' : '#ffd740';
+      rr(b.x, b.y + 6, b.w, b.h, 22, 'rgba(0,0,0,.35)'); rr(b.x, b.y - (hover ? 3 : 0), b.w, b.h, 22, col, '#fff', 4);
+      text(b.label, b.x + b.w / 2, b.y + b.h / 2 + 18 - (hover ? 3 : 0), 52, b.wrong ? '#eee' : '#1b1b3a', 'center', null);
+      text(String(b.key), b.x + 18, b.y + 24, 14, 'rgba(0,0,0,.4)', 'center', null);
+      continue;
+    }
+    rr(b.x, b.y + 5, b.w, b.h, 18, 'rgba(0,0,0,.35)'); rr(b.x, b.y - (hover ? 3 : 0), b.w, b.h, 18, b.color || '#5c6bc0', '#fff', 3);
+    if (b.icon) { emoji(b.icon, b.x + 60, b.y + b.h / 2 - (hover ? 3 : 0), 54); text(b.label, b.x + 175, b.y + b.h / 2 + 10 - (hover ? 3 : 0), 26, '#fff'); }
+    else text(b.label, b.x + b.w / 2, b.y + b.h / 2 + 8 - (hover ? 3 : 0), b.small ? 18 : 26, '#fff');
+  }
+}
+function drawParticles() {
+  for (const p of particles) { ctx.globalAlpha = Math.min(1, p.life / 20); if (p.star) text('★', p.x, p.y, 18, p.c, 'center', null); else { ctx.fillStyle = p.c; ctx.fillRect(p.x, p.y, 6, 6); } }
+  ctx.globalAlpha = 1;
+}
+
+function draw() {
+  space();
+  if (scene === 'title') {
+    drawPlanet(PLANETS[2], 820, 110, 60); drawPlanet(PLANETS[3], 140, 400, 40);
+    drawRocket(200 + (frame * 2) % 700, 220 + Math.sin(frame * 0.05) * 20, 0);
+    text('MATH ROCKET', W / 2, 130, 80, '#ffd740');
+    text('Learn math and blast off to the stars!', W / 2, 180, 26, '#b3e5fc', 'center', null);
+    text(`🌟 Planets visited: ${S.stickers.length}/${PLANETS.length}     🎈 Best balloon score: ${S.best}`, W / 2, 470, 20, '#ce93d8', 'center', null);
+  } else if (scene === 'map') {
+    text('Pick a planet!', W / 2, 70, 44, '#ffd740');
+    text('Finish a planet to unlock the next one. Get 3 stars by making 1 mistake or fewer!', W / 2, 108, 18, '#b3e5fc', 'center', null);
+    ctx.strokeStyle = 'rgba(255,255,255,.25)'; ctx.setLineDash([8, 10]); ctx.lineWidth = 3; ctx.beginPath();
+    PLANETS.forEach((p, i) => { const [x, y] = mapPos(i); i ? ctx.lineTo(x + 65, y + 55) : ctx.moveTo(x + 65, y + 55); }); ctx.stroke(); ctx.setLineDash([]);
+    PLANETS.forEach((p, i) => { const [x, y] = mapPos(i); text(p.skill, x + 65, y + 166, 13, '#b39ddb', 'center', null); });
+    if (mapMsg > 0) { mapMsg--; text('🔒 Finish the planet before it to unlock this one!', W / 2, 500, 20, '#ff8a80'); }
+  } else if (scene === 'quiz') {
+    const P = PLANETS[planet];
+    // journey bar with the rocket
+    text(`${P.name}: ${P.skill}`, W / 2, 44, 24, '#ffd740');
+    rr(210, 64, 590, 14, 7, 'rgba(255,255,255,.15)');
+    for (let i = 0; i <= QUESTIONS; i++) circle(210 + i * 59, 71, 5, i <= qNum ? '#69f0ae' : 'rgba(255,255,255,.3)');
+    const target = 210 + qNum * 59; rocketX += (target - rocketX) * 0.1;
+    drawRocket(rocketX, 71, 0, Math.abs(target - rocketX) > 2); drawPlanet(P, 830, 71, 24);
+    if (streak >= 3) text(`🔥 ${streak}`, 90, 80, 24, '#ff9800');
+    // the question
+    rr(W / 2 - 230, 105, 460, 110, 26, 'rgba(255,255,255,.95)', '#ffd740', 5);
+    text(`${q.a} ${q.op} ${q.b} = ${feedback && feedback.ok ? q.ans : '?'}`, W / 2, 185, 70, feedback && feedback.ok ? '#43a047' : '#1b1b3a', 'center', null);
+    if (showHelp) drawObjects();
+    else text('Need help? Pick an answer and I\'ll show you pictures to count!', W / 2, 320, 18, '#9fa8da', 'center', null);
+    if (feedback) text(feedback.text, W / 2, 252, 28, feedback.ok ? '#69f0ae' : '#ff8a80');
+    text('Click an answer (or press 1 2 3 4)', W / 2, 512, 14, '#9fa8da', 'center', null);
+  } else if (scene === 'landed') {
+    const P = PLANETS[planet];
+    drawPlanet(P, W / 2, 470, 220);
+    drawRocket(W / 2, 210 + Math.sin(frame * 0.05) * 6, -Math.PI / 2, false);
+    emoji('🚩', W / 2 + 60, 250, 40);
+    text(`You landed on ${P.name}!`, W / 2, 80, 48, '#ffd740');
+    text('★'.repeat(landedStars) + '☆'.repeat(3 - landedStars), W / 2, 140, 54, '#ffd740');
+    text(landedStars === 3 ? 'PERFECT! You are a math superstar!' : landedStars === 2 ? 'Great flying! Try again for 3 stars!' : 'You made it! Practice makes perfect!', W / 2, 180, 22, '#fff');
+  } else if (scene === 'balloons' || scene === 'balloonsDone') {
+    const g = ctx.createLinearGradient(0, 0, 0, H); g.addColorStop(0, '#81d4fa'); g.addColorStop(1, '#e1f5fe');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+    for (let i = 0; i < 4; i++) { const cx = ((i * 280 + frame * 0.3) % (W + 200)) - 100; circle(cx, 120 + i * 20, 30, '#fff'); circle(cx + 30, 110 + i * 20, 36, '#fff'); circle(cx + 62, 120 + i * 20, 28, '#fff'); }
+    if (scene === 'balloons') {
+      for (const b of bp.balloons) {
+        if (b.popped) continue;
+        const bx = b.x + Math.sin(b.wob) * 12;
+        ctx.strokeStyle = '#555'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(bx, b.y + 46); ctx.quadraticCurveTo(bx + 8, b.y + 70, bx, b.y + 95); ctx.stroke();
+        ctx.fillStyle = b.c; ctx.beginPath(); ctx.ellipse(bx, b.y, 40, 46, 0, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.moveTo(bx - 6, b.y + 50); ctx.lineTo(bx + 6, b.y + 50); ctx.lineTo(bx, b.y + 42); ctx.fill();
+        circle(bx - 14, b.y - 18, 8, 'rgba(255,255,255,.5)');
+        text(String(b.v), bx, b.y + 14, 38, '#fff');
+      }
+      rr(W / 2 - 200, 14, 400, 76, 24, 'rgba(255,255,255,.95)', '#ec407a', 5);
+      text(`${bp.q.a} ${bp.q.op} ${bp.q.b} = ?`, W / 2, 70, 48, '#1b1b3a', 'center', null);
+      text(`🎈 ${bp.score}`, 170, 90, 30, '#ec407a', 'left');
+      const secs = Math.ceil(bp.time / 60);
+      text(`⏰ ${secs}`, W - 90, 100, 30, secs <= 10 ? '#ff5252' : '#1b1b3a', 'right', '#fff');
+      if (bp.wrongFlash > 0) text('Oops! Find the right answer!', W / 2, 130, 24, '#ff5252', 'center', '#fff');
+      text('Pop the balloon with the right answer!', W / 2, 510, 18, '#1b1b3a', 'center', null);
+    } else {
+      text("Time's up!", W / 2, 140, 64, '#ec407a', 'center', '#fff');
+      text(`You popped ${bp.score} right answers! 🎈`, W / 2, 220, 36, '#1b1b3a', 'center', null);
+      text(bp.newBest ? '⭐ NEW BEST SCORE! ⭐' : `Best: ${S.best}`, W / 2, 280, 30, '#ff9800', 'center', '#fff');
+    }
+  }
+  drawButtons();
+  drawParticles();
+}
+
+function update() {
+  frame++;
+  for (const p of particles) { p.x += p.vx; p.y += p.vy; p.vy += 0.1; p.life--; }
+  particles = particles.filter(p => p.life > 0);
+  if (scene === 'quiz' && feedback && feedback.ok && --feedT <= 0) { if (qNum >= QUESTIONS) finishPlanet(); else nextQuestion(); }
+  if (scene === 'balloons') updateBalloons();
+  buildButtons();
+}
+
+buildButtons();
+let last = performance.now(), acc = 0;
+function loop(now) {
+  acc += Math.min(100, now - last); last = now;
+  while (acc >= 1000 / 60) { update(); acc -= 1000 / 60; }
+  playMusic();
+  draw();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+<!-- injected by scripts/inject-factory.py — hold PS (or SELECT+START) for 1s to go
+     up one level: game -> the book (parent.closeGame), standalone game -> /factory/,
+     the book -> Stephens Arcade (/). Shares one rAF pad poll with the cursor + idle overlays. -->
+<script id="__gf_pad_exit">
+(function () {
+  var IS_BOOK = false; /*@gf:is_book*/
+  var HOLD_MS = 1000;
+  // one rAF loop per page reads the pads for every __gf overlay
+  var hub = window.__gfHub;
+  if (!hub) {
+    hub = window.__gfHub = { fns: [], pads: [] };
+    (function () {
+      var NONE = [];
+      function loop(now) {
+        var p = null;
+        try { p = navigator.getGamepads ? navigator.getGamepads() : null; } catch (e) {}
+        hub.pads = p || NONE;
+        for (var i = 0; i < hub.fns.length; i++) { try { hub.fns[i](now, hub.pads); } catch (e) {} }
+        requestAnimationFrame(loop);
+      }
+      requestAnimationFrame(loop);
+    })();
+  }
+
+  var STEPS = 20, TF = [];               // precomputed badge transforms: zero allocations while held
+  for (var s = 0; s <= STEPS; s++) TF.push('translateX(-50%) scale(' + (1 + 0.35 * s / STEPS).toFixed(4) + ')');
+  var HIDE_TF = 'translateX(-50%) scale(0.85)';
+  var heldSince = 0, needRelease = true, leaving = false, badge = null, lastStep = -2;
+  var player = null;
+
+  function comboDown(pads) {
+    for (var i = 0; i < pads.length; i++) {
+      var gp = pads[i];
+      if (!gp || gp.connected === false) continue;
+      var b = gp.buttons;
+      if ((b[16] && b[16].pressed) || (b[8] && b[8].pressed && b[9] && b[9].pressed)) return true;
+    }
+    return false;
+  }
+  function makeBadge() {
+    badge = document.createElement('div');
+    badge.id = '__gfx_exit';
+    badge.textContent = IS_BOOK ? '◄ ARCADE' : '◄ BOOK';
+    badge.style.cssText = 'position:fixed;top:12px;left:50%;z-index:2147483001;pointer-events:none;' +
+      'padding:7px 18px;border-radius:999px;background:#10172a;color:#ffd23f;border:3px solid #ffd23f;' +
+      'font:bold 18px/1 "Trebuchet MS","Arial Rounded MT Bold",sans-serif;letter-spacing:1px;white-space:nowrap;' +
+      'transform-origin:50% 0;opacity:0;transform:' + HIDE_TF + ';transition:opacity .12s;';
+    (document.body || document.documentElement).appendChild(badge);
+  }
+  function setBadge(step) {            // step -1 = hidden, 0..STEPS = hold progress
+    if (step === lastStep) return;
+    lastStep = step;
+    if (step < 0) { if (badge) { badge.style.opacity = '0'; badge.style.transform = HIDE_TF; } return; }
+    if (!badge) makeBadge();
+    badge.style.opacity = '1';
+    badge.style.transform = TF[step];
+  }
+  function inGame() {
+    try { return window.parent !== window && typeof window.parent.closeGame === 'function'; } catch (e) { return false; }
+  }
+  function leave() {
+    leaving = true;                    // never navigate twice
+    if (!IS_BOOK && inGame()) { setBadge(-1); try { window.parent.closeGame(); } catch (e) {} return; }
+    location.href = IS_BOOK ? '/' : '/factory/';
+  }
+  hub.fns.push(function (now, pads) {
+    if (leaving) return;
+    var down = comboDown(pads);
+    if (IS_BOOK) {
+      if (!player) player = document.getElementById('player');
+      if (player && player.classList.contains('open')) {   // the game's own overlay handles this hold
+        if (down) needRelease = true;
+        heldSince = 0; setBadge(-1); return;
+      }
+    }
+    if (needRelease) {                 // a hold that started elsewhere never counts here
+      if (down) return;
+      needRelease = false;
+    }
+    if (!down) { heldSince = 0; setBadge(-1); return; }
+    if (!heldSince) heldSince = now;
+    var p = (now - heldSince) / HOLD_MS;
+    setBadge(Math.round((p > 1 ? 1 : p) * STEPS));
+    if (p >= 1) leave();
+  });
+})();
+</script>
+<!-- injected by scripts/inject-factory.py — console (low-fx) mode only: no-op canvas
+     shadowBlur and kill CSS backdrop-filter (both measured fps killers on the Pi).
+     The mouse cursor is hidden only while the pad cursor is installed. -->
+<script id="__gf_lowfx">
+(function () {
+  var on = false;
+  try {
+    if (/[?&]fx=low\b/.test(location.search)) { on = true; localStorage.setItem('arcade_lowfx', '1'); }
+    else if (/[?&]fx=full\b/.test(location.search)) { localStorage.setItem('arcade_lowfx', '0'); }
+    else { on = localStorage.getItem('arcade_lowfx') === '1'; }
+  } catch (e) {}
+  if (!on) return;
+  try {
+    Object.defineProperty(CanvasRenderingContext2D.prototype, 'shadowBlur', {
+      set: function () {}, get: function () { return 0; }, configurable: true
+    });
+  } catch (e) {}
+  try {
+    var st = document.createElement('style');
+    st.textContent = '* { backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }' +
+      ' html.__gfx_padcursor, html.__gfx_padcursor * { cursor: none !important; }';
+    (document.head || document.documentElement).appendChild(st);
+  } catch (e) {}
+})();
+</script>
+<!-- injected by scripts/inject-factory.py — console mode only: the TV has no printer,
+     so window.print shows a friendly toast instead of a dead print dialog. -->
+<script id="__gf_print">
+(function () {
+  var on = false;
+  try { on = /[?&]fx=low\b/.test(location.search) || localStorage.getItem('arcade_lowfx') === '1'; } catch (e) {}
+  if (!on) return;
+  var toast = null, timer = 0;
+  function hide() { if (toast) toast.style.opacity = '0'; }
+  window.print = function () {
+    try {
+      if (!toast) {
+        toast = document.createElement('div');
+        toast.id = '__gfx_print';
+        toast.textContent = '🖨️ Printing works on the iPad — not on the TV!';
+        toast.style.cssText = 'position:fixed;left:50%;bottom:48px;transform:translateX(-50%);z-index:2147483001;' +
+          'pointer-events:none;padding:14px 26px;border-radius:16px;background:#10172a;color:#ffd23f;' +
+          'border:3px solid #ffd23f;font:bold 24px/1.2 "Trebuchet MS","Arial Rounded MT Bold",sans-serif;' +
+          'white-space:nowrap;opacity:0;transition:opacity .2s;';
+        (document.body || document.documentElement).appendChild(toast);
+      }
+      toast.style.opacity = '1';
+      clearTimeout(timer);
+      timer = setTimeout(hide, 2500);
+    } catch (e) {}
+  };
+})();
+</script>
+<!-- injected by scripts/inject-factory.py — pad cursor: a pad-driven mouse pointer so
+     tap/click-only games play on the console. Right stick moves it (left stick too in
+     pointer games); X / R1 clicks and drags (pointer + mouse events, like touchpad.js
+     turns fingers into mouse events). Never consumes pad input. -->
+<script id="__gf_cursor">
+(function () {
+  window.__GF_CURSOR_LEFT = true; /*@gf:cursor_left*/
+  var IS_BOOK = false; /*@gf:is_book*/
+  var LEFT = window.__GF_CURSOR_LEFT === true;
+  var DZ = 0.2, SPEED = 900, SLEEP_MS = 4000, CLICK_SLOP = 12;
+  // one rAF loop per page reads the pads for every __gf overlay
+  var hub = window.__gfHub;
+  if (!hub) {
+    hub = window.__gfHub = { fns: [], pads: [] };
+    (function () {
+      var NONE = [];
+      function loop(now) {
+        var p = null;
+        try { p = navigator.getGamepads ? navigator.getGamepads() : null; } catch (e) {}
+        hub.pads = p || NONE;
+        for (var i = 0; i < hub.fns.length; i++) { try { hub.fns[i](now, hub.pads); } catch (e) {} }
+        requestAnimationFrame(loop);
+      }
+      requestAnimationFrame(loop);
+    })();
+  }
+
+  var S = window.__gfCursorState = { installed: false, awake: false, held: false, x: 0, y: 0 };
+  var el = null, x = 0, y = 0, awake = false, lastMove = 0, lastT = 0;
+  var held = false, target = null, sx = 0, sy = 0, prevBtn = false, vx = 0, vy = 0, player = null;
+  var INIT = { bubbles: true, cancelable: true, composed: true, view: window, detail: 0,
+    clientX: 0, clientY: 0, screenX: 0, screenY: 0, button: 0, buttons: 0,
+    pointerId: 1, pointerType: 'mouse', isPrimary: true, width: 1, height: 1, pressure: 0 };
+  var HAS_PE = typeof window.PointerEvent === 'function';
+
+  function install() {
+    if (S.installed) return;
+    S.installed = true;
+    x = Math.round((window.innerWidth || 1280) / 2); y = Math.round((window.innerHeight || 720) / 2);
+    el = document.createElement('div');
+    el.id = '__gfx_cursor';
+    el.style.cssText = 'position:fixed;left:0;top:0;width:28px;height:28px;pointer-events:none;z-index:2147483000;' +
+      'opacity:0;transition:opacity .25s;will-change:transform;';
+    el.innerHTML = '<svg width="28" height="28" viewBox="0 0 28 28" style="display:block;overflow:visible">' +
+      '<path d="M3 2 L3 23.5 L8.6 18.3 L12.6 26.6 L17 24.5 L13 16.4 L20.8 16.4 Z" fill="#fff" stroke="#10172a" ' +
+      'stroke-width="2.2" stroke-linejoin="round"/></svg>';
+    (document.body || document.documentElement).appendChild(el);
+    try { document.documentElement.classList.add('__gfx_padcursor'); } catch (e) {}
+    place();
+  }
+  function place() {
+    el.style.transform = 'translate3d(' + (x - 3) + 'px,' + (y - 2) + 'px,0)';
+    S.x = x; S.y = y;
+  }
+  function wake() { awake = S.awake = true; el.style.opacity = '1'; }
+  function sleep() { awake = S.awake = false; el.style.opacity = '0'; }
+  function fire(type, node, buttons, pointer) {
+    if (!node) return;
+    INIT.clientX = x; INIT.clientY = y;
+    INIT.screenX = (window.screenX || 0) + x; INIT.screenY = (window.screenY || 0) + y;
+    INIT.buttons = buttons; INIT.pressure = buttons ? 0.5 : 0;
+    INIT.detail = type === 'click' ? 1 : 0;
+    var ev;
+    try { ev = pointer && HAS_PE ? new PointerEvent(type, INIT) : new MouseEvent(type, INIT); } catch (e) { return; }
+    try { node.dispatchEvent(ev); } catch (e) {}
+  }
+  function at() { return document.elementFromPoint(x, y) || document.body || document.documentElement; }
+  function press(now) {
+    target = at(); held = S.held = true; sx = x; sy = y; lastMove = now;
+    fire('pointermove', target, 0, true); fire('mousemove', target, 0, false);
+    fire('pointerdown', target, 1, true); fire('mousedown', target, 1, false);
+  }
+  function release(clickOk) {
+    var t = target;
+    held = S.held = false; target = null;
+    fire('pointerup', t, 0, true); fire('mouseup', t, 0, false);
+    if (clickOk) { var dx = x - sx, dy = y - sy; if (dx * dx + dy * dy < CLICK_SLOP * CLICK_SLOP) fire('click', t, 0, false); }
+  }
+  function stick(ax, ay) {
+    ax = +ax || 0; ay = +ay || 0;
+    var m = Math.sqrt(ax * ax + ay * ay);
+    if (m <= DZ) return;
+    var e = ((m > 1 ? 1 : m) - DZ) / (1 - DZ);
+    e = e * e * SPEED / m;              // mild ease: squared magnitude, ~900 px/s at full tilt
+    vx += ax * e; vy += ay * e;
+  }
+
+  window.addEventListener('gamepadconnected', install);
+  hub.fns.push(function (now, pads) {
+    var i, p, a, b, btn = false;
+    if (!S.installed) {
+      for (i = 0; i < pads.length; i++) { p = pads[i]; if (p && p.mapping === 'standard') { install(); break; } }
+      if (!S.installed) return;
+    }
+    var dt = lastT ? (now - lastT) / 1000 : 0;
+    if (dt > 0.05) dt = 0.05;
+    lastT = now;
+    vx = 0; vy = 0;
+    for (i = 0; i < pads.length; i++) {
+      p = pads[i];
+      if (!p || p.connected === false) continue;
+      a = p.axes; b = p.buttons;
+      if (a) { stick(a[2], a[3]); if (LEFT) stick(a[0], a[1]); }
+      if ((b[0] && b[0].pressed) || (b[5] && b[5].pressed)) btn = true;
+    }
+    if (IS_BOOK) {                      // the book: asleep and silent while a game is open
+      if (!player) player = document.getElementById('player');
+      if (player && player.classList.contains('open')) {
+        if (held) release(false);
+        if (awake) sleep();
+        prevBtn = btn; return;
+      }
+    }
+    if (vx !== 0 || vy !== 0) {
+      var w = window.innerWidth || 1280, h = window.innerHeight || 720;
+      x += vx * dt; y += vy * dt;
+      if (x < 0) x = 0; else if (x > w - 1) x = w - 1;
+      if (y < 0) y = 0; else if (y > h - 1) y = h - 1;
+      lastMove = now;
+      if (!awake) wake();
+      place();
+      if (held) { fire('pointermove', target, 1, true); fire('mousemove', target, 1, false); }
+      else { var t = at(); fire('pointermove', t, 0, true); fire('mousemove', t, 0, false); }
+    } else if (awake && !held && now - lastMove > SLEEP_MS) {
+      sleep();
+    }
+    if (btn && !prevBtn) { if (awake) press(now); }
+    else if (!btn && prevBtn) { if (held) release(true); }
+    if (held) lastMove = now;
+    prevBtn = btn;
+  });
+})();
+</script>
+<!-- injected by scripts/inject-factory.py — after 15 idle minutes (no pad / keyboard /
+     pointer / touch input): a game closes back to the book, anything else returns to
+     Stephens Arcade. Test override: ?idle=<seconds>. -->
+<script id="__gf_idle">
+(function () {
+  var IS_BOOK = false; /*@gf:is_book*/
+  var qs = null;
+  try { qs = new URLSearchParams(location.search).get('idle'); } catch (e) {}
+  var IDLE_MS = (qs ? Math.max(10, parseFloat(qs) || 900) : 15 * 60) * 1000;
+  var DEADZONE = 0.25;
+  // one rAF loop per page reads the pads for every __gf overlay
+  var hub = window.__gfHub;
+  if (!hub) {
+    hub = window.__gfHub = { fns: [], pads: [] };
+    (function () {
+      var NONE = [];
+      function loop(now) {
+        var p = null;
+        try { p = navigator.getGamepads ? navigator.getGamepads() : null; } catch (e) {}
+        hub.pads = p || NONE;
+        for (var i = 0; i < hub.fns.length; i++) { try { hub.fns[i](now, hub.pads); } catch (e) {} }
+        requestAnimationFrame(loop);
+      }
+      requestAnimationFrame(loop);
+    })();
+  }
+  var last = performance.now(), leaving = false, player = null;
+  function bump() { last = performance.now(); }
+  window.addEventListener('keydown', bump, { capture: true });
+  window.addEventListener('pointerdown', bump, { capture: true });
+  window.addEventListener('touchstart', bump, { capture: true, passive: true });
+  function padActive(pads) {
+    for (var i = 0; i < pads.length; i++) {
+      var gp = pads[i];
+      if (!gp || gp.connected === false) continue;
+      for (var b = 0; b < gp.buttons.length; b++) if (gp.buttons[b].pressed) return true;
+      for (var a = 0; a < gp.axes.length; a++) if (Math.abs(gp.axes[a]) > DEADZONE) return true;
+    }
+    return false;
+  }
+  hub.fns.push(function (now, pads) {
+    if (leaving) return;
+    if (IS_BOOK) {                     // while a game is open its own overlay owns the idle timer
+      if (!player) player = document.getElementById('player');
+      if (player && player.classList.contains('open')) { last = now; return; }
+    }
+    if (padActive(pads)) last = now;
+    if (now - last < IDLE_MS) return;
+    leaving = true;
+    var g = false;
+    try { g = window.parent !== window && typeof window.parent.closeGame === 'function'; } catch (e) {}
+    if (g) { try { window.parent.closeGame(); } catch (e) {} }
+    else location.href = '/';          // pagehide fires -> games persist their state
+  });
+})();
+</script>

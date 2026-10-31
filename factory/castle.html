@@ -1,0 +1,939 @@
+<meta charset="utf-8">
+<title>Castle Defense</title>
+<!-- injected by scripts/inject-factory.py (HEAD, before touchpad.js) — hide phantom
+     DualShock sub-devices ("... Motion Sensors", "... Touchpad") and, when a
+     standard-mapping pad exists, every non-standard device. Original indices
+     are kept (filtered slots read null), exactly like lib/controller.js. -->
+<script id="__gf_padfilter">
+(function () {
+  var nav = window.navigator;
+  if (!nav || typeof nav.getGamepads !== 'function' || nav.__gfPadFilter) return;
+  var orig = nav.getGamepads;
+  var PHANTOM = /motion sensors|touchpad/i;
+  var out = [];                       // reused every call: no per-frame allocation
+  function filtered() {
+    var src = orig.call(nav);
+    if (!src) return src;
+    var n = src.length, anyStd = false, i, p;
+    for (i = 0; i < n; i++) { p = src[i]; if (p && p.mapping === 'standard') anyStd = true; }
+    out.length = n;
+    for (i = 0; i < n; i++) {
+      p = src[i];
+      out[i] = (!p || PHANTOM.test(p.id || '') || (anyStd && p.mapping !== 'standard')) ? null : p;
+    }
+    return out;
+  }
+  try { nav.getGamepads = filtered; } catch (e) {}
+  if (nav.getGamepads !== filtered) {
+    try { Object.defineProperty(nav, 'getGamepads', { value: filtered, configurable: true, writable: true }); } catch (e) {}
+  }
+  try { nav.__gfPadFilter = true; } catch (e) {}
+})();
+</script>
+<script src="touchpad.js?v=2"></script>
+<style>
+  html, body { height: 100%; }
+  body { margin: 0; background: #10172a; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+  canvas { width: min(100vw, calc(100vh * 960 / 520)); height: auto; display: block; border-radius: 12px; box-shadow: 0 10px 40px rgba(0,0,0,.5); cursor: pointer; }
+</style>
+<canvas id="game" width="960" height="520"></canvas>
+<script>
+const C = document.getElementById('game'), ctx = C.getContext('2d');
+const W = 960, H = 520, T = 40, COLS = 20, ROWS = 12, FW = COLS * T, FY = 40;   // field is 800 x 480, starting at y = 40
+let frame = 0;
+const ri = (a, b) => a + Math.floor(Math.random() * (b - a + 1));
+const pick = a => a[Math.floor(Math.random() * a.length)];
+const dist = (a, b, c, d) => Math.hypot(a - c, b - d);
+
+// ---------- Sound ----------
+function bankCoin(n = 1) { try { const c = JSON.parse(localStorage.getItem('gfCoins') || '{}'); c.castle = (c.castle || 0) + n; localStorage.setItem('gfCoins', JSON.stringify(c)); } catch (_) {} }   // coins for the Bundle Room in the Game Factory book
+function bundleHas(j) { try { return (JSON.parse(localStorage.getItem('gfBundles') || '{}').opened || []).includes('castle-' + j); } catch (_) { return false; } }   // unlocked in the Bundle Room
+// Tower hats (Bundle Room) - every tower you build wears the hat you pick on the title screen
+const LOOKS = [
+  { id: 'normal', name: 'No Hat', b: -1 },
+  { id: 'party', name: 'Party Hats', b: 0 }, { id: 'tophat', name: 'Top Hats', b: 0 },
+  { id: 'crown', name: 'Crowns', b: 1 }, { id: 'cowboy', name: 'Cowboy Hats', b: 1 },
+];
+const BUNDLE_NAMES = ['Tower Hat Pack', 'Royal Hat Pack', 'MEGA Robo Tower Pack'];
+const lookOpen = L => L.b < 0 || bundleHas(L.b);
+const roboOpen = () => bundleHas(2);   // the Robo Laser Tower
+function loadLook() {
+  try {
+    const id = (JSON.parse(localStorage.getItem('gfLooks') || '{}') || {}).castle;
+    const L = LOOKS.find(o => o.id === id);
+    return L && lookOpen(L) ? L.id : 'normal';
+  } catch (_) { return 'normal'; }
+}
+function saveLook() {
+  try { const o = JSON.parse(localStorage.getItem('gfLooks') || '{}') || {}; o.castle = myLook; localStorage.setItem('gfLooks', JSON.stringify(o)); } catch (_) {}
+}
+let myLook = loadLook(), lookView = Math.max(0, LOOKS.findIndex(o => o.id === myLook));
+function cycleLook(d) {   // browse hats; only unlocked ones get picked
+  lookView = (lookView + d + LOOKS.length) % LOOKS.length;
+  if (lookOpen(LOOKS[lookView])) { myLook = LOOKS[lookView].id; saveLook(); }
+}
+let actx = null, musicOn = true, nextNote = 0, mStep = 0;
+function audio() { if (!actx) { try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch (_) {} } return actx; }
+function note(f, start, dur, wave = 'square', vol = 0.06, slide = null) {
+  if (!actx) return;
+  const t = actx.currentTime + start, o = actx.createOscillator(), g = actx.createGain();
+  o.type = wave; o.frequency.setValueAtTime(f, t); if (slide) o.frequency.exponentialRampToValueAtTime(slide, t + dur);
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g); g.connect(actx.destination); o.start(t); o.stop(t + dur);
+}
+function noise(dur, vol, freq) {
+  if (!actx) return;
+  const len = Math.floor(actx.sampleRate * dur), buf = actx.createBuffer(1, len, actx.sampleRate), d = buf.getChannelData(0);
+  for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / len);
+  const src = actx.createBufferSource(), f = actx.createBiquadFilter(), g = actx.createGain();
+  src.buffer = buf; f.type = 'bandpass'; f.frequency.value = freq; g.gain.value = vol; src.connect(f); f.connect(g); g.connect(actx.destination); src.start();
+}
+let sndBudget = 0;   // so 20 towers firing at once don't get too loud
+const sfx = {
+  click: () => note(700, 0, 0.05, 'square', 0.04),
+  build: () => { note(300, 0, 0.1, 'square', 0.08); note(450, 0.1, 0.15, 'square', 0.08); },
+  arrow: () => { if (sndBudget-- > 0) noise(0.06, 0.15, 3000); },
+  boom: () => { if (sndBudget-- > 0) { noise(0.3, 0.5, 300); } },
+  ice: () => { if (sndBudget-- > 0) note(1800, 0, 0.1, 'sine', 0.03, 2600); },
+  zap: () => { if (sndBudget-- > 0) note(200, 0, 0.12, 'sawtooth', 0.04, 1200); },
+  laser: () => { if (sndBudget-- > 0) note(1400, 0, 0.1, 'square', 0.03, 500); },
+  poof: () => { if (sndBudget-- > 0) note(500, 0, 0.1, 'triangle', 0.06, 900); },
+  coin: () => note(1500, 0, 0.05, 'square', 0.025),
+  ouch: () => { noise(0.2, 0.4, 200); note(200, 0, 0.3, 'sawtooth', 0.08, 80); },
+  horn: () => { note(392, 0, 0.25, 'sawtooth', 0.07); note(523, 0.25, 0.4, 'sawtooth', 0.07); },
+  win: () => [523, 659, 784, 1047, 784, 1047, 1319].forEach((f, i) => note(f, i * 0.12, 0.25, 'square', 0.08)),
+  lose: () => [523, 494, 466, 440].forEach((f, i) => note(f, i * 0.25, 0.35, 'triangle', 0.1)),
+  upgrade: () => [660, 880, 1100, 1320].forEach((f, i) => note(f, i * 0.05, 0.1, 'square', 0.05)),
+};
+const TUNE = [62, 0, 65, 69, 0, 67, 65, 0, 64, 0, 62, 64, 65, 0, 0, 0, 69, 0, 72, 74, 0, 72, 70, 0, 69, 0, 67, 65, 64, 0, 0, 0];
+function playMusic() {
+  if (!actx || !musicOn || scene === 'title') return;
+  if (nextNote < actx.currentTime) nextNote = actx.currentTime + 0.05;
+  while (nextNote < actx.currentTime + 0.2) {
+    const t = nextNote - actx.currentTime, m = TUNE[mStep % TUNE.length];
+    if (m) note(440 * Math.pow(2, (m - 69) / 12), t, 0.22, 'triangle', 0.035);
+    if (mStep % 8 === 0) note(440 * Math.pow(2, ([38, 41, 43, 36][(mStep / 8) % 4] - 69) / 12), t, 1.2, 'sine', 0.07);
+    nextNote += 0.19; mStep++;
+  }
+}
+
+// ---------- Maps ----------
+const MAPS = [
+  { name: 'Grassy Hills', grass: ['#7cc35a', '#74b952'], path: '#e0c08a', path2: '#d4b27a', deco: 'tree', hp: 1,
+    pts: [[-1, 2], [5, 2], [5, 8], [11, 8], [11, 3], [16, 3], [16, 9], [18, 9]] },
+  { name: 'Snowy Pass', grass: ['#eef4fa', '#e3ecf5'], path: '#b0bec5', path2: '#a3b2ba', deco: 'pine', hp: 1.35,
+    pts: [[-1, 6], [3, 6], [3, 1], [8, 1], [8, 10], [13, 10], [13, 4], [16, 4], [16, 8], [18, 8]] },
+  { name: 'Lava Land', grass: ['#5d4037', '#55392f'], path: '#3e2723', path2: '#33201b', deco: 'lava', hp: 1.75,
+    pts: [[-1, 1], [16, 1], [16, 4], [2, 4], [2, 7], [16, 7], [16, 10], [18, 10]] },
+];
+const WAVES = 10;
+
+// ---------- Towers ----------
+const TOWERS = {
+  archer:    { name: 'Archer', icon: '🏹', cost: 30, up: [25, 40], range: [125, 145, 165], dmg: [4, 7, 11], rate: [28, 24, 20], color: '#8d6e63', desc: 'Shoots arrows fast' },
+  cannon:    { name: 'Cannon', icon: '💣', cost: 50, up: [40, 60], range: [110, 125, 140], dmg: [9, 15, 24], rate: [70, 62, 54], color: '#546e7a', desc: 'BOOM! Hits a group' },
+  ice:       { name: 'Ice', icon: '❄️', cost: 40, up: [30, 45], range: [100, 115, 130], dmg: [1, 2, 3], rate: [45, 42, 38], color: '#4fc3f7', desc: 'Freezes monsters slow' },
+  lightning: { name: 'Lightning', icon: '⚡', cost: 80, up: [60, 90], range: [130, 145, 160], dmg: [6, 9, 14], rate: [52, 46, 40], color: '#ab47bc', desc: 'Zaps 3+ monsters' },
+  robo:      { name: 'Robo Laser', icon: '🤖', cost: 60, up: [45, 70], range: [140, 155, 170], dmg: [7, 11, 17], rate: [46, 41, 36], color: '#2979ff', desc: 'Robo zaps LASERS far away' },   // MEGA Robo Tower Pack
+};
+const MONSTERS = {
+  slime: { hp: 14, speed: 0.9, reward: 4, size: 15 },
+  bat:   { hp: 9, speed: 1.7, reward: 4, size: 13 },
+  troll: { hp: 60, speed: 0.55, reward: 10, size: 20 },
+  ghost: { hp: 26, speed: 1.15, reward: 6, size: 16 },
+  boss:  { hp: 420, speed: 0.42, reward: 60, size: 30 },
+};
+
+// ---------- Save ----------
+let SAVE = { stars: [0, 0, 0] };
+try { const s = JSON.parse(localStorage.getItem('castleDefense') || 'null'); if (s) SAVE = s; } catch (_) {}
+function save() { try { localStorage.setItem('castleDefense', JSON.stringify(SAVE)); } catch (_) {} }
+
+// ---------- Game state ----------
+let scene = 'title', mapI = 0, M = null, pathTiles, pathPx, pathLen, decos;
+let gold = 0, hearts = 20, wave = 0, waveActive = false, spawnQueue = [], spawnT = 0;
+let monsters = [], towers = [], shots = [], effects = [], particles = [], floaters = [];
+let placing = null, selected = null, speed = 1, mouse = { x: 0, y: 0 }, msg = '', msgT = 0, resultStars = 0;
+
+function startMap(i) {
+  mapI = i; M = MAPS[i];
+  pathTiles = new Set(); pathPx = [];
+  const P = M.pts;
+  for (let k = 0; k < P.length - 1; k++) {
+    let [x, y] = P[k]; const [x2, y2] = P[k + 1];
+    while (x !== x2 || y !== y2) { pathTiles.add(x + ',' + y); x += Math.sign(x2 - x); y += Math.sign(y2 - y); }
+  }
+  pathTiles.add(P[P.length - 1].join(','));
+  for (const [x, y] of P) pathPx.push([x * T + T / 2, FY + y * T + T / 2]);
+  pathLen = 0; for (let k = 1; k < pathPx.length; k++) pathLen += dist(...pathPx[k - 1], ...pathPx[k]);
+  // castle sits on the last two columns
+  const [cx, cy] = P[P.length - 1];
+  for (let y = cy - 1; y <= cy + 1; y++) for (let x = 18; x <= 19; x++) pathTiles.add(x + ',' + y);
+  decos = [];
+  for (let k = 0; k < 26; k++) { const x = ri(0, COLS - 1), y = ri(0, ROWS - 1); if (!pathTiles.has(x + ',' + y)) decos.push({ x, y, s: 0.6 + Math.random() * 0.4 }); }
+  gold = 120; hearts = 20; wave = 0; waveActive = false; spawnQueue = []; spawnT = 0;
+  monsters = []; towers = []; shots = []; effects = []; particles = []; floaters = [];
+  placing = null; selected = null; speed = 1;
+  scene = 'play';
+  say('Pick a tower on the right, then click the grass to build it!');
+}
+function say(t) { msg = t; msgT = 220; }
+const tileFree = (x, y) => x >= 0 && y >= 0 && x < COLS && y < ROWS && !pathTiles.has(x + ',' + y) && !towers.some(t => t.x === x && t.y === y);
+
+function makeWave(n) {
+  const list = [];
+  const count = 6 + n * 2;
+  for (let i = 0; i < count; i++) {
+    let type = 'slime';
+    const r = Math.random();
+    if (n >= 2 && r < 0.3) type = 'bat';
+    if (n >= 4 && r > 0.82) type = 'troll';
+    if (n >= 6 && r > 0.55 && r < 0.72) type = 'ghost';
+    list.push(type);
+  }
+  if (n === 5) list.push('troll', 'troll');
+  if (n === WAVES) list.push('boss');
+  return list;
+}
+function startWave() {
+  if (waveActive || wave >= WAVES) return;
+  wave++; waveActive = true; spawnQueue = makeWave(wave); spawnT = 30;
+  sfx.horn();
+  say(wave === WAVES ? '👑 BOSS WAVE! King Blob is coming!' : `Wave ${wave}! Here they come!`);
+}
+function spawn(type) {
+  const base = MONSTERS[type], hp = Math.round(base.hp * (1 + (wave - 1) * 0.2) * M.hp);
+  monsters.push({ type, hp, max: hp, speed: base.speed, d: 0, x: pathPx[0][0], y: pathPx[0][1], slow: 0, slowAmt: 1, size: base.size, reward: base.reward, wob: Math.random() * 7 });
+}
+function posAt(d) {
+  for (let k = 1; k < pathPx.length; k++) {
+    const seg = dist(...pathPx[k - 1], ...pathPx[k]);
+    if (d <= seg) { const f = d / seg; return [pathPx[k - 1][0] + (pathPx[k][0] - pathPx[k - 1][0]) * f, pathPx[k - 1][1] + (pathPx[k][1] - pathPx[k - 1][1]) * f]; }
+    d -= seg;
+  }
+  return pathPx[pathPx.length - 1];
+}
+
+function hurt(m, dmg) {
+  if (m.dead) return;
+  m.hp -= dmg; m.flash = 6;
+  if (m.hp <= 0) {
+    m.dead = true; gold += m.reward; sfx.poof(); sfx.coin(); bankCoin();
+    floaters.push({ x: m.x, y: m.y - 20, t: `+${m.reward}`, life: 45 });
+    for (let i = 0; i < 10; i++) { const a = Math.random() * 7, s = Math.random() * 3 + 1; particles.push({ x: m.x, y: m.y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: 30, c: pick(['#fff', '#ffd740', '#b2ff59']), star: Math.random() < 0.5 }); }
+    if (m.type === 'boss') { for (let i = 0; i < 40; i++) { const a = Math.random() * 7, s = Math.random() * 6 + 1; particles.push({ x: m.x, y: m.y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: 60, c: pick(['#ffd740', '#e040fb', '#fff']), star: true }); } }
+  }
+}
+function towerStat(t, key) { return TOWERS[t.type][key][t.level - 1]; }
+function target(t) {
+  const r = towerStat(t, 'range'), cx = t.x * T + T / 2, cy = FY + t.y * T + T / 2;
+  let best = null;
+  for (const m of monsters) if (!m.dead && dist(cx, cy, m.x, m.y) <= r && (!best || m.d > best.d)) best = m;   // the one closest to the castle
+  return best;
+}
+function fire(t) {
+  const m = target(t); if (!m) return false;
+  const cx = t.x * T + T / 2, cy = FY + t.y * T + T / 2, dmg = towerStat(t, 'dmg');
+  t.aim = Math.atan2(m.y - cy, m.x - cx);
+  if (t.type === 'archer') { shots.push({ kind: 'arrow', x: cx, y: cy - 10, m, dmg, speed: 9 }); sfx.arrow(); }
+  if (t.type === 'ice') { shots.push({ kind: 'ice', x: cx, y: cy - 10, m, dmg, speed: 7, slow: [0.55, 0.45, 0.35][t.level - 1], slowT: [90, 120, 150][t.level - 1] }); sfx.ice(); }
+  if (t.type === 'cannon') { shots.push({ kind: 'ball', sx: cx, sy: cy - 8, tx: m.x, ty: m.y, t: 0, dur: 30, dmg, splash: 48 + t.level * 6 }); sfx.boom(); }
+  if (t.type === 'robo') {   // instant laser beam from Robo's eyes
+    effects.push({ kind: 'laser', x1: cx + Math.cos(t.aim) * 4, y1: cy - 25, x2: m.x, y2: m.y, life: 10 });
+    for (let i = 0; i < 5; i++) particles.push({ x: m.x, y: m.y, vx: Math.random() * 3 - 1.5, vy: Math.random() * 3 - 1.5, life: 16, c: pick(['#ff5252', '#40c4ff', '#fff']) });
+    hurt(m, dmg); sfx.laser();
+  }
+  if (t.type === 'lightning') {
+    const chain = [m], n = 2 + t.level;
+    while (chain.length < n) {
+      const last = chain[chain.length - 1];
+      let next = null;
+      for (const o of monsters) if (!o.dead && !chain.includes(o) && dist(last.x, last.y, o.x, o.y) < 90 && (!next || dist(last.x, last.y, o.x, o.y) < dist(last.x, last.y, next.x, next.y))) next = o;
+      if (!next) break; chain.push(next);
+    }
+    const pts = [[cx, cy - 16], ...chain.map(c => [c.x, c.y])];
+    effects.push({ kind: 'zap', pts, life: 10 });
+    chain.forEach(c => hurt(c, dmg)); sfx.zap();
+  }
+  return true;
+}
+
+function updatePlay() {
+  sndBudget = 3;
+  if (msgT > 0) msgT--;
+  // spawn
+  if (waveActive && spawnQueue.length && --spawnT <= 0) { const type = spawnQueue.shift(); spawn(type); spawnT = type === 'bat' ? 26 : type === 'boss' ? 90 : 42; }
+  // monsters walk
+  for (const m of monsters) {
+    if (m.dead) continue;
+    if (m.slow > 0) m.slow--; else m.slowAmt = 1;
+    m.d += m.speed * m.slowAmt; m.wob += 0.15;
+    [m.x, m.y] = posAt(m.d);
+    if (m.flash > 0) m.flash--;
+    if (m.d >= pathLen) {
+      m.dead = true; m.escaped = true; const lost = m.type === 'boss' ? 5 : m.type === 'troll' ? 2 : 1;
+      hearts = Math.max(0, hearts - lost); sfx.ouch(); floaters.push({ x: 760, y: m.y - 30, t: `-${lost} ❤️`, life: 60, red: true });
+    }
+  }
+  monsters = monsters.filter(m => !m.dead);
+  // towers
+  for (const t of towers) { if (t.cd > 0) t.cd--; else if (fire(t)) t.cd = towerStat(t, 'rate'); }
+  // shots
+  for (const s of shots) {
+    if (s.kind === 'ball') {
+      s.t++; const k = s.t / s.dur;
+      s.x = s.sx + (s.tx - s.sx) * k; s.y = s.sy + (s.ty - s.sy) * k - Math.sin(k * Math.PI) * 50;
+      if (k >= 1) { s.done = true; effects.push({ kind: 'boom', x: s.tx, y: s.ty, r: s.splash, life: 18 }); for (const m of monsters) if (dist(m.x, m.y, s.tx, s.ty) < s.splash) hurt(m, s.dmg); }
+    } else {
+      if (s.m.dead) { s.done = true; continue; }
+      const dx = s.m.x - s.x, dy = s.m.y - s.y, d = Math.hypot(dx, dy);
+      s.ang = Math.atan2(dy, dx);
+      if (d < s.speed + 4) { s.done = true; hurt(s.m, s.dmg); if (s.kind === 'ice') { s.m.slow = s.slowT; s.m.slowAmt = Math.min(s.m.slowAmt, s.slow); for (let i = 0; i < 4; i++) particles.push({ x: s.m.x, y: s.m.y, vx: Math.random() * 2 - 1, vy: Math.random() * 2 - 1, life: 20, c: '#b3e5fc' }); } }
+      else { s.x += dx / d * s.speed; s.y += dy / d * s.speed; }
+    }
+  }
+  shots = shots.filter(s => !s.done);
+  // wave over?
+  if (waveActive && !spawnQueue.length && !monsters.length) {
+    waveActive = false;
+    const bonus = 20 + wave * 3; gold += bonus;
+    if (wave >= WAVES) { winMap(); return; }
+    say(`Wave ${wave} cleared! +${bonus} bonus gold! Press START WAVE when ready.`);
+    sfx.upgrade();
+  }
+  if (hearts <= 0) { scene = 'lose'; sfx.lose(); }
+}
+function winMap() {
+  resultStars = hearts >= 15 ? 3 : hearts >= 8 ? 2 : 1;
+  SAVE.stars[mapI] = Math.max(SAVE.stars[mapI] || 0, resultStars); save();
+  scene = 'win'; sfx.win();
+  for (let i = 0; i < 90; i++) particles.push({ x: Math.random() * W, y: -Math.random() * 200, vx: Math.random() - .5, vy: Math.random() * 2 + 1, life: 220, c: pick(['#ff5252', '#ffd740', '#69f0ae', '#40c4ff', '#e040fb']) });
+}
+
+// ---------- Buttons & input ----------
+let buttons = [];
+function btn(x, y, w, h, o) { buttons.push({ x, y, w, h, ...o }); }
+function buildButtons() {
+  buttons = [];
+  if (scene === 'title') {
+    btn(W / 2 - 150, 390, 300, 70, { label: '▶ Defend the castle!', fn: () => { scene = 'maps'; }, color: '#e53935', big: true });
+    btn(686, 236, 52, 52, { label: '◀', fn: () => cycleLook(-1), color: '#7e57c2', big: true });   // tower hat picker
+    btn(862, 236, 52, 52, { label: '▶', fn: () => cycleLook(1), color: '#7e57c2', big: true });
+  }
+  else if (scene === 'maps') {
+    MAPS.forEach((m, i) => { const open = i === 0 || SAVE.stars[i - 1] > 0; btn(60 + i * 290, 150, 260, 230, { mapCard: i, open, fn: () => { if (open) startMap(i); else sfx.ouch(); } }); });
+    btn(20, 20, 120, 44, { label: '◀ Back', fn: () => { scene = 'title'; }, color: '#546e7a' });
+  } else if (scene === 'play') {
+    Object.keys(TOWERS).forEach((k, i) => btn(812, 108 + i * 56, 136, 52, { tower: k, fn: () => {
+      if (k === 'robo' && !roboOpen()) { placing = null; sfx.ouch(); return say(`🔒 Open the ${BUNDLE_NAMES[2]} in the Bundle Room!`); }
+      placing = placing === k ? null : k; selected = null; } }));
+    btn(812, 392, 136, 52, { label: waveActive ? `Wave ${wave}...` : wave >= WAVES ? 'Done!' : '▶ START WAVE', fn: startWave, color: waveActive ? '#78909c' : '#e53935', bold: true });
+    btn(812, 452, 64, 40, { label: speed === 1 ? '▶ 1x' : '⏩ 2x', fn: () => { speed = speed === 1 ? 2 : 1; }, color: '#5c6bc0' });
+    btn(884, 452, 64, 40, { label: musicOn ? '♪' : '♪̸', fn: () => { musicOn = !musicOn; }, color: '#546e7a' });
+    if (selected) {
+      const t = selected, info = TOWERS[t.type], upCost = t.level < 3 ? info.up[t.level - 1] : null;
+      const sx = Math.min(t.x * T + T + 6, FW - 170), sy = Math.max(FY + 4, Math.min(FY + t.y * T - 20, H - 130));
+      if (upCost) btn(sx, sy + 34, 160, 40, { label: `⬆ Upgrade 🪙${upCost}`, fn: () => { if (gold < upCost) return say('Not enough gold!'); gold -= upCost; t.level++; sfx.upgrade(); }, color: gold >= upCost ? '#43a047' : '#9e9e9e' });
+      const refund = Math.floor((info.cost + (t.level > 1 ? info.up[0] : 0) + (t.level > 2 ? info.up[1] : 0)) * 0.6);
+      btn(sx, sy + 80, 160, 36, { label: `Sell 🪙${refund}`, fn: () => { gold += refund; towers = towers.filter(o => o !== t); selected = null; sfx.coin(); }, color: '#8d6e63' });
+      selected.panel = [sx, sy];
+    }
+  } else if (scene === 'win' || scene === 'lose') {
+    btn(W / 2 - 290, 380, 270, 64, { label: scene === 'win' ? '🗺️ Map select' : '↻ Try again', fn: () => { scene === 'win' ? scene = 'maps' : startMap(mapI); }, color: '#43a047', big: true });
+    btn(W / 2 + 20, 380, 270, 64, { label: scene === 'win' && mapI < 2 ? '▶ Next land' : '🗺️ Map select', fn: () => { scene === 'win' && mapI < 2 ? startMap(mapI + 1) : scene = 'maps'; }, color: '#5c6bc0', big: true });
+  }
+}
+function pos(e) { const r = C.getBoundingClientRect(); return [(e.clientX - r.left) * W / r.width, (e.clientY - r.top) * H / r.height]; }
+C.addEventListener('mousedown', e => {
+  audio(); buildButtons();
+  const [x, y] = pos(e); mouse.x = x; mouse.y = y;
+  if (e.button === 2) { placing = null; selected = null; return; }
+  for (const b of buttons.slice().reverse()) if (x > b.x && x < b.x + b.w && y > b.y && y < b.y + b.h) { sfx.click(); b.fn(); return; }
+  if (scene !== 'play' || x >= FW || y < FY) return;
+  const tx = Math.floor(x / T), ty = Math.floor((y - FY) / T);
+  const there = towers.find(t => t.x === tx && t.y === ty);
+  if (there) { selected = selected === there ? null : there; placing = null; sfx.click(); return; }
+  selected = null;
+  if (placing) {
+    if (!tileFree(tx, ty)) return say("Can't build on the path! Pick a grassy spot.");
+    const cost = TOWERS[placing].cost;
+    if (gold < cost) return say(`You need ${cost} gold! Defeat monsters to earn more.`);
+    gold -= cost; towers.push({ type: placing, x: tx, y: ty, level: 1, cd: 0, aim: 0 }); sfx.build();
+    decos = decos.filter(d => d.x !== tx || d.y !== ty);
+    if (gold < cost) placing = null;
+  }
+});
+C.addEventListener('contextmenu', e => e.preventDefault());
+C.addEventListener('mousemove', e => { [mouse.x, mouse.y] = pos(e); });
+addEventListener('keydown', e => {
+  audio();
+  if (e.key === 'Escape') { placing = null; selected = null; }
+  if (e.key === 'm' || e.key === 'M') musicOn = !musicOn;
+  if (scene === 'play' && e.key === ' ') { e.preventDefault(); startWave(); }
+  if (scene === 'play' && e.key >= '1' && e.key <= '5') { const k = Object.keys(TOWERS)[+e.key - 1]; if (k !== 'robo' || roboOpen()) placing = k; else say(`🔒 Open the ${BUNDLE_NAMES[2]} in the Bundle Room!`); }
+  if (scene === 'title' && (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'l' || e.key === 'L')) { cycleLook(e.key === 'ArrowLeft' ? -1 : 1); sfx.click(); }   // change tower hat
+  if (scene === 'title' && e.key === 'Enter') scene = 'maps';
+});
+
+// ---------- Drawing ----------
+function rr(x, y, w, h, r, fill, stroke, lw = 3) { ctx.beginPath(); ctx.roundRect(x, y, w, h, r); if (fill) { ctx.fillStyle = fill; ctx.fill(); } if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lw; ctx.stroke(); } }
+function circle(x, y, r, c) { ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fillStyle = c; ctx.fill(); }
+function el(x, y, rx, ry, c) { ctx.beginPath(); ctx.ellipse(x, y, rx, ry, 0, 0, Math.PI * 2); ctx.fillStyle = c; ctx.fill(); }
+function text(s, x, y, size, color = '#fff', align = 'center', outline = '#1b1b2f') {
+  ctx.font = `bold ${size}px "Comic Sans MS", "Chalkboard SE", sans-serif`; ctx.textAlign = align; ctx.lineJoin = 'round';
+  if (outline) { ctx.lineWidth = size / 5; ctx.strokeStyle = outline; ctx.strokeText(s, x, y); }
+  ctx.fillStyle = color; ctx.fillText(s, x, y);
+}
+function drawCastle(x, y, s = 1, dmg = 0) {
+  ctx.save(); ctx.translate(x, y); ctx.scale(s, s);
+  const stone = '#b0bec5', dark = '#78909c';
+  rr(-38, -30, 76, 70, 4, stone, dark, 2);
+  for (const tx of [-44, 30]) { rr(tx, -55, 18, 95, 3, stone, dark, 2); for (let k = 0; k < 3; k++) rr(tx + k * 6, -63, 5, 9, 1, stone); }
+  for (let k = 0; k < 5; k++) rr(-36 + k * 15, -38, 9, 9, 1, stone);
+  rr(-12, 10, 24, 30, [12, 12, 0, 0], '#6d4c41');
+  rr(-28, -14, 12, 14, [6, 6, 0, 0], '#37474f'); rr(16, -14, 12, 14, [6, 6, 0, 0], '#37474f');
+  ctx.fillStyle = '#5d4037'; ctx.fillRect(-36, -76, 2, 22); ctx.fillRect(38, -76, 2, 22);
+  ctx.fillStyle = '#e53935'; for (const fx of [-34, 40]) { ctx.beginPath(); ctx.moveTo(fx, -76); ctx.lineTo(fx + 14 + Math.sin(frame * 0.1) * 2, -71); ctx.lineTo(fx, -66); ctx.fill(); }
+  ctx.restore();
+}
+function drawMap() {
+  for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) {
+    const px = x * T, py = FY + y * T, onPath = pathTiles.has(x + ',' + y);
+    ctx.fillStyle = onPath ? ((x + y) % 2 ? M.path : M.path2) : M.grass[(x + y) % 2]; ctx.fillRect(px, py, T, T);
+    if (onPath && M.deco === 'lava' && (x * 7 + y) % 5 === 0) { circle(px + 12, py + 28, 3, '#ff7043'); }
+  }
+  for (const d of decos) {
+    const px = d.x * T + T / 2, py = FY + d.y * T + T / 2;
+    if (M.deco === 'tree') { ctx.fillStyle = '#6d4c41'; ctx.fillRect(px - 3, py, 6, 14); circle(px, py - 4, 13 * d.s, '#2e7d32'); circle(px - 4, py - 8, 6 * d.s, '#43a047'); }
+    else if (M.deco === 'pine') { ctx.fillStyle = '#2e7d32'; ctx.beginPath(); ctx.moveTo(px, py - 18 * d.s); ctx.lineTo(px - 12 * d.s, py + 10); ctx.lineTo(px + 12 * d.s, py + 10); ctx.fill(); ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.moveTo(px, py - 18 * d.s); ctx.lineTo(px - 5, py - 8); ctx.lineTo(px + 5, py - 8); ctx.fill(); }
+    else { el(px, py + 6, 14 * d.s, 8 * d.s, '#ff5722'); el(px, py + 6, 9 * d.s, 5 * d.s, `rgba(255,235,59,${0.6 + 0.3 * Math.sin(frame * 0.1 + d.x)})`); }
+  }
+  const [ex, ey] = M.pts[M.pts.length - 1];
+  drawCastle(18 * T + 34, FY + ey * T + T / 2 + 6, 0.85);
+  // entrance arrow
+  const [sx, sy] = pathPx[1]; text('➡', 22, FY + M.pts[0][1] * T + 28, 22, '#fff');
+}
+function drawTower(t, ghost) {
+  const cx = t.x * T + T / 2, cy = FY + t.y * T + T / 2, info = TOWERS[t.type];
+  ctx.globalAlpha = ghost ? 0.6 : 1;
+  rr(cx - 16, cy - 6, 32, 22, 4, '#9e9e9e', '#616161', 2);
+  ctx.fillStyle = '#757575'; ctx.fillRect(cx - 16, cy + 2, 32, 2);
+  if (t.type === 'archer') { rr(cx - 12, cy - 22, 24, 18, 3, '#a1887f', '#6d4c41', 2); ctx.fillStyle = '#c62828'; ctx.beginPath(); ctx.moveTo(cx - 16, cy - 20); ctx.lineTo(cx, cy - 34); ctx.lineTo(cx + 16, cy - 20); ctx.fill(); circle(cx + Math.cos(t.aim) * 6, cy - 13, 4, '#ffcc99'); }
+  if (t.type === 'cannon') { circle(cx, cy - 12, 12, '#455a64'); ctx.save(); ctx.translate(cx, cy - 12); ctx.rotate(t.aim); rr(0, -5, 20, 10, 3, '#263238'); ctx.restore(); }
+  if (t.type === 'ice') { ctx.fillStyle = '#81d4fa'; ctx.beginPath(); ctx.moveTo(cx, cy - 36); ctx.lineTo(cx + 11, cy - 14); ctx.lineTo(cx, cy - 4); ctx.lineTo(cx - 11, cy - 14); ctx.fill(); ctx.fillStyle = 'rgba(255,255,255,.7)'; ctx.beginPath(); ctx.moveTo(cx, cy - 36); ctx.lineTo(cx + 4, cy - 16); ctx.lineTo(cx - 4, cy - 16); ctx.fill(); }
+  if (t.type === 'lightning') { rr(cx - 5, cy - 26, 10, 22, 3, '#7e57c2'); for (let k = 0; k < 3; k++) el(cx, cy - 10 - k * 6, 9, 2.5, '#b39ddb'); circle(cx, cy - 30, 7, `rgba(234,128,252,${0.7 + 0.3 * Math.sin(frame * 0.3)})`); }
+  if (t.type === 'robo') {   // Robo on top of the tower (same Robo as in Robo Jump)
+    const ex = Math.cos(t.aim) * 2.5;
+    rr(cx - 9, cy - 17, 18, 12, 4, '#f5f7ff', '#90a4ae', 1); circle(cx, cy - 11, 2.5, '#2979ff');   // body + chest light
+    rr(cx - 15, cy - 29, 5, 8, 2, '#2979ff'); rr(cx + 10, cy - 29, 5, 8, 2, '#2979ff');                // ear pods
+    rr(cx - 12, cy - 34, 24, 19, 8, '#ffffff', '#90a4ae', 1);                                           // big round head
+    rr(cx - 9, cy - 31, 18, 12, 6, '#111827');                                                          // visor
+    const blink = frame % 170 < 6 ? 0.6 : 2.6;
+    ctx.fillStyle = '#40c4ff'; ctx.beginPath(); ctx.ellipse(cx - 4 + ex, cy - 25, 2.2, blink, 0, 0, Math.PI * 2); ctx.ellipse(cx + 4 + ex, cy - 25, 2.2, blink, 0, 0, Math.PI * 2); ctx.fill();
+  }
+  const hat = t.hat || myLook;
+  if (hat !== 'normal') drawTowerHat(hat, cx, cy + HAT_TOP[t.type]);
+  for (let k = 0; k < t.level; k++) text('★', cx - 10 + k * 10, cy + 20, 11, '#ffd740', 'center', '#5d4037');
+  ctx.globalAlpha = 1;
+}
+const HAT_TOP = { archer: -31, cannon: -23, ice: -33, lightning: -36, robo: -33 };   // where each tower's head is (from its middle)
+function drawTowerHat(id, x, y) {   // a little hat sitting on a tower; y = top of the tower
+  const ink = '#3e2723';
+  const line = () => { ctx.strokeStyle = ink; ctx.lineWidth = 1.5; ctx.stroke(); };
+  if (id === 'party') {
+    ctx.beginPath(); ctx.moveTo(x - 9, y + 2); ctx.lineTo(x, y - 20); ctx.lineTo(x + 9, y + 2); ctx.closePath();
+    ctx.fillStyle = '#ec407a'; ctx.fill(); line();
+    ctx.save(); ctx.clip(); ctx.fillStyle = '#ffeb3b';
+    for (let k = 0; k < 3; k++) ctx.fillRect(x - 12, y - 14 + k * 6, 24, 2.5);   // stripes
+    ctx.restore();
+    circle(x, y - 20, 3.5, '#69f0ae'); circle(x - 1, y - 21, 1.2, '#fff');      // pompom
+  } else if (id === 'tophat') {
+    ctx.beginPath(); ctx.rect(x - 7, y - 18, 14, 18); ctx.fillStyle = '#212121'; ctx.fill(); line();
+    ctx.fillStyle = '#e53935'; ctx.fillRect(x - 7, y - 5, 14, 3.5);
+    ctx.beginPath(); ctx.roundRect(x - 12, y - 1, 24, 4, 2); ctx.fillStyle = '#212121'; ctx.fill(); line();
+    ctx.fillStyle = 'rgba(255,255,255,.35)'; ctx.fillRect(x - 5, y - 16, 2, 9);
+  } else if (id === 'crown') {
+    ctx.beginPath(); ctx.moveTo(x - 11, y + 2); ctx.lineTo(x - 11, y - 9); ctx.lineTo(x - 5.5, y - 3); ctx.lineTo(x, y - 13);
+    ctx.lineTo(x + 5.5, y - 3); ctx.lineTo(x + 11, y - 9); ctx.lineTo(x + 11, y + 2); ctx.closePath();
+    ctx.fillStyle = '#ffd740'; ctx.fill(); line();
+    circle(x, y - 2, 2.2, '#e53935'); circle(x - 6.5, y - 1, 1.6, '#40c4ff'); circle(x + 6.5, y - 1, 1.6, '#40c4ff');
+    circle(x, y - 13, 1.8, '#fff59d'); circle(x - 11, y - 9, 1.6, '#fff59d'); circle(x + 11, y - 9, 1.6, '#fff59d');
+  } else if (id === 'cowboy') {
+    ctx.beginPath(); ctx.moveTo(x - 7, y); ctx.lineTo(x - 6, y - 12); ctx.quadraticCurveTo(x - 3, y - 15, x, y - 11); ctx.quadraticCurveTo(x + 3, y - 15, x + 6, y - 12); ctx.lineTo(x + 7, y); ctx.closePath();
+    ctx.fillStyle = '#a1662f'; ctx.fill(); line();
+    ctx.fillStyle = '#5d4037'; ctx.fillRect(x - 7, y - 4, 14, 3);   // band
+    ctx.beginPath(); ctx.moveTo(x - 16, y - 4); ctx.quadraticCurveTo(x - 13, y + 3, x, y + 2); ctx.quadraticCurveTo(x + 13, y + 3, x + 16, y - 4);
+    ctx.quadraticCurveTo(x + 12, y + 6, x, y + 5); ctx.quadraticCurveTo(x - 12, y + 6, x - 16, y - 4); ctx.closePath();
+    ctx.fillStyle = '#8d5524'; ctx.fill(); line();   // curly brim
+  }
+}
+function drawMonster(m) {
+  const x = m.x, y = m.y + Math.sin(m.wob) * (m.type === 'bat' || m.type === 'ghost' ? 4 : 1.5), s = m.size;
+  ctx.save();
+  if (m.flash > 0) ctx.globalAlpha = 0.6;
+  el(x, m.y + s * 0.8, s * 0.9, s * 0.3, 'rgba(0,0,0,.2)');
+  if (m.type === 'slime') { el(x, y + 2, s, s * 0.8, m.slow ? '#80deea' : '#76ff03'); circle(x - 5, y - 2, 3.5, '#fff'); circle(x + 5, y - 2, 3.5, '#fff'); circle(x - 4, y - 1, 1.8, '#000'); circle(x + 6, y - 1, 1.8, '#000'); }
+  if (m.type === 'bat') { const f = Math.sin(m.wob * 3) * 8; ctx.fillStyle = m.slow ? '#80deea' : '#6a1b9a'; ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x - 20, y - 6 + f); ctx.lineTo(x - 9, y + 5); ctx.fill(); ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + 20, y - 6 + f); ctx.lineTo(x + 9, y + 5); ctx.fill(); circle(x, y, 9, m.slow ? '#b2ebf2' : '#8e24aa'); circle(x - 3, y - 2, 2, '#ffeb3b'); circle(x + 3, y - 2, 2, '#ffeb3b'); }
+  if (m.type === 'troll') { el(x, y + 2, s, s * 0.95, m.slow ? '#80deea' : '#7cb342'); ctx.fillStyle = '#5d4037'; ctx.save(); ctx.translate(x + s * 0.8, y - 4); ctx.rotate(-0.6 + Math.sin(m.wob) * 0.3); ctx.fillRect(-3, -18, 7, 22); ctx.restore(); circle(x - 6, y - 6, 3.5, '#fff'); circle(x + 6, y - 6, 3.5, '#fff'); circle(x - 6, y - 5, 1.8, '#000'); circle(x + 6, y - 5, 1.8, '#000'); ctx.fillStyle = '#fff'; ctx.fillRect(x - 6, y + 5, 3, 4); ctx.fillRect(x + 3, y + 5, 3, 4); }
+  if (m.type === 'ghost') { ctx.globalAlpha *= 0.85; ctx.fillStyle = m.slow ? '#b2ebf2' : '#f5f5f5'; ctx.beginPath(); ctx.arc(x, y - 2, s, Math.PI, 0); for (let k = 0; k <= 4; k++) ctx.lineTo(x + s - k * s / 2, y + s * 0.8 + (k % 2 ? -5 : 0)); ctx.fill(); circle(x - 5, y - 4, 3, '#000'); circle(x + 5, y - 4, 3, '#000'); el(x, y + 4, 3, 4, '#000'); }
+  if (m.type === 'boss') { el(x, y, s, s * 0.85, m.slow ? '#80deea' : '#8e24aa'); circle(x - 10, y - 6, 7, '#fff'); circle(x + 10, y - 6, 7, '#fff'); circle(x - 9, y - 5, 3.5, '#000'); circle(x + 11, y - 5, 3.5, '#000'); ctx.fillStyle = '#ffd740'; ctx.beginPath(); ctx.moveTo(x - 16, y - s * 0.7); for (let k = 0; k <= 4; k++) ctx.lineTo(x - 16 + k * 8, y - s * 0.7 - (k % 2 ? 4 : 16)); ctx.lineTo(x + 16, y - s * 0.7); ctx.fill(); }
+  ctx.restore();
+  if (m.hp < m.max) { rr(x - s, y - s - 12, s * 2, 5, 2, 'rgba(0,0,0,.5)'); rr(x - s, y - s - 12, s * 2 * Math.max(0, m.hp / m.max), 5, 2, '#ff5252'); }
+}
+function drawPanel() {
+  rr(FW, 0, W - FW, H, 0, '#3e2723');
+  ctx.fillStyle = '#4e342e'; for (let y = 0; y < H; y += 24) ctx.fillRect(FW, y, W - FW, 2);
+  text(`❤️ ${hearts}`, 820, 34, 24, '#ff5252', 'left');
+  text(`🪙 ${gold}`, 820, 66, 24, '#ffd740', 'left');
+  text(`Wave ${wave}/${WAVES}`, 880, 100, 18, '#fff');
+}
+function drawButtons() {
+  for (const b of buttons) {
+    const hover = mouse.x > b.x && mouse.x < b.x + b.w && mouse.y > b.y && mouse.y < b.y + b.h;
+    if (b.mapCard !== undefined) {
+      const m = MAPS[b.mapCard];
+      rr(b.x, b.y, b.w, b.h, 18, b.open ? (hover ? '#fff8e1' : '#ffffff') : '#9e9e9e', hover && b.open ? '#ffb300' : '#5d4037', 4);
+      rr(b.x + 14, b.y + 14, b.w - 28, 110, 12, m.grass[0]);
+      ctx.strokeStyle = m.path; ctx.lineWidth = 12; ctx.beginPath(); m.pts.forEach(([x, y], k) => { const px = b.x + 20 + (x + 1) * 10.5, py = b.y + 22 + y * 8; k ? ctx.lineTo(px, py) : ctx.moveTo(px, py); }); ctx.stroke();
+      drawCastle(b.x + b.w - 34, b.y + 100, 0.45);
+      text(m.name, b.x + b.w / 2, b.y + 156, 24, b.open ? '#5d4037' : '#424242', 'center', null);
+      text(b.open ? '★'.repeat(SAVE.stars[b.mapCard] || 0) + '☆'.repeat(3 - (SAVE.stars[b.mapCard] || 0)) : '🔒 Beat the land before', b.x + b.w / 2, b.y + 196, b.open ? 28 : 16, '#ffb300', 'center', null);
+      continue;
+    }
+    if (b.tower) {
+      const info = TOWERS[b.tower], on = placing === b.tower, can = gold >= info.cost, locked = b.tower === 'robo' && !roboOpen();
+      rr(b.x, b.y, b.w, b.h, 10, locked ? '#6d6d6d' : on ? '#fff59d' : can ? '#efebe9' : '#8d8d8d', on ? '#ff9800' : hover ? '#ffb300' : '#5d4037', on ? 4 : 2);
+      ctx.save(); ctx.translate(b.x + 26 - 20, b.y + 36 - FY - 20); drawTower({ type: b.tower, x: 0, y: 0, level: 0, aim: -0.5, hat: 'normal' }, locked); ctx.restore();
+      if (locked) {   // MEGA Robo Tower Pack not opened yet
+        text('🔒', b.x + 26, b.y + 34, 22, '#fff', 'center', null);
+        text('Robo Laser', b.x + 90, b.y + 18, 14, '#fff', 'center', null);
+        text('Open the MEGA', b.x + 90, b.y + 33, 10, '#ffe082', 'center', null);
+        text('Robo Tower Pack!', b.x + 90, b.y + 45, 10, '#ffe082', 'center', null);
+        continue;
+      }
+      text(info.name, b.x + 88, b.y + 22, 15, '#3e2723', 'center', null);
+      text(`🪙 ${info.cost}`, b.x + 88, b.y + 42, 15, can ? '#e65100' : '#424242', 'center', null);
+      continue;
+    }
+    rr(b.x, b.y + 4, b.w, b.h, 14, 'rgba(0,0,0,.3)'); rr(b.x, b.y - (hover ? 2 : 0), b.w, b.h, 14, b.color || '#5c6bc0', '#fff', 2.5);
+    text(b.label, b.x + b.w / 2, b.y + b.h / 2 + (b.big ? 10 : 6) - (hover ? 2 : 0), b.big ? 26 : b.bold ? 17 : 15, '#fff');
+  }
+}
+
+function draw() {
+  if (scene === 'title' || scene === 'maps') {
+    const g = ctx.createLinearGradient(0, 0, 0, H); g.addColorStop(0, '#4fc3f7'); g.addColorStop(1, '#b3e5fc'); ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = '#7cc35a'; ctx.beginPath(); ctx.moveTo(0, H); for (let x = 0; x <= W; x += 20) ctx.lineTo(x, 400 - Math.sin(x / 140) * 30); ctx.lineTo(W, H); ctx.fill();
+    if (scene === 'title') {
+      drawCastle(W / 2, 330, 2.4);
+      const fake = { type: 'slime', x: 0, y: 0, size: 15, hp: 1, max: 1, wob: frame * 0.15 };
+      for (let k = 0; k < 4; k++) { fake.type = ['slime', 'bat', 'troll', 'ghost'][k]; fake.size = MONSTERS[fake.type].size; fake.x = ((frame * 0.8 + k * 70) % 330); fake.y = 410 + (k % 2) * 14; fake.wob = frame * 0.15 + k; drawMonster(fake); }
+      text('CASTLE DEFENSE', W / 2, 90, 70, '#ffd740', 'center', '#5d4037');
+      text('Build towers to stop the silly monsters!', W / 2, 135, 24, '#fff', 'center', '#5d4037');
+      // tower hat picker: a big tower wearing the hat
+      const LK = LOOKS[lookView], open = lookOpen(LK);
+      rr(676, 158, 248, 232, 18, 'rgba(255,255,255,.55)', '#5d4037', 3);
+      text('Tower Hats', 800, 186, 22, '#5d4037', 'center', null);
+      ctx.save(); ctx.translate(800, 308); ctx.scale(1.9, 1.9); ctx.translate(-20, -FY - 20);
+      drawTower({ type: 'archer', x: 0, y: 0, level: 0, aim: Math.sin(frame * 0.03), hat: LK.id }, !open); ctx.restore();
+      if (!open) text('🔒', 800, 296, 40, '#fff', 'center', null);
+      if (open) text(`${LK.name}${LK.id === myLook ? ' ✔' : ''}`, 800, 362, 20, '#2e7d32', 'center', null);
+      else { text(`🔒 ${LK.name}: Open the`, 800, 356, 15, '#5d4037', 'center', null); text(`${BUNDLE_NAMES[LK.b]} in the Bundle Room!`, 800, 375, 15, '#5d4037', 'center', null); }
+      text('◀ ▶ change hat', 800, 412, 16, '#fff', 'center', '#5d4037');
+    } else text('Pick a land to defend!', W / 2, 90, 48, '#ffd740', 'center', '#5d4037');
+    drawButtons(); drawParticles(); return;
+  }
+  drawMap();
+  // range preview
+  if (placing && mouse.x < FW && mouse.y > FY) {
+    const tx = Math.floor(mouse.x / T), ty = Math.floor((mouse.y - FY) / T), ok = tileFree(tx, ty) && gold >= TOWERS[placing].cost;
+    ctx.fillStyle = ok ? 'rgba(105,240,174,.18)' : 'rgba(255,82,82,.2)'; ctx.strokeStyle = ok ? '#69f0ae' : '#ff5252'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(tx * T + T / 2, FY + ty * T + T / 2, TOWERS[placing].range[0], 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    drawTower({ type: placing, x: tx, y: ty, level: 1, aim: 0 }, true);
+  }
+  if (selected) { const t = selected; ctx.strokeStyle = 'rgba(255,255,255,.8)'; ctx.lineWidth = 2; ctx.fillStyle = 'rgba(255,255,255,.12)'; ctx.beginPath(); ctx.arc(t.x * T + T / 2, FY + t.y * T + T / 2, towerStat(t, 'range'), 0, Math.PI * 2); ctx.fill(); ctx.stroke(); }
+  const all = [...towers.map(t => ({ y: FY + t.y * T + T, draw: () => drawTower(t) })), ...monsters.map(m => ({ y: m.y + m.size, draw: () => drawMonster(m) }))].sort((a, b) => a.y - b.y);
+  for (const o of all) o.draw();
+  for (const s of shots) {
+    if (s.kind === 'arrow') { ctx.save(); ctx.translate(s.x, s.y); ctx.rotate(s.ang || 0); ctx.fillStyle = '#5d4037'; ctx.fillRect(-10, -1, 16, 2); ctx.fillStyle = '#9e9e9e'; ctx.beginPath(); ctx.moveTo(6, -3); ctx.lineTo(11, 0); ctx.lineTo(6, 3); ctx.fill(); ctx.restore(); }
+    if (s.kind === 'ice') { circle(s.x, s.y, 5, '#b3e5fc'); circle(s.x, s.y, 2.5, '#fff'); }
+    if (s.kind === 'ball') { circle(s.x, s.y, 6, '#212121'); }
+  }
+  for (const e of effects) {
+    if (e.kind === 'boom') { ctx.globalAlpha = e.life / 18; circle(e.x, e.y, e.r * (1 - e.life / 24), '#ffab40'); circle(e.x, e.y, e.r * 0.6 * (1 - e.life / 24), '#ffeb3b'); ctx.globalAlpha = 1; }
+    if (e.kind === 'laser') { const a = e.life / 10; ctx.lineCap = 'round';
+      ctx.strokeStyle = `rgba(255,82,82,${a * 0.6})`; ctx.lineWidth = 7; ctx.beginPath(); ctx.moveTo(e.x1, e.y1); ctx.lineTo(e.x2, e.y2); ctx.stroke();
+      ctx.strokeStyle = `rgba(255,255,255,${a})`; ctx.lineWidth = 2.5; ctx.stroke(); ctx.lineCap = 'butt'; circle(e.x2, e.y2, 6 * a + 2, `rgba(255,138,128,${a})`); }
+    if (e.kind === 'zap') { ctx.strokeStyle = `rgba(234,128,252,${e.life / 10})`; ctx.lineWidth = 3; ctx.beginPath(); e.pts.forEach(([x, y], k) => { if (!k) ctx.moveTo(x, y); else { const [px, py] = e.pts[k - 1]; ctx.lineTo((px + x) / 2 + (Math.random() - .5) * 14, (py + y) / 2 + (Math.random() - .5) * 14); ctx.lineTo(x, y); } }); ctx.stroke(); }
+  }
+  drawParticles();
+  for (const f of floaters) text(f.t, f.x, f.y, 16, f.red ? '#ff5252' : '#ffd740');
+  // top bar
+  ctx.fillStyle = 'rgba(0,0,0,.45)'; ctx.fillRect(0, 0, FW, FY);
+  text(M.name, 12, 28, 20, '#fff', 'left');
+  if (msgT > 0) text(msg, FW / 2 + 60, 28, 16, '#ffe082');
+  drawPanel();
+  if (selected && selected.panel) { const [sx, sy] = selected.panel, info = TOWERS[selected.type]; rr(sx - 6, sy - 6, 172, 128, 12, 'rgba(30,20,10,.85)'); text(`${info.icon} ${info.name} ${'★'.repeat(selected.level)}`, sx + 80, sy + 22, 15, '#ffd740'); }
+  drawButtons();
+  if (placing) text(TOWERS[placing].desc, 880, 520 - 8, 11, '#ffe082');
+  if (scene === 'win' || scene === 'lose') {
+    ctx.fillStyle = 'rgba(0,0,0,.55)'; ctx.fillRect(0, 0, W, H);
+    text(scene === 'win' ? 'THE CASTLE IS SAFE! 🏰' : 'Oh no! The monsters got in!', W / 2, 160, scene === 'win' ? 54 : 46, scene === 'win' ? '#ffd740' : '#ff8a80');
+    if (scene === 'win') { text('★'.repeat(resultStars) + '☆'.repeat(3 - resultStars), W / 2, 240, 64, '#ffd740'); text(`You kept ${hearts} hearts safe!`, W / 2, 300, 26); }
+    else text('Try building more towers near the corners!', W / 2, 240, 26);
+    drawButtons(); drawParticles();
+  }
+}
+function drawParticles() { for (const p of particles) { ctx.globalAlpha = Math.min(1, p.life / 15); if (p.star) text('★', p.x, p.y, 14, p.c, 'center', null); else { ctx.fillStyle = p.c; ctx.fillRect(p.x, p.y, 5, 5); } } ctx.globalAlpha = 1; }
+
+function update() {
+  frame++;
+  for (const p of particles) { p.x += p.vx; p.y += p.vy; p.vy += 0.06; p.life--; }
+  particles = particles.filter(p => p.life > 0);
+  if (scene === 'play') {
+    for (let k = 0; k < speed; k++) { updatePlay(); if (scene !== 'play') break; }
+    for (const e of effects) e.life--; effects = effects.filter(e => e.life > 0);
+    for (const f of floaters) { f.y -= 0.7; f.life--; } floaters = floaters.filter(f => f.life > 0);
+  }
+  buildButtons();
+}
+buildButtons();
+let last = performance.now(), acc = 0;
+function loop(now) {
+  acc += Math.min(100, now - last); last = now;
+  while (acc >= 1000 / 60) { update(); acc -= 1000 / 60; }
+  playMusic();
+  draw();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+<!-- injected by scripts/inject-factory.py — hold PS (or SELECT+START) for 1s to go
+     up one level: game -> the book (parent.closeGame), standalone game -> /factory/,
+     the book -> Stephens Arcade (/). Shares one rAF pad poll with the cursor + idle overlays. -->
+<script id="__gf_pad_exit">
+(function () {
+  var IS_BOOK = false; /*@gf:is_book*/
+  var HOLD_MS = 1000;
+  // one rAF loop per page reads the pads for every __gf overlay
+  var hub = window.__gfHub;
+  if (!hub) {
+    hub = window.__gfHub = { fns: [], pads: [] };
+    (function () {
+      var NONE = [];
+      function loop(now) {
+        var p = null;
+        try { p = navigator.getGamepads ? navigator.getGamepads() : null; } catch (e) {}
+        hub.pads = p || NONE;
+        for (var i = 0; i < hub.fns.length; i++) { try { hub.fns[i](now, hub.pads); } catch (e) {} }
+        requestAnimationFrame(loop);
+      }
+      requestAnimationFrame(loop);
+    })();
+  }
+
+  var STEPS = 20, TF = [];               // precomputed badge transforms: zero allocations while held
+  for (var s = 0; s <= STEPS; s++) TF.push('translateX(-50%) scale(' + (1 + 0.35 * s / STEPS).toFixed(4) + ')');
+  var HIDE_TF = 'translateX(-50%) scale(0.85)';
+  var heldSince = 0, needRelease = true, leaving = false, badge = null, lastStep = -2;
+  var player = null;
+
+  function comboDown(pads) {
+    for (var i = 0; i < pads.length; i++) {
+      var gp = pads[i];
+      if (!gp || gp.connected === false) continue;
+      var b = gp.buttons;
+      if ((b[16] && b[16].pressed) || (b[8] && b[8].pressed && b[9] && b[9].pressed)) return true;
+    }
+    return false;
+  }
+  function makeBadge() {
+    badge = document.createElement('div');
+    badge.id = '__gfx_exit';
+    badge.textContent = IS_BOOK ? '◄ ARCADE' : '◄ BOOK';
+    badge.style.cssText = 'position:fixed;top:12px;left:50%;z-index:2147483001;pointer-events:none;' +
+      'padding:7px 18px;border-radius:999px;background:#10172a;color:#ffd23f;border:3px solid #ffd23f;' +
+      'font:bold 18px/1 "Trebuchet MS","Arial Rounded MT Bold",sans-serif;letter-spacing:1px;white-space:nowrap;' +
+      'transform-origin:50% 0;opacity:0;transform:' + HIDE_TF + ';transition:opacity .12s;';
+    (document.body || document.documentElement).appendChild(badge);
+  }
+  function setBadge(step) {            // step -1 = hidden, 0..STEPS = hold progress
+    if (step === lastStep) return;
+    lastStep = step;
+    if (step < 0) { if (badge) { badge.style.opacity = '0'; badge.style.transform = HIDE_TF; } return; }
+    if (!badge) makeBadge();
+    badge.style.opacity = '1';
+    badge.style.transform = TF[step];
+  }
+  function inGame() {
+    try { return window.parent !== window && typeof window.parent.closeGame === 'function'; } catch (e) { return false; }
+  }
+  function leave() {
+    leaving = true;                    // never navigate twice
+    if (!IS_BOOK && inGame()) { setBadge(-1); try { window.parent.closeGame(); } catch (e) {} return; }
+    location.href = IS_BOOK ? '/' : '/factory/';
+  }
+  hub.fns.push(function (now, pads) {
+    if (leaving) return;
+    var down = comboDown(pads);
+    if (IS_BOOK) {
+      if (!player) player = document.getElementById('player');
+      if (player && player.classList.contains('open')) {   // the game's own overlay handles this hold
+        if (down) needRelease = true;
+        heldSince = 0; setBadge(-1); return;
+      }
+    }
+    if (needRelease) {                 // a hold that started elsewhere never counts here
+      if (down) return;
+      needRelease = false;
+    }
+    if (!down) { heldSince = 0; setBadge(-1); return; }
+    if (!heldSince) heldSince = now;
+    var p = (now - heldSince) / HOLD_MS;
+    setBadge(Math.round((p > 1 ? 1 : p) * STEPS));
+    if (p >= 1) leave();
+  });
+})();
+</script>
+<!-- injected by scripts/inject-factory.py — console (low-fx) mode only: no-op canvas
+     shadowBlur and kill CSS backdrop-filter (both measured fps killers on the Pi).
+     The mouse cursor is hidden only while the pad cursor is installed. -->
+<script id="__gf_lowfx">
+(function () {
+  var on = false;
+  try {
+    if (/[?&]fx=low\b/.test(location.search)) { on = true; localStorage.setItem('arcade_lowfx', '1'); }
+    else if (/[?&]fx=full\b/.test(location.search)) { localStorage.setItem('arcade_lowfx', '0'); }
+    else { on = localStorage.getItem('arcade_lowfx') === '1'; }
+  } catch (e) {}
+  if (!on) return;
+  try {
+    Object.defineProperty(CanvasRenderingContext2D.prototype, 'shadowBlur', {
+      set: function () {}, get: function () { return 0; }, configurable: true
+    });
+  } catch (e) {}
+  try {
+    var st = document.createElement('style');
+    st.textContent = '* { backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }' +
+      ' html.__gfx_padcursor, html.__gfx_padcursor * { cursor: none !important; }';
+    (document.head || document.documentElement).appendChild(st);
+  } catch (e) {}
+})();
+</script>
+<!-- injected by scripts/inject-factory.py — console mode only: the TV has no printer,
+     so window.print shows a friendly toast instead of a dead print dialog. -->
+<script id="__gf_print">
+(function () {
+  var on = false;
+  try { on = /[?&]fx=low\b/.test(location.search) || localStorage.getItem('arcade_lowfx') === '1'; } catch (e) {}
+  if (!on) return;
+  var toast = null, timer = 0;
+  function hide() { if (toast) toast.style.opacity = '0'; }
+  window.print = function () {
+    try {
+      if (!toast) {
+        toast = document.createElement('div');
+        toast.id = '__gfx_print';
+        toast.textContent = '🖨️ Printing works on the iPad — not on the TV!';
+        toast.style.cssText = 'position:fixed;left:50%;bottom:48px;transform:translateX(-50%);z-index:2147483001;' +
+          'pointer-events:none;padding:14px 26px;border-radius:16px;background:#10172a;color:#ffd23f;' +
+          'border:3px solid #ffd23f;font:bold 24px/1.2 "Trebuchet MS","Arial Rounded MT Bold",sans-serif;' +
+          'white-space:nowrap;opacity:0;transition:opacity .2s;';
+        (document.body || document.documentElement).appendChild(toast);
+      }
+      toast.style.opacity = '1';
+      clearTimeout(timer);
+      timer = setTimeout(hide, 2500);
+    } catch (e) {}
+  };
+})();
+</script>
+<!-- injected by scripts/inject-factory.py — pad cursor: a pad-driven mouse pointer so
+     tap/click-only games play on the console. Right stick moves it (left stick too in
+     pointer games); X / R1 clicks and drags (pointer + mouse events, like touchpad.js
+     turns fingers into mouse events). Never consumes pad input. -->
+<script id="__gf_cursor">
+(function () {
+  window.__GF_CURSOR_LEFT = true; /*@gf:cursor_left*/
+  var IS_BOOK = false; /*@gf:is_book*/
+  var LEFT = window.__GF_CURSOR_LEFT === true;
+  var DZ = 0.2, SPEED = 900, SLEEP_MS = 4000, CLICK_SLOP = 12;
+  // one rAF loop per page reads the pads for every __gf overlay
+  var hub = window.__gfHub;
+  if (!hub) {
+    hub = window.__gfHub = { fns: [], pads: [] };
+    (function () {
+      var NONE = [];
+      function loop(now) {
+        var p = null;
+        try { p = navigator.getGamepads ? navigator.getGamepads() : null; } catch (e) {}
+        hub.pads = p || NONE;
+        for (var i = 0; i < hub.fns.length; i++) { try { hub.fns[i](now, hub.pads); } catch (e) {} }
+        requestAnimationFrame(loop);
+      }
+      requestAnimationFrame(loop);
+    })();
+  }
+
+  var S = window.__gfCursorState = { installed: false, awake: false, held: false, x: 0, y: 0 };
+  var el = null, x = 0, y = 0, awake = false, lastMove = 0, lastT = 0;
+  var held = false, target = null, sx = 0, sy = 0, prevBtn = false, vx = 0, vy = 0, player = null;
+  var INIT = { bubbles: true, cancelable: true, composed: true, view: window, detail: 0,
+    clientX: 0, clientY: 0, screenX: 0, screenY: 0, button: 0, buttons: 0,
+    pointerId: 1, pointerType: 'mouse', isPrimary: true, width: 1, height: 1, pressure: 0 };
+  var HAS_PE = typeof window.PointerEvent === 'function';
+
+  function install() {
+    if (S.installed) return;
+    S.installed = true;
+    x = Math.round((window.innerWidth || 1280) / 2); y = Math.round((window.innerHeight || 720) / 2);
+    el = document.createElement('div');
+    el.id = '__gfx_cursor';
+    el.style.cssText = 'position:fixed;left:0;top:0;width:28px;height:28px;pointer-events:none;z-index:2147483000;' +
+      'opacity:0;transition:opacity .25s;will-change:transform;';
+    el.innerHTML = '<svg width="28" height="28" viewBox="0 0 28 28" style="display:block;overflow:visible">' +
+      '<path d="M3 2 L3 23.5 L8.6 18.3 L12.6 26.6 L17 24.5 L13 16.4 L20.8 16.4 Z" fill="#fff" stroke="#10172a" ' +
+      'stroke-width="2.2" stroke-linejoin="round"/></svg>';
+    (document.body || document.documentElement).appendChild(el);
+    try { document.documentElement.classList.add('__gfx_padcursor'); } catch (e) {}
+    place();
+  }
+  function place() {
+    el.style.transform = 'translate3d(' + (x - 3) + 'px,' + (y - 2) + 'px,0)';
+    S.x = x; S.y = y;
+  }
+  function wake() { awake = S.awake = true; el.style.opacity = '1'; }
+  function sleep() { awake = S.awake = false; el.style.opacity = '0'; }
+  function fire(type, node, buttons, pointer) {
+    if (!node) return;
+    INIT.clientX = x; INIT.clientY = y;
+    INIT.screenX = (window.screenX || 0) + x; INIT.screenY = (window.screenY || 0) + y;
+    INIT.buttons = buttons; INIT.pressure = buttons ? 0.5 : 0;
+    INIT.detail = type === 'click' ? 1 : 0;
+    var ev;
+    try { ev = pointer && HAS_PE ? new PointerEvent(type, INIT) : new MouseEvent(type, INIT); } catch (e) { return; }
+    try { node.dispatchEvent(ev); } catch (e) {}
+  }
+  function at() { return document.elementFromPoint(x, y) || document.body || document.documentElement; }
+  function press(now) {
+    target = at(); held = S.held = true; sx = x; sy = y; lastMove = now;
+    fire('pointermove', target, 0, true); fire('mousemove', target, 0, false);
+    fire('pointerdown', target, 1, true); fire('mousedown', target, 1, false);
+  }
+  function release(clickOk) {
+    var t = target;
+    held = S.held = false; target = null;
+    fire('pointerup', t, 0, true); fire('mouseup', t, 0, false);
+    if (clickOk) { var dx = x - sx, dy = y - sy; if (dx * dx + dy * dy < CLICK_SLOP * CLICK_SLOP) fire('click', t, 0, false); }
+  }
+  function stick(ax, ay) {
+    ax = +ax || 0; ay = +ay || 0;
+    var m = Math.sqrt(ax * ax + ay * ay);
+    if (m <= DZ) return;
+    var e = ((m > 1 ? 1 : m) - DZ) / (1 - DZ);
+    e = e * e * SPEED / m;              // mild ease: squared magnitude, ~900 px/s at full tilt
+    vx += ax * e; vy += ay * e;
+  }
+
+  window.addEventListener('gamepadconnected', install);
+  hub.fns.push(function (now, pads) {
+    var i, p, a, b, btn = false;
+    if (!S.installed) {
+      for (i = 0; i < pads.length; i++) { p = pads[i]; if (p && p.mapping === 'standard') { install(); break; } }
+      if (!S.installed) return;
+    }
+    var dt = lastT ? (now - lastT) / 1000 : 0;
+    if (dt > 0.05) dt = 0.05;
+    lastT = now;
+    vx = 0; vy = 0;
+    for (i = 0; i < pads.length; i++) {
+      p = pads[i];
+      if (!p || p.connected === false) continue;
+      a = p.axes; b = p.buttons;
+      if (a) { stick(a[2], a[3]); if (LEFT) stick(a[0], a[1]); }
+      if ((b[0] && b[0].pressed) || (b[5] && b[5].pressed)) btn = true;
+    }
+    if (IS_BOOK) {                      // the book: asleep and silent while a game is open
+      if (!player) player = document.getElementById('player');
+      if (player && player.classList.contains('open')) {
+        if (held) release(false);
+        if (awake) sleep();
+        prevBtn = btn; return;
+      }
+    }
+    if (vx !== 0 || vy !== 0) {
+      var w = window.innerWidth || 1280, h = window.innerHeight || 720;
+      x += vx * dt; y += vy * dt;
+      if (x < 0) x = 0; else if (x > w - 1) x = w - 1;
+      if (y < 0) y = 0; else if (y > h - 1) y = h - 1;
+      lastMove = now;
+      if (!awake) wake();
+      place();
+      if (held) { fire('pointermove', target, 1, true); fire('mousemove', target, 1, false); }
+      else { var t = at(); fire('pointermove', t, 0, true); fire('mousemove', t, 0, false); }
+    } else if (awake && !held && now - lastMove > SLEEP_MS) {
+      sleep();
+    }
+    if (btn && !prevBtn) { if (awake) press(now); }
+    else if (!btn && prevBtn) { if (held) release(true); }
+    if (held) lastMove = now;
+    prevBtn = btn;
+  });
+})();
+</script>
+<!-- injected by scripts/inject-factory.py — after 15 idle minutes (no pad / keyboard /
+     pointer / touch input): a game closes back to the book, anything else returns to
+     Stephens Arcade. Test override: ?idle=<seconds>. -->
+<script id="__gf_idle">
+(function () {
+  var IS_BOOK = false; /*@gf:is_book*/
+  var qs = null;
+  try { qs = new URLSearchParams(location.search).get('idle'); } catch (e) {}
+  var IDLE_MS = (qs ? Math.max(10, parseFloat(qs) || 900) : 15 * 60) * 1000;
+  var DEADZONE = 0.25;
+  // one rAF loop per page reads the pads for every __gf overlay
+  var hub = window.__gfHub;
+  if (!hub) {
+    hub = window.__gfHub = { fns: [], pads: [] };
+    (function () {
+      var NONE = [];
+      function loop(now) {
+        var p = null;
+        try { p = navigator.getGamepads ? navigator.getGamepads() : null; } catch (e) {}
+        hub.pads = p || NONE;
+        for (var i = 0; i < hub.fns.length; i++) { try { hub.fns[i](now, hub.pads); } catch (e) {} }
+        requestAnimationFrame(loop);
+      }
+      requestAnimationFrame(loop);
+    })();
+  }
+  var last = performance.now(), leaving = false, player = null;
+  function bump() { last = performance.now(); }
+  window.addEventListener('keydown', bump, { capture: true });
+  window.addEventListener('pointerdown', bump, { capture: true });
+  window.addEventListener('touchstart', bump, { capture: true, passive: true });
+  function padActive(pads) {
+    for (var i = 0; i < pads.length; i++) {
+      var gp = pads[i];
+      if (!gp || gp.connected === false) continue;
+      for (var b = 0; b < gp.buttons.length; b++) if (gp.buttons[b].pressed) return true;
+      for (var a = 0; a < gp.axes.length; a++) if (Math.abs(gp.axes[a]) > DEADZONE) return true;
+    }
+    return false;
+  }
+  hub.fns.push(function (now, pads) {
+    if (leaving) return;
+    if (IS_BOOK) {                     // while a game is open its own overlay owns the idle timer
+      if (!player) player = document.getElementById('player');
+      if (player && player.classList.contains('open')) { last = now; return; }
+    }
+    if (padActive(pads)) last = now;
+    if (now - last < IDLE_MS) return;
+    leaving = true;
+    var g = false;
+    try { g = window.parent !== window && typeof window.parent.closeGame === 'function'; } catch (e) {}
+    if (g) { try { window.parent.closeGame(); } catch (e) {} }
+    else location.href = '/';          // pagehide fires -> games persist their state
+  });
+})();
+</script>

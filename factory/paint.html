@@ -1,0 +1,754 @@
+<meta charset="utf-8">
+<title>Paint Studio</title>
+<!-- injected by scripts/inject-factory.py (HEAD, before touchpad.js) — hide phantom
+     DualShock sub-devices ("... Motion Sensors", "... Touchpad") and, when a
+     standard-mapping pad exists, every non-standard device. Original indices
+     are kept (filtered slots read null), exactly like lib/controller.js. -->
+<script id="__gf_padfilter">
+(function () {
+  var nav = window.navigator;
+  if (!nav || typeof nav.getGamepads !== 'function' || nav.__gfPadFilter) return;
+  var orig = nav.getGamepads;
+  var PHANTOM = /motion sensors|touchpad/i;
+  var out = [];                       // reused every call: no per-frame allocation
+  function filtered() {
+    var src = orig.call(nav);
+    if (!src) return src;
+    var n = src.length, anyStd = false, i, p;
+    for (i = 0; i < n; i++) { p = src[i]; if (p && p.mapping === 'standard') anyStd = true; }
+    out.length = n;
+    for (i = 0; i < n; i++) {
+      p = src[i];
+      out[i] = (!p || PHANTOM.test(p.id || '') || (anyStd && p.mapping !== 'standard')) ? null : p;
+    }
+    return out;
+  }
+  try { nav.getGamepads = filtered; } catch (e) {}
+  if (nav.getGamepads !== filtered) {
+    try { Object.defineProperty(nav, 'getGamepads', { value: filtered, configurable: true, writable: true }); } catch (e) {}
+  }
+  try { nav.__gfPadFilter = true; } catch (e) {}
+})();
+</script>
+<script src="touchpad.js?v=2"></script>
+<style>
+  html, body { height: 100%; }
+  body { margin: 0; background: #10172a; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+  canvas { width: min(100vw, calc(100vh * 960 / 520)); height: auto; display: block; border-radius: 12px; box-shadow: 0 10px 40px rgba(0,0,0,.5); cursor: none; }
+</style>
+<canvas id="game" width="960" height="520"></canvas>
+<script>
+const C = document.getElementById('game'), ctx = C.getContext('2d');
+const W = 960, H = 520;
+const PX = 180, PY = 62, PW = 770, PH = 386;            // where the paper sits
+const paper = document.createElement('canvas'); paper.width = PW; paper.height = PH;
+const pctx = paper.getContext('2d', { willReadFrequently: true });
+pctx.fillStyle = '#fff'; pctx.fillRect(0, 0, PW, PH);
+let frame = 0;
+
+// ---------- Sound ----------
+let actx = null;
+function audio() { if (!actx) { try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch (_) {} } return actx; }
+function note(f, start, dur, wave = 'sine', vol = 0.06, slide = null) {
+  if (!actx) return;
+  const t = actx.currentTime + start, o = actx.createOscillator(), g = actx.createGain();
+  o.type = wave; o.frequency.setValueAtTime(f, t); if (slide) o.frequency.exponentialRampToValueAtTime(slide, t + dur);
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g); g.connect(actx.destination); o.start(t); o.stop(t + dur);
+}
+const sfx = {
+  click: () => note(800, 0, 0.05, 'square', 0.04),
+  pop: () => note(500, 0, 0.12, 'sine', 0.12, 1200),
+  splash: () => { note(300, 0, 0.25, 'sine', 0.1, 900); note(900, 0.08, 0.2, 'sine', 0.06, 1500); },
+  sparkle: () => note(1500 + Math.random() * 1500, 0, 0.06, 'sine', 0.03),
+  undo: () => note(600, 0, 0.12, 'triangle', 0.08, 300),
+  save: () => [784, 988, 1175, 1568].forEach((f, i) => note(f, i * 0.08, 0.15, 'square', 0.05)),
+  swoosh: () => note(200, 0, 0.3, 'sawtooth', 0.04, 80),
+};
+
+// ---------- Tools ----------
+const TOOLS = [
+  { id: 'brush', name: 'Brush', icon: '🖌️' }, { id: 'rainbow', name: 'Rainbow', icon: '🌈' },
+  { id: 'sparkle', name: 'Sparkle', icon: '✨' }, { id: 'spray', name: 'Spray', icon: '💨' },
+  { id: 'fill', name: 'Fill', icon: '🪣' }, { id: 'stamp', name: 'Stamps', icon: '⭐' },
+  { id: 'eraser', name: 'Eraser', icon: '🧽' }, { id: 'shapes', name: 'Shapes', icon: '🔷' },
+];
+const COLORS = ['#000000', '#7a7a7a', '#ffffff', '#ff1744', '#ff6d00', '#ffd600', '#76ff03', '#00c853', '#00b8d4', '#2979ff', '#651fff', '#d500f9', '#ff4081', '#8d5a2b', '#ffccbc', '#b2ebf2'];
+const STAMPS = ['⭐', '❤️', '🌸', '🌈', '☀️', '🌙', '🐶', '🐱', '🦄', '🐉', '🦖', '🚀', '🌳', '🏠', '🍕', '🦋', '🐟', '🎈', '👑', '😀'];
+const SHAPES = ['circle', 'square', 'heart', 'star', 'triangle'];
+const SIZES = [4, 10, 20, 40];
+
+let tool = 'brush', color = '#ff1744', sizeI = 1, stamp = '⭐', shape = 'circle', mirror = false;
+let mouse = { x: 0, y: 0, down: false }, last = null, hue = 0, panel = null, toastMsg = '', toastT = 0, clearArm = 0, shapeStart = null;
+const undoStack = [];
+function pushUndo() { undoStack.push(pctx.getImageData(0, 0, PW, PH)); if (undoStack.length > 25) undoStack.shift(); }
+function undo() { const d = undoStack.pop(); if (d) { pctx.putImageData(d, 0, 0); sfx.undo(); } else toast('Nothing to undo!'); }
+function toast(t) { toastMsg = t; toastT = 140; }
+const size = () => SIZES[sizeI];
+const inPaper = (x, y) => x >= PX && x < PX + PW && y >= PY && y < PY + PH;
+
+// mirror helper: run a drawing function at (x, y) and again mirrored left-right
+function both(fn, x, y, ...rest) { fn(x, y, ...rest); if (mirror) fn(PW - x, y, ...rest, true); }
+
+function line(x1, y1, x2, y2, c, w) {
+  pctx.strokeStyle = c; pctx.lineWidth = w; pctx.lineCap = 'round'; pctx.lineJoin = 'round';
+  pctx.beginPath(); pctx.moveTo(x1, y1); pctx.lineTo(x2, y2); pctx.stroke();
+  if (mirror) { pctx.beginPath(); pctx.moveTo(PW - x1, y1); pctx.lineTo(PW - x2, y2); pctx.stroke(); }
+}
+function starPath(c, x, y, r, pts = 5, inner = 0.45, rot = -Math.PI / 2) {
+  c.beginPath();
+  for (let i = 0; i < pts * 2; i++) { const rr = i % 2 ? r * inner : r, a = rot + i * Math.PI / pts; c.lineTo(x + Math.cos(a) * rr, y + Math.sin(a) * rr); }
+  c.closePath();
+}
+function sparkleAt(x, y) {
+  const r = size() * 0.6 + 4;
+  for (let i = 0; i < 2; i++) {
+    const sx = x + (Math.random() - .5) * r * 2.5, sy = y + (Math.random() - .5) * r * 2.5;
+    pctx.fillStyle = `hsl(${Math.random() * 360},100%,60%)`;
+    both((px, py) => { starPath(pctx, px, py, r * (0.4 + Math.random() * 0.5), 4, 0.35, Math.random()); pctx.fill(); }, sx, sy);
+  }
+  if (Math.random() < 0.3) sfx.sparkle();
+}
+function sprayAt(x, y) {
+  const r = size() * 1.5 + 8; pctx.fillStyle = color;
+  for (let i = 0; i < 30; i++) {
+    const a = Math.random() * Math.PI * 2, d = Math.sqrt(Math.random()) * r;
+    both((px, py) => pctx.fillRect(px, py, 2, 2), x + Math.cos(a) * d, y + Math.sin(a) * d);
+  }
+}
+function stampAt(x, y) {
+  const s = size() * 2.2 + 24;
+  pctx.font = `${s}px sans-serif`; pctx.textAlign = 'center'; pctx.textBaseline = 'middle';
+  pctx.fillText(stamp, x, y);
+  if (mirror) { pctx.save(); pctx.translate(PW - x, y); pctx.scale(-1, 1); pctx.fillText(stamp, 0, 0); pctx.restore(); }
+  sfx.pop();
+}
+function shapePath(c, kind, x1, y1, x2, y2) {
+  const cx = (x1 + x2) / 2, cy = (y1 + y2) / 2, rx = Math.abs(x2 - x1) / 2, ry = Math.abs(y2 - y1) / 2;
+  c.beginPath();
+  if (kind === 'circle') c.ellipse(cx, cy, Math.max(1, rx), Math.max(1, ry), 0, 0, Math.PI * 2);
+  else if (kind === 'square') c.rect(Math.min(x1, x2), Math.min(y1, y2), rx * 2, ry * 2);
+  else if (kind === 'triangle') { c.moveTo(cx, cy - ry); c.lineTo(cx + rx, cy + ry); c.lineTo(cx - rx, cy + ry); c.closePath(); }
+  else if (kind === 'star') { starPath(c, cx, cy, Math.max(rx, ry)); }
+  else if (kind === 'heart') {
+    c.moveTo(cx, cy + ry); c.bezierCurveTo(cx - rx * 1.6, cy - ry * 0.2, cx - rx * 0.6, cy - ry * 1.4, cx, cy - ry * 0.45);
+    c.bezierCurveTo(cx + rx * 0.6, cy - ry * 1.4, cx + rx * 1.6, cy - ry * 0.2, cx, cy + ry); c.closePath();
+  }
+}
+function drawShape(x1, y1, x2, y2) {
+  pctx.fillStyle = color;
+  shapePath(pctx, shape, x1, y1, x2, y2); pctx.fill();
+  if (mirror) { shapePath(pctx, shape, PW - x1, y1, PW - x2, y2); pctx.fill(); }
+  sfx.pop();
+}
+
+// flood fill (paint bucket)
+function hexToRgb(h) { const n = parseInt(h.slice(1), 16); return [n >> 16, (n >> 8) & 255, n & 255]; }
+function floodFill(sx, sy, hex) {
+  sx = Math.floor(sx); sy = Math.floor(sy);
+  const img = pctx.getImageData(0, 0, PW, PH), d = img.data, [r, g, b] = hexToRgb(hex);
+  const i0 = (sy * PW + sx) * 4, tr = d[i0], tg = d[i0 + 1], tb = d[i0 + 2];
+  if (Math.abs(tr - r) + Math.abs(tg - g) + Math.abs(tb - b) < 10) return;
+  const match = i => Math.abs(d[i] - tr) + Math.abs(d[i + 1] - tg) + Math.abs(d[i + 2] - tb) < 110;
+  const seen = new Uint8Array(PW * PH), stack = [sx, sy];
+  while (stack.length) {
+    const y = stack.pop(), x0 = stack.pop();
+    let x = x0;
+    while (x >= 0 && !seen[y * PW + x] && match((y * PW + x) * 4)) x--;
+    x++;
+    let up = false, down = false;
+    while (x < PW && !seen[y * PW + x] && match((y * PW + x) * 4)) {
+      const i = (y * PW + x) * 4; seen[y * PW + x] = 1;
+      d[i] = r; d[i + 1] = g; d[i + 2] = b; d[i + 3] = 255;
+      if (y > 0) { const m = !seen[(y - 1) * PW + x] && match(((y - 1) * PW + x) * 4); if (m && !up) { stack.push(x, y - 1); up = true; } else if (!m) up = false; }
+      if (y < PH - 1) { const m = !seen[(y + 1) * PW + x] && match(((y + 1) * PW + x) * 4); if (m && !down) { stack.push(x, y + 1); down = true; } else if (!m) down = false; }
+      x++;
+    }
+  }
+  pctx.putImageData(img, 0, 0);
+}
+
+// ---------- Coloring pages ----------
+function outline(fn) {
+  pushUndo();
+  pctx.fillStyle = '#fff'; pctx.fillRect(0, 0, PW, PH);
+  pctx.strokeStyle = '#000'; pctx.lineWidth = 6; pctx.lineCap = 'round'; pctx.lineJoin = 'round';
+  const s = (f) => { pctx.beginPath(); f(); pctx.stroke(); };
+  fn(s, pctx);
+  sfx.swoosh(); toast('Use the 🪣 Fill tool to color it in!');
+  tool = 'fill';
+}
+const PAGES = {
+  house: { name: 'House', icon: '🏠', draw: (s, c) => {
+    s(() => c.rect(250, 170, 270, 190)); s(() => { c.moveTo(220, 175); c.lineTo(385, 60); c.lineTo(550, 175); c.closePath(); });
+    s(() => c.rect(355, 270, 60, 90)); s(() => c.rect(275, 200, 60, 50)); s(() => c.rect(435, 200, 60, 50));
+    s(() => { c.moveTo(305, 200); c.lineTo(305, 250); c.moveTo(275, 225); c.lineTo(335, 225); c.moveTo(465, 200); c.lineTo(465, 250); c.moveTo(435, 225); c.lineTo(495, 225); });
+    s(() => c.arc(660, 80, 40, 0, Math.PI * 2)); s(() => { c.moveTo(0, 360); c.lineTo(PW, 360); });
+    s(() => { c.moveTo(80, 360); c.lineTo(80, 260); }); s(() => c.arc(80, 220, 50, 0, Math.PI * 2));
+  } },
+  cat: { name: 'Kitty', icon: '🐱', draw: (s, c) => {
+    s(() => c.ellipse(385, 280, 110, 85, 0, 0, Math.PI * 2)); s(() => c.arc(385, 160, 75, 0, Math.PI * 2));
+    s(() => { c.moveTo(325, 115); c.lineTo(315, 50); c.lineTo(365, 92); c.closePath(); }); s(() => { c.moveTo(445, 115); c.lineTo(455, 50); c.lineTo(405, 92); c.closePath(); });
+    s(() => c.arc(355, 150, 12, 0, Math.PI * 2)); s(() => c.arc(415, 150, 12, 0, Math.PI * 2));
+    s(() => { c.moveTo(375, 180); c.lineTo(395, 180); c.lineTo(385, 192); c.closePath(); });
+    s(() => { c.moveTo(385, 192); c.quadraticCurveTo(370, 210, 355, 200); c.moveTo(385, 192); c.quadraticCurveTo(400, 210, 415, 200); });
+    s(() => { c.moveTo(495, 300); c.quadraticCurveTo(600, 300, 580, 190); });
+    s(() => { c.moveTo(340, 175); c.lineTo(280, 165); c.moveTo(340, 185); c.lineTo(280, 195); c.moveTo(430, 175); c.lineTo(490, 165); c.moveTo(430, 185); c.lineTo(490, 195); });
+  } },
+  rocket: { name: 'Rocket', icon: '🚀', draw: (s, c) => {
+    s(() => { c.moveTo(385, 30); c.quadraticCurveTo(470, 110, 450, 280); c.lineTo(320, 280); c.quadraticCurveTo(300, 110, 385, 30); });
+    s(() => c.arc(385, 150, 35, 0, Math.PI * 2));
+    s(() => { c.moveTo(320, 220); c.lineTo(260, 300); c.lineTo(325, 280); }); s(() => { c.moveTo(450, 220); c.lineTo(510, 300); c.lineTo(445, 280); });
+    s(() => { c.moveTo(340, 280); c.lineTo(355, 360); c.lineTo(385, 320); c.lineTo(415, 360); c.lineTo(430, 280); });
+    for (const [x, y] of [[100, 80], [640, 60], [150, 300], [650, 300], [560, 170]]) s(() => starPath(c, x, y, 26));
+  } },
+  dino: { name: 'Dinosaur', icon: '🦖', draw: (s, c) => {
+    s(() => { c.moveTo(150, 300); c.quadraticCurveTo(250, 160, 400, 200); c.quadraticCurveTo(470, 100, 500, 80); c.quadraticCurveTo(600, 60, 610, 110);
+      c.quadraticCurveTo(600, 140, 540, 140); c.quadraticCurveTo(520, 200, 520, 260); c.quadraticCurveTo(480, 320, 380, 310); c.quadraticCurveTo(250, 320, 150, 300); });
+    s(() => c.arc(560, 92, 8, 0, Math.PI * 2));
+    s(() => c.rect(330, 300, 40, 60)); s(() => c.rect(440, 290, 40, 70));
+    for (let i = 0; i < 5; i++) s(() => { const x = 250 + i * 50, y = 205 - i * 8 + (i > 2 ? 10 : 0); c.moveTo(x, y); c.lineTo(x + 18, y - 35); c.lineTo(x + 36, y - 2); });
+    s(() => { c.moveTo(0, 362); c.lineTo(PW, 362); });
+  } },
+  flower: { name: 'Flowers', icon: '🌸', draw: (s, c) => {
+    for (const [x, y, r] of [[200, 160, 50], [400, 120, 60], [600, 170, 48]]) {
+      for (let k = 0; k < 6; k++) { const a = k * Math.PI / 3; s(() => c.arc(x + Math.cos(a) * r, y + Math.sin(a) * r, r * 0.55, 0, Math.PI * 2)); }
+      s(() => c.arc(x, y, r * 0.55, 0, Math.PI * 2)); s(() => { c.moveTo(x, y + r * 1.5); c.lineTo(x, 370); });
+      s(() => c.ellipse(x + 30, y + r * 2.2, 30, 12, -0.5, 0, Math.PI * 2));
+    }
+    s(() => { c.moveTo(0, 370); c.lineTo(PW, 370); });
+  } },
+  fish: { name: 'Fish', icon: '🐟', draw: (s, c) => {
+    s(() => c.ellipse(360, 190, 170, 100, 0, 0, Math.PI * 2));
+    s(() => { c.moveTo(530, 190); c.lineTo(640, 100); c.lineTo(640, 280); c.closePath(); });
+    s(() => c.arc(260, 165, 20, 0, Math.PI * 2));
+    for (let k = 0; k < 3; k++) s(() => c.arc(350 + k * 60, 190, 45, -1.2, 1.2));
+    s(() => { c.moveTo(330, 95); c.quadraticCurveTo(380, 30, 440, 100); });
+    for (const [x, y, r] of [[120, 80, 18], [90, 140, 12], [150, 40, 10]]) s(() => c.arc(x, y, r, 0, Math.PI * 2));
+  } },
+};
+
+// ---------- Gallery ----------
+function gallery() { try { return JSON.parse(localStorage.getItem('paintGallery') || '[]'); } catch (_) { return []; } }
+function saveArt() {
+  const list = gallery();
+  list.unshift(paper.toDataURL('image/jpeg', 0.8));
+  while (list.length > 8) list.pop();
+  try { localStorage.setItem('paintGallery', JSON.stringify(list)); sfx.save(); toast('Saved to your gallery! 🖼️'); loadThumbs(); }
+  catch (_) { toast('Oops! The gallery is full. Delete an old picture first.'); }
+}
+let thumbs = [];
+function loadThumbs() { thumbs = gallery().map(src => { const im = new Image(); im.src = src; return im; }); }
+loadThumbs();
+let deleteArm = -1;
+
+// ---------- UI layout ----------
+let buttons = [];
+function btn(x, y, w, h, o) { buttons.push({ x, y, w, h, ...o }); }
+function buildButtons() {
+  buttons = [];
+  // top bar
+  const top = [
+    ['↩️', 'Undo', () => undo()],
+    ['🪞', 'Mirror', () => { mirror = !mirror; toast(mirror ? 'Mirror magic ON! Both sides match! 🦋' : 'Mirror off'); }],
+    ['📄', 'Coloring', () => { panel = panel === 'pages' ? null : 'pages'; }],
+    ['💾', 'Save', () => saveArt()],
+    ['🖼️', 'Gallery', () => { panel = panel === 'gallery' ? null : 'gallery'; deleteArm = -1; }],
+    ['🗑️', clearArm ? 'Sure?' : 'New', () => {
+      if (!clearArm) { clearArm = 150; toast('Click "Sure?" to start a new picture'); return; }
+      pushUndo(); pctx.fillStyle = '#fff'; pctx.fillRect(0, 0, PW, PH); clearArm = 0; sfx.swoosh(); toast('Fresh new paper! (Undo brings it back)');
+    }],
+  ];
+  top.forEach(([icon, label, fn], i) => btn(330 + i * 104, 8, 98, 46, { icon, label, fn, active: (label === 'Mirror' && mirror) || (label === 'Coloring' && panel === 'pages') || (label === 'Gallery' && panel === 'gallery'), warn: label === 'Sure?' }));
+  // tools
+  TOOLS.forEach((t, i) => btn(10 + (i % 2) * 82, 62 + Math.floor(i / 2) * 72, 76, 66, { icon: t.icon, label: t.name, fn: () => { tool = t.id; panel = null; }, active: tool === t.id, big: true }));
+  // sizes
+  SIZES.forEach((s, i) => btn(10 + i * 41, 356, 37, 40, { dot: Math.min(16, s / 2.5 + 2), fn: () => { sizeI = i; }, active: sizeI === i }));
+  // bottom: colors, stamps or shapes
+  if (tool === 'stamp') STAMPS.forEach((s, i) => btn(PX + i * 38.5, 456, 36, 54, { emoji: s, fn: () => { stamp = s; }, active: stamp === s }));
+  else if (tool === 'shapes') {
+    SHAPES.forEach((s, i) => btn(PX + i * 62, 456, 56, 54, { shape: s, fn: () => { shape = s; }, active: shape === s }));
+    COLORS.forEach((c, i) => btn(PX + 320 + i * 28, 462, 25, 42, { swatch: c, fn: () => { color = c; }, active: color === c }));
+  } else if (tool !== 'rainbow' && tool !== 'sparkle' && tool !== 'eraser') COLORS.forEach((c, i) => btn(PX + i * 48, 458, 44, 50, { swatch: c, fn: () => { color = c; }, active: color === c }));
+  // panels
+  if (panel === 'pages') Object.entries(PAGES).forEach(([id, pg], i) => btn(PX + 40 + (i % 3) * 240, PY + 60 + Math.floor(i / 3) * 150, 210, 130, { icon: pg.icon, label: pg.name, fn: () => { outline(pg.draw); panel = null; }, card: true }));
+  if (panel === 'gallery') thumbs.forEach((im, i) => {
+    const x = PX + 30 + (i % 4) * 180, y = PY + 60 + Math.floor(i / 4) * 150;
+    btn(x, y, 165, 100, { thumb: im, fn: () => { pushUndo(); pctx.drawImage(im, 0, 0, PW, PH); panel = null; sfx.pop(); toast('Here is your picture! Keep painting! 🎨'); } });
+    btn(x + 40, y + 106, 85, 30, { label: deleteArm === i ? 'Sure?' : 'Delete', small: true, warn: deleteArm === i, fn: () => {
+      if (deleteArm !== i) { deleteArm = i; return; }
+      const list = gallery(); list.splice(i, 1); try { localStorage.setItem('paintGallery', JSON.stringify(list)); } catch (_) {} loadThumbs(); deleteArm = -1; sfx.undo();
+    } });
+  });
+}
+
+// ---------- Input ----------
+function pos(e) { const r = C.getBoundingClientRect(); return [(e.clientX - r.left) * W / r.width, (e.clientY - r.top) * H / r.height]; }
+C.addEventListener('mousedown', e => {
+  audio();
+  const [x, y] = pos(e); mouse.x = x; mouse.y = y;
+  buildButtons();
+  for (const b of buttons.slice().reverse()) if (x > b.x && x < b.x + b.w && y > b.y && y < b.y + b.h) { sfx.click(); b.fn(); return; }
+  if (panel) { panel = null; return; }
+  if (!inPaper(x, y)) return;
+  const px = x - PX, py = y - PY;
+  mouse.down = true; last = [px, py];
+  pushUndo();
+  if (tool === 'fill') { floodFill(px, py, color); if (mirror) floodFill(PW - 1 - px, py, color); sfx.splash(); mouse.down = false; }
+  else if (tool === 'stamp') { stampAt(px, py); mouse.down = false; }
+  else if (tool === 'shapes') shapeStart = [px, py];
+  else paintAt(px, py, px, py);
+});
+C.addEventListener('mousemove', e => {
+  const [x, y] = pos(e); mouse.x = x; mouse.y = y;
+  if (!mouse.down || tool === 'shapes') return;
+  const px = clampX(x - PX), py = clampY(y - PY);
+  paintAt(last[0], last[1], px, py);
+  last = [px, py];
+});
+const clampX = v => Math.max(0, Math.min(PW - 1, v)), clampY = v => Math.max(0, Math.min(PH - 1, v));
+addEventListener('mouseup', () => {
+  if (mouse.down && tool === 'shapes' && shapeStart) {
+    const ex = clampX(mouse.x - PX), ey = clampY(mouse.y - PY);
+    if (Math.abs(ex - shapeStart[0]) + Math.abs(ey - shapeStart[1]) < 6) drawShape(shapeStart[0] - 40, shapeStart[1] - 40, shapeStart[0] + 40, shapeStart[1] + 40);
+    else drawShape(shapeStart[0], shapeStart[1], ex, ey);
+    shapeStart = null;
+  }
+  mouse.down = false;
+});
+C.addEventListener('contextmenu', e => e.preventDefault());
+addEventListener('keydown', e => { audio(); if ((e.metaKey || e.ctrlKey) && e.key === 'z') { undo(); e.preventDefault(); } if (e.key === 'Escape') panel = null; });
+
+function paintAt(x1, y1, x2, y2) {
+  if (tool === 'brush') line(x1, y1, x2, y2, color, size());
+  else if (tool === 'eraser') line(x1, y1, x2, y2, '#ffffff', size() * 1.6);
+  else if (tool === 'rainbow') { hue = (hue + 6) % 360; line(x1, y1, x2, y2, `hsl(${hue},100%,55%)`, size()); }
+  else if (tool === 'sparkle') { const d = Math.hypot(x2 - x1, y2 - y1); for (let k = 0; k <= d; k += 14) sparkleAt(x1 + (x2 - x1) * k / (d || 1), y1 + (y2 - y1) * k / (d || 1)); if (d < 1) sparkleAt(x2, y2); }
+  else if (tool === 'spray') sprayAt(x2, y2);
+}
+
+// ---------- Drawing the screen ----------
+function rr(x, y, w, h, r, fill, stroke, lw = 3) { ctx.beginPath(); ctx.roundRect(x, y, w, h, r); if (fill) { ctx.fillStyle = fill; ctx.fill(); } if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lw; ctx.stroke(); } }
+function text(s, x, y, size, color = '#fff', align = 'center', outline = '#3a2a4a') {
+  ctx.font = `bold ${size}px "Comic Sans MS", "Chalkboard SE", sans-serif`; ctx.textAlign = align; ctx.textBaseline = 'alphabetic'; ctx.lineJoin = 'round';
+  if (outline) { ctx.lineWidth = size / 5; ctx.strokeStyle = outline; ctx.strokeText(s, x, y); }
+  ctx.fillStyle = color; ctx.fillText(s, x, y);
+}
+function draw() {
+  // studio background
+  const g = ctx.createLinearGradient(0, 0, W, H); g.addColorStop(0, '#ffe0f0'); g.addColorStop(1, '#d6ecff');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  // title with rainbow letters
+  const title = 'Paint Studio';
+  ctx.font = 'bold 34px "Comic Sans MS", "Chalkboard SE", sans-serif'; let tx = 14;
+  for (let i = 0; i < title.length; i++) { const ch = title[i]; text(ch, tx, 44, 34, `hsl(${(i * 30 + frame) % 360},90%,55%)`, 'left'); tx += ctx.measureText(ch).width; }
+  // paper
+  rr(PX - 6, PY - 6, PW + 12, PH + 12, 10, '#fff', '#c9a0ff', 5);
+  ctx.drawImage(paper, PX, PY);
+  if (mirror) { ctx.setLineDash([8, 8]); ctx.strokeStyle = 'rgba(160,100,255,.5)'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(PX + PW / 2, PY); ctx.lineTo(PX + PW / 2, PY + PH); ctx.stroke(); ctx.setLineDash([]); }
+  // shape being dragged
+  if (tool === 'shapes' && shapeStart && mouse.down) {
+    ctx.save(); ctx.translate(PX, PY); ctx.globalAlpha = 0.5; ctx.fillStyle = color;
+    shapePath(ctx, shape, shapeStart[0], shapeStart[1], clampX(mouse.x - PX), clampY(mouse.y - PY)); ctx.fill(); ctx.restore();
+  }
+  // buttons
+  for (const b of buttons) drawButton(b);
+  // size label
+  text('Size', 90, 413, 16, '#7a4a9a', 'center', null);
+  if (tool === 'rainbow' || tool === 'sparkle' || tool === 'eraser') text(tool === 'eraser' ? 'Rub out mistakes! 🧽' : tool === 'rainbow' ? 'Every color of the rainbow! 🌈' : 'Sparkly stars everywhere! ✨', PX + PW / 2, 492, 24, '#7a4a9a', 'center', null);
+  // panels
+  if (panel) {
+    ctx.fillStyle = 'rgba(255,255,255,.9)'; ctx.fillRect(PX, PY, PW, PH);
+    text(panel === 'pages' ? '📄 Pick a coloring page!' : thumbs.length ? '🖼️ Your Gallery: click a picture to open it' : '🖼️ Your gallery is empty. Press 💾 Save to keep a picture!', PX + PW / 2, PY + 40, 24, '#ff5a9a', 'center', null);
+    for (const b of buttons) if (b.card || b.thumb || (b.small && panel === 'gallery')) drawButton(b);
+  }
+  // cursor
+  if (inPaper(mouse.x, mouse.y) && !panel) {
+    if (tool === 'stamp') { ctx.globalAlpha = 0.5; ctx.font = `${size() * 2.2 + 24}px sans-serif`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(stamp, mouse.x, mouse.y); ctx.textBaseline = 'alphabetic'; ctx.globalAlpha = 1; }
+    else if (tool === 'fill') { ctx.font = '30px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('🪣', mouse.x + 10, mouse.y - 6); }
+    else {
+      const r = tool === 'spray' ? size() * 1.5 + 8 : tool === 'eraser' ? size() * 0.8 : tool === 'shapes' ? 6 : size() / 2;
+      ctx.strokeStyle = '#333'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(mouse.x, mouse.y, Math.max(3, r), 0, Math.PI * 2); ctx.stroke();
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = 1; ctx.beginPath(); ctx.arc(mouse.x, mouse.y, Math.max(3, r) + 1.5, 0, Math.PI * 2); ctx.stroke();
+    }
+  } else {   // a little pointer outside the paper
+    ctx.fillStyle = '#ff5a9a'; ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(mouse.x, mouse.y); ctx.lineTo(mouse.x + 4, mouse.y + 18); ctx.lineTo(mouse.x + 9, mouse.y + 12); ctx.lineTo(mouse.x + 17, mouse.y + 12); ctx.closePath(); ctx.fill(); ctx.stroke();
+  }
+  if (toastT > 0) {
+    ctx.globalAlpha = Math.min(1, toastT / 20);
+    ctx.font = 'bold 20px "Comic Sans MS", sans-serif'; const w = ctx.measureText(toastMsg).width + 40;
+    rr(PX + PW / 2 - w / 2, PY + PH - 54, w, 42, 21, 'rgba(255,255,255,.96)', '#ff9ec7', 3);
+    text(toastMsg, PX + PW / 2, PY + PH - 26, 20, '#7a4a9a', 'center', null);
+    ctx.globalAlpha = 1;
+  }
+}
+function drawButton(b) {
+  if ((b.card || b.thumb || (b.small && panel === 'gallery')) && !panel) return;
+  const hover = mouse.x > b.x && mouse.x < b.x + b.w && mouse.y > b.y && mouse.y < b.y + b.h;
+  if (b.swatch) {
+    rr(b.x, b.y, b.w, b.h, 10, b.swatch, b.active ? '#333' : 'rgba(0,0,0,.2)', b.active ? 4 : 2);
+    if (b.active) { ctx.fillStyle = b.swatch === '#000000' ? '#fff' : '#000'; ctx.beginPath(); ctx.arc(b.x + b.w / 2, b.y + b.h / 2, 5, 0, 7); ctx.fill(); }
+    return;
+  }
+  rr(b.x, b.y, b.w, b.h, 12, b.warn ? '#ffcdd2' : b.active ? '#fff3b0' : '#ffffff', b.active ? '#ff9800' : hover ? '#ff5a9a' : 'rgba(0,0,0,.12)', b.active || hover ? 3.5 : 2);
+  ctx.textBaseline = 'alphabetic';
+  if (b.thumb) { if (b.thumb.complete) ctx.drawImage(b.thumb, b.x + 4, b.y + 4, b.w - 8, b.h - 8); return; }
+  if (b.emoji) { ctx.font = '26px sans-serif'; ctx.textAlign = 'center'; ctx.fillText(b.emoji, b.x + b.w / 2, b.y + 36); return; }
+  if (b.shape) { ctx.fillStyle = color; shapePath(ctx, b.shape, b.x + 12, b.y + 10, b.x + b.w - 12, b.y + b.h - 10); ctx.fill(); return; }
+  if (b.dot) { ctx.fillStyle = '#5a3a6a'; ctx.beginPath(); ctx.arc(b.x + b.w / 2, b.y + b.h / 2, b.dot, 0, 7); ctx.fill(); return; }
+  if (b.card) { ctx.font = '56px sans-serif'; ctx.textAlign = 'center'; ctx.fillText(b.icon, b.x + b.w / 2, b.y + 72); text(b.label, b.x + b.w / 2, b.y + 112, 22, '#5a3a6a', 'center', null); return; }
+  if (b.big) { ctx.font = '28px sans-serif'; ctx.textAlign = 'center'; ctx.fillText(b.icon, b.x + b.w / 2, b.y + 36); text(b.label, b.x + b.w / 2, b.y + 58, 14, '#5a3a6a', 'center', null); return; }
+  if (b.icon) { ctx.font = '20px sans-serif'; ctx.textAlign = 'left'; ctx.fillText(b.icon, b.x + 8, b.y + 31); text(b.label, b.x + 34, b.y + 30, 15, '#5a3a6a', 'left', null); return; }
+  text(b.label, b.x + b.w / 2, b.y + b.h / 2 + 6, 15, '#5a3a6a', 'center', null);
+}
+
+function update() {
+  frame++;
+  if (toastT > 0) toastT--;
+  if (clearArm > 0) clearArm--;
+  // keep spraying while the mouse is held still
+  if (mouse.down && tool === 'spray' && inPaper(mouse.x, mouse.y)) sprayAt(mouse.x - PX, mouse.y - PY);
+  if (mouse.down && tool === 'sparkle' && inPaper(mouse.x, mouse.y) && frame % 6 === 0) sparkleAt(mouse.x - PX, mouse.y - PY);
+  buildButtons();
+}
+toast('Pick a tool on the left and start painting! 🎨');
+buildButtons();
+let lastT = performance.now(), acc = 0;
+function loop(now) {
+  acc += Math.min(100, now - lastT); lastT = now;
+  while (acc >= 1000 / 60) { update(); acc -= 1000 / 60; }
+  draw();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+<!-- injected by scripts/inject-factory.py — hold PS (or SELECT+START) for 1s to go
+     up one level: game -> the book (parent.closeGame), standalone game -> /factory/,
+     the book -> Stephens Arcade (/). Shares one rAF pad poll with the cursor + idle overlays. -->
+<script id="__gf_pad_exit">
+(function () {
+  var IS_BOOK = false; /*@gf:is_book*/
+  var HOLD_MS = 1000;
+  // one rAF loop per page reads the pads for every __gf overlay
+  var hub = window.__gfHub;
+  if (!hub) {
+    hub = window.__gfHub = { fns: [], pads: [] };
+    (function () {
+      var NONE = [];
+      function loop(now) {
+        var p = null;
+        try { p = navigator.getGamepads ? navigator.getGamepads() : null; } catch (e) {}
+        hub.pads = p || NONE;
+        for (var i = 0; i < hub.fns.length; i++) { try { hub.fns[i](now, hub.pads); } catch (e) {} }
+        requestAnimationFrame(loop);
+      }
+      requestAnimationFrame(loop);
+    })();
+  }
+
+  var STEPS = 20, TF = [];               // precomputed badge transforms: zero allocations while held
+  for (var s = 0; s <= STEPS; s++) TF.push('translateX(-50%) scale(' + (1 + 0.35 * s / STEPS).toFixed(4) + ')');
+  var HIDE_TF = 'translateX(-50%) scale(0.85)';
+  var heldSince = 0, needRelease = true, leaving = false, badge = null, lastStep = -2;
+  var player = null;
+
+  function comboDown(pads) {
+    for (var i = 0; i < pads.length; i++) {
+      var gp = pads[i];
+      if (!gp || gp.connected === false) continue;
+      var b = gp.buttons;
+      if ((b[16] && b[16].pressed) || (b[8] && b[8].pressed && b[9] && b[9].pressed)) return true;
+    }
+    return false;
+  }
+  function makeBadge() {
+    badge = document.createElement('div');
+    badge.id = '__gfx_exit';
+    badge.textContent = IS_BOOK ? '◄ ARCADE' : '◄ BOOK';
+    badge.style.cssText = 'position:fixed;top:12px;left:50%;z-index:2147483001;pointer-events:none;' +
+      'padding:7px 18px;border-radius:999px;background:#10172a;color:#ffd23f;border:3px solid #ffd23f;' +
+      'font:bold 18px/1 "Trebuchet MS","Arial Rounded MT Bold",sans-serif;letter-spacing:1px;white-space:nowrap;' +
+      'transform-origin:50% 0;opacity:0;transform:' + HIDE_TF + ';transition:opacity .12s;';
+    (document.body || document.documentElement).appendChild(badge);
+  }
+  function setBadge(step) {            // step -1 = hidden, 0..STEPS = hold progress
+    if (step === lastStep) return;
+    lastStep = step;
+    if (step < 0) { if (badge) { badge.style.opacity = '0'; badge.style.transform = HIDE_TF; } return; }
+    if (!badge) makeBadge();
+    badge.style.opacity = '1';
+    badge.style.transform = TF[step];
+  }
+  function inGame() {
+    try { return window.parent !== window && typeof window.parent.closeGame === 'function'; } catch (e) { return false; }
+  }
+  function leave() {
+    leaving = true;                    // never navigate twice
+    if (!IS_BOOK && inGame()) { setBadge(-1); try { window.parent.closeGame(); } catch (e) {} return; }
+    location.href = IS_BOOK ? '/' : '/factory/';
+  }
+  hub.fns.push(function (now, pads) {
+    if (leaving) return;
+    var down = comboDown(pads);
+    if (IS_BOOK) {
+      if (!player) player = document.getElementById('player');
+      if (player && player.classList.contains('open')) {   // the game's own overlay handles this hold
+        if (down) needRelease = true;
+        heldSince = 0; setBadge(-1); return;
+      }
+    }
+    if (needRelease) {                 // a hold that started elsewhere never counts here
+      if (down) return;
+      needRelease = false;
+    }
+    if (!down) { heldSince = 0; setBadge(-1); return; }
+    if (!heldSince) heldSince = now;
+    var p = (now - heldSince) / HOLD_MS;
+    setBadge(Math.round((p > 1 ? 1 : p) * STEPS));
+    if (p >= 1) leave();
+  });
+})();
+</script>
+<!-- injected by scripts/inject-factory.py — console (low-fx) mode only: no-op canvas
+     shadowBlur and kill CSS backdrop-filter (both measured fps killers on the Pi).
+     The mouse cursor is hidden only while the pad cursor is installed. -->
+<script id="__gf_lowfx">
+(function () {
+  var on = false;
+  try {
+    if (/[?&]fx=low\b/.test(location.search)) { on = true; localStorage.setItem('arcade_lowfx', '1'); }
+    else if (/[?&]fx=full\b/.test(location.search)) { localStorage.setItem('arcade_lowfx', '0'); }
+    else { on = localStorage.getItem('arcade_lowfx') === '1'; }
+  } catch (e) {}
+  if (!on) return;
+  try {
+    Object.defineProperty(CanvasRenderingContext2D.prototype, 'shadowBlur', {
+      set: function () {}, get: function () { return 0; }, configurable: true
+    });
+  } catch (e) {}
+  try {
+    var st = document.createElement('style');
+    st.textContent = '* { backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }' +
+      ' html.__gfx_padcursor, html.__gfx_padcursor * { cursor: none !important; }';
+    (document.head || document.documentElement).appendChild(st);
+  } catch (e) {}
+})();
+</script>
+<!-- injected by scripts/inject-factory.py — console mode only: the TV has no printer,
+     so window.print shows a friendly toast instead of a dead print dialog. -->
+<script id="__gf_print">
+(function () {
+  var on = false;
+  try { on = /[?&]fx=low\b/.test(location.search) || localStorage.getItem('arcade_lowfx') === '1'; } catch (e) {}
+  if (!on) return;
+  var toast = null, timer = 0;
+  function hide() { if (toast) toast.style.opacity = '0'; }
+  window.print = function () {
+    try {
+      if (!toast) {
+        toast = document.createElement('div');
+        toast.id = '__gfx_print';
+        toast.textContent = '🖨️ Printing works on the iPad — not on the TV!';
+        toast.style.cssText = 'position:fixed;left:50%;bottom:48px;transform:translateX(-50%);z-index:2147483001;' +
+          'pointer-events:none;padding:14px 26px;border-radius:16px;background:#10172a;color:#ffd23f;' +
+          'border:3px solid #ffd23f;font:bold 24px/1.2 "Trebuchet MS","Arial Rounded MT Bold",sans-serif;' +
+          'white-space:nowrap;opacity:0;transition:opacity .2s;';
+        (document.body || document.documentElement).appendChild(toast);
+      }
+      toast.style.opacity = '1';
+      clearTimeout(timer);
+      timer = setTimeout(hide, 2500);
+    } catch (e) {}
+  };
+})();
+</script>
+<!-- injected by scripts/inject-factory.py — pad cursor: a pad-driven mouse pointer so
+     tap/click-only games play on the console. Right stick moves it (left stick too in
+     pointer games); X / R1 clicks and drags (pointer + mouse events, like touchpad.js
+     turns fingers into mouse events). Never consumes pad input. -->
+<script id="__gf_cursor">
+(function () {
+  window.__GF_CURSOR_LEFT = true; /*@gf:cursor_left*/
+  var IS_BOOK = false; /*@gf:is_book*/
+  var LEFT = window.__GF_CURSOR_LEFT === true;
+  var DZ = 0.2, SPEED = 900, SLEEP_MS = 4000, CLICK_SLOP = 12;
+  // one rAF loop per page reads the pads for every __gf overlay
+  var hub = window.__gfHub;
+  if (!hub) {
+    hub = window.__gfHub = { fns: [], pads: [] };
+    (function () {
+      var NONE = [];
+      function loop(now) {
+        var p = null;
+        try { p = navigator.getGamepads ? navigator.getGamepads() : null; } catch (e) {}
+        hub.pads = p || NONE;
+        for (var i = 0; i < hub.fns.length; i++) { try { hub.fns[i](now, hub.pads); } catch (e) {} }
+        requestAnimationFrame(loop);
+      }
+      requestAnimationFrame(loop);
+    })();
+  }
+
+  var S = window.__gfCursorState = { installed: false, awake: false, held: false, x: 0, y: 0 };
+  var el = null, x = 0, y = 0, awake = false, lastMove = 0, lastT = 0;
+  var held = false, target = null, sx = 0, sy = 0, prevBtn = false, vx = 0, vy = 0, player = null;
+  var INIT = { bubbles: true, cancelable: true, composed: true, view: window, detail: 0,
+    clientX: 0, clientY: 0, screenX: 0, screenY: 0, button: 0, buttons: 0,
+    pointerId: 1, pointerType: 'mouse', isPrimary: true, width: 1, height: 1, pressure: 0 };
+  var HAS_PE = typeof window.PointerEvent === 'function';
+
+  function install() {
+    if (S.installed) return;
+    S.installed = true;
+    x = Math.round((window.innerWidth || 1280) / 2); y = Math.round((window.innerHeight || 720) / 2);
+    el = document.createElement('div');
+    el.id = '__gfx_cursor';
+    el.style.cssText = 'position:fixed;left:0;top:0;width:28px;height:28px;pointer-events:none;z-index:2147483000;' +
+      'opacity:0;transition:opacity .25s;will-change:transform;';
+    el.innerHTML = '<svg width="28" height="28" viewBox="0 0 28 28" style="display:block;overflow:visible">' +
+      '<path d="M3 2 L3 23.5 L8.6 18.3 L12.6 26.6 L17 24.5 L13 16.4 L20.8 16.4 Z" fill="#fff" stroke="#10172a" ' +
+      'stroke-width="2.2" stroke-linejoin="round"/></svg>';
+    (document.body || document.documentElement).appendChild(el);
+    try { document.documentElement.classList.add('__gfx_padcursor'); } catch (e) {}
+    place();
+  }
+  function place() {
+    el.style.transform = 'translate3d(' + (x - 3) + 'px,' + (y - 2) + 'px,0)';
+    S.x = x; S.y = y;
+  }
+  function wake() { awake = S.awake = true; el.style.opacity = '1'; }
+  function sleep() { awake = S.awake = false; el.style.opacity = '0'; }
+  function fire(type, node, buttons, pointer) {
+    if (!node) return;
+    INIT.clientX = x; INIT.clientY = y;
+    INIT.screenX = (window.screenX || 0) + x; INIT.screenY = (window.screenY || 0) + y;
+    INIT.buttons = buttons; INIT.pressure = buttons ? 0.5 : 0;
+    INIT.detail = type === 'click' ? 1 : 0;
+    var ev;
+    try { ev = pointer && HAS_PE ? new PointerEvent(type, INIT) : new MouseEvent(type, INIT); } catch (e) { return; }
+    try { node.dispatchEvent(ev); } catch (e) {}
+  }
+  function at() { return document.elementFromPoint(x, y) || document.body || document.documentElement; }
+  function press(now) {
+    target = at(); held = S.held = true; sx = x; sy = y; lastMove = now;
+    fire('pointermove', target, 0, true); fire('mousemove', target, 0, false);
+    fire('pointerdown', target, 1, true); fire('mousedown', target, 1, false);
+  }
+  function release(clickOk) {
+    var t = target;
+    held = S.held = false; target = null;
+    fire('pointerup', t, 0, true); fire('mouseup', t, 0, false);
+    if (clickOk) { var dx = x - sx, dy = y - sy; if (dx * dx + dy * dy < CLICK_SLOP * CLICK_SLOP) fire('click', t, 0, false); }
+  }
+  function stick(ax, ay) {
+    ax = +ax || 0; ay = +ay || 0;
+    var m = Math.sqrt(ax * ax + ay * ay);
+    if (m <= DZ) return;
+    var e = ((m > 1 ? 1 : m) - DZ) / (1 - DZ);
+    e = e * e * SPEED / m;              // mild ease: squared magnitude, ~900 px/s at full tilt
+    vx += ax * e; vy += ay * e;
+  }
+
+  window.addEventListener('gamepadconnected', install);
+  hub.fns.push(function (now, pads) {
+    var i, p, a, b, btn = false;
+    if (!S.installed) {
+      for (i = 0; i < pads.length; i++) { p = pads[i]; if (p && p.mapping === 'standard') { install(); break; } }
+      if (!S.installed) return;
+    }
+    var dt = lastT ? (now - lastT) / 1000 : 0;
+    if (dt > 0.05) dt = 0.05;
+    lastT = now;
+    vx = 0; vy = 0;
+    for (i = 0; i < pads.length; i++) {
+      p = pads[i];
+      if (!p || p.connected === false) continue;
+      a = p.axes; b = p.buttons;
+      if (a) { stick(a[2], a[3]); if (LEFT) stick(a[0], a[1]); }
+      if ((b[0] && b[0].pressed) || (b[5] && b[5].pressed)) btn = true;
+    }
+    if (IS_BOOK) {                      // the book: asleep and silent while a game is open
+      if (!player) player = document.getElementById('player');
+      if (player && player.classList.contains('open')) {
+        if (held) release(false);
+        if (awake) sleep();
+        prevBtn = btn; return;
+      }
+    }
+    if (vx !== 0 || vy !== 0) {
+      var w = window.innerWidth || 1280, h = window.innerHeight || 720;
+      x += vx * dt; y += vy * dt;
+      if (x < 0) x = 0; else if (x > w - 1) x = w - 1;
+      if (y < 0) y = 0; else if (y > h - 1) y = h - 1;
+      lastMove = now;
+      if (!awake) wake();
+      place();
+      if (held) { fire('pointermove', target, 1, true); fire('mousemove', target, 1, false); }
+      else { var t = at(); fire('pointermove', t, 0, true); fire('mousemove', t, 0, false); }
+    } else if (awake && !held && now - lastMove > SLEEP_MS) {
+      sleep();
+    }
+    if (btn && !prevBtn) { if (awake) press(now); }
+    else if (!btn && prevBtn) { if (held) release(true); }
+    if (held) lastMove = now;
+    prevBtn = btn;
+  });
+})();
+</script>
+<!-- injected by scripts/inject-factory.py — after 15 idle minutes (no pad / keyboard /
+     pointer / touch input): a game closes back to the book, anything else returns to
+     Stephens Arcade. Test override: ?idle=<seconds>. -->
+<script id="__gf_idle">
+(function () {
+  var IS_BOOK = false; /*@gf:is_book*/
+  var qs = null;
+  try { qs = new URLSearchParams(location.search).get('idle'); } catch (e) {}
+  var IDLE_MS = (qs ? Math.max(10, parseFloat(qs) || 900) : 15 * 60) * 1000;
+  var DEADZONE = 0.25;
+  // one rAF loop per page reads the pads for every __gf overlay
+  var hub = window.__gfHub;
+  if (!hub) {
+    hub = window.__gfHub = { fns: [], pads: [] };
+    (function () {
+      var NONE = [];
+      function loop(now) {
+        var p = null;
+        try { p = navigator.getGamepads ? navigator.getGamepads() : null; } catch (e) {}
+        hub.pads = p || NONE;
+        for (var i = 0; i < hub.fns.length; i++) { try { hub.fns[i](now, hub.pads); } catch (e) {} }
+        requestAnimationFrame(loop);
+      }
+      requestAnimationFrame(loop);
+    })();
+  }
+  var last = performance.now(), leaving = false, player = null;
+  function bump() { last = performance.now(); }
+  window.addEventListener('keydown', bump, { capture: true });
+  window.addEventListener('pointerdown', bump, { capture: true });
+  window.addEventListener('touchstart', bump, { capture: true, passive: true });
+  function padActive(pads) {
+    for (var i = 0; i < pads.length; i++) {
+      var gp = pads[i];
+      if (!gp || gp.connected === false) continue;
+      for (var b = 0; b < gp.buttons.length; b++) if (gp.buttons[b].pressed) return true;
+      for (var a = 0; a < gp.axes.length; a++) if (Math.abs(gp.axes[a]) > DEADZONE) return true;
+    }
+    return false;
+  }
+  hub.fns.push(function (now, pads) {
+    if (leaving) return;
+    if (IS_BOOK) {                     // while a game is open its own overlay owns the idle timer
+      if (!player) player = document.getElementById('player');
+      if (player && player.classList.contains('open')) { last = now; return; }
+    }
+    if (padActive(pads)) last = now;
+    if (now - last < IDLE_MS) return;
+    leaving = true;
+    var g = false;
+    try { g = window.parent !== window && typeof window.parent.closeGame === 'function'; } catch (e) {}
+    if (g) { try { window.parent.closeGame(); } catch (e) {} }
+    else location.href = '/';          // pagehide fires -> games persist their state
+  });
+})();
+</script>

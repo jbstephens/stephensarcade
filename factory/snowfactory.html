@@ -1,0 +1,1272 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Snow Factory!</title>
+<script>TOUCHPAD = { dpad: true, south: [' ', 'THROW'], east: ['h', 'HIDE'] };</script>
+<!-- injected by scripts/inject-factory.py (HEAD, before touchpad.js) — hide phantom
+     DualShock sub-devices ("... Motion Sensors", "... Touchpad") and, when a
+     standard-mapping pad exists, every non-standard device. Original indices
+     are kept (filtered slots read null), exactly like lib/controller.js. -->
+<script id="__gf_padfilter">
+(function () {
+  var nav = window.navigator;
+  if (!nav || typeof nav.getGamepads !== 'function' || nav.__gfPadFilter) return;
+  var orig = nav.getGamepads;
+  var PHANTOM = /motion sensors|touchpad/i;
+  var out = [];                       // reused every call: no per-frame allocation
+  function filtered() {
+    var src = orig.call(nav);
+    if (!src) return src;
+    var n = src.length, anyStd = false, i, p;
+    for (i = 0; i < n; i++) { p = src[i]; if (p && p.mapping === 'standard') anyStd = true; }
+    out.length = n;
+    for (i = 0; i < n; i++) {
+      p = src[i];
+      out[i] = (!p || PHANTOM.test(p.id || '') || (anyStd && p.mapping !== 'standard')) ? null : p;
+    }
+    return out;
+  }
+  try { nav.getGamepads = filtered; } catch (e) {}
+  if (nav.getGamepads !== filtered) {
+    try { Object.defineProperty(nav, 'getGamepads', { value: filtered, configurable: true, writable: true }); } catch (e) {}
+  }
+  try { nav.__gfPadFilter = true; } catch (e) {}
+})();
+</script>
+<script src="touchpad.js?v=2"></script>
+<style>
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: #0d2a4a; display: flex;
+    align-items: center; justify-content: center; overflow: hidden;
+  }
+  canvas {
+    width: min(100vw, calc(100vh * 960 / 520));
+    height: auto; display: block; border-radius: 12px;
+    box-shadow: 0 10px 40px rgba(0,0,0,.5);
+  }
+</style>
+<canvas id="game" width="960" height="520"></canvas>
+<script>
+// ===== SNOW FACTORY! Catch snow, build from blueprints, then a silly snowball fight vs the Snow-Bots =====
+function trophy(id) { try { const t = JSON.parse(localStorage.getItem('gfTrophies') || '{}'); t[id] = 1; localStorage.setItem('gfTrophies', JSON.stringify(t)); } catch (_) {} }   // for the Trophy Room in the Game Factory book
+function sticker(id) { try { const s = JSON.parse(localStorage.getItem('gfStickers') || '{}'); if (!s[id]) { s[id] = 1; localStorage.setItem('gfStickers', JSON.stringify(s)); stickerNew = 90; } } catch (_) {} }   // for the Sticker Book
+let stickerNew = 0;
+
+// ---------- Saved progress ----------
+let unlocked = 1, everWon = false;
+try { const s = JSON.parse(localStorage.getItem('snowFactory') || '{}') || {}; unlocked = Math.max(1, Math.min(4, s.unlocked || 1)); everWon = !!s.won; } catch (_) {}
+function saveProgress(won) {
+  try {
+    const s = JSON.parse(localStorage.getItem('snowFactory') || '{}') || {};
+    s.unlocked = Math.max(s.unlocked || 1, unlocked); if (won) s.won = true;
+    localStorage.setItem('snowFactory', JSON.stringify(s));
+  } catch (_) {}
+}
+
+const C = document.getElementById('game'), ctx = C.getContext('2d');
+const W = 960, H = 520, GROUND = 450;
+const inBox = (b, x, y) => x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h;
+const rnd = (a, b) => a + Math.random() * (b - a);
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+
+// ---------- Levels ----------
+// bp = which blueprint you build.  team = who you have a snowball fight with (hats = how many hats to knock off)
+const LEVELS = [
+  { name: 'Snowman Morning', bp: 'snowman', sky: ['#4fc3f7', '#e1f5fe'], wind: 75, hide: [130, 240],
+    story: 'Build a SNOWMAN, then beat the Snow-Bots!',
+    team: [{ k: 'bot', x: 640, hats: 2, col: '#e53935' }, { k: 'bot', x: 840, hats: 2, col: '#43a047' }] },
+  { name: 'Fort Afternoon', bp: 'fort', sky: ['#29b6f6', '#fff3e0'], wind: 65, hide: [110, 220],
+    story: 'Build a strong SNOW FORT, then beat 3 Snow-Bots!',
+    team: [{ k: 'bot', x: 590, hats: 2, col: '#1e88e5' }, { k: 'bot', x: 730, hats: 2, col: '#fdd835' }, { k: 'bot', x: 870, hats: 2, col: '#8e24aa' }] },
+  { name: 'Snowy Sunset', bp: 'ammo', sky: ['#ff8a65', '#ffe0b2'], wind: 60, hide: [110, 200],
+    story: 'Make a BIG pile of snowballs! Sparks and Pages want to play!',
+    team: [{ k: 'sparks', x: 600, hats: 3, col: '#00acc1' }, { k: 'pages', x: 740, hats: 3, col: '#ec407a' }, { k: 'bot', x: 880, hats: 2, col: '#ff7043' }] },
+  { name: 'King of Snow', bp: 'royal', sky: ['#1a237e', '#7986cb'], wind: 60, hide: [120, 210], night: true,
+    story: 'The KING OF SNOW wants a BIG fight! Build a royal fort!',
+    team: [{ k: 'bot', x: 590, hats: 2, col: '#00897b' }, { k: 'king', x: 810, hats: 6, col: '#ffd600' }] },
+];
+// Blueprint parts: ball = catch snow then roll it big, block = pack a fort block, ammo = squish a snowball, item = catch it from the machine
+const BLUEPRINTS = {
+  snowman: { name: 'SNOWMAN', parts: [{ t: 'ball', r: 46 }, { t: 'ball', r: 35 }, { t: 'ball', r: 26 }, { t: 'item', item: 'carrot' }, { t: 'item', item: 'hat' }] },
+  fort:    { name: 'SNOW FORT WALL', parts: [0, 1, 2, 3, 4, 5].map(() => ({ t: 'block' })) },
+  ammo:    { name: 'SNOWBALL PILE', parts: [0, 1, 2, 3, 4, 5, 6, 7].map(() => ({ t: 'ammo' })) },
+  royal:   { name: 'ROYAL FORT', parts: [{ t: 'block' }, { t: 'block' }, { t: 'block' }, { t: 'block' }, { t: 'ammo' }, { t: 'ammo' }, { t: 'ammo' }, { t: 'item', item: 'flag' }] },
+};
+const NEED = { ball: 5, block: 4, ammo: 2 }, ROLLS = { ball: 6, block: 3, ammo: 2 };
+
+// ---------- Sound ----------
+let actx = null;
+function wakeAudio() { if (!actx) { try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch (_) {} } }
+function note(freq, start, dur, wave = 'square', vol = 0.12, slideTo = null) {
+  if (!actx) return;
+  const t = actx.currentTime + start;
+  const o = actx.createOscillator(), g = actx.createGain();
+  o.type = wave; o.frequency.setValueAtTime(freq, t);
+  if (slideTo) o.frequency.exponentialRampToValueAtTime(slideTo, t + dur);
+  g.gain.setValueAtTime(vol, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g); g.connect(actx.destination);
+  o.start(t); o.stop(t + dur);
+}
+const sfx = {
+  catch:  () => note(1200 + Math.random() * 300, 0, 0.1, 'sine', 0.08, 1800),
+  gold:   () => [988, 1319, 1568].forEach((f, i) => note(f, i * 0.06, 0.12, 'triangle', 0.1)),
+  roll:   () => note(140 + Math.random() * 40, 0, 0.12, 'triangle', 0.15, 90),
+  place:  () => [523, 659, 784, 1047].forEach((f, i) => note(f, i * 0.07, 0.15, 'triangle', 0.12)),
+  throw:  () => note(500, 0, 0.12, 'sine', 0.08, 260),
+  splat:  () => note(220, 0, 0.12, 'sawtooth', 0.06, 80),
+  hat:    () => { note(700, 0, 0.1, 'square', 0.08, 1400); note(1400, 0.1, 0.15, 'square', 0.06, 900); },
+  brrr:   () => { for (let i = 0; i < 6; i++) note(300 + (i % 2) * 40, i * 0.05, 0.05, 'square', 0.05); },
+  chip:   () => note(160, 0, 0.1, 'triangle', 0.15, 70),
+  warn:   () => { note(880, 0, 0.08, 'square', 0.06); note(880, 0.12, 0.08, 'square', 0.06); },
+  big:    () => [196, 185, 175, 165].forEach((f, i) => note(f, i * 0.2, 0.25, 'sawtooth', 0.1)),
+  pop:    () => { note(900, 0, 0.08, 'sine', 0.1, 300); note(600, 0.06, 0.1, 'sine', 0.08, 1200); },
+  out:    () => [784, 659, 523].forEach((f, i) => note(f, i * 0.1, 0.14, 'triangle', 0.1)),
+  win:    () => [523, 659, 784, 1047, 784, 1047, 1319].forEach((f, i) => note(f, i * 0.12, 0.2, 'square', 0.09)),
+  click:  () => note(660, 0, 0.06, 'square', 0.06),
+  no:     () => note(200, 0, 0.2, 'square', 0.06, 120),
+};
+
+// ---------- Music: original cozy "Snow Factory" tune (eighth notes, 0 = rest) ----------
+let musicOn = true, nextNoteTime = 0, step = 0;
+const MUSIC_BPM = 132;
+const MELODY = [
+  72,0,76,0, 79,0,76,74, 72,0,74,76, 74,0,0,0,   71,0,74,0, 77,0,76,74, 72,0,71,72, 74,0,0,0,
+  72,0,76,0, 79,0,81,79, 77,0,76,74, 76,0,72,0,  69,0,71,72, 74,0,76,74, 72,0,0,0, 79,0,84,0,
+];
+const BASS = [48, 43, 53, 43, 48, 45, 50, 43].flatMap(r => [r, 0, r + 7, 0, r + 12, 0, r + 7, 0]);
+const midi = n => 440 * Math.pow(2, (n - 69) / 12);
+function playMusic() {
+  if (!actx || !musicOn) return;
+  const fight = state === 'fight';
+  const stepDur = 60 / (fight ? 156 : MUSIC_BPM) / 2;
+  if (nextNoteTime < actx.currentTime) nextNoteTime = actx.currentTime + 0.05;
+  while (nextNoteTime < actx.currentTime + 0.2) {
+    const t = nextNoteTime - actx.currentTime;
+    const m = MELODY[step % MELODY.length], b = BASS[step % BASS.length];
+    if (m) note(midi(m), t, stepDur * 0.9, 'square', 0.035);
+    if (b) note(midi(b), t, stepDur * 0.9, 'triangle', 0.09);
+    if (step % 4 === 2) note(fight ? 2600 : 2200, t, 0.05, 'sine', 0.012);   // little sleigh-bell tick
+    nextNoteTime += stepDur; step++;
+  }
+}
+
+// ---------- Input ----------
+const keys = { left: false, right: false, down: false, hide: false };
+let actPressed = false, tapHide = false, dragX = null;
+addEventListener('keydown', e => {
+  wakeAudio();
+  const k = e.key;
+  if (k === ' ' || k.startsWith('Arrow')) e.preventDefault();
+  if (k === 'ArrowLeft' || k === 'a' || k === 'A') { if (!keys.left && !e.repeat) leftPress(); keys.left = true; }
+  if (k === 'ArrowRight' || k === 'd' || k === 'D') { if (!keys.right && !e.repeat) rightPress(); keys.right = true; }
+  if (k === 'ArrowDown' || k === 's' || k === 'S') keys.down = true;
+  if (k === 'h' || k === 'H') keys.hide = true;
+  if (k === 'ArrowUp' || k === 'w' || k === 'W') keys.down = keys.hide = false;
+  if ((k === ' ' || k === 'Enter') && !e.repeat) actPressed = true;
+  if (k === 'm' || k === 'M') musicOn = !musicOn;
+  if (state === 'title' && k >= '1' && k <= '4') { if (+k <= unlocked) startLevel(+k - 1); else sfx.no(); }
+  if (k === 'Escape' && state !== 'title') goTitle();
+});
+addEventListener('keyup', e => {
+  const k = e.key;
+  if (k === 'ArrowLeft' || k === 'a' || k === 'A') keys.left = false;
+  if (k === 'ArrowRight' || k === 'd' || k === 'D') keys.right = false;
+  if (k === 'ArrowDown' || k === 's' || k === 'S') keys.down = false;
+  if (k === 'h' || k === 'H') keys.hide = false;
+});
+function canvasXY(e) { const r = C.getBoundingClientRect(); return [(e.clientX - r.left) * W / r.width, (e.clientY - r.top) * H / r.height]; }
+C.addEventListener('mousedown', e => { wakeAudio(); const [x, y] = canvasXY(e); tapAt(x, y); });
+C.addEventListener('mousemove', e => { if (e.buttons & 1) { const [x, y] = canvasXY(e); dragAt(x, y); } });
+addEventListener('mouseup', () => { tapHide = false; dragX = null; });
+
+// ---------- Game state ----------
+let state = 'title', lv = 0, frame = 0, banner = 0, bannerText = '', shake = 0;
+let parts = [], puffs = [], bgFlakes = [];
+for (let i = 0; i < 70; i++) bgFlakes.push({ x: Math.random() * W, y: Math.random() * H, s: rnd(1.5, 4), v: rnd(0.4, 1.2) });
+
+function goTitle() { state = 'title'; banner = 0; }
+function puff(x, y, n = 8, col = '#fff') { for (let i = 0; i < n; i++) puffs.push({ x, y, vx: rnd(-3, 3), vy: rnd(-4, 1), life: rnd(20, 40), col, r: rnd(2, 5) }); }
+function say(text, t = 90) { bannerText = text; banner = t; }
+
+// =================== PART 1: BUILD (catch snow, roll it, build the blueprint) ===================
+let robo = { x: 300, face: 1, walk: 0 }, bucket = 0, flakes = [], partIdx = 0, bphase = 'catch', rolls = 0, fly = null, doneT = 0, nozX = 340, spawnT = 0, itemT = 0;
+let itemsFalling = [];
+const SITE_X = 815;
+function bp() { return BLUEPRINTS[LEVELS[lv].bp]; }
+function partInfo(i) {                     // where each blueprint part goes on the build site
+  const kind = LEVELS[lv].bp, p = bp().parts[i];
+  if (kind === 'snowman') {
+    const ys = [GROUND - 46, GROUND - 119, GROUND - 172];
+    if (p.t === 'ball') return { t: 'ball', x: SITE_X, y: ys[i], r: p.r };
+    if (p.item === 'carrot') return { t: 'item', item: 'carrot', x: SITE_X + 8, y: GROUND - 170 };
+    return { t: 'item', item: 'hat', x: SITE_X, y: GROUND - 196 };
+  }
+  if (kind === 'fort') return { t: 'block', x: 752 + (i % 3) * 42, y: GROUND - 34 * (Math.floor(i / 3) + 1), w: 40, h: 34 };
+  if (kind === 'ammo') {
+    const row = i < 4 ? 0 : i < 7 ? 1 : 2, j = i < 4 ? i : i < 7 ? i - 4 : 0, n = [4, 3, 1][row];
+    return { t: 'ammo', x: SITE_X + (j - (n - 1) / 2) * 30, y: GROUND - 15 - row * 26, r: 15 };
+  }
+  // royal fort: 4 blocks, a little snowball pile, and a flag on top
+  if (i < 4) return { t: 'block', x: 752 + (i % 2) * 42, y: GROUND - 34 * (Math.floor(i / 2) + 1), w: 40, h: 34 };
+  if (i < 7) return { t: 'ammo', x: [870, 900, 885][i - 4], y: GROUND - 15 - (i === 6 ? 26 : 0), r: 15 };
+  return { t: 'item', item: 'flag', x: 793, y: GROUND - 68 };
+}
+function startLevel(i) {
+  lv = i; state = 'build'; frame = 0;
+  robo = { x: 300, face: 1, walk: 0 }; bucket = 0; flakes = []; itemsFalling = []; partIdx = 0; bphase = 'catch'; rolls = 0; fly = null; doneT = 0;
+  puffs = []; spawnT = 30; itemT = 40;
+  say('LEVEL ' + (i + 1) + ': ' + LEVELS[i].name.toUpperCase(), 150);
+  sfx.place();
+}
+function curPart() { return bp().parts[partIdx]; }
+
+function updateBuild() {
+  const L = LEVELS[lv];
+  nozX = 340 + Math.sin(frame * 0.013) * 270;
+  // --- move Robo (arrows or drag your finger) ---
+  if (bphase !== 'roll') {
+    let mv = 0;
+    if (keys.left) mv = -1; if (keys.right) mv = 1;
+    if (dragX !== null && Math.abs(dragX - robo.x) > 8) mv = Math.sign(dragX - robo.x);
+    robo.x = clamp(robo.x + mv * 6.5, 50, 640);
+    if (mv) { robo.face = mv; robo.walk++; }
+  }
+  // --- the snow machine puffs out snowflakes ---
+  if (--spawnT <= 0 && bphase !== 'done') {
+    spawnT = rnd(18, 30);
+    flakes.push({ x: nozX + rnd(-20, 20), y: 128, vy: rnd(1.5, 2.2) + lv * 0.12, wob: rnd(0, 6), gold: Math.random() < 0.08 });
+  }
+  const p = curPart();
+  if (p && p.t === 'item' && bphase === 'catch' && !itemsFalling.length && --itemT <= 0) {
+    itemsFalling.push({ item: p.item, x: nozX, y: 128, vy: 1.5 });
+    sfx.warn();
+  }
+  for (const f of flakes) {
+    f.y += f.vy; f.x += Math.sin(frame * 0.05 + f.wob) * 0.8;
+    if (bphase === 'catch' && Math.abs(f.x - robo.x) < 34 && f.y > GROUND - 116 && f.y < GROUND - 88) {
+      f.dead = true;
+      if (p && p.t !== 'item') { bucket = Math.min(NEED[p.t], bucket + (f.gold ? 2 : 1)); f.gold ? sfx.gold() : sfx.catch(); puff(f.x, f.y, 4, f.gold ? '#ffe082' : '#fff'); }
+      else { sfx.catch(); puff(f.x, f.y, 3, '#e1f5fe'); }
+    }
+    if (f.y > GROUND) { f.dead = true; puff(f.x, GROUND - 2, 2); }
+  }
+  flakes = flakes.filter(f => !f.dead);
+  for (const it of itemsFalling) {
+    it.y += it.vy; it.x += Math.sin(frame * 0.04) * 0.6;
+    if (Math.abs(it.x - robo.x) < 40 && it.y > GROUND - 124 && it.y < GROUND - 80) {
+      it.dead = true; sfx.gold(); startFly(it.x, it.y);
+    } else if (it.y > GROUND) { it.dead = true; puff(it.x, GROUND - 4, 6); itemT = 60; say('Oops! The machine will drop another one!', 80); }
+  }
+  itemsFalling = itemsFalling.filter(i => !i.dead);
+  // --- bucket full? time to roll! ---
+  if (bphase === 'catch' && p && p.t !== 'item' && bucket >= NEED[p.t]) { bphase = 'roll'; rolls = 0; actPressed = false; sfx.place(); }
+  if (bphase === 'roll' && actPressed) {
+    rolls++; sfx.roll(); puff(robo.x + robo.face * 50, GROUND - 4, 4); robo.walk += 6;
+    if (rolls >= ROLLS[p.t]) startFly(robo.x + robo.face * 50, GROUND - rollR());
+  }
+  if (fly) {
+    fly.t++;
+    if (fly.t >= 40) {
+      fly = null; partIdx++; sfx.place(); puff(partInfo(partIdx - 1).x + 10, partInfo(partIdx - 1).y, 10);
+      if (p && p.t !== 'item') bucket = 0;
+      itemT = 50;
+      if (partIdx >= bp().parts.length) { bphase = 'done'; doneT = 150; say('BLUEPRINT DONE! ' + bp().name + '!', 150); sfx.win(); }
+      else bphase = 'catch';
+    }
+  }
+  if (bphase === 'done' && --doneT <= 0) startFight();
+  actPressed = false;
+}
+function rollR() {                         // how big the snowball you are rolling is right now
+  const p = curPart(); if (!p) return 10;
+  const goal = p.t === 'ball' ? p.r : p.t === 'block' ? 20 : 15;
+  return 8 + (goal - 8) * Math.min(1, rolls / ROLLS[p.t]);
+}
+function startFly(x, y) {
+  const info = partInfo(partIdx);
+  const tx = info.t === 'block' ? info.x + 20 : info.x, ty = info.t === 'block' ? info.y + 17 : info.y;
+  fly = { x, y, tx, ty, t: 0, info, r: rollR() }; bphase = 'fly';
+}
+
+function drawBuild() {
+  const L = LEVELS[lv];
+  drawSky(L); drawFactoryBack();
+  drawSite();
+  // falling snow + items
+  for (const f of flakes) drawFlake(f.x, f.y, f.gold ? 9 : 7, f.gold ? '#ffd740' : '#fff', frame * 0.03 + f.wob);
+  for (const it of itemsFalling) {
+    ctx.save(); ctx.globalAlpha = 0.35 + 0.15 * Math.sin(frame * 0.2); ctx.fillStyle = '#fff59d';
+    ctx.beginPath(); ctx.arc(it.x, it.y, 30, 0, 7); ctx.fill(); ctx.restore();
+    drawItem(it.item, it.x, it.y, 1.2);
+  }
+  drawMachine();
+  // Robo with his bucket, or rolling a snowball
+  const p = curPart();
+  if (bphase === 'roll' || (bphase === 'fly' && !fly)) {
+    const r = rollR(), bx = robo.x + robo.face * 50;
+    drawSnowball(bx, GROUND - r, r, rolls * 0.9, p && p.t === 'block');
+    drawRobo(robo.x, GROUND, 1.8, { face: robo.face, walk: robo.walk, push: true });
+  } else drawRobo(robo.x, GROUND, 1.8, { face: robo.face, walk: robo.walk, bucket: p && p.t !== 'item' ? bucket / NEED[p.t] : 0 });
+  if (fly) {
+    const k = fly.t / 40, x = fly.x + (fly.tx - fly.x) * k, y = fly.y + (fly.ty - fly.y) * k - Math.sin(k * Math.PI) * 140;
+    if (fly.info.t === 'item') drawItem(fly.info.item, x, y, 1); else drawSnowball(x, y, fly.info.t === 'ball' ? fly.info.r : fly.info.t === 'block' ? 18 : 15, fly.t * 0.3, fly.info.t === 'block');
+  }
+  // what to do now (big and simple)
+  let help = '';
+  if (bphase === 'catch' && p) help = p.t === 'item' ? 'Catch the ' + p.item.toUpperCase() + '! It drops from the machine!' : 'Catch ' + NEED[p.t] + ' snowflakes in your bucket!  ⬅ ➡';
+  if (bphase === 'roll') help = (p.t === 'ball' ? 'ROLL it BIG!' : p.t === 'block' ? 'PACK the block!' : 'SQUISH a snowball!') + '  Press SPACE / tap!  ' + rolls + '/' + ROLLS[p.t];
+  if (help) {
+    ctx.fillStyle = 'rgba(13,42,74,.75)'; rr(110, 140, 470, 40, 14);
+    txt(help, 345, 168, 20, '#fff');
+  }
+  if (bphase === 'roll') {                 // big ROLL button for fingers
+    const s = 1 + 0.06 * Math.sin(frame * 0.25);
+    ctx.save(); ctx.translate(345, 240); ctx.scale(s, s);
+    ctx.fillStyle = '#ff7043'; ctx.beginPath(); ctx.arc(0, 0, 44, 0, 7); ctx.fill();
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = 5; ctx.stroke();
+    txt(p.t === 'ball' ? 'ROLL!' : p.t === 'block' ? 'PACK!' : 'SQUISH!', 0, 8, p.t === 'ammo' ? 18 : 22, '#fff');
+    ctx.restore();
+  }
+}
+
+// =================== PART 2: SNOWBALL FIGHT ===================
+const RX = 150, G_E = 0.25, G_P = 0.3;
+let fort = [], foes = [], pBalls = [], eBalls = [], hatsFly = [], texts = [];
+let rise = 1, froz = 0, popT = 0, throwCool = 0, aimIdx = 0, tapTarget = null, regenT = 0, winT = 0, fightT = 0, fortMax = 2;
+const HAT_SETS = { bot: ['beanie', 'tophat', 'party'], sparks: ['cap', 'beanie', 'party'], pages: ['bow', 'beanie', 'tophat'], king: ['crown', 'beanie', 'tophat', 'party', 'cap', 'pot'] };
+function startFight() {
+  const L = LEVELS[lv];
+  state = 'fight'; fightT = 0; winT = 0; regenT = 0;
+  fortMax = (L.bp === 'fort' || L.bp === 'royal') ? 3 : 2;
+  fort = [];
+  for (let r = 0; r < 3; r++) for (let c = 0; c < 2; c++) fort.push({ x: 198 + c * 32, y: GROUND - 30 * (r + 1), w: 32, h: 30, hp: fortMax });
+  foes = L.team.map((t, i) => ({ k: t.k, x: t.x, hats: t.hats, col: t.col, list: HAT_SETS[t.k], st: t.k === 'king' ? 'idle' : 'hide', t: t.k === 'king' ? 120 : 70 + i * 70, rise: 0, frz: 0, out: false, shots: 0, attacks: 0 }));
+  pBalls = []; eBalls = []; hatsFly = []; texts = []; puffs = [];
+  rise = 1; froz = 0; popT = 0; throwCool = 0; aimIdx = 0; tapTarget = null;
+  say('SNOWBALL FIGHT! Knock off all their hats!', 150);
+}
+const aliveFoes = () => foes.filter(f => !f.out).sort((a, b) => a.x - b.x);
+const PET = f => f.k === 'sparks' || f.k === 'pages';
+function aimPoint(f) { return f.k === 'king' ? { x: f.x, y: GROUND - 175 } : { x: f.x, y: GROUND - (PET(f) ? 95 : 62) }; }
+function leftPress() { if (state === 'fight') { const a = aliveFoes(); if (a.length) { aimIdx = (aimIdx - 1 + a.length) % a.length; sfx.click(); } } }
+function rightPress() { if (state === 'fight') { const a = aliveFoes(); if (a.length) { aimIdx = (aimIdx + 1) % a.length; sfx.click(); } } }
+function launch(x, y, tx, ty, T, g) { return { x, y, vx: (tx - x) / T, vy: (ty - y - 0.5 * g * T * T) / T, g }; }
+function roboBoxes() {                     // where Robo can be hit right now
+  if (rise > 0.5) return [{ x: RX, y: GROUND - 92, r: 30 }, { x: RX, y: GROUND - 55, r: 22 }];
+  return [{ x: RX, y: GROUND - 28, r: 20 }];
+}
+function foeBoxes(f) {
+  if (f.k === 'king') return [{ x: f.x, y: GROUND - 65, r: 65 }, { x: f.x, y: GROUND - 165, r: 48 }, { x: f.x, y: GROUND - 245, r: 38 }];
+  return f.rise > 0.6 ? [{ x: f.x, y: GROUND - (PET(f) ? 95 : 62), r: 38 }] : [];
+}
+function float(s, x, y, col = '#fff') { texts.push({ s, x, y, t: 60, col }); }
+
+function enemyThrow(f, big) {
+  const up = rise > 0.5, alive = fort.filter(b => b.hp > 0);
+  let tx, ty;
+  if (up) { tx = RX + rnd(-10, 10); ty = GROUND - 92 + rnd(-10, 10); }
+  else if (alive.length) { const b = alive[Math.floor(Math.random() * alive.length)]; tx = b.x + 16; ty = b.y + 15; }
+  else { tx = RX; ty = GROUND - 28; }
+  const hx = f.k === 'king' ? f.x - (big ? 95 : 40) : f.x - 30, hy = f.k === 'king' ? (big ? GROUND - 295 : GROUND - 200) : GROUND - (PET(f) ? 130 : 95);
+  const b = launch(hx, hy, tx, ty, big ? 100 : (f.k === 'king' ? 56 : 62 - lv * 2), G_E);
+  b.r = big ? 30 : 9; b.big = big; b.hp = 2;
+  eBalls.push(b); sfx.throw();
+}
+function hitFoe(f) {
+  f.hats--; f.frz = 45; sfx.hat(); shake = 6;
+  const hb = f.k === 'king' ? GROUND - 290 : GROUND - 110;
+  hatsFly.push({ type: f.list[f.hats], col: f.col, x: f.x, y: hb - f.hats * (f.k === 'king' ? 18 : 16), vx: rnd(2, 5), vy: rnd(-9, -6), rot: 0 });
+  float(f.k === 'king' ? 'BONK!' : 'BRRR!', f.x, GROUND - (f.k === 'king' ? 320 : 150), '#80d8ff');
+  if (f.st === 'bigwind') { float('OOPS! The giant snowball fell on his head!', f.x - 120, GROUND - 360, '#fff59d'); puff(f.x, GROUND - 300, 20); }
+  if (f.k === 'king') { f.st = 'idle'; f.t = 70; }
+  if (f.hats <= 0) {
+    f.out = true; f.st = 'out'; sfx.out(); puff(f.x, GROUND - 60, 18);
+    float(f.k === 'king' ? 'You got my crown!' : 'I\'m out! Good throw!', f.x, GROUND - 140, '#fff');
+    const a = aliveFoes(); aimIdx = a.length ? aimIdx % a.length : 0;
+  }
+}
+
+function updateFight() {
+  const L = LEVELS[lv];
+  fightT++;
+  // ---------- Robo ----------
+  if (froz > 0) froz--;
+  if (popT > 0) popT--;
+  if (throwCool > 0) throwCool--;
+  const hideWant = keys.down || keys.hide || tapHide;
+  if (froz <= 0) rise += ((hideWant && popT <= 0) ? -0.16 : 0.16);
+  rise = clamp(rise, 0, 1);
+  const a = aliveFoes();
+  if (actPressed && froz <= 0 && throwCool <= 0 && a.length && winT <= 0) {
+    let tgt;
+    if (tapTarget) { tgt = tapTarget; let best = 1e9; a.forEach((f, i) => { const d = Math.abs(f.x - tgt.x); if (d < best) { best = d; aimIdx = i; } }); }
+    else tgt = aimPoint(a[aimIdx % a.length]);
+    rise = 1; popT = 24; throwCool = (L.bp === 'ammo' || L.bp === 'royal') ? 14 : 20;
+    const T = clamp(30 + (tgt.x - RX) / 22, 30, 62), b = launch(RX + 30, GROUND - 105, tgt.x, tgt.y, T, G_P);
+    b.r = 10; pBalls.push(b); sfx.throw();
+  }
+  actPressed = false; tapTarget = null;
+  // ---------- Fort fixes itself (the snow machine helps!) ----------
+  if (++regenT >= 400) {
+    regenT = 0;
+    const b = fort.find(b => b.hp < fortMax);
+    if (b) { b.hp = fortMax; puff(b.x + 16, b.y + 15, 10); float('Fort fixed!', 230, GROUND - 140, '#b3e5fc'); }
+  }
+  // ---------- Foes ----------
+  const busy = foes.filter(f => f.st === 'wind' || f.st === 'bigwind').length;
+  for (const f of foes) {
+    if (f.out) { f.rise += (0.5 - f.rise) * 0.1; continue; }
+    if (f.frz > 0) { f.frz--; if (f.frz === 0 && f.k !== 'king') { f.st = 'hide'; f.t = rnd(L.hide[0], L.hide[1]); } continue; }
+    if (f.k === 'king') { updateKing(f, L); continue; }
+    f.t--;
+    if (f.st === 'hide') {
+      f.rise = Math.max(0, f.rise - 0.1);
+      if (f.t <= 0) { if (busy < 2 && winT <= 0) { f.st = 'wind'; f.t = L.wind; } else f.t = 30; }
+    } else if (f.st === 'wind') {
+      f.rise = Math.min(1, f.rise + 0.12);
+      if (f.t <= 0) { enemyThrow(f, false); f.st = 'after'; f.t = 45; }
+    } else if (f.st === 'after') {
+      if (f.t <= 0) { f.st = 'hide'; f.t = rnd(L.hide[0], L.hide[1]); }
+    }
+  }
+  // ---------- Robo's snowballs ----------
+  for (const b of pBalls) {
+    b.x += b.vx; b.y += b.vy; b.vy += b.g;
+    for (const e of eBalls) if (!e.dead && Math.hypot(e.x - b.x, e.y - b.y) < e.r + b.r) {
+      b.dead = true; puff(b.x, b.y, 6);
+      if (e.big) { e.hp--; e.r -= 7; sfx.chip(); if (e.hp <= 0) { e.dead = true; puff(e.x, e.y, 26); sfx.pop(); float('POP!', e.x, e.y - 30, '#fff59d'); } }
+      else { e.dead = true; sfx.pop(); float('SMASH!', e.x, e.y - 20, '#fff'); }
+      break;
+    }
+    if (b.dead) continue;
+    for (const f of foes) {
+      if (f.out) continue;
+      if (foeBoxes(f).some(h => Math.hypot(h.x - b.x, h.y - b.y) < h.r + b.r)) { b.dead = true; puff(b.x, b.y, 10); hitFoe(f); break; }
+      const mx = f.x - 15;                // their snow pile
+      if (f.k !== 'king' && ((b.x - mx) / 62) ** 2 + ((b.y - GROUND) / 64) ** 2 < 1) { b.dead = true; puff(b.x, b.y, 6); sfx.splat(); break; }
+    }
+    if (b.y > GROUND) { b.dead = true; puff(b.x, GROUND, 5); sfx.splat(); }
+    if (b.x > W + 60) b.dead = true;
+  }
+  pBalls = pBalls.filter(b => !b.dead);
+  // ---------- Their snowballs ----------
+  for (const b of eBalls) {
+    if (b.dead) continue;
+    b.x += b.vx; b.y += b.vy; b.vy += b.g;
+    for (const k of fort) if (k.hp > 0 && b.x > k.x - b.r && b.x < k.x + k.w + b.r && b.y > k.y - b.r && b.y < k.y + k.h + b.r) {
+      b.dead = true; sfx.chip(); puff(b.x, b.y, b.big ? 20 : 8);
+      if (b.big) { for (const n of fort) if (Math.abs(n.x - k.x) < 40 && Math.abs(n.y - k.y) < 40) n.hp = 0; shake = 12; }
+      else k.hp--;
+      break;
+    }
+    if (b.dead) continue;
+    if (roboBoxes().some(h => Math.hypot(h.x - b.x, h.y - b.y) < h.r + b.r)) {
+      b.dead = true; puff(b.x, b.y, 12);
+      if (froz <= 0) { froz = b.big ? 90 : 60; sfx.brrr(); float('BRRR!', RX, GROUND - 160, '#80d8ff'); shake = 4; }
+    }
+    if (b.y > GROUND) { b.dead = true; puff(b.x, GROUND, b.big ? 20 : 5); sfx.splat(); if (b.big) shake = 8; }
+    if (b.x < -60) b.dead = true;
+  }
+  eBalls = eBalls.filter(b => !b.dead);
+  // ---------- flying hats + words ----------
+  for (const h of hatsFly) { h.x += h.vx; h.y += h.vy; h.vy += 0.35; h.rot += 0.2; if (h.y > GROUND - 6) { h.y = GROUND - 6; h.vx *= 0.8; h.vy = 0; h.rot *= 0.7; } }
+  for (const t of texts) { t.t--; t.y -= 0.6; }
+  texts = texts.filter(t => t.t > 0);
+  // ---------- Won the round? ----------
+  if (!aliveFoes().length) {
+    if (winT <= 0) { winT = 130; say('YOU WIN THE ROUND!', 130); sfx.win(); eBalls = []; }
+    else if (--winT <= 0) finishRound();
+  }
+}
+function updateKing(f, L) {
+  f.rise = 1; f.t--;
+  if (f.st === 'idle') {
+    if (f.t <= 0 && winT <= 0) {
+      f.attacks++;
+      if (f.attacks % 3 === 0) { f.st = 'bigwind'; f.t = 110; sfx.big(); say('GIANT SNOWBALL! Hide, or hit it 2 times to POP it!', 110); }
+      else { f.st = 'wind'; f.t = 55; sfx.warn(); }
+    }
+  } else if (f.st === 'wind') {
+    if (f.t <= 0) { f.st = 'shoot'; f.shots = 3; f.t = 0; }
+  } else if (f.st === 'shoot') {
+    if (f.t <= 0) { enemyThrow(f, false); f.shots--; f.t = 20; if (f.shots <= 0) { f.st = 'idle'; f.t = rnd(120, 170); } }
+  } else if (f.st === 'bigwind') {
+    if (f.t <= 0) { enemyThrow(f, true); f.st = 'idle'; f.t = rnd(140, 180); }
+  }
+}
+function finishRound() {
+  if (lv >= LEVELS.length - 1) {
+    unlocked = 4; everWon = true; saveProgress(true);
+    sticker('snow-king-of-snow'); trophy('snowWin');
+    state = 'win'; frame = 0; sfx.win();
+  } else {
+    unlocked = Math.max(unlocked, lv + 2); saveProgress(false);
+    state = 'roundWin'; frame = 0;
+  }
+}
+
+// =================== DRAWING HELPERS ===================
+function rr(x, y, w, h, r) {
+  r = Math.max(0, Math.min(r, w / 2, h / 2));
+  ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath(); ctx.fill();
+}
+function circ(x, y, r, col) { ctx.fillStyle = col; ctx.beginPath(); ctx.arc(x, y, Math.max(0.1, r), 0, 7); ctx.fill(); }
+function txt(s, x, y, size, col, align = 'center') {
+  ctx.font = 'bold ' + size + 'px "Trebuchet MS", "Comic Sans MS", sans-serif'; ctx.textAlign = align;
+  ctx.lineWidth = Math.max(3, size / 6); ctx.strokeStyle = 'rgba(13,42,74,.85)'; ctx.lineJoin = 'round';
+  ctx.strokeText(s, x, y); ctx.fillStyle = col; ctx.fillText(s, x, y);
+}
+function drawFlake(x, y, r, col, rot) {
+  ctx.save(); ctx.translate(x, y); ctx.rotate(rot); ctx.strokeStyle = col; ctx.lineWidth = 2.5; ctx.lineCap = 'round';
+  for (let i = 0; i < 3; i++) { ctx.rotate(Math.PI / 3); ctx.beginPath(); ctx.moveTo(-r, 0); ctx.lineTo(r, 0); ctx.moveTo(r * 0.55, -r * 0.3); ctx.lineTo(r * 0.75, 0); ctx.lineTo(r * 0.55, r * 0.3); ctx.stroke(); }
+  ctx.restore();
+}
+function drawSnowball(x, y, r, rot, block) {
+  if (block) {
+    const s = r * 2; ctx.fillStyle = '#eaf6ff'; rr(x - s * 0.55, y - s * 0.45, s * 1.1, s * 0.9, 6);
+    ctx.fillStyle = '#b3d9f2'; ctx.fillRect(x - s * 0.55 + 4, y + s * 0.3, s * 1.1 - 8, 3); return;
+  }
+  circ(x, y, r, '#fafdff');
+  ctx.fillStyle = '#cfe8f7'; ctx.beginPath(); ctx.arc(x, y, r, 0.2, Math.PI - 0.2); ctx.fill();
+  circ(x, y, r * 0.8, '#fafdff');
+  ctx.strokeStyle = '#b3d9f2'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(x, y, r * 0.55, rot, rot + 1.6); ctx.stroke();
+  circ(x - r * 0.35, y - r * 0.4, r * 0.15, '#fff');
+}
+function drawItem(item, x, y, s) {
+  ctx.save(); ctx.translate(x, y); ctx.scale(s, s);
+  if (item === 'carrot') {
+    ctx.fillStyle = '#ff7043'; ctx.beginPath(); ctx.moveTo(-6, -6); ctx.lineTo(24, 0); ctx.lineTo(-6, 6); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#43a047'; ctx.beginPath(); ctx.moveTo(-6, 0); ctx.lineTo(-16, -9); ctx.lineTo(-12, 0); ctx.lineTo(-16, 9); ctx.closePath(); ctx.fill();
+  } else if (item === 'hat') drawHat('tophat', 0, 10, '#e53935');
+  else if (item === 'flag') {
+    ctx.fillStyle = '#795548'; ctx.fillRect(-2, -30, 4, 50);
+    ctx.fillStyle = '#e53935'; ctx.beginPath(); ctx.moveTo(2, -30); ctx.lineTo(30, -22 + Math.sin(frame * 0.2) * 3); ctx.lineTo(2, -12); ctx.fill();
+    drawFlake(12, -21, 5, '#fff', 0);
+  }
+  ctx.restore();
+}
+// Hats: cx = middle, b = bottom of the hat
+function drawHat(type, cx, b, col) {
+  ctx.save(); ctx.lineJoin = 'round'; ctx.strokeStyle = '#1b1b2f'; ctx.lineWidth = 1.5;
+  const sh = (fill, f) => { ctx.fillStyle = fill; ctx.beginPath(); f(); ctx.fill(); ctx.stroke(); };
+  if (type === 'beanie') {
+    sh(col, () => ctx.arc(cx, b, 19, Math.PI, 0)); sh('#fff', () => ctx.rect(cx - 20, b - 6, 40, 7));
+    circ(cx, b - 21, 6, '#fff');
+  } else if (type === 'tophat') {
+    sh('#212121', () => ctx.ellipse(cx, b, 23, 4, 0, 0, 7)); sh('#212121', () => ctx.rect(cx - 14, b - 26, 28, 26));
+    ctx.fillStyle = col; ctx.fillRect(cx - 14, b - 9, 28, 5);
+  } else if (type === 'party') {
+    sh(col, () => { ctx.moveTo(cx - 15, b); ctx.lineTo(cx, b - 30); ctx.lineTo(cx + 15, b); ctx.closePath(); });
+    circ(cx - 4, b - 9, 2.5, '#fff'); circ(cx + 5, b - 15, 2.5, '#fff59d'); circ(cx, b - 31, 5, '#fff59d');
+  } else if (type === 'cap') {
+    sh(col, () => ctx.ellipse(cx - 20, b - 1, 14, 4, 0, 0, 7)); sh(col, () => ctx.arc(cx, b, 18, Math.PI, 0));
+    circ(cx, b - 18, 3, '#fff');
+  } else if (type === 'bow') {
+    sh(col, () => { ctx.moveTo(cx, b - 8); ctx.lineTo(cx - 20, b - 18); ctx.lineTo(cx - 20, b + 2); ctx.closePath(); });
+    sh(col, () => { ctx.moveTo(cx, b - 8); ctx.lineTo(cx + 20, b - 18); ctx.lineTo(cx + 20, b + 2); ctx.closePath(); });
+    circ(cx, b - 8, 5, '#fff59d');
+  } else if (type === 'pot') {
+    sh('#90a4ae', () => ctx.rect(cx - 17, b - 20, 34, 20)); sh('#b0bec5', () => ctx.rect(cx - 20, b - 23, 40, 5));
+    ctx.fillStyle = '#546e7a'; ctx.fillRect(cx + 20, b - 15, 12, 4);
+  } else if (type === 'crown') {
+    sh('#ffd600', () => { ctx.moveTo(cx - 24, b); ctx.lineTo(cx - 26, b - 26); ctx.lineTo(cx - 13, b - 14); ctx.lineTo(cx, b - 32); ctx.lineTo(cx + 13, b - 14); ctx.lineTo(cx + 26, b - 26); ctx.lineTo(cx + 24, b); ctx.closePath(); });
+    circ(cx, b - 9, 4, '#e53935'); circ(cx - 14, b - 7, 3, '#2979ff'); circ(cx + 14, b - 7, 3, '#00e676');
+  }
+  ctx.restore();
+}
+
+// ---------- Robo: white round robot, dark visor, glowing blue eyes, blue ear pods, jet boots ----------
+function drawRobo(cx, feetY, s, o = {}) {
+  const w = 30 * s, h = 40 * s, f = o.face || 1, shiver = o.frozen ? Math.sin(frame * 1.7) * 2 : 0;
+  const x = cx - w / 2 + shiver, y = feetY - h;
+  const step = o.walk ? Math.sin(o.walk * 0.4) * 2 * s : 0;
+  ctx.fillStyle = '#3d5afe';                                                // legs / jet boots
+  ctx.fillRect(x + 4 * s, y + h - 7 * s + Math.max(0, step), 8 * s, 7 * s); ctx.fillRect(x + w - 12 * s, y + h - 7 * s + Math.max(0, -step), 8 * s, 7 * s);
+  ctx.fillStyle = '#f5f7ff'; rr(x + 2 * s, y + h * 0.5, w - 4 * s, h * 0.4, 6 * s);   // body
+  circ(x + w / 2, y + h * 0.7, 3 * s, '#2979ff');                           // chest light
+  ctx.fillStyle = '#e8ecf7';                                                // arms
+  if (o.bucket !== undefined && !o.push) { rr(x - 3 * s, y - 2 * s, 5 * s, h * 0.6, 2 * s); rr(x + w - 2 * s, y - 2 * s, 5 * s, h * 0.6, 2 * s); }
+  else if (o.push) { rr(f > 0 ? cx + w * 0.2 : cx - w * 0.2 - 16 * s, y + h * 0.58, 16 * s, 5 * s, 2 * s); }
+  else if (o.throwArm) { rr(cx + w * 0.38, y - 6 * s, 5 * s, h * 0.55, 2 * s); circ(cx + w * 0.38 + 2.5 * s, y - 8 * s, 5 * s, '#fafdff'); }
+  else if (o.cocoa) { rr(cx + w * 0.3, y + h * 0.55, 12 * s, 5 * s, 2 * s); drawMug(cx + w * 0.5 + 8 * s, y + h * 0.52, s * 0.9); }
+  ctx.fillStyle = '#2979ff'; rr(x - 5 * s, y + h * 0.3 - 3 * s, 6 * s, 9 * s, 3 * s); rr(x + w - 1 * s, y + h * 0.3 - 3 * s, 6 * s, 9 * s, 3 * s);   // ear pods
+  ctx.fillStyle = '#ffffff'; rr(x - 2 * s, y, w + 4 * s, h * 0.55, 12 * s);   // big round head
+  ctx.fillStyle = '#111827'; rr(x + 2 * s, y + 4 * s, w - 4 * s, h * 0.55 - 9 * s, 9 * s);   // dark visor
+  const ex = cx + shiver + f * 3 * s, ey = y + h * 0.27, blink = frame % 180 < 6 ? 1 : 5 * s / 1.6;
+  ctx.fillStyle = o.frozen ? '#b3e5fc' : '#40c4ff';
+  ctx.beginPath(); ctx.ellipse(ex - 6 * s, ey, 3.5 * s / 1.4, blink, 0, 0, 7); ctx.ellipse(ex + 6 * s, ey, 3.5 * s / 1.4, blink, 0, 0, 7); ctx.fill();
+  if (o.bucket !== undefined && !o.push) {                                 // the snow bucket, held up high
+    const bw = 30 * s, bh = 16 * s, bx = cx - bw / 2, by = y - bh - 2 * s;
+    ctx.fillStyle = '#ff7043'; ctx.beginPath(); ctx.moveTo(bx, by); ctx.lineTo(bx + bw, by); ctx.lineTo(bx + bw - 4 * s, by + bh); ctx.lineTo(bx + 4 * s, by + bh); ctx.closePath(); ctx.fill();
+    if (o.bucket > 0) { const fh = bh * Math.min(1, o.bucket); ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.ellipse(cx, by + bh - fh, bw / 2 - 2, Math.max(2, fh * 0.6), 0, Math.PI, 0); ctx.fill(); ctx.fillRect(bx + 4 * s, by + bh - fh, bw - 8 * s, fh); }
+    ctx.fillStyle = '#ffab91'; ctx.fillRect(bx - 2, by - 2, bw + 4, 4);
+  }
+  if (o.frozen) {                                                           // BRRR! a little ice cube (it melts fast)
+    ctx.save(); ctx.globalAlpha = 0.4; ctx.fillStyle = '#b3e5fc'; rr(x - 10, y - 10, w + 20, h + 14, 10); ctx.restore();
+    ctx.strokeStyle = 'rgba(255,255,255,.8)'; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(x - 4, y); ctx.lineTo(x + 10, y - 6); ctx.stroke();
+  }
+}
+function drawMug(x, y, s) {
+  ctx.fillStyle = '#d84315'; rr(x - 7 * s, y - 8 * s, 14 * s, 14 * s, 3 * s);
+  ctx.strokeStyle = '#d84315'; ctx.lineWidth = 2.5 * s; ctx.beginPath(); ctx.arc(x + 7 * s, y - 1 * s, 4 * s, -1.4, 1.4); ctx.stroke();
+  ctx.fillStyle = '#6d4c41'; ctx.fillRect(x - 6 * s, y - 8 * s, 12 * s, 3 * s);
+  circ(x - 2 * s, y - 9 * s, 2.5 * s, '#fff'); circ(x + 2 * s, y - 9 * s, 2 * s, '#fff');          // marshmallows
+  ctx.save(); ctx.strokeStyle = 'rgba(255,255,255,.7)'; ctx.lineWidth = 2;                        // steam
+  for (let i = -1; i <= 1; i += 2) { ctx.beginPath(); for (let k = 0; k < 10; k++) { const yy = y - 12 * s - k * 2.2 * s, xx = x + i * 3 * s + Math.sin(frame * 0.1 + k * 0.6 + i) * 3; k ? ctx.lineTo(xx, yy) : ctx.moveTo(xx, yy); } ctx.stroke(); }
+  ctx.restore();
+}
+
+// ---------- Scenery ----------
+function drawSky(L) {
+  const g = ctx.createLinearGradient(0, 0, 0, H); g.addColorStop(0, L.sky[0]); g.addColorStop(1, L.sky[1]);
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  if (L.night) for (let i = 0; i < 40; i++) circ((i * 211) % W, (i * 97) % 220, 1.5 + (i % 3) * 0.5, 'rgba(255,255,255,' + (0.5 + 0.5 * Math.sin(frame * 0.05 + i)) + ')');
+  ctx.fillStyle = 'rgba(255,255,255,.6)';                                   // snowy hills
+  ctx.beginPath(); ctx.moveTo(0, GROUND - 40);
+  for (let x = 0; x <= W; x += 40) ctx.lineTo(x, GROUND - 50 - 30 * Math.sin(x * 0.008 + 1) - 15 * Math.sin(x * 0.02));
+  ctx.lineTo(W, GROUND); ctx.lineTo(0, GROUND); ctx.fill();
+  for (const f of bgFlakes) circ(f.x, f.y, f.s, 'rgba(255,255,255,.75)');
+  ctx.fillStyle = '#f5fbff'; ctx.fillRect(0, GROUND, W, H - GROUND);        // snowy ground
+  ctx.fillStyle = '#d6ecfa'; ctx.fillRect(0, GROUND, W, 5);
+}
+function drawFactoryBack() {                                                // cozy factory wall + pipes
+  ctx.fillStyle = 'rgba(141,110,99,.35)'; ctx.fillRect(0, 0, 660, 118);
+  ctx.fillStyle = '#ffcc80'; for (let i = 0; i < 6; i++) { rr(30 + i * 108, 36, 50, 40, 8); }
+  ctx.fillStyle = 'rgba(255,255,255,.25)'; for (let i = 0; i < 6; i++) ctx.fillRect(54 + i * 108, 36, 3, 40);
+}
+function drawMachine() {                                                     // the Snow Machine rail + nozzle at the top
+  ctx.fillStyle = '#546e7a'; rr(20, 92, 640, 16, 8);
+  ctx.fillStyle = '#78909c'; for (let x = 40; x < 660; x += 60) circ(x, 100, 4, '#b0bec5');
+  ctx.fillStyle = '#29b6f6'; rr(nozX - 40, 78, 80, 40, 12);
+  ctx.fillStyle = '#e1f5fe'; rr(nozX - 30, 84, 60, 14, 6);
+  ctx.font = 'bold 9px sans-serif'; ctx.textAlign = 'center'; ctx.fillStyle = '#0277bd'; ctx.fillText('SNOW-O-MATIC', nozX, 95);
+  ctx.fillStyle = '#0288d1'; ctx.beginPath(); ctx.moveTo(nozX - 14, 118); ctx.lineTo(nozX + 14, 118); ctx.lineTo(nozX + 8, 130); ctx.lineTo(nozX - 8, 130); ctx.fill();
+  circ(nozX - 26, 90, 3, frame % 20 < 10 ? '#ff5252' : '#69f0ae');
+}
+function drawPartShape(info, ghost) {
+  if (ghost) { ctx.save(); ctx.globalAlpha = 0.35; ctx.setLineDash([6, 5]); ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; }
+  if (info.t === 'ball' || info.t === 'ammo') {
+    if (ghost) { ctx.beginPath(); ctx.arc(info.x, info.y, info.r, 0, 7); ctx.stroke(); } else drawSnowball(info.x, info.y, info.r, info.x * 0.1, false);
+  } else if (info.t === 'block') {
+    if (ghost) ctx.strokeRect(info.x, info.y, info.w, info.h);
+    else { ctx.fillStyle = '#eaf6ff'; rr(info.x, info.y, info.w, info.h, 5); ctx.fillStyle = '#b3d9f2'; ctx.fillRect(info.x + 3, info.y + info.h - 6, info.w - 6, 3); }
+  } else if (info.t === 'item') {
+    if (ghost) { ctx.beginPath(); ctx.arc(info.x, info.y - 4, 14, 0, 7); ctx.stroke(); } else drawItem(info.item, info.x, info.y, 1);
+  }
+  if (ghost) ctx.restore();
+}
+function drawSite() {                                                        // the blueprint + what you have built so far
+  ctx.fillStyle = '#1565c0'; rr(680, 130, 270, 70, 12);
+  ctx.strokeStyle = 'rgba(255,255,255,.25)'; ctx.lineWidth = 1;
+  for (let x = 690; x < 950; x += 18) { ctx.beginPath(); ctx.moveTo(x, 132); ctx.lineTo(x, 198); ctx.stroke(); }
+  txt('BLUEPRINT', 815, 156, 16, '#bbdefb'); txt(bp().name, 815, 186, 22, '#fff');
+  const n = bp().parts.length;
+  for (let i = 0; i < n; i++) circ(815 - (n - 1) * 9 + i * 18, 212, 6, i < partIdx ? '#69f0ae' : 'rgba(255,255,255,.5)');
+  for (let i = n - 1; i >= 0; i--) if (i >= partIdx) drawPartShape(partInfo(i), true);
+  for (let i = 0; i < partIdx; i++) drawPartShape(partInfo(i), false);
+  if (LEVELS[lv].bp === 'snowman' && partIdx >= 3) {                       // snowman face + stick arms
+    circ(SITE_X - 9, GROUND - 178, 3, '#263238'); circ(SITE_X + 7, GROUND - 178, 3, '#263238');
+    for (let k = -2; k <= 2; k++) circ(SITE_X + k * 5, GROUND - 162 + Math.abs(k) * -1.5, 1.8, '#263238');
+    ctx.strokeStyle = '#6d4c41'; ctx.lineWidth = 4; ctx.beginPath(); ctx.moveTo(SITE_X - 30, GROUND - 125); ctx.lineTo(SITE_X - 62, GROUND - 150); ctx.moveTo(SITE_X + 30, GROUND - 125); ctx.lineTo(SITE_X + 62, GROUND - 145); ctx.stroke();
+  }
+}
+
+// ---------- The other team ----------
+function drawFoe(f, o = {}) {
+  const pet = f.k === 'sparks' || f.k === 'pages';   // Sparks and Pages hop up onto their snow pile to throw
+  const sink = f.k === 'king' ? 0 : pet ? 45 - f.rise * 85 : (1 - f.rise) * 58, shiver = f.frz > 0 ? Math.sin(frame * 1.7) * 2 : 0;
+  const wind = !o.cocoa && (f.st === 'wind' || f.st === 'shoot'), big = !o.cocoa && f.st === 'bigwind';
+  ctx.save(); ctx.translate(f.x + shiver, GROUND + sink);
+  let hatX = 0, hatB = -106, hs = 1, gap = 16;
+  if (f.k === 'bot') {
+    ctx.strokeStyle = '#78909c'; ctx.lineWidth = 6; ctx.lineCap = 'round';          // metal arms
+    ctx.beginPath(); ctx.moveTo(-20, -70);
+    if (wind) ctx.lineTo(-34, -98); else if (o.cocoa) ctx.lineTo(-36, -58); else ctx.lineTo(-46, -60 + Math.sin(frame * 0.1) * 5);
+    ctx.moveTo(20, -70); ctx.lineTo(44, -58); ctx.stroke();
+    if (wind) drawSnowball(-34, -102, 10, 0, false);
+    circ(0, -34, 34, '#fafdff'); circ(0, -84, 26, '#fafdff');
+    ctx.fillStyle = '#cfe8f7'; ctx.beginPath(); ctx.arc(0, -34, 34, 0.3, Math.PI - 0.3); ctx.fill(); circ(0, -38, 29, '#fafdff');
+    ctx.fillStyle = '#90a4ae'; rr(-14, -48, 28, 20, 5);                                // tummy panel
+    circ(-6, -38, 3.5, frame % 30 < 15 ? '#ff5252' : '#ffd740'); circ(6, -38, 3.5, '#69f0ae');
+    ctx.fillStyle = '#455a64'; ctx.fillRect(-26, -92, 52, 8);                          // goggle strap
+    circ(-11, -88, 10, '#455a64'); circ(9, -88, 10, '#455a64');
+    circ(-11, -88, 7, '#ffb74d'); circ(9, -88, 7, '#ffb74d'); circ(-13, -91, 2.2, '#fff'); circ(7, -91, 2.2, '#fff');
+    ctx.strokeStyle = '#263238'; ctx.lineWidth = 2.5; ctx.beginPath(); ctx.arc(-1, -74, 7, 0.3, Math.PI - 0.3); ctx.stroke();
+    if (o.cocoa) drawMug(-38, -58, 1.2);
+  } else if (f.k === 'sparks') {                                                       // Sparks: gold robot dog with 2 cats inside
+    ctx.save(); ctx.scale(-2, 2);
+    ctx.fillStyle = '#c98e2a'; ctx.fillRect(-16, -9, 6, 9); ctx.fillRect(10, -9, 6, 9);
+    ctx.strokeStyle = '#c98e2a'; ctx.lineWidth = 4; ctx.lineCap = 'round'; ctx.beginPath(); ctx.moveTo(-18, -22); ctx.lineTo(-26, -32 + Math.sin(frame * 0.4) * 4); ctx.stroke();
+    ctx.fillStyle = '#f4b942'; rr(-20, -27, 40, 18, 8);
+    circ(-3, -18, 7, '#b3e5fc'); circ(-6, -17, 3, '#ff9800'); circ(0, -17, 3, '#9e9e9e');
+    rr(2, -46, 22, 18, 7); rr(14, -39, 12, 9, 4);
+    circ(27, -37, 3, '#000'); circ(16, -40, 2.2, '#000');
+    ctx.fillStyle = '#8d5a2b'; ctx.beginPath(); ctx.ellipse(6, -40, 4, 9, 0.4, 0, 7); ctx.fill();
+    ctx.fillStyle = '#e53935'; ctx.fillRect(4, -29, 18, 3);
+    if (wind) drawSnowball(24, -50, 5, 0, false);
+    if (o.cocoa) drawMug(26, -26, 0.6);
+    ctx.restore();
+    hatX = -26; hatB = -90; hs = 1; gap = 15;
+  } else if (f.k === 'pages') {                                                        // Pages: orange cat with a red bookmark scarf
+    ctx.save(); ctx.scale(-2.3, 2.3);
+    ctx.strokeStyle = '#ff9800'; ctx.lineWidth = 6; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(-14, -14); ctx.quadraticCurveTo(-30, -20, -26, -38 + Math.sin(frame * 0.1) * 4); ctx.stroke();
+    ctx.fillStyle = '#e65100'; ctx.fillRect(-11, -8, 6, 8); ctx.fillRect(5, -8, 6, 8);
+    ctx.fillStyle = '#ff9800'; ctx.beginPath(); ctx.ellipse(0, -14, 17, 10, 0, 0, 7); ctx.fill();
+    ctx.fillStyle = '#e65100'; for (let k = -1; k <= 1; k++) ctx.fillRect(k * 6 - 1, -23, 3, 8);
+    circ(12, -28, 11, '#ff9800');
+    ctx.fillStyle = '#ff9800'; ctx.beginPath(); ctx.moveTo(4, -35); ctx.lineTo(5, -46); ctx.lineTo(11, -38); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(14, -38); ctx.lineTo(20, -46); ctx.lineTo(21, -34); ctx.fill();
+    circ(10, -29, 2.2, '#1b1b2f'); circ(17, -29, 2.2, '#1b1b2f'); circ(14, -25, 1.6, '#ff80ab');
+    ctx.fillStyle = '#e53935'; ctx.fillRect(4, -19, 14, 3);
+    if (wind) drawSnowball(22, -38, 5, 0, false);
+    if (o.cocoa) drawMug(24, -14, 0.55);
+    ctx.restore();
+    hatX = -28; hatB = -92; gap = 15;
+  } else if (f.k === 'king') {                                                         // KING OF SNOW: giant robot snowman with a crown
+    ctx.fillStyle = '#6a1b9a'; ctx.beginPath(); ctx.moveTo(-40, -200); ctx.lineTo(-95, 0); ctx.lineTo(95, 0); ctx.lineTo(40, -200); ctx.fill();   // royal cape
+    ctx.fillStyle = '#fff'; ctx.fillRect(-95, -10, 190, 10);
+    ctx.strokeStyle = '#78909c'; ctx.lineWidth = 12; ctx.lineCap = 'round';
+    ctx.beginPath();
+    if (big) { ctx.moveTo(-40, -185); ctx.lineTo(-80, -270); ctx.moveTo(40, -175); ctx.lineTo(90, -150); }
+    else if (wind) { ctx.moveTo(-40, -185); ctx.lineTo(-62, -215); ctx.moveTo(40, -175); ctx.lineTo(90, -150); }
+    else if (o.cocoa) { ctx.moveTo(-40, -175); ctx.lineTo(-80, -160); ctx.moveTo(40, -175); ctx.lineTo(90, -150); }
+    else { ctx.moveTo(-40, -175); ctx.lineTo(-95, -150 + Math.sin(frame * 0.08) * 8); ctx.moveTo(40, -175); ctx.lineTo(90, -150); }
+    ctx.stroke();
+    ctx.strokeStyle = '#b3e5fc'; ctx.lineWidth = 6; ctx.beginPath(); ctx.moveTo(92, -180); ctx.lineTo(92, -60); ctx.stroke();   // icicle scepter
+    circ(92, -188, 10, '#e1f5fe'); drawFlake(92, -188, 8, '#4fc3f7', frame * 0.05);
+    circ(0, -65, 65, '#fafdff'); circ(0, -165, 48, '#fafdff'); circ(0, -245, 38, '#fafdff');
+    ctx.fillStyle = '#cfe8f7'; ctx.beginPath(); ctx.arc(0, -65, 65, 0.3, Math.PI - 0.3); ctx.fill(); circ(0, -72, 57, '#fafdff');
+    ctx.fillStyle = '#90a4ae'; rr(-26, -95, 52, 40, 8);
+    for (let i = 0; i < 3; i++) circ(-14 + i * 14, -75, 5, (Math.floor(frame / 12) + i) % 3 === 0 ? '#ff5252' : '#ffd740');
+    circ(0, -150, 6, '#455a64'); circ(0, -175, 6, '#455a64');
+    ctx.fillStyle = '#455a64'; ctx.fillRect(-38, -258, 76, 12);
+    circ(-15, -252, 15, '#455a64'); circ(15, -252, 15, '#455a64');
+    circ(-15, -252, 11, f.frz > 0 ? '#80d8ff' : '#ff5252'); circ(15, -252, 11, f.frz > 0 ? '#80d8ff' : '#ff5252');
+    circ(-19, -256, 3, '#fff'); circ(11, -256, 3, '#fff');
+    ctx.fillStyle = '#ff7043'; ctx.beginPath(); ctx.moveTo(0, -238); ctx.lineTo(-26, -232); ctx.lineTo(0, -228); ctx.fill();
+    for (let k = -2; k <= 2; k++) circ(k * 7, -218 + Math.abs(k) * -2, 2.5, '#263238');
+    if (wind) drawSnowball(-64, -220, 12, 0, false);
+    if (big) drawSnowball(-95, -295, 30 + Math.sin(frame * 0.3) * 2, frame * 0.1, false);
+    if (o.cocoa) drawMug(-88, -165, 2);
+    hatB = -278; hs = 1.3; gap = 18;
+  }
+  // the hat stack
+  const n = o.cocoa ? (f.k === 'king' ? 1 : 1) : f.hats;
+  for (let i = 0; i < n; i++) {
+    ctx.save(); ctx.translate(hatX, hatB - i * gap); ctx.scale(hs, hs); drawHat(f.list[i], 0, 0, f.col); ctx.restore();
+  }
+  if (f.frz > 0 && !o.cocoa) { ctx.globalAlpha = 0.3; circ(hatX * 0.5, f.k === 'king' ? -150 : -55, f.k === 'king' ? 140 : 55, '#b3e5fc'); ctx.globalAlpha = 1; }
+  if ((wind || big) && f.frz <= 0) txt('!', hatX, hatB - n * gap - (f.k === 'king' ? 60 : 30), 40, '#ff5252');
+  if (f.out && !o.cocoa) {                                                             // white flag: "I'm out!"
+    ctx.fillStyle = '#795548'; ctx.fillRect(30, -120, 4, 80);
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.moveTo(34, -120); ctx.lineTo(64, -110 + Math.sin(frame * 0.2) * 4); ctx.lineTo(34, -98); ctx.fill();
+  }
+  ctx.restore();
+}
+
+// =================== FIGHT SCENE ===================
+function drawFight() {
+  const L = LEVELS[lv];
+  drawSky(L);
+  // your side: cheering snowman / snowball pile / royal flag from the blueprint you built
+  if (L.bp === 'snowman') {
+    circ(55, GROUND - 30, 30, '#fafdff'); circ(55, GROUND - 78, 22, '#fafdff'); circ(55, GROUND - 115, 16, '#fafdff');
+    circ(50, GROUND - 119, 2.5, '#263238'); circ(61, GROUND - 119, 2.5, '#263238');
+    ctx.save(); ctx.translate(58, GROUND - 113); ctx.scale(0.7, 0.7); drawItem('carrot', 0, 0, 1); ctx.restore();
+    ctx.save(); ctx.translate(55, GROUND - 128); ctx.scale(0.8, 0.8); drawHat('tophat', 0, 0, '#e53935'); ctx.restore();
+    ctx.strokeStyle = '#6d4c41'; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(35, GROUND - 80); ctx.lineTo(18, GROUND - 105 + Math.sin(frame * 0.2) * 8); ctx.moveTo(75, GROUND - 80); ctx.lineTo(92, GROUND - 105 - Math.sin(frame * 0.2) * 8); ctx.stroke();
+  }
+  if (L.bp === 'ammo' || L.bp === 'royal') {
+    const pile = [[40, 0], [62, 0], [84, 0], [51, 1], [73, 1], [62, 2]];
+    for (const [x, r] of pile) drawSnowball(x, GROUND - 11 - r * 19, 11, x, false);
+  }
+  // Robo pops up and hides behind the fort
+  const feet = GROUND - 30 + (1 - rise) * 52;
+  drawRobo(RX, feet, 2.2, { face: 1, throwArm: popT > 10, frozen: froz > 0 });
+  ctx.fillStyle = '#f5fbff'; ctx.fillRect(90, GROUND, 130, H - GROUND); ctx.fillStyle = '#d6ecfa'; ctx.fillRect(90, GROUND, 130, 5);
+  ctx.fillStyle = '#eaf6ff'; rr(108, GROUND - 30, 84, 34, 8);                    // snow step
+  for (const b of fort) {
+    if (b.hp <= 0) continue;
+    ctx.fillStyle = b.hp >= fortMax ? '#f5fbff' : b.hp === 1 ? '#c5e1f5' : '#ddeefa'; rr(b.x + 1, b.y + 1, b.w - 2, b.h - 2, 6);
+    ctx.fillStyle = '#b3d9f2'; ctx.fillRect(b.x + 4, b.y + b.h - 6, b.w - 8, 3);
+    if (b.hp < fortMax) { ctx.strokeStyle = '#90caf9'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(b.x + 8, b.y + 4); ctx.lineTo(b.x + 16, b.y + 14); ctx.lineTo(b.x + 12, b.y + 24); ctx.stroke(); }
+  }
+  if (L.bp === 'royal') drawItem('flag', 246, GROUND - 120, 1);
+  // the other team, then their snow piles in front
+  ctx.save(); ctx.beginPath(); ctx.rect(-20, -20, W + 40, GROUND + 20); ctx.clip();   // hiding foes duck down behind the snow
+  for (const f of foes) drawFoe(f);
+  ctx.restore();
+  for (const f of foes) if (f.k !== 'king') {
+    ctx.fillStyle = '#f5fbff'; ctx.beginPath(); ctx.ellipse(f.x - 15, GROUND, 62, 64, 0, Math.PI, 0); ctx.fill();
+    ctx.fillStyle = '#d6ecfa'; ctx.beginPath(); ctx.ellipse(f.x - 15, GROUND, 62, 20, 0, Math.PI, 0); ctx.fill();
+  }
+  // giant snowball warning
+  const kb = foes.find(f => f.st === 'bigwind');
+  if (kb) {
+    ctx.save(); ctx.strokeStyle = '#ff1744'; ctx.lineWidth = 5; ctx.setLineDash([12, 8]); ctx.lineDashOffset = frame;
+    ctx.globalAlpha = 0.5 + 0.5 * Math.sin(frame * 0.3);
+    ctx.beginPath(); ctx.arc(RX + 50, GROUND - 60, 75, 0, 7); ctx.stroke(); ctx.restore();
+  }
+  // snowballs, hats, puffs, words
+  for (const b of pBalls) drawSnowball(b.x, b.y, b.r, frame * 0.3, false);
+  for (const b of eBalls) drawSnowball(b.x, b.y, b.r, -frame * 0.3, false);
+  for (const h of hatsFly) { ctx.save(); ctx.translate(h.x, h.y); ctx.rotate(h.rot); drawHat(h.type, 0, 6, h.col); ctx.restore(); }
+  // aim target
+  const a = aliveFoes();
+  if (a.length && winT <= 0) {
+    const p = aimPoint(a[aimIdx % a.length]);
+    ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(frame * 0.05); ctx.strokeStyle = '#ffea00'; ctx.lineWidth = 4; ctx.setLineDash([10, 8]);
+    ctx.beginPath(); ctx.arc(0, 0, 34, 0, 7); ctx.stroke(); ctx.restore();
+    txt('▼', p.x, p.y - 44 - (a[aimIdx % a.length].k === 'king' ? 150 : 50) + Math.sin(frame * 0.2) * 4, 22, '#ffea00');
+  }
+  for (const t of texts) { ctx.globalAlpha = Math.min(1, t.t / 20); txt(t.s, t.x, t.y, 26, t.col); ctx.globalAlpha = 1; }
+  // HUD
+  const hatsLeft = foes.reduce((n, f) => n + Math.max(0, f.hats), 0);
+  ctx.fillStyle = 'rgba(13,42,74,.6)'; rr(10, 10, 330, 40, 12); txt('Level ' + (lv + 1) + ': ' + L.name, 175, 38, 20, '#fff');
+  ctx.fillStyle = 'rgba(13,42,74,.6)'; rr(350, 10, 260, 40, 12); txt('🎩 Hats to knock off: ' + hatsLeft, 480, 38, 20, '#fff59d');
+  if (froz > 0) txt('BRRR! Frozen for a second!', 330, 90, 24, '#80d8ff');
+  txt('⬅ ➡ pick   SPACE or TAP them = THROW   hold ⬇ / HIDE = hide', W / 2, 500, 17, '#e3f2fd');
+}
+
+// =================== TITLE / ROUND WON / BIG WIN ===================
+const LV_BTN = i => ({ x: 270 + i * 110, y: 296, w: 96, h: 64 }), PLAY_BTN = { x: 370, y: 378, w: 220, h: 58 }, MUSIC_BTN = { x: 884, y: 60, w: 64, h: 36 };
+const titleBot = { k: 'bot', x: 800, hats: 2, list: HAT_SETS.bot, col: '#e53935', rise: 1, frz: 0, st: 'hide' };
+function drawTitle() {
+  drawSky(LEVELS[0]);
+  drawRobo(150, GROUND, 2, { face: 1, walk: 0, bucket: 0.5 + 0.5 * Math.sin(frame * 0.05) });
+  drawFoe(titleBot);
+  ctx.fillStyle = '#f5fbff'; ctx.beginPath(); ctx.ellipse(785, GROUND, 62, 40, 0, Math.PI, 0); ctx.fill();
+  const bob = Math.sin(frame * 0.06) * 4;
+  txt('❄ SNOW FACTORY ❄', W / 2, 92 + bob, 64, '#ffffff');
+  txt('Catch snow ➜ build from blueprints ➜ SNOWBALL FIGHT!', W / 2, 150, 22, '#fff59d');
+  txt('Getting hit just makes you go BRRR! Knock off all their hats to win!', W / 2, 184, 18, '#e3f2fd');
+  txt('Pick a level:', W / 2, 282, 20, '#fff');
+  for (let i = 0; i < 4; i++) {
+    const b = LV_BTN(i), open = i < unlocked;
+    ctx.fillStyle = open ? ['#29b6f6', '#26a69a', '#ff7043', '#7e57c2'][i] : '#90a4ae'; rr(b.x, b.y, b.w, b.h, 14);
+    txt(open ? String(i + 1) : '🔒', b.x + b.w / 2, b.y + 42, 30, '#fff');
+  }
+  const p = PLAY_BTN, s = 1 + 0.04 * Math.sin(frame * 0.15);
+  ctx.save(); ctx.translate(p.x + p.w / 2, p.y + p.h / 2); ctx.scale(s, s);
+  ctx.fillStyle = '#ff4081'; rr(-p.w / 2, -p.h / 2, p.w, p.h, 18); txt('▶ PLAY', 0, 11, 30, '#fff'); ctx.restore();
+  txt('Press SPACE or tap PLAY', W / 2, 466, 18, '#0d47a1');
+  if (everWon) txt('🏆 You won the Snow Factory!', W / 2, 500, 18, '#ff8f00');
+}
+function drawRoundWin() {
+  drawSky(LEVELS[lv]);
+  drawRobo(W / 2, GROUND, 2.4, { face: 1, throwArm: Math.floor(frame / 20) % 2 === 0 });
+  txt('ROUND WON! ⭐', W / 2, 120, 60, '#fff59d');
+  txt('Next: Level ' + (lv + 2) + ' – ' + LEVELS[lv + 1].name, W / 2, 180, 28, '#fff');
+  txt(LEVELS[lv + 1].story, W / 2, 220, 20, '#e3f2fd');
+  if (frame > 30) txt('Tap or press SPACE to keep going!', W / 2, 500, 22, '#0d47a1');
+}
+const PARTY = [
+  { k: 'sparks', x: 270, hats: 1, list: HAT_SETS.sparks, col: '#00acc1', rise: 1, frz: 0, st: 'party' },
+  { k: 'pages', x: 390, hats: 1, list: HAT_SETS.pages, col: '#ec407a', rise: 1, frz: 0, st: 'party' },
+  { k: 'bot', x: 500, hats: 1, list: HAT_SETS.bot, col: '#e53935', rise: 1, frz: 0, st: 'party' },
+  { k: 'bot', x: 610, hats: 1, list: HAT_SETS.bot, col: '#43a047', rise: 1, frz: 0, st: 'party' },
+];
+const KING_PARTY = { k: 'king', x: 820, hats: 1, list: HAT_SETS.king, col: '#ffd600', rise: 1, frz: 0, st: 'party' };
+function drawWin() {
+  drawSky({ sky: ['#311b92', '#ff8a65'], night: true });
+  ctx.save(); ctx.beginPath(); ctx.rect(0, 0, W, GROUND); ctx.clip(); ctx.globalAlpha = 0.25 + 0.1 * Math.sin(frame * 0.3); circ(W / 2, GROUND, 260, '#ffb74d'); ctx.restore();   // cozy glow
+  drawRobo(130, GROUND, 2.2, { face: 1, cocoa: true });
+  for (const f of PARTY) drawFoe(f, { cocoa: true });
+  ctx.save(); ctx.translate(820, GROUND); ctx.scale(0.8, 0.8); ctx.translate(-820, -GROUND); drawFoe(KING_PARTY, { cocoa: true }); ctx.restore();
+  const bob = Math.sin(frame * 0.08) * 5;
+  txt('YOU WIN THE SNOW FACTORY!', W / 2, 80 + bob, 52, '#fff59d');
+  txt('Everybody drinks HOT COCOA! ☕ Even the King of Snow!', W / 2, 132, 24, '#fff');
+  for (let i = 0; i < 12; i++) { const t = frame * 0.02 + i; drawFlake((i * 83 + frame * 0.6) % W, 170 + Math.sin(t) * 20, 6, ['#fff59d', '#80d8ff', '#ff80ab'][i % 3], t); }
+  if (frame > 90) txt('Tap or press SPACE to go back to the start', W / 2, 500, 20, '#fff');
+}
+
+// =================== TAPS ===================
+function tapAt(x, y) {
+  if (inBox(MUSIC_BTN, x, y)) { musicOn = !musicOn; return; }
+  if (state === 'title') {
+    for (let i = 0; i < 4; i++) if (inBox(LV_BTN(i), x, y)) { if (i < unlocked) startLevel(i); else sfx.no(); return; }
+    if (inBox(PLAY_BTN, x, y)) startLevel(unlocked - 1);
+  } else if (state === 'build') {
+    if (bphase === 'roll') actPressed = true; else dragX = x;
+  } else if (state === 'fight') {
+    if (x < 330) tapHide = true; else { tapTarget = { x, y }; actPressed = true; }
+  } else if (state === 'roundWin' || state === 'win') actPressed = true;
+}
+function dragAt(x, y) { if (state === 'build' && bphase !== 'roll') dragX = x; }
+
+// =================== MAIN LOOP ===================
+function update() {
+  frame++;
+  for (const f of bgFlakes) { f.y += f.v; f.x += Math.sin(frame * 0.01 + f.s) * 0.3; if (f.y > H) { f.y = -5; f.x = Math.random() * W; } }
+  for (const p of puffs) { p.x += p.vx; p.y += p.vy; p.vy += 0.15; p.life--; }
+  puffs = puffs.filter(p => p.life > 0);
+  if (banner > 0) banner--; if (stickerNew > 0) stickerNew--; shake *= 0.85;
+  if (state === 'title') { if (actPressed) startLevel(unlocked - 1); actPressed = false; }
+  else if (state === 'build') updateBuild();
+  else if (state === 'fight') updateFight();
+  else if (state === 'roundWin') { if (actPressed && frame > 30) startLevel(lv + 1); actPressed = false; }
+  else if (state === 'win') { if (actPressed && frame > 90) goTitle(); actPressed = false; }
+  playMusic();
+}
+function draw() {
+  ctx.save();
+  if (shake > 0.5) ctx.translate(rnd(-shake, shake), rnd(-shake, shake));
+  if (state === 'title') drawTitle();
+  else if (state === 'build') drawBuild();
+  else if (state === 'fight') drawFight();
+  else if (state === 'roundWin') drawRoundWin();
+  else drawWin();
+  for (const p of puffs) circ(p.x, p.y, p.r, p.col);
+  if (banner > 0 && (state === 'build' || state === 'fight')) {
+    ctx.globalAlpha = Math.min(1, banner / 20);
+    ctx.fillStyle = 'rgba(13,42,74,.8)'; rr(W / 2 - 330, 214, 660, 64, 18);
+    txt(bannerText, W / 2, 256, bannerText.length > 34 ? 24 : 32, '#fff59d');
+    ctx.globalAlpha = 1;
+  }
+  if (stickerNew > 0) { ctx.fillStyle = '#ff4081'; rr(W / 2 - 170, 150, 340, 50, 16); txt('⭐ NEW STICKER!', W / 2, 185, 28, '#fff'); }
+  ctx.fillStyle = 'rgba(13,42,74,.5)'; rr(MUSIC_BTN.x, MUSIC_BTN.y, MUSIC_BTN.w, MUSIC_BTN.h, 10);
+  txt(musicOn ? '♪ M' : '✕ M', MUSIC_BTN.x + 32, MUSIC_BTN.y + 25, 17, '#fff');
+  ctx.restore();
+}
+let last = performance.now(), acc = 0;
+function loop(now) {
+  acc += Math.min(100, now - last); last = now;
+  while (acc >= 1000 / 60) { update(); acc -= 1000 / 60; }
+  draw();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+<!-- injected by scripts/inject-factory.py — hold PS (or SELECT+START) for 1s to go
+     up one level: game -> the book (parent.closeGame), standalone game -> /factory/,
+     the book -> Stephens Arcade (/). Shares one rAF pad poll with the cursor + idle overlays. -->
+<script id="__gf_pad_exit">
+(function () {
+  var IS_BOOK = false; /*@gf:is_book*/
+  var HOLD_MS = 1000;
+  // one rAF loop per page reads the pads for every __gf overlay
+  var hub = window.__gfHub;
+  if (!hub) {
+    hub = window.__gfHub = { fns: [], pads: [] };
+    (function () {
+      var NONE = [];
+      function loop(now) {
+        var p = null;
+        try { p = navigator.getGamepads ? navigator.getGamepads() : null; } catch (e) {}
+        hub.pads = p || NONE;
+        for (var i = 0; i < hub.fns.length; i++) { try { hub.fns[i](now, hub.pads); } catch (e) {} }
+        requestAnimationFrame(loop);
+      }
+      requestAnimationFrame(loop);
+    })();
+  }
+
+  var STEPS = 20, TF = [];               // precomputed badge transforms: zero allocations while held
+  for (var s = 0; s <= STEPS; s++) TF.push('translateX(-50%) scale(' + (1 + 0.35 * s / STEPS).toFixed(4) + ')');
+  var HIDE_TF = 'translateX(-50%) scale(0.85)';
+  var heldSince = 0, needRelease = true, leaving = false, badge = null, lastStep = -2;
+  var player = null;
+
+  function comboDown(pads) {
+    for (var i = 0; i < pads.length; i++) {
+      var gp = pads[i];
+      if (!gp || gp.connected === false) continue;
+      var b = gp.buttons;
+      if ((b[16] && b[16].pressed) || (b[8] && b[8].pressed && b[9] && b[9].pressed)) return true;
+    }
+    return false;
+  }
+  function makeBadge() {
+    badge = document.createElement('div');
+    badge.id = '__gfx_exit';
+    badge.textContent = IS_BOOK ? '◄ ARCADE' : '◄ BOOK';
+    badge.style.cssText = 'position:fixed;top:12px;left:50%;z-index:2147483001;pointer-events:none;' +
+      'padding:7px 18px;border-radius:999px;background:#10172a;color:#ffd23f;border:3px solid #ffd23f;' +
+      'font:bold 18px/1 "Trebuchet MS","Arial Rounded MT Bold",sans-serif;letter-spacing:1px;white-space:nowrap;' +
+      'transform-origin:50% 0;opacity:0;transform:' + HIDE_TF + ';transition:opacity .12s;';
+    (document.body || document.documentElement).appendChild(badge);
+  }
+  function setBadge(step) {            // step -1 = hidden, 0..STEPS = hold progress
+    if (step === lastStep) return;
+    lastStep = step;
+    if (step < 0) { if (badge) { badge.style.opacity = '0'; badge.style.transform = HIDE_TF; } return; }
+    if (!badge) makeBadge();
+    badge.style.opacity = '1';
+    badge.style.transform = TF[step];
+  }
+  function inGame() {
+    try { return window.parent !== window && typeof window.parent.closeGame === 'function'; } catch (e) { return false; }
+  }
+  function leave() {
+    leaving = true;                    // never navigate twice
+    if (!IS_BOOK && inGame()) { setBadge(-1); try { window.parent.closeGame(); } catch (e) {} return; }
+    location.href = IS_BOOK ? '/' : '/factory/';
+  }
+  hub.fns.push(function (now, pads) {
+    if (leaving) return;
+    var down = comboDown(pads);
+    if (IS_BOOK) {
+      if (!player) player = document.getElementById('player');
+      if (player && player.classList.contains('open')) {   // the game's own overlay handles this hold
+        if (down) needRelease = true;
+        heldSince = 0; setBadge(-1); return;
+      }
+    }
+    if (needRelease) {                 // a hold that started elsewhere never counts here
+      if (down) return;
+      needRelease = false;
+    }
+    if (!down) { heldSince = 0; setBadge(-1); return; }
+    if (!heldSince) heldSince = now;
+    var p = (now - heldSince) / HOLD_MS;
+    setBadge(Math.round((p > 1 ? 1 : p) * STEPS));
+    if (p >= 1) leave();
+  });
+})();
+</script>
+<!-- injected by scripts/inject-factory.py — console (low-fx) mode only: no-op canvas
+     shadowBlur and kill CSS backdrop-filter (both measured fps killers on the Pi).
+     The mouse cursor is hidden only while the pad cursor is installed. -->
+<script id="__gf_lowfx">
+(function () {
+  var on = false;
+  try {
+    if (/[?&]fx=low\b/.test(location.search)) { on = true; localStorage.setItem('arcade_lowfx', '1'); }
+    else if (/[?&]fx=full\b/.test(location.search)) { localStorage.setItem('arcade_lowfx', '0'); }
+    else { on = localStorage.getItem('arcade_lowfx') === '1'; }
+  } catch (e) {}
+  if (!on) return;
+  try {
+    Object.defineProperty(CanvasRenderingContext2D.prototype, 'shadowBlur', {
+      set: function () {}, get: function () { return 0; }, configurable: true
+    });
+  } catch (e) {}
+  try {
+    var st = document.createElement('style');
+    st.textContent = '* { backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }' +
+      ' html.__gfx_padcursor, html.__gfx_padcursor * { cursor: none !important; }';
+    (document.head || document.documentElement).appendChild(st);
+  } catch (e) {}
+})();
+</script>
+<!-- injected by scripts/inject-factory.py — console mode only: the TV has no printer,
+     so window.print shows a friendly toast instead of a dead print dialog. -->
+<script id="__gf_print">
+(function () {
+  var on = false;
+  try { on = /[?&]fx=low\b/.test(location.search) || localStorage.getItem('arcade_lowfx') === '1'; } catch (e) {}
+  if (!on) return;
+  var toast = null, timer = 0;
+  function hide() { if (toast) toast.style.opacity = '0'; }
+  window.print = function () {
+    try {
+      if (!toast) {
+        toast = document.createElement('div');
+        toast.id = '__gfx_print';
+        toast.textContent = '🖨️ Printing works on the iPad — not on the TV!';
+        toast.style.cssText = 'position:fixed;left:50%;bottom:48px;transform:translateX(-50%);z-index:2147483001;' +
+          'pointer-events:none;padding:14px 26px;border-radius:16px;background:#10172a;color:#ffd23f;' +
+          'border:3px solid #ffd23f;font:bold 24px/1.2 "Trebuchet MS","Arial Rounded MT Bold",sans-serif;' +
+          'white-space:nowrap;opacity:0;transition:opacity .2s;';
+        (document.body || document.documentElement).appendChild(toast);
+      }
+      toast.style.opacity = '1';
+      clearTimeout(timer);
+      timer = setTimeout(hide, 2500);
+    } catch (e) {}
+  };
+})();
+</script>
+<!-- injected by scripts/inject-factory.py — pad cursor: a pad-driven mouse pointer so
+     tap/click-only games play on the console. Right stick moves it (left stick too in
+     pointer games); X / R1 clicks and drags (pointer + mouse events, like touchpad.js
+     turns fingers into mouse events). Never consumes pad input. -->
+<script id="__gf_cursor">
+(function () {
+  window.__GF_CURSOR_LEFT = false; /*@gf:cursor_left*/
+  var IS_BOOK = false; /*@gf:is_book*/
+  var LEFT = window.__GF_CURSOR_LEFT === true;
+  var DZ = 0.2, SPEED = 900, SLEEP_MS = 4000, CLICK_SLOP = 12;
+  // one rAF loop per page reads the pads for every __gf overlay
+  var hub = window.__gfHub;
+  if (!hub) {
+    hub = window.__gfHub = { fns: [], pads: [] };
+    (function () {
+      var NONE = [];
+      function loop(now) {
+        var p = null;
+        try { p = navigator.getGamepads ? navigator.getGamepads() : null; } catch (e) {}
+        hub.pads = p || NONE;
+        for (var i = 0; i < hub.fns.length; i++) { try { hub.fns[i](now, hub.pads); } catch (e) {} }
+        requestAnimationFrame(loop);
+      }
+      requestAnimationFrame(loop);
+    })();
+  }
+
+  var S = window.__gfCursorState = { installed: false, awake: false, held: false, x: 0, y: 0 };
+  var el = null, x = 0, y = 0, awake = false, lastMove = 0, lastT = 0;
+  var held = false, target = null, sx = 0, sy = 0, prevBtn = false, vx = 0, vy = 0, player = null;
+  var INIT = { bubbles: true, cancelable: true, composed: true, view: window, detail: 0,
+    clientX: 0, clientY: 0, screenX: 0, screenY: 0, button: 0, buttons: 0,
+    pointerId: 1, pointerType: 'mouse', isPrimary: true, width: 1, height: 1, pressure: 0 };
+  var HAS_PE = typeof window.PointerEvent === 'function';
+
+  function install() {
+    if (S.installed) return;
+    S.installed = true;
+    x = Math.round((window.innerWidth || 1280) / 2); y = Math.round((window.innerHeight || 720) / 2);
+    el = document.createElement('div');
+    el.id = '__gfx_cursor';
+    el.style.cssText = 'position:fixed;left:0;top:0;width:28px;height:28px;pointer-events:none;z-index:2147483000;' +
+      'opacity:0;transition:opacity .25s;will-change:transform;';
+    el.innerHTML = '<svg width="28" height="28" viewBox="0 0 28 28" style="display:block;overflow:visible">' +
+      '<path d="M3 2 L3 23.5 L8.6 18.3 L12.6 26.6 L17 24.5 L13 16.4 L20.8 16.4 Z" fill="#fff" stroke="#10172a" ' +
+      'stroke-width="2.2" stroke-linejoin="round"/></svg>';
+    (document.body || document.documentElement).appendChild(el);
+    try { document.documentElement.classList.add('__gfx_padcursor'); } catch (e) {}
+    place();
+  }
+  function place() {
+    el.style.transform = 'translate3d(' + (x - 3) + 'px,' + (y - 2) + 'px,0)';
+    S.x = x; S.y = y;
+  }
+  function wake() { awake = S.awake = true; el.style.opacity = '1'; }
+  function sleep() { awake = S.awake = false; el.style.opacity = '0'; }
+  function fire(type, node, buttons, pointer) {
+    if (!node) return;
+    INIT.clientX = x; INIT.clientY = y;
+    INIT.screenX = (window.screenX || 0) + x; INIT.screenY = (window.screenY || 0) + y;
+    INIT.buttons = buttons; INIT.pressure = buttons ? 0.5 : 0;
+    INIT.detail = type === 'click' ? 1 : 0;
+    var ev;
+    try { ev = pointer && HAS_PE ? new PointerEvent(type, INIT) : new MouseEvent(type, INIT); } catch (e) { return; }
+    try { node.dispatchEvent(ev); } catch (e) {}
+  }
+  function at() { return document.elementFromPoint(x, y) || document.body || document.documentElement; }
+  function press(now) {
+    target = at(); held = S.held = true; sx = x; sy = y; lastMove = now;
+    fire('pointermove', target, 0, true); fire('mousemove', target, 0, false);
+    fire('pointerdown', target, 1, true); fire('mousedown', target, 1, false);
+  }
+  function release(clickOk) {
+    var t = target;
+    held = S.held = false; target = null;
+    fire('pointerup', t, 0, true); fire('mouseup', t, 0, false);
+    if (clickOk) { var dx = x - sx, dy = y - sy; if (dx * dx + dy * dy < CLICK_SLOP * CLICK_SLOP) fire('click', t, 0, false); }
+  }
+  function stick(ax, ay) {
+    ax = +ax || 0; ay = +ay || 0;
+    var m = Math.sqrt(ax * ax + ay * ay);
+    if (m <= DZ) return;
+    var e = ((m > 1 ? 1 : m) - DZ) / (1 - DZ);
+    e = e * e * SPEED / m;              // mild ease: squared magnitude, ~900 px/s at full tilt
+    vx += ax * e; vy += ay * e;
+  }
+
+  window.addEventListener('gamepadconnected', install);
+  hub.fns.push(function (now, pads) {
+    var i, p, a, b, btn = false;
+    if (!S.installed) {
+      for (i = 0; i < pads.length; i++) { p = pads[i]; if (p && p.mapping === 'standard') { install(); break; } }
+      if (!S.installed) return;
+    }
+    var dt = lastT ? (now - lastT) / 1000 : 0;
+    if (dt > 0.05) dt = 0.05;
+    lastT = now;
+    vx = 0; vy = 0;
+    for (i = 0; i < pads.length; i++) {
+      p = pads[i];
+      if (!p || p.connected === false) continue;
+      a = p.axes; b = p.buttons;
+      if (a) { stick(a[2], a[3]); if (LEFT) stick(a[0], a[1]); }
+      if ((b[0] && b[0].pressed) || (b[5] && b[5].pressed)) btn = true;
+    }
+    if (IS_BOOK) {                      // the book: asleep and silent while a game is open
+      if (!player) player = document.getElementById('player');
+      if (player && player.classList.contains('open')) {
+        if (held) release(false);
+        if (awake) sleep();
+        prevBtn = btn; return;
+      }
+    }
+    if (vx !== 0 || vy !== 0) {
+      var w = window.innerWidth || 1280, h = window.innerHeight || 720;
+      x += vx * dt; y += vy * dt;
+      if (x < 0) x = 0; else if (x > w - 1) x = w - 1;
+      if (y < 0) y = 0; else if (y > h - 1) y = h - 1;
+      lastMove = now;
+      if (!awake) wake();
+      place();
+      if (held) { fire('pointermove', target, 1, true); fire('mousemove', target, 1, false); }
+      else { var t = at(); fire('pointermove', t, 0, true); fire('mousemove', t, 0, false); }
+    } else if (awake && !held && now - lastMove > SLEEP_MS) {
+      sleep();
+    }
+    if (btn && !prevBtn) { if (awake) press(now); }
+    else if (!btn && prevBtn) { if (held) release(true); }
+    if (held) lastMove = now;
+    prevBtn = btn;
+  });
+})();
+</script>
+<!-- injected by scripts/inject-factory.py — after 15 idle minutes (no pad / keyboard /
+     pointer / touch input): a game closes back to the book, anything else returns to
+     Stephens Arcade. Test override: ?idle=<seconds>. -->
+<script id="__gf_idle">
+(function () {
+  var IS_BOOK = false; /*@gf:is_book*/
+  var qs = null;
+  try { qs = new URLSearchParams(location.search).get('idle'); } catch (e) {}
+  var IDLE_MS = (qs ? Math.max(10, parseFloat(qs) || 900) : 15 * 60) * 1000;
+  var DEADZONE = 0.25;
+  // one rAF loop per page reads the pads for every __gf overlay
+  var hub = window.__gfHub;
+  if (!hub) {
+    hub = window.__gfHub = { fns: [], pads: [] };
+    (function () {
+      var NONE = [];
+      function loop(now) {
+        var p = null;
+        try { p = navigator.getGamepads ? navigator.getGamepads() : null; } catch (e) {}
+        hub.pads = p || NONE;
+        for (var i = 0; i < hub.fns.length; i++) { try { hub.fns[i](now, hub.pads); } catch (e) {} }
+        requestAnimationFrame(loop);
+      }
+      requestAnimationFrame(loop);
+    })();
+  }
+  var last = performance.now(), leaving = false, player = null;
+  function bump() { last = performance.now(); }
+  window.addEventListener('keydown', bump, { capture: true });
+  window.addEventListener('pointerdown', bump, { capture: true });
+  window.addEventListener('touchstart', bump, { capture: true, passive: true });
+  function padActive(pads) {
+    for (var i = 0; i < pads.length; i++) {
+      var gp = pads[i];
+      if (!gp || gp.connected === false) continue;
+      for (var b = 0; b < gp.buttons.length; b++) if (gp.buttons[b].pressed) return true;
+      for (var a = 0; a < gp.axes.length; a++) if (Math.abs(gp.axes[a]) > DEADZONE) return true;
+    }
+    return false;
+  }
+  hub.fns.push(function (now, pads) {
+    if (leaving) return;
+    if (IS_BOOK) {                     // while a game is open its own overlay owns the idle timer
+      if (!player) player = document.getElementById('player');
+      if (player && player.classList.contains('open')) { last = now; return; }
+    }
+    if (padActive(pads)) last = now;
+    if (now - last < IDLE_MS) return;
+    leaving = true;
+    var g = false;
+    try { g = window.parent !== window && typeof window.parent.closeGame === 'function'; } catch (e) {}
+    if (g) { try { window.parent.closeGame(); } catch (e) {} }
+    else location.href = '/';          // pagehide fires -> games persist their state
+  });
+})();
+</script>

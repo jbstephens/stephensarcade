@@ -167,5 +167,14 @@ window.GAMES_DATA = [
     "status": "PRESS START",
     "icon": "zoomies",
     "source": "https://ses.q5labs.co/zoomies/index.html"
+  },
+  {
+    "slug": "game-factory",
+    "title": "GAME FACTORY",
+    "genre": "BY BEN \u00b7 130+ GAMES",
+    "status": "PRESS START",
+    "icon": "gamefactory",
+    "iconSrc": "/factory/icon-512.png",
+    "href": "/factory/"
   }
 ];

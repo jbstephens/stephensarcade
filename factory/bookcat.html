@@ -1,0 +1,932 @@
+<meta charset="utf-8">
+<title>Book Cat</title>
+<script>TOUCHPAD = { dpad: true, south: [' ', 'JUMP'] };</script>
+<!-- injected by scripts/inject-factory.py (HEAD, before touchpad.js) — hide phantom
+     DualShock sub-devices ("... Motion Sensors", "... Touchpad") and, when a
+     standard-mapping pad exists, every non-standard device. Original indices
+     are kept (filtered slots read null), exactly like lib/controller.js. -->
+<script id="__gf_padfilter">
+(function () {
+  var nav = window.navigator;
+  if (!nav || typeof nav.getGamepads !== 'function' || nav.__gfPadFilter) return;
+  var orig = nav.getGamepads;
+  var PHANTOM = /motion sensors|touchpad/i;
+  var out = [];                       // reused every call: no per-frame allocation
+  function filtered() {
+    var src = orig.call(nav);
+    if (!src) return src;
+    var n = src.length, anyStd = false, i, p;
+    for (i = 0; i < n; i++) { p = src[i]; if (p && p.mapping === 'standard') anyStd = true; }
+    out.length = n;
+    for (i = 0; i < n; i++) {
+      p = src[i];
+      out[i] = (!p || PHANTOM.test(p.id || '') || (anyStd && p.mapping !== 'standard')) ? null : p;
+    }
+    return out;
+  }
+  try { nav.getGamepads = filtered; } catch (e) {}
+  if (nav.getGamepads !== filtered) {
+    try { Object.defineProperty(nav, 'getGamepads', { value: filtered, configurable: true, writable: true }); } catch (e) {}
+  }
+  try { nav.__gfPadFilter = true; } catch (e) {}
+})();
+</script>
+<script src="touchpad.js?v=2"></script>
+<style>
+  html, body { height: 100%; }
+  body { margin: 0; background: #14102a; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+  canvas { width: min(100vw, calc(100vh * 960 / 520)); height: auto; display: block; border-radius: 12px; box-shadow: 0 10px 40px rgba(0,0,0,.5); }
+</style>
+<canvas id="game" width="960" height="520"></canvas>
+<script>
+function sticker(id) { try { const s = JSON.parse(localStorage.getItem('gfStickers') || '{}'); if (!s[id]) { s[id] = 1; localStorage.setItem('gfStickers', JSON.stringify(s)); stickerNew = 90; } } catch (_) {} }   // for the Sticker Book in the Game Factory book
+let stickerNew = 0;
+function foundKey() { try { const k = JSON.parse(localStorage.getItem('gfKeys') || '{}'); if (!k['bookcat']) { k['bookcat'] = 1; localStorage.setItem('gfKeys', JSON.stringify(k)); } return Object.keys(k).length; } catch (_) { return 1; } }
+function hasKey() { try { return !!JSON.parse(localStorage.getItem('gfKeys') || '{}')['bookcat']; } catch (_) { return false; } }
+let goldKey = null, keyBanner = 0, keyCount = 0;     // the secret golden key (page 1, way up high to the left of the start)
+// ✨ Gold Pages: find all 5 secret golden keys → play as a shiny gold cat (pick it on the title page: tap or press G)
+function goldOpen() { try { return Object.keys(JSON.parse(localStorage.getItem('gfKeys') || '{}')).length >= 5; } catch (_) { return false; } }   // all 5 secret keys found → gold heroes
+let goldOn = false, goldDraw = false, goldNope = 0;   // goldOn = picked gold, goldDraw = drawing in gold right now
+try { goldOn = !!(JSON.parse(localStorage.getItem('gfGold') || '{}') || {}).bookcat; } catch (_) {}
+const isGold = () => goldOn && goldOpen();
+const gc = (c, g) => goldDraw ? g : c;                 // normal color, or the gold one while drawing Gold Pages
+const GOLD_BTNS = [{ x: 112, y: 420, w: 150, h: 40, gold: false }, { x: 278, y: 420, w: 170, h: 40, gold: true }];   // Normal / ✨ Gold buttons on the title page
+function setGold(on) {
+  if (on && !goldOpen()) { goldNope = 120; try { sfx.blip(false); } catch (_) {} return; }
+  if (goldOn === on) return;
+  goldOn = on;
+  try { const o = JSON.parse(localStorage.getItem('gfGold') || '{}') || {}; o.bookcat = goldOn; localStorage.setItem('gfGold', JSON.stringify(o)); } catch (_) {}
+  try { sfx.coin(); } catch (_) {}
+}
+const C = document.getElementById('game'), ctx = C.getContext('2d');
+const W = 960, H = 520, T = 40, ROWS = 13, LEN = 96;
+let LW = LEN;   // how wide the current page is (the boss page is just one screen)
+let frame = 0;
+
+// ---------- Sound ----------
+let actx = null, musicOn = true, nextNote = 0, mStep = 0;
+function audio() { if (!actx) { try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch (_) {} } return actx; }
+function note(f, start, dur, wave = 'square', vol = 0.06, slide = null) {
+  if (!actx) return;
+  const t = actx.currentTime + start, o = actx.createOscillator(), g = actx.createGain();
+  o.type = wave; o.frequency.setValueAtTime(f, t); if (slide) o.frequency.exponentialRampToValueAtTime(slide, t + dur);
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g); g.connect(actx.destination); o.start(t); o.stop(t + dur);
+}
+const sfx = {
+  jump: () => note(500, 0, 0.12, 'square', 0.05, 900),
+  jump2: () => note(700, 0, 0.12, 'square', 0.05, 1300),
+  coin: () => { note(1320, 0, 0.05); note(1760, 0.05, 0.1); },
+  stomp: () => note(300, 0, 0.12, 'triangle', 0.12, 90),
+  meow: () => { note(700, 0, 0.15, 'sine', 0.1, 1050); note(1050, 0.15, 0.25, 'sine', 0.08, 600); },
+  ouch: () => note(400, 0, 0.35, 'sawtooth', 0.08, 120),
+  blip: f => { note(f ? 660 : 990, 0, 0.08, 'square', 0.07); note(f ? 990 : 660, 0.06, 0.08, 'square', 0.07); },
+  right: () => [784, 988, 1175].forEach((f, i) => note(f, i * 0.07, 0.12, 'square', 0.06)),
+  wrong: () => note(300, 0, 0.3, 'triangle', 0.1, 200),
+  rumble: () => note(70, 0, 0.6, 'sawtooth', 0.07, 45),
+  roar: () => { note(160, 0, 0.5, 'sawtooth', 0.09, 70); note(90, 0.1, 0.5, 'square', 0.05, 60); },
+  splat: () => note(220, 0, 0.12, 'sine', 0.08, 90),
+  win: () => [523, 659, 784, 1047, 784, 1047, 1319].forEach((f, i) => note(f, i * 0.12, 0.25, 'square', 0.08)),
+};
+const TUNE = [72, 0, 76, 0, 79, 76, 72, 0, 74, 0, 77, 0, 81, 77, 74, 0, 76, 0, 79, 0, 84, 79, 76, 0, 74, 72, 71, 72, 0, 0, 0, 0];
+function playMusic() {
+  if (!actx || !musicOn || scene !== 'play') return;
+  if (nextNote < actx.currentTime) nextNote = actx.currentTime + 0.05;
+  while (nextNote < actx.currentTime + 0.2) {
+    const t = nextNote - actx.currentTime, m = TUNE[mStep % TUNE.length];
+    if (m) note(440 * Math.pow(2, (m - 69) / 12), t, 0.15, 'square', 0.022);
+    if (mStep % 4 === 0) note(440 * Math.pow(2, ([48, 53, 55, 48][(mStep / 8 | 0) % 4] - 69) / 12), t, 0.3, 'triangle', 0.06);
+    nextNote += 0.14; mStep++;
+  }
+}
+
+// ---------- The pages (each one is one of Ben's games!) ----------
+const PAGES = [
+  { game: 'Robo Jump', sky: ['#0b1026', '#2b3a7a'], ground: '#8e9bb5', top: '#7df9ff', enemy: 'alien', item: '⭐', gravity: 0.38, note: 'Low gravity! Float through space!', space: true },
+  { game: 'Sparks!', sky: ['#4fc3f7', '#e1f5fe'], ground: '#bc8f6f', top: '#cfd8dc', enemy: 'windup', item: '🐟', note: 'Jump on the wind-up robots!', city: true },
+  { game: 'Sports Party', sky: ['#4fc3f7', '#b3e5fc'], ground: '#8d6e63', top: '#4caf50', enemy: 'ball', item: '🏀', note: 'Watch out for bouncing soccer balls!' },
+  { game: "Ben's Quest", sky: ['#81d4fa', '#e1f5fe'], ground: '#7a5230', top: '#7cc35a', enemy: 'slime', item: '💎', note: 'Bonk the slimes like a hero!', trees: true },
+  { game: 'Turbo Racers', sky: ['#81d4fa', '#fffde7'], ground: '#555b66', top: '#fff', enemy: 'car', item: '⚡', note: 'Zoom zoom! Jump over the race cars!', fast: true },
+  { game: 'Build It!', sky: ['#4fc3f7', '#e1f5fe'], ground: '#c0504d', top: '#d84315', enemy: 'none', item: '🧱', note: 'Hop across the block buildings!', bricks: true },
+  { game: 'Brawl Buddies', sky: ['#ff7043', '#ffe0b2'], ground: '#4e342e', top: '#6d4c41', enemy: 'fighter', item: '🥊', note: 'Bop the little fighters!', city: true },
+  { game: 'Zombie Maze', sky: ['#0d0d1a', '#263238'], ground: '#546e7a', top: '#78909c', enemy: 'zombie', item: '💰', note: 'Spooky! Stomp the slow zombies!', dark: true },
+  { game: 'Monster Pals', sky: ['#a5d6a7', '#e8f5e9'], ground: '#8d6e63', top: '#66bb6a', enemy: 'puff', item: '🐾', note: 'Catch the bouncy monsters!', grass: true },
+  { game: 'Pet Park', sky: ['#ffe0f0', '#fff4dc'], ground: '#d6a96b', top: '#c99a5c', enemy: 'tennis', item: '🦴', note: 'Dodge the bouncing tennis balls!' },
+  { game: 'Paint Studio', sky: ['#ffffff', '#f3e5f5'], ground: '#7c4dff', top: '#ff4081', enemy: 'paint', item: '🎨', note: 'Splat! Jump on the paint blobs!', paint: true },
+  { game: 'Math Rocket', sky: ['#0b1026', '#2a1b5c'], ground: '#5c6bc0', top: '#ffd740', enemy: 'alien', item: '⭐', note: 'Jump into the bubble with the right answer to open the gate!', space: true, math: true },
+  { game: 'Order Up! In Space', sky: ['#0b1026', '#3a1d6e'], ground: '#7e57c2', top: '#9575cd', enemy: 'alien', item: '🍕', note: 'Grab the pizzas! Watch for hungry aliens!', space: true },
+  { game: 'Castle Defense', sky: ['#4fc3f7', '#b3e5fc'], ground: '#9e9e9e', top: '#7cc35a', enemy: 'slime', item: '🛡️', note: 'Arrows are flying! Jump over them!', arrows: true, castle: true },
+  { game: 'The Bookworm King', secret: true, boss: true, sky: ['#fff8e7', '#f3e2c0'], ground: '#c9b89a', top: '#8d6e63', enemy: 'none', item: '📄', note: 'The BOOKWORM KING is eating the book! Jump on his head when he pops up!' },
+];
+
+// ---------- Save ----------
+let SAVE = { unlocked: 1, stars: {} };
+try { const s = JSON.parse(localStorage.getItem('bookCat') || 'null'); if (s) SAVE = s; } catch (_) {}
+function save() { try { localStorage.setItem('bookCat', JSON.stringify(SAVE)); } catch (_) {} }
+
+// ---------- Level generator (the same page always looks the same) ----------
+function rng(seed) { return () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+let tiles, items, enemies, bubbles, gate, portal, cat, cam, lv, P, particles = [], arrows = [], hurtFlash = 0, levelTime = 0, collected = 0, totalItems = 0;
+function buildLevel(i) {
+  P = PAGES[i]; lv = i; boss = null; inks = []; LW = LEN;
+  goldKey = i === 0 ? { x: 1 * T, y: 6 * T + 10, got: hasKey() } : null;
+  if (P.boss) return buildBoss();
+  const R = rng(1000 + i * 77), ri = (a, b) => a + Math.floor(R() * (b - a + 1));
+  tiles = Array.from({ length: ROWS }, () => Array(LEN).fill(0));
+  items = []; enemies = []; bubbles = []; arrows = []; gate = null;
+  const ground = (x) => { tiles[11][x] = 1; tiles[12][x] = 1; };
+  let x = 0;
+  for (; x < 8; x++) ground(x);
+  const endZone = P.math ? LEN - 24 : LEN - 10;
+  while (x < endZone) {
+    const segLen = ri(6, 12), start = x;
+    for (let k = 0; k < segLen && x < endZone; k++, x++) ground(x);
+    const end = x - 1;
+    // coins along the ground
+    for (let cx = start + 1; cx < end; cx += 2) if (R() < 0.5) items.push({ x: cx * T + 20, y: 10 * T + 14 });
+    // a floating platform in the middle of long pieces of ground
+    if (end - start >= 8 && R() < 0.75) {
+      const px = start + 2, pl = ri(3, Math.min(5, end - start - 4)), py = ri(7, 8);
+      for (let k = 0; k < pl; k++) { tiles[py][px + k] = 2; items.push({ x: (px + k) * T + 20, y: (py - 1) * T + 14 }); }
+    }
+    // an enemy
+    if (P.enemy !== 'none' && end - start >= 5 && R() < 0.85) enemies.push(makeEnemy(P.enemy, (start + Math.floor((end - start) / 2)) * T, start * T, (end + 1) * T));
+    // a gap (or stepping stones for the brick page)
+    if (x < endZone) { const g = ri(2, 3); if (P.bricks) { tiles[9][x + 1] = 2; } x += g; }
+  }
+  for (; x < LEN; x++) ground(x);
+  if (P.math) {
+    const a = ri(2, 9), b = ri(1, 9), ans = a + b, opts = [ans, ans + ri(1, 3), Math.max(0, ans - ri(1, 3))].sort(() => R() - 0.5);
+    gate = { x: (LEN - 8) * T, open: false, q: `${a} + ${b} = ?`, ans, signX: (LEN - 21) * T };
+    opts.forEach((v, k) => bubbles.push({ x: (LEN - 18 + k * 3) * T + 20, y: 8 * T, v, popped: 0 }));
+  }
+  portal = { x: (LEN - 4) * T + 20, y: 10 * T };
+  totalItems = items.length; collected = 0;
+  cat = { x: 2 * T, y: 9 * T, vx: 0, vy: 0, w: 30, h: 28, face: 1, onGround: false, jumps: 0, inv: 0, hearts: 3, maxH: 3, safeX: 2 * T, safeY: 9 * T };
+  cam = 0; levelTime = 0; hurtFlash = 0;
+}
+// ---------- SECRET BOSS: the Bookworm King ----------
+let boss = null, inks = [];
+const clampN = (v, a, b) => Math.max(a, Math.min(b, v));
+function buildBoss() {
+  LW = 24;
+  tiles = Array.from({ length: ROWS }, () => Array(LEN).fill(0));
+  for (let x = 0; x < LW; x++) { tiles[11][x] = 1; tiles[12][x] = 1; }
+  for (let x = 4; x <= 7; x++) tiles[7][x] = 2;
+  for (let x = 16; x <= 19; x++) tiles[7][x] = 2;
+  items = [5, 6, 17, 18].map(x => ({ x: x * T + 20, y: 6 * T + 14 }));
+  enemies = []; bubbles = []; arrows = []; gate = null; portal = null; inks = [];
+  totalItems = items.length; collected = 0;
+  cat = { x: 2 * T, y: 9 * T, vx: 0, vy: 0, w: 30, h: 28, face: 1, onGround: false, jumps: 0, inv: 0, hearts: 5, maxH: 5, safeX: 2 * T, safeY: 9 * T };
+  cam = 0; levelTime = 0; hurtFlash = 0;
+  boss = { state: 'under', t: 0, x: 16 * T, hp: 5, max: 5, headY: 11 * T + 30, hurt: 0 };
+}
+function updateBoss() {
+  const b = boss, c = cat, gY = 11 * T;
+  if (!b) return;
+  b.t++; if (b.hurt > 0) b.hurt--;
+  const angry = b.hp <= 2;
+  if (b.state === 'under') {
+    if (b.t === 1) b.x = clampN(c.x + 15 + (Math.random() < 0.5 ? -1 : 1) * (60 + Math.random() * 120), 3 * T, 21 * T);
+    if (b.t > 20 && b.t % 20 === 0) sfx.rumble();
+    if (b.t > (angry ? 70 : 90)) { b.state = 'rise'; b.t = 0; sfx.roar(); }
+  } else if (b.state === 'rise') {
+    b.headY = gY + 30 - Math.min(1, b.t / 22) * 125;
+    if (b.t >= 22) { b.state = 'up'; b.t = 0; }
+  } else if (b.state === 'up') {
+    b.headY = gY - 95 + Math.sin(b.t * 0.1) * 5;
+    if (b.t % (angry ? 55 : 75) === 30) {
+      const n = angry ? 2 : 1;
+      for (let k = 0; k < n; k++) inks.push({ x: b.x, y: b.headY + 10, vx: (c.x + 15 - b.x) / 75 + (Math.random() - 0.5) * 1.5 + (k ? 2 : 0), vy: -6 - k });
+      sfx.splat();
+    }
+    if (b.t > (angry ? 170 : 220)) { b.state = 'dive'; b.t = 0; }
+  } else if (b.state === 'dive') {
+    b.headY = gY - 95 + Math.min(1, b.t / 18) * 125;
+    if (b.t >= 18) { b.state = 'under'; b.t = 0; }
+  } else if (b.state === 'defeated') {
+    if (b.t % 6 === 0) for (let k = 0; k < 6; k++) particles.push({ x: b.x + Math.random() * 60 - 30, y: b.headY + Math.random() * 120, vx: Math.random() * 6 - 3, vy: -Math.random() * 6, life: 50, c: pick(['#fffaf0', '#ffd740', '#9ccc65', '#fff']) });
+    b.headY += 1.5;
+    if (b.t > 100) { boss = null; portal = { x: 12 * T + 20, y: 10 * T }; toast('You beat the BOOKWORM KING! Jump into the page! 📖'); }
+    return;
+  }
+  if (b.state === 'rise' || b.state === 'up' || b.state === 'dive') {
+    const cx = c.x + 15, bottom = c.y + c.h;
+    if (b.hurt === 0 && c.vy > 0 && Math.abs(cx - b.x) < 42 && bottom > b.headY - 40 && bottom - c.vy <= b.headY) {
+      b.hp--; b.hurt = 45; c.vy = -11.5; c.jumps = 1; sfx.stomp(); sfx.roar();
+      for (let k = 0; k < 16; k++) particles.push({ x: b.x, y: b.headY - 20, vx: Math.random() * 8 - 4, vy: -Math.random() * 6, life: 35, c: pick(['#ffd740', '#fff', '#9ccc65']) });
+      if (b.hp <= 0) { b.state = 'defeated'; b.t = 0; inks = []; sfx.win(); sticker('bookcat-bookworm-king'); }
+      else { b.state = 'dive'; b.t = 0; toast(b.hp <= 2 ? 'He is getting ANGRY! Keep going!' : `BONK! ${b.hp} more!`); }
+    }   // touching his body is safe, only the ink blobs hurt!
+  }
+  for (const k of inks) {
+    k.x += k.vx; k.y += k.vy; k.vy += 0.25;
+    if (k.y > gY - 6) { k.dead = true; sfx.splat(); for (let j = 0; j < 6; j++) particles.push({ x: k.x, y: gY - 4, vx: Math.random() * 4 - 2, vy: -Math.random() * 3, life: 25, c: '#4a148c' }); }
+    if (Math.hypot(k.x - (c.x + 15), k.y - (c.y + 14)) < 17) { k.dead = true; hurtCat(); }
+  }
+  inks = inks.filter(k => !k.dead);
+}
+function drawBoss() {
+  for (const k of inks) { circle(k.x - cam, k.y, 11, '#4a148c'); circle(k.x - cam - 3, k.y - 3, 3, '#9575cd'); }
+  const b = boss; if (!b) return;
+  const gY = 11 * T, x = b.x - cam;
+  if (b.state === 'under') {
+    if (b.t > (b.hp <= 2 ? 20 : 40)) {                      // a rumbling bump warns you where he'll pop up!
+      const sh = Math.sin(frame * 0.8) * 3;
+      el(x + sh, gY + 2, 34, 12, '#a1887f');
+      for (let k = 0; k < 5; k++) circle(x - 24 + k * 12 + sh, gY - 6 - Math.abs(Math.sin(frame * 0.3 + k)) * 10, 4, '#8d6e63');
+      text('!', x, gY - 30, 30, '#ff5252');
+    }
+    return;
+  }
+  ctx.save(); ctx.beginPath(); ctx.rect(0, 0, W, gY + 4); ctx.clip();
+  const flash = b.hurt > 0 && frame % 6 < 3;
+  let n = 0;
+  for (let y = gY + 20; y > b.headY + 18; y -= 18, n++) circle(x + Math.sin((y + frame * 3) * 0.04) * 6, y, 22, flash ? '#fff' : n % 2 ? '#7cb342' : '#8bc34a');
+  const hx = x + Math.sin((b.headY + frame * 3) * 0.04) * 6, hy = b.headY;
+  circle(hx, hy, 32, flash ? '#fff' : '#9ccc65');
+  ctx.strokeStyle = '#3e2723'; ctx.lineWidth = 3;                     // big round glasses
+  circle(hx - 12, hy - 6, 11, '#fff'); circle(hx + 12, hy - 6, 11, '#fff');
+  ctx.beginPath(); ctx.arc(hx - 12, hy - 6, 11, 0, 7); ctx.moveTo(hx + 23, hy - 6); ctx.arc(hx + 12, hy - 6, 11, 0, 7); ctx.moveTo(hx - 1, hy - 6); ctx.lineTo(hx + 1, hy - 6); ctx.stroke();
+  const look = Math.sign(cat.x + 15 - b.x) * 3;
+  circle(hx - 12 + look, hy - 5, 4.5, '#1b1b2f'); circle(hx + 12 + look, hy - 5, 4.5, '#1b1b2f');
+  ctx.fillStyle = '#5d4037'; ctx.beginPath(); ctx.ellipse(hx, hy + 14, 14, 8, 0, 0, Math.PI); ctx.fill();   // munching mouth
+  ctx.fillStyle = '#fff'; ctx.fillRect(hx - 8, hy + 14, 5, 5); ctx.fillRect(hx + 3, hy + 14, 5, 5);
+  ctx.fillStyle = '#fffaf0'; ctx.fillRect(hx + 10, hy + 12 + Math.sin(frame * 0.4) * 2, 14, 10);           // a page he is chewing
+  ctx.fillStyle = '#ffd740'; ctx.beginPath(); ctx.moveTo(hx - 20, hy - 26);                                  // crown
+  for (let k = 0; k <= 4; k++) ctx.lineTo(hx - 20 + k * 10, hy - 26 - (k % 2 ? 6 : 20)); ctx.lineTo(hx + 20, hy - 26); ctx.fill();
+  ctx.restore();
+}
+function drawBossBar() {
+  if (!boss) return;
+  text('🐛 THE BOOKWORM KING', W / 2, 84, 20, '#7cb342', 'center', '#1b1b2f');
+  rr(W / 2 - 150, 92, 300, 14, 7, 'rgba(0,0,0,.4)');
+  rr(W / 2 - 148, 94, 296 * Math.max(0, boss.hp) / boss.max, 10, 5, '#ff5252');
+}
+
+function makeEnemy(kind, x, minX, maxX) {
+  const spd = { car: 2.6, ball: 1.8, tennis: 1.6, zombie: 0.6, fighter: 1.3 }[kind] || 1.1;
+  return { kind, x, y: 11 * T - 28, w: 30, h: 28, vx: -spd, minX, maxX: maxX - 30, dead: 0, bounce: 0, t: Math.random() * 100 };
+}
+
+// ---------- Physics ----------
+const solid = (tx, ty) => tx < 0 || tx >= LW || (ty >= 0 && ty < ROWS && tiles[ty][tx] > 0) || (gate && !gate.open && tx === gate.x / T && ty >= 2 && ty <= 10);
+function hit(e) {
+  const x0 = Math.floor(e.x / T), x1 = Math.floor((e.x + e.w - 0.01) / T), y0 = Math.floor(e.y / T), y1 = Math.floor((e.y + e.h - 0.01) / T);
+  for (let ty = y0; ty <= y1; ty++) for (let tx = x0; tx <= x1; tx++) if (solid(tx, ty)) return true;
+  return false;
+}
+const overlap = (a, b) => a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+
+const keys = {}, pressed = new Set();
+addEventListener('keydown', e => {
+  audio();
+  if (!keys[e.key]) pressed.add(e.key);
+  keys[e.key] = true;
+  if ([' ', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) e.preventDefault();
+  if (e.key === 'm' || e.key === 'M') musicOn = !musicOn;
+  if ((e.key === 'g' || e.key === 'G') && scene === 'title' && !e.repeat) setGold(!isGold());   // ✨ Normal / Gold
+});
+C.addEventListener('mousedown', e => {                 // tap Normal / ✨ Gold on the title page (touches become mouse events)
+  if (scene !== 'title') return;
+  audio();
+  const r = C.getBoundingClientRect();
+  const mx = (e.clientX - r.left) * W / r.width, my = (e.clientY - r.top) * H / r.height;
+  for (const b of GOLD_BTNS) if (mx >= b.x && mx <= b.x + b.w && my >= b.y - 6 && my <= b.y + b.h + 6) setGold(b.gold);
+});
+addEventListener('keyup', e => { keys[e.key] = false; });
+
+function hurtCat() {
+  if (cat.inv > 0) return;
+  cat.hearts--; cat.inv = 90; hurtFlash = 12; sfx.ouch();
+  if (cat.hearts <= 0) { scene = 'oops'; sceneT = 0; }
+}
+function updatePlay() {
+  levelTime++;
+  const c = cat, g = P.gravity || 0.6, spd = P.fast ? 5 : 4.2;
+  const dir = (keys.ArrowRight || keys.d ? 1 : 0) - (keys.ArrowLeft || keys.a ? 1 : 0);
+  c.vx += (dir * spd - c.vx) * 0.25; if (dir) c.face = dir;
+  const jumpKey = pressed.has(' ') || pressed.has('ArrowUp') || pressed.has('w');
+  if (jumpKey) {
+    if (c.onGround) { c.vy = P.gravity ? -9 : -11.8; c.jumps = 1; sfx.jump(); }
+    else if (c.jumps < 2) { c.vy = P.gravity ? -8 : -10.5; c.jumps = 2; sfx.jump2(); for (let i = 0; i < 8; i++) particles.push({ x: c.x + 15, y: c.y + c.h, vx: Math.random() * 4 - 2, vy: Math.random() * 2, life: 20, c: '#fff' }); }
+  }
+  if (!(keys[' '] || keys.ArrowUp || keys.w) && c.vy < -4) c.vy += 0.6;   // short hop when you let go
+  c.vy = Math.min(c.vy + g, 13);
+  c.x += c.vx; if (hit(c)) { c.x -= c.vx; c.vx = 0; }
+  c.y += c.vy; c.onGround = false;
+  if (hit(c)) { if (c.vy > 0) { c.y = Math.floor((c.y + c.h) / T) * T - c.h; c.onGround = true; c.jumps = 0; if (!c.inv) { c.safeX = c.x; c.safeY = c.y; } } else c.y = (Math.floor(c.y / T) + 1) * T; c.vy = 0; }
+  if (c.inv > 0) c.inv--;
+  if (hurtFlash > 0) hurtFlash--;
+  if (c.y > H + 40) { hurtCat(); Object.assign(c, { x: c.safeX - c.face * 40, y: c.safeY - 20, vx: 0, vy: 0 }); if (hit(c)) c.x = c.safeX; }
+  // items
+  for (const it of items) if (!it.got && Math.abs(it.x - (c.x + 15)) < 24 && Math.abs(it.y - (c.y + 14)) < 26) { it.got = true; collected++; sfx.coin(); for (let k = 0; k < 6; k++) particles.push({ x: it.x, y: it.y, vx: Math.random() * 4 - 2, vy: -Math.random() * 3, life: 25, c: '#ffd740' }); }
+  // the secret golden key
+  if (goldKey && !goldKey.got && Math.abs(goldKey.x - (c.x + 15)) < 30 && Math.abs(goldKey.y - (c.y + 14)) < 32) {
+    goldKey.got = true; keyCount = foundKey(); keyBanner = 150;
+    [784, 988, 1175, 1568, 1319, 1568].forEach((f, i) => note(f, i * 0.08, 0.18, 'square', 0.07));
+    for (let k = 0; k < 24; k++) particles.push({ x: goldKey.x, y: goldKey.y, vx: Math.random() * 8 - 4, vy: Math.random() * 8 - 5, life: 40, c: pick(['#ffd700', '#fff59d', '#fff']) });
+  }
+  // enemies
+  for (const e of enemies) {
+    if (e.dead) { e.dead++; continue; }
+    e.t++; e.x += e.vx;
+    if (e.x < e.minX || e.x > e.maxX) e.vx = -e.vx;
+    if (e.kind === 'ball' || e.kind === 'tennis' || e.kind === 'puff') e.bounce = Math.abs(Math.sin(e.t * 0.08)) * (e.kind === 'puff' ? 30 : 50);
+    const box = { x: e.x, y: e.y - e.bounce, w: e.w, h: e.h };
+    if (overlap(c, box)) {
+      if (c.vy > 0 && c.y + c.h - c.vy <= box.y + 12) { e.dead = 1; c.vy = -9; c.jumps = 1; sfx.stomp(); for (let k = 0; k < 10; k++) particles.push({ x: e.x + 15, y: box.y + 14, vx: Math.random() * 6 - 3, vy: Math.random() * -4, life: 30, c: pick(['#fff', '#ffd740', '#ff80ab']) }); }
+      else hurtCat();
+    }
+  }
+  enemies = enemies.filter(e => e.dead < 25);
+  // flying arrows on the castle page
+  if (P.arrows && levelTime % 110 === 0) arrows.push({ x: cam + W + 30, y: (8 + Math.floor(Math.random() * 3)) * T + 18 });
+  for (const a of arrows) { a.x -= 4.5; if (Math.abs(a.x - (c.x + 15)) < 24 && Math.abs(a.y - (c.y + 14)) < 16) { a.x = -999; hurtCat(); } }
+  arrows = arrows.filter(a => a.x > cam - 60);
+  // math bubbles
+  for (const b of bubbles) {
+    if (b.popped > 0) { b.popped--; continue; }
+    if (Math.hypot(b.x - (c.x + 15), b.y - (c.y + 14)) < 34 && !gate.open) {
+      if (b.v === gate.ans) { gate.open = true; sfx.right(); for (let k = 0; k < 30; k++) particles.push({ x: b.x, y: b.y, vx: Math.random() * 8 - 4, vy: Math.random() * 8 - 4, life: 40, c: pick(['#ffd740', '#69f0ae', '#40c4ff']) }); toast('Correct! The gate is open! 🎉'); }
+      else { b.popped = 90; sfx.wrong(); c.vy = 4; toast(`Not ${b.v}! Try another bubble!`); }
+    }
+  }
+  // the page portal at the end
+  if (portal && Math.abs(portal.x - (c.x + 15)) < 30 && Math.abs(portal.y - (c.y + 14)) < 50) finishPage();
+  updateBoss();
+  cam += (Math.max(0, Math.min(LW * T - W, c.x - W * 0.4)) - cam) * 0.12;
+  pressed.clear();
+}
+function finishPage() {
+  const st = P.boss ? (cat.hearts >= 4 ? 3 : cat.hearts >= 2 ? 2 : 1) : cat.hearts === 3 ? 3 : cat.hearts === 2 ? 2 : 1;
+  if (P.boss) SAVE.boss = true;
+  SAVE.stars[lv] = Math.max(SAVE.stars[lv] || 0, st);
+  if (lv + 2 > SAVE.unlocked) SAVE.unlocked = Math.min(PAGES.length + 1, lv + 2);
+  save(); sfx.win(); scene = 'pageDone'; sceneT = 0;
+}
+let toastMsg = '', toastT = 0;
+function toast(t) { toastMsg = t; toastT = 130; }
+const pick = a => a[Math.floor(Math.random() * a.length)];
+
+// ---------- Scenes ----------
+let scene = 'title', sceneT = 0, menuSel = 0, flip = 0, flipTo = null;
+function goPage(i) { flip = 30; flipTo = i; sfx.blip(true); }
+function update() {
+  frame++; sceneT++;
+  for (const p of particles) { p.x += p.vx; p.y += p.vy; p.vy += 0.2; p.life--; }
+  particles = particles.filter(p => p.life > 0);
+  if (toastT > 0) toastT--;
+  if (keyBanner > 0) keyBanner--;
+  if (goldNope > 0) goldNope--;
+  if (stickerNew > 0) stickerNew--;
+  if (flip > 0) { flip--; if (flip === 15) { if (flipTo === 'end') { scene = 'end'; } else { buildLevel(flipTo); scene = 'play'; toast(`Page ${flipTo + 1}: ${PAGES[flipTo].game}! ${PAGES[flipTo].note}`); } sceneT = 0; } pressed.clear(); return; }
+  const ok = pressed.has(' ') || pressed.has('Enter');
+  if (scene === 'title') {
+    const n = Math.min(SAVE.unlocked, PAGES.length);
+    if (pressed.has('ArrowRight') || pressed.has('ArrowDown')) { menuSel = (menuSel + 1) % n; sfx.blip(true); }
+    if (pressed.has('ArrowLeft') || pressed.has('ArrowUp')) { menuSel = (menuSel - 1 + n) % n; sfx.blip(false); }
+    if (ok) { sfx.meow(); goPage(menuSel); }
+  } else if (scene === 'play') { updatePlay(); return; }
+  else if (scene === 'pageDone') { if (sceneT > 40 && ok) { if (lv + 1 < PAGES.length) goPage(lv + 1); else goPage('end'); } }
+  else if (scene === 'oops') { if (sceneT > 40 && ok) goPage(lv); }
+  else if (scene === 'end') { if (frame % 30 === 0) for (let k = 0; k < 20; k++) particles.push({ x: Math.random() * W, y: -10, vx: Math.random() - .5, vy: Math.random() * 2 + 1, life: 200, c: pick(['#ff5252', '#ffd740', '#69f0ae', '#40c4ff', '#e040fb']) }); if (sceneT > 60 && ok) { scene = 'title'; menuSel = 0; } }
+  pressed.clear();
+}
+
+// ---------- Drawing ----------
+function rr(x, y, w, h, r, fill, stroke, lw = 3) { ctx.beginPath(); ctx.roundRect(x, y, w, h, r); if (fill) { ctx.fillStyle = fill; ctx.fill(); } if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lw; ctx.stroke(); } }
+function circle(x, y, r, c) { ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fillStyle = c; ctx.fill(); }
+function el(x, y, rx, ry, c) { ctx.beginPath(); ctx.ellipse(x, y, rx, ry, 0, 0, Math.PI * 2); ctx.fillStyle = c; ctx.fill(); }
+function text(s, x, y, size, color = '#fff', align = 'center', outline = '#1b1b2f') {
+  ctx.font = `bold ${size}px "Comic Sans MS", "Chalkboard SE", sans-serif`; ctx.textAlign = align; ctx.lineJoin = 'round';
+  if (outline) { ctx.lineWidth = size / 5; ctx.strokeStyle = outline; ctx.strokeText(s, x, y); }
+  ctx.fillStyle = color; ctx.fillText(s, x, y);
+}
+function emoji(s, x, y, size) { ctx.font = `${size}px sans-serif`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(s, x, y); ctx.textBaseline = 'alphabetic'; }
+
+function drawGoldKey(x, y) {      // a shiny golden key with a glow
+  const bob = Math.sin(frame * 0.07) * 5, gl = 0.35 + 0.2 * Math.sin(frame * 0.12);
+  ctx.save(); ctx.translate(x, y + bob);
+  const g = ctx.createRadialGradient(0, 0, 4, 0, 0, 30); g.addColorStop(0, `rgba(255,236,120,${gl})`); g.addColorStop(1, 'rgba(255,236,120,0)');
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(0, 0, 30, 0, 7); ctx.fill();
+  ctx.rotate(-0.5);
+  ctx.fillStyle = '#ffc107'; ctx.strokeStyle = '#b8860b'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(-10, 0, 8, 0, 7); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = '#fff8e1'; ctx.beginPath(); ctx.arc(-10, 0, 3.2, 0, 7); ctx.fill();
+  ctx.fillStyle = '#ffc107'; ctx.fillRect(-2, -2.5, 18, 5); ctx.strokeRect(-2, -2.5, 18, 5);
+  ctx.fillRect(10, 2, 3, 6); ctx.fillRect(14, 2, 3, 4);
+  ctx.fillStyle = 'rgba(255,255,255,.7)'; ctx.fillRect(-1, -2, 14, 1.5);
+  ctx.restore();
+  const tw = (frame % 60) / 60, sx = x + Math.cos(frame * 0.05) * 18, sy = y + bob - 14 + Math.sin(frame * 0.05) * 6;
+  ctx.fillStyle = `rgba(255,255,255,${1 - tw})`; ctx.fillRect(sx - 1, sy - 6, 2, 12); ctx.fillRect(sx - 6, sy - 1, 12, 2);
+}
+function drawCat(x, y, face, t, airborne, s = 1) {
+  const gold = goldDraw = isGold();
+  ctx.save(); ctx.translate(x + 15, y + 28); ctx.scale(face * s, s);
+  const run = airborne ? 0 : Math.sin(t * 0.4) * 4;
+  ctx.strokeStyle = gc('#ff9800', '#ffb300'); ctx.lineWidth = 6; ctx.lineCap = 'round';                // tail
+  ctx.beginPath(); ctx.moveTo(-14, -14); ctx.quadraticCurveTo(-30, -20, -26, -38 + Math.sin(t * 0.1) * 4); ctx.stroke();
+  ctx.fillStyle = gc('#e65100', '#ff8f00'); ctx.fillRect(-11 + run, -8, 6, 8); ctx.fillRect(5 - run, -8, 6, 8);   // legs
+  el(0, -14, 17, 10, gc('#ff9800', '#ffd740'));                                           // body
+  ctx.fillStyle = gc('#e65100', '#ffb300'); for (let k = -1; k <= 1; k++) ctx.fillRect(k * 6 - 1, -23, 3, 8); // stripes
+  circle(12, -28, 11, gc('#ff9800', '#ffd740'));                                           // head
+  ctx.fillStyle = gc('#ff9800', '#ffd740');
+  ctx.beginPath(); ctx.moveTo(4, -35); ctx.lineTo(5, -46); ctx.lineTo(11, -38); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(14, -38); ctx.lineTo(20, -46); ctx.lineTo(21, -34); ctx.fill();
+  if (gold) {                                          // ✨ a shiny streak slides across + a white highlight
+    ctx.save(); ctx.beginPath(); ctx.ellipse(0, -14, 17, 10, 0, 0, Math.PI * 2); ctx.moveTo(23, -28); ctx.arc(12, -28, 11, 0, Math.PI * 2); ctx.clip();
+    const st = (t % 140) / 90;
+    if (st <= 1) { const sx = -30 + st * 70; ctx.fillStyle = 'rgba(255,255,255,.6)'; ctx.beginPath(); ctx.moveTo(sx, -40); ctx.lineTo(sx + 7, -40); ctx.lineTo(sx - 9, -4); ctx.lineTo(sx - 16, -4); ctx.fill(); }
+    ctx.restore();
+    ctx.fillStyle = 'rgba(255,255,255,.85)'; ctx.beginPath(); ctx.ellipse(7, -35, 3, 1.5, -0.6, 0, Math.PI * 2); ctx.fill();
+  }
+  circle(10, -29, 2.2, '#1b1b2f'); circle(17, -29, 2.2, '#1b1b2f');
+  circle(14, -25, 1.6, '#ff80ab');
+  ctx.strokeStyle = '#5d4037'; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(16, -24); ctx.lineTo(27, -26); ctx.moveTo(16, -23); ctx.lineTo(27, -21); ctx.stroke();
+  ctx.fillStyle = '#e53935'; ctx.fillRect(4, -19, 14, 3);                                  // a red bookmark scarf
+  if (SAVE.boss) { ctx.fillStyle = '#ffd740'; ctx.beginPath(); ctx.moveTo(4, -38); ctx.lineTo(5, -48); ctx.lineTo(9, -42); ctx.lineTo(12, -50); ctx.lineTo(15, -42); ctx.lineTo(19, -48); ctx.lineTo(20, -38); ctx.closePath(); ctx.fill(); circle(12, -42, 1.6, '#e53935'); }
+  if (gold) for (let i = 0; i < 3; i++) {              // little twinkles pop up around the cat now and then
+    const n = t + i * 41, ph = n % 70; if (ph > 24) continue;
+    const sd = Math.floor(n / 70) * 3.7 + i * 1.9;
+    const sx = 0 + 26 * Math.sin(sd * 12.99), sy = -24 + 24 * Math.sin(sd * 78.23);
+    const r = Math.sin(ph / 24 * Math.PI) * 5 + 0.5, q = r * 0.28;
+    ctx.fillStyle = i ? '#fff' : '#fff59d';
+    ctx.beginPath(); ctx.moveTo(sx, sy - r); ctx.lineTo(sx + q, sy - q); ctx.lineTo(sx + r, sy); ctx.lineTo(sx + q, sy + q);
+    ctx.lineTo(sx, sy + r); ctx.lineTo(sx - q, sy + q); ctx.lineTo(sx - r, sy); ctx.lineTo(sx - q, sy - q); ctx.fill();
+  }
+  ctx.restore();
+  goldDraw = false;
+}
+function drawEnemy(e) {
+  const x = e.x + 15, y = e.y + 28 - e.bounce, sq = e.dead ? 0.3 : 1;
+  ctx.save(); ctx.translate(x, y); ctx.scale(e.vx > 0 ? 1 : -1, sq);
+  switch (e.kind) {
+    case 'alien': el(0, -12, 15, 13, '#76ff03'); ctx.strokeStyle = '#33691e'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(0, -24); ctx.lineTo(3, -34); ctx.stroke(); circle(3, -35, 3, '#ff4081'); circle(3, -14, 6, '#fff'); circle(5, -14, 3, '#000'); break;
+    case 'windup': rr(-14, -26, 28, 24, 5, '#9e9e9e'); ctx.fillStyle = '#ff1744'; ctx.fillRect(-2, -20, 4, 4); ctx.fillRect(6, -20, 4, 4); ctx.strokeStyle = '#ffd740'; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(-14, -14); ctx.lineTo(-22, -14); ctx.moveTo(-22, -14 - 6 * Math.cos(frame * 0.2)); ctx.lineTo(-22, -14 + 6 * Math.cos(frame * 0.2)); ctx.stroke(); circle(-8, -1, 4, '#424242'); circle(8, -1, 4, '#424242'); break;
+    case 'ball': circle(0, -14, 14, '#fff'); for (let k = 0; k < 5; k++) circle(Math.cos(k * 1.26 + e.t * 0.1) * 8, -14 + Math.sin(k * 1.26 + e.t * 0.1) * 8, 3.5, '#212121'); break;
+    case 'slime': el(0, -10, 16, 12, '#76ff03'); circle(-4, -13, 3, '#fff'); circle(6, -13, 3, '#fff'); circle(-3, -12, 1.5, '#000'); circle(7, -12, 1.5, '#000'); break;
+    case 'car': rr(-22, -20, 44, 16, 6, '#e53935'); rr(-10, -30, 22, 12, 5, '#b3e5fc'); circle(-12, -3, 6, '#212121'); circle(12, -3, 6, '#212121'); ctx.fillStyle = '#ffeb3b'; ctx.fillRect(18, -16, 4, 5); break;
+    case 'fighter': rr(-10, -24, 20, 18, 5, '#42a5f5'); circle(0, -30, 8, '#ffcc99'); circle(12 + Math.sin(e.t * 0.3) * 4, -20, 6, '#e53935'); ctx.fillStyle = '#1565c0'; ctx.fillRect(-8, -6, 6, 6); ctx.fillRect(2, -6, 6, 6); break;
+    case 'zombie': rr(-10, -22, 20, 16, 4, '#6d4c41'); circle(0, -30, 9, '#9ccc65'); ctx.strokeStyle = '#9ccc65'; ctx.lineWidth = 4; ctx.beginPath(); ctx.moveTo(6, -18); ctx.lineTo(18, -20); ctx.stroke(); circle(3, -32, 2.5, '#fff'); circle(-3, -31, 2, '#fff'); ctx.fillStyle = '#4e342e'; ctx.fillRect(-8, -6, 6, 6); ctx.fillRect(2, -6, 6, 6); break;
+    case 'puff': circle(0, -14, 14, '#ce93d8'); circle(-8, -24, 5, '#ce93d8'); circle(8, -24, 5, '#ce93d8'); circle(-4, -15, 3, '#fff'); circle(5, -15, 3, '#fff'); circle(-4, -14, 1.5, '#000'); circle(5, -14, 1.5, '#000'); el(0, -8, 4, 2, '#f48fb1'); break;
+    case 'tennis': circle(0, -12, 12, '#d4e157'); ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(-6, -12, 10, -0.9, 0.9); ctx.stroke(); break;
+    case 'paint': { const cs = ['#ff4081', '#7c4dff', '#00b8d4', '#ffd600'], col = cs[Math.floor(e.x / 200) % 4]; el(0, -10, 16, 11, col); circle(-10, -2, 4, col); circle(11, -3, 3, col); circle(-3, -12, 3, '#fff'); circle(6, -12, 3, '#fff'); circle(-3, -11, 1.5, '#000'); circle(6, -11, 1.5, '#000'); break; }
+  }
+  ctx.restore();
+}
+function drawBackground() {
+  const g = ctx.createLinearGradient(0, 0, 0, H); g.addColorStop(0, P.sky[0]); g.addColorStop(1, P.sky[1]);
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  if (P.space || P.dark) for (let i = 0; i < 60; i++) circle(((i * 137 - cam * 0.1) % W + W) % W, (i * 53) % 300, 1.5, `rgba(255,255,255,${0.4 + 0.4 * Math.sin(frame * 0.05 + i)})`);
+  if (P.space) { circle(820 - cam * 0.05, 100, 40, '#ff8a65'); ctx.strokeStyle = 'rgba(255,255,255,.5)'; ctx.lineWidth = 5; ctx.beginPath(); ctx.ellipse(820 - cam * 0.05, 100, 68, 15, -0.3, 0, Math.PI * 2); ctx.stroke(); }
+  if (P.dark) { circle(800, 90, 34, '#fff9c4'); for (let i = 0; i < 8; i++) { const gx = ((i * 230 - cam * 0.5) % (W + 200) + W + 200) % (W + 200) - 100; rr(gx, 380, 30, 40, [14, 14, 2, 2], '#90a4ae'); } }
+  if (!P.space && !P.dark && !P.paint) { circle(830, 80, 36, '#fff59d'); for (let i = 0; i < 4; i++) { const cx = ((i * 280 - cam * 0.2) % (W + 200) + W + 200) % (W + 200) - 100; el(cx, 90 + i * 20, 46, 18, 'rgba(255,255,255,.85)'); } }
+  if (P.city) for (let i = 0; i < 12; i++) { const bx = ((i * 110 - cam * 0.3) % (W + 220) + W + 220) % (W + 220) - 110, bh = 120 + (i * 53) % 140; ctx.fillStyle = P.game === 'Brawl Buddies' ? '#5d4037' : '#b0bec5'; ctx.fillRect(bx, 440 - bh, 90, bh); ctx.fillStyle = 'rgba(255,255,255,.4)'; for (let wy = 440 - bh + 12; wy < 420; wy += 24) for (let wx = bx + 10; wx < bx + 80; wx += 22) ctx.fillRect(wx, wy, 10, 12); }
+  if (P.trees || P.grass) for (let i = 0; i < 9; i++) { const tx = ((i * 150 - cam * 0.4) % (W + 200) + W + 200) % (W + 200) - 100; ctx.fillStyle = '#6d4c41'; ctx.fillRect(tx - 6, 330, 12, 110); circle(tx, 320, 40, '#2e7d32'); circle(tx - 16, 306, 20, '#43a047'); }
+  if (P.paint) for (let i = 0; i < 10; i++) { const px = ((i * 170 - cam * 0.3) % (W + 200) + W + 200) % (W + 200) - 100; circle(px, 120 + (i * 61) % 220, 26 + (i % 3) * 10, ['rgba(255,64,129,.25)', 'rgba(124,77,255,.25)', 'rgba(0,184,212,.25)', 'rgba(255,214,0,.3)'][i % 4]); }
+  if (P.castle) { ctx.fillStyle = '#b0bec5'; const cx = (LEN - 3) * T - cam; ctx.fillRect(cx, 300, 120, 140); for (let k = 0; k < 4; k++) ctx.fillRect(cx + k * 34, 284, 20, 18); rr(cx + 44, 380, 32, 60, [16, 16, 0, 0], '#6d4c41'); }
+  if (P.game === 'Sports Party') { ctx.fillStyle = 'rgba(255,255,255,.5)'; for (let i = 0; i < 6; i++) { const lx = ((i * 240 - cam * 0.6) % (W + 240) + W + 240) % (W + 240) - 120; ctx.fillRect(lx, 300, 6, 140); } }
+  if (P.game === 'Pet Park') { ctx.fillStyle = '#ffd59e'; ctx.fillRect(0, 300, W, 8); for (let i = 0; i < 4; i++) { const wx = ((i * 380 - cam * 0.3) % (W + 300) + W + 300) % (W + 300) - 150; rr(wx, 140, 160, 110, 8, '#8fd3ff', '#8d5a2b', 6); } }
+}
+function drawTiles() {
+  const c0 = Math.max(0, Math.floor(cam / T)), c1 = Math.min(LW - 1, c0 + Math.ceil(W / T) + 1);
+  for (let y = 0; y < ROWS; y++) for (let x = c0; x <= c1; x++) {
+    const v = tiles[y][x]; if (!v) continue;
+    const px = x * T - cam, py = y * T;
+    if (P.bricks || (v === 2 && P.game === 'Build It!')) { ctx.fillStyle = v === 2 ? '#ffca28' : P.ground; ctx.fillRect(px, py, T, T); ctx.fillStyle = 'rgba(255,255,255,.4)'; ctx.fillRect(px, py + 19, T, 2); ctx.fillRect(px + (y % 2 ? 10 : 30), py, 2, 19); ctx.fillRect(px + (y % 2 ? 30 : 10), py + 21, 2, 19); continue; }
+    if (v === 2) { rr(px + 1, py + 2, T - 2, T - 6, 8, P.paint ? ['#ff4081', '#7c4dff', '#00b8d4', '#ffd600'][x % 4] : P.top, 'rgba(0,0,0,.2)', 2); continue; }
+    ctx.fillStyle = P.ground; ctx.fillRect(px, py, T + 1, T + 1);
+    if (y === 11) { ctx.fillStyle = P.top; ctx.fillRect(px, py, T + 1, P.game === 'Turbo Racers' ? 4 : 10); if (P.game === 'Turbo Racers' && x % 2) { ctx.fillStyle = '#fff'; ctx.fillRect(px + 8, py + 18, 24, 4); } }
+  }
+  // gate and bubbles on the math page
+  if (gate) {
+    const gx = gate.x - cam;
+    if (!gate.open) { for (let k = 2; k <= 10; k++) rr(gx + 4, k * T, T - 8, T, 4, '#5c6bc0', '#ffd740', 2); text('🔒', gx + 20, 6 * T + 26, 26, '#fff', 'center', null); }
+    const sx = gate.signX - cam; rr(sx - 90, 150, 180, 70, 14, '#fff', '#ffd740', 4); text(gate.q, sx, 197, 34, '#1b1b3a', 'center', null);
+    for (const b of bubbles) { if (b.popped > 0 || gate.open) continue; const by = b.y + Math.sin(frame * 0.05 + b.x) * 8; circle(b.x - cam, by, 28, 'rgba(64,196,255,.35)'); ctx.strokeStyle = '#40c4ff'; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(b.x - cam, by, 28, 0, Math.PI * 2); ctx.stroke(); text(String(b.v), b.x - cam, by + 11, 30, '#fff'); }
+  }
+  // the magic page portal
+  if (!portal) return;
+  const px = portal.x - cam, py = portal.y;
+  ctx.save(); ctx.translate(px, py); ctx.rotate(Math.sin(frame * 0.05) * 0.1);
+  rr(-26, -40, 52, 70, 6, '#fffaf0', '#ffd740', 4); ctx.fillStyle = '#c9b89a'; for (let k = 0; k < 4; k++) ctx.fillRect(-16, -26 + k * 12, 32, 3);
+  ctx.restore(); text('NEXT PAGE ▶', px, py - 52, 14, '#ffd740');
+}
+function drawPlay() {
+  drawBackground(); drawTiles();
+  for (const it of items) if (!it.got) emoji(P.item, it.x - cam, it.y + Math.sin(frame * 0.08 + it.x) * 3, 24);
+  for (const e of enemies) { ctx.save(); ctx.translate(-cam, 0); drawEnemy(e); ctx.restore(); }
+  drawBoss();
+  if (goldKey && !goldKey.got) drawGoldKey(goldKey.x - cam, goldKey.y);
+  for (const a of arrows) { const ax = a.x - cam; ctx.fillStyle = '#5d4037'; ctx.fillRect(ax, a.y - 1, 26, 3); ctx.fillStyle = '#9e9e9e'; ctx.beginPath(); ctx.moveTo(ax - 8, a.y); ctx.lineTo(ax, a.y - 5); ctx.lineTo(ax, a.y + 5); ctx.fill(); ctx.fillStyle = '#e53935'; ctx.fillRect(ax + 22, a.y - 4, 6, 9); }
+  if (!(cat.inv > 0 && Math.floor(frame / 4) % 2)) drawCat(cat.x - cam, cat.y, cat.face, frame, !cat.onGround);
+  for (const p of particles) { ctx.globalAlpha = Math.min(1, p.life / 15); ctx.fillStyle = p.c; ctx.fillRect(p.x - (scene === 'play' ? cam : 0), p.y, 5, 5); }
+  ctx.globalAlpha = 1;
+  if (P.dark) { const cx = cat.x - cam + 15, cy = cat.y + 14, gr = ctx.createRadialGradient(cx, cy, 120, cx, cy, 340); gr.addColorStop(0, 'rgba(0,0,0,0)'); gr.addColorStop(1, 'rgba(0,0,0,.55)'); ctx.fillStyle = gr; ctx.fillRect(0, 0, W, H); }
+  if (hurtFlash > 0) { ctx.fillStyle = `rgba(255,0,0,${hurtFlash / 40})`; ctx.fillRect(0, 0, W, H); }
+  // HUD: it's a page in the book!
+  rr(10, 10, 300, 44, 12, 'rgba(255,250,240,.92)', '#c9b89a', 3);
+  text(`📖 Page ${lv + 1}: ${P.game}`, 22, 40, 20, '#5d4037', 'left', null);
+  for (let k = 0; k < cat.maxH; k++) text(k < cat.hearts ? '❤️' : '🤍', W - 26 - (cat.maxH - 1 - k) * 31, 42, 24, '#fff', 'center', null);
+  drawBossBar();
+  rr(W - 300, 10, 110, 44, 12, 'rgba(255,250,240,.92)', '#c9b89a', 3);
+  ctx.font = '22px sans-serif'; ctx.textAlign = 'center'; ctx.fillText(P.item, W - 276, 40); text(`${collected}`, W - 232, 40, 20, '#5d4037', 'center', null);
+  if (toastT > 0) { ctx.globalAlpha = Math.min(1, toastT / 20); ctx.font = 'bold 19px "Comic Sans MS", sans-serif'; const w = ctx.measureText(toastMsg).width + 36; rr(W / 2 - w / 2, 66, w, 38, 19, 'rgba(255,255,255,.95)', '#ff9800', 3); text(toastMsg, W / 2, 92, 19, '#5d4037', 'center', null); ctx.globalAlpha = 1; }
+  if (keyBanner > 0) { ctx.globalAlpha = Math.min(1, keyBanner / 20); const kw = keyCount >= 5 ? 330 : 240; rr(W / 2 - kw, 300, kw * 2, 50, 16, 'rgba(0,0,0,.6)'); text(keyCount >= 5 ? '🔑 ALL 5 KEYS! Open the Secret Door in the book! ✨' : `🔑 SECRET KEY! You found ${keyCount} of 5!`, W / 2, 336, keyCount >= 5 ? 21 : 28, '#ffd740'); ctx.globalAlpha = 1; }
+  if (stickerNew > 0) { ctx.globalAlpha = Math.min(1, stickerNew / 20); rr(W / 2 - 170, 120, 340, 46, 14, 'rgba(0,0,0,.55)'); text('⭐ NEW STICKER! ⭐', W / 2, 153, 28, '#ffeb3b'); ctx.globalAlpha = 1; }
+  if (levelTime < 300 && lv === 0) text('← → run    SPACE jump (press again in the air to DOUBLE JUMP!)', W / 2, H - 20, 18, '#fff');
+}
+function drawBookPage(title, lines) {      // an open-book look for menus
+  ctx.fillStyle = '#4a3480'; ctx.fillRect(0, 0, W, H);
+  rr(60, 30, 840, 460, 20, '#7b2ff7'); rr(76, 40, 404, 440, [16, 4, 4, 16], '#fffaf0'); rr(480, 40, 404, 440, [4, 16, 16, 4], '#fffaf0');
+  ctx.fillStyle = 'rgba(0,0,0,.15)'; ctx.fillRect(476, 40, 8, 440);
+}
+function draw() {
+  if (scene === 'play' || scene === 'pageDone' || scene === 'oops') {
+    drawPlay();
+    if (scene === 'pageDone') { ctx.fillStyle = 'rgba(0,0,0,.45)'; ctx.fillRect(0, 0, W, H); const st = SAVE.stars[lv] || 0; text(P.boss ? 'YOU SAVED THE BOOK! 👑' : lv + 1 < PAGES.length ? 'Page complete! 📖' : 'Last page done!', W / 2, 190, 56, '#ffd740'); text(`${'★'.repeat(st)}${'☆'.repeat(3 - st)}`, W / 2, 260, 56, '#ffd740'); text(`You found ${collected} ${P.item}`, W / 2, 310, 26); if (lv === PAGES.length - 2) { text('Wait... something is CHEWING the book! 🐛', W / 2, 350, 26, '#ff8a80'); if (sceneT > 40) text('SPACE: go find out! ▶', W / 2, 395, 26, '#69f0ae'); }
+      else if (sceneT > 40) text(lv + 1 < PAGES.length ? `SPACE: jump into ${PAGES[lv + 1].game} ▶` : 'SPACE: jump out of the book! ▶', W / 2, 390, 26, '#69f0ae'); drawCat(W / 2 - 15, 420 - Math.abs(Math.sin(frame * 0.1)) * 30, 1, frame, true, 1.5); }
+    if (scene === 'oops') { ctx.fillStyle = 'rgba(0,0,0,.5)'; ctx.fillRect(0, 0, W, H); text('Oof! Pages got bonked!', W / 2, 220, 52, '#ff8a80'); if (sceneT > 40) text('Press SPACE to try this page again', W / 2, 300, 26, '#fff'); }
+  } else if (scene === 'title') {
+    drawBookPage();
+    text('BOOK CAT', 278, 120, 54, '#ff9800', 'center', '#5d4037');
+    text('Pages the cat snuck into', 278, 168, 20, '#5d4037', 'center', null);
+    text('THE GAME FACTORY book!', 278, 194, 20, '#5d4037', 'center', null);
+    text('Run through every game', 278, 236, 18, '#7a6a58', 'center', null);
+    text('and reach the last page!', 278, 260, 18, '#7a6a58', 'center', null);
+    drawCat(250, 380 + Math.sin(frame * 0.08) * 8, 1, frame, false, 2.2);
+    const gOpen = goldOpen(), gOn = isGold();                // ✨ Normal / Gold Pages picker
+    for (const b of GOLD_BTNS) {
+      const on = b.gold === gOn;
+      rr(b.x, b.y, b.w, b.h, 12, on ? (b.gold ? '#ffd740' : '#fff3b0') : b.gold && !gOpen ? '#e0d8c8' : '#fff', on ? '#ff9800' : '#c9b89a', on ? 3 : 1.5);
+      text(b.gold ? (gOpen ? '✨ Gold Pages' : '🔒 ✨ Gold Pages') : '🐱 Normal', b.x + b.w / 2, b.y + 27, 17, b.gold && !gOpen ? '#9e9e9e' : '#5d4037', 'center', null);
+    }
+    text(gOpen ? 'Tap one, or press G' : 'Find all 5 golden keys to unlock!', 280, 476, 13, goldNope > 0 && frame % 20 < 10 ? '#ff5aa5' : '#7a6a58', 'center', null);
+    text('Pick a page:', 682, 82, 22, '#ff5aa5', 'center', null);
+    PAGES.forEach((p, i) => {
+      const secret = p.secret, col = i < 7 ? 0 : 1, row = i % 7, x = secret ? 500 : 500 + col * 195, y = secret ? 418 : 94 + row * 46, w = secret ? 380 : 185, open = i < SAVE.unlocked, on = i === menuSel;
+      if (secret) { rr(x, y, w, 40, 10, on ? '#fff3b0' : open ? '#e8f5e9' : '#e0d8c8', on ? '#ff9800' : open ? '#7cb342' : '#c9b89a', on ? 3 : 2); text(open ? `${i + 1}. 🐛 SECRET BOSS: ${p.game}` : `${i + 1}. ❓❓❓  (a secret...)`, x + 12, y + 26, 15, open ? '#33691e' : '#9e9e9e', 'left', null); if (open && SAVE.stars[i]) text('★'.repeat(SAVE.stars[i]), x + w - 8, y + 26, 12, '#ffb300', 'right', null); return; }
+      rr(x, y, w, 40, 10, on ? '#fff3b0' : open ? '#fff' : '#e0d8c8', on ? '#ff9800' : '#c9b89a', on ? 3 : 1.5);
+      text(`${i + 1}. ${open ? p.game : '🔒'}`, x + 10, y + 26, 15, open ? '#5d4037' : '#9e9e9e', 'left', null);
+      if (open && SAVE.stars[i]) text('★'.repeat(SAVE.stars[i]), x + 178, y + 26, 12, '#ffb300', 'right', null);
+    });
+    text('← → pick    SPACE to jump in!', 682, 474, 15, '#7a6a58', 'center', null);
+  } else if (scene === 'end') {
+    drawBookPage();
+    text(SAVE.boss ? 'THE TRUE END!' : 'THE END!', 278, 140, SAVE.boss ? 48 : 60, '#ff9800', 'center', '#5d4037');
+    text('Pages ran through ALL', 278, 200, 22, '#5d4037', 'center', null);
+    text('14 games in the book!', 278, 230, 22, '#5d4037', 'center', null);
+    if (SAVE.boss) { text('AND beat the', 278, 280, 22, '#5d4037', 'center', null); text('BOOKWORM KING! 🐛👑', 278, 312, 24, '#7cb342', 'center', '#1b1b2f'); text('You are a Game Factory LEGEND!', 278, 360, 18, '#7a6a58', 'center', null); }
+    else text('You are a Game Factory hero!', 278, 290, 20, '#7a6a58', 'center', null);
+    drawCat(600, 260 + Math.sin(frame * 0.1) * 20, -1, frame, true, 3);
+    text('🏆', 680, 140, 60, '#fff', 'center', null);
+    if (sceneT > 60) text('Press SPACE', 682, 440, 22, '#ff5aa5', 'center', null);
+    for (const p of particles) { ctx.fillStyle = p.c; ctx.fillRect(p.x, p.y, 6, 6); }
+  }
+  if (flip > 0) {      // page flip!
+    const k = flip > 15 ? (30 - flip) / 15 : flip / 15, w = W * k;
+    ctx.fillStyle = '#fffaf0'; ctx.fillRect(W - w, 0, w, H);
+    ctx.fillStyle = 'rgba(0,0,0,.2)'; ctx.fillRect(W - w, 0, 10, H);
+  }
+}
+
+let last = performance.now(), acc = 0;
+function loop(now) {
+  acc += Math.min(100, now - last); last = now;
+  while (acc >= 1000 / 60) { update(); acc -= 1000 / 60; }
+  playMusic();
+  draw();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+<!-- injected by scripts/inject-factory.py — hold PS (or SELECT+START) for 1s to go
+     up one level: game -> the book (parent.closeGame), standalone game -> /factory/,
+     the book -> Stephens Arcade (/). Shares one rAF pad poll with the cursor + idle overlays. -->
+<script id="__gf_pad_exit">
+(function () {
+  var IS_BOOK = false; /*@gf:is_book*/
+  var HOLD_MS = 1000;
+  // one rAF loop per page reads the pads for every __gf overlay
+  var hub = window.__gfHub;
+  if (!hub) {
+    hub = window.__gfHub = { fns: [], pads: [] };
+    (function () {
+      var NONE = [];
+      function loop(now) {
+        var p = null;
+        try { p = navigator.getGamepads ? navigator.getGamepads() : null; } catch (e) {}
+        hub.pads = p || NONE;
+        for (var i = 0; i < hub.fns.length; i++) { try { hub.fns[i](now, hub.pads); } catch (e) {} }
+        requestAnimationFrame(loop);
+      }
+      requestAnimationFrame(loop);
+    })();
+  }
+
+  var STEPS = 20, TF = [];               // precomputed badge transforms: zero allocations while held
+  for (var s = 0; s <= STEPS; s++) TF.push('translateX(-50%) scale(' + (1 + 0.35 * s / STEPS).toFixed(4) + ')');
+  var HIDE_TF = 'translateX(-50%) scale(0.85)';
+  var heldSince = 0, needRelease = true, leaving = false, badge = null, lastStep = -2;
+  var player = null;
+
+  function comboDown(pads) {
+    for (var i = 0; i < pads.length; i++) {
+      var gp = pads[i];
+      if (!gp || gp.connected === false) continue;
+      var b = gp.buttons;
+      if ((b[16] && b[16].pressed) || (b[8] && b[8].pressed && b[9] && b[9].pressed)) return true;
+    }
+    return false;
+  }
+  function makeBadge() {
+    badge = document.createElement('div');
+    badge.id = '__gfx_exit';
+    badge.textContent = IS_BOOK ? '◄ ARCADE' : '◄ BOOK';
+    badge.style.cssText = 'position:fixed;top:12px;left:50%;z-index:2147483001;pointer-events:none;' +
+      'padding:7px 18px;border-radius:999px;background:#10172a;color:#ffd23f;border:3px solid #ffd23f;' +
+      'font:bold 18px/1 "Trebuchet MS","Arial Rounded MT Bold",sans-serif;letter-spacing:1px;white-space:nowrap;' +
+      'transform-origin:50% 0;opacity:0;transform:' + HIDE_TF + ';transition:opacity .12s;';
+    (document.body || document.documentElement).appendChild(badge);
+  }
+  function setBadge(step) {            // step -1 = hidden, 0..STEPS = hold progress
+    if (step === lastStep) return;
+    lastStep = step;
+    if (step < 0) { if (badge) { badge.style.opacity = '0'; badge.style.transform = HIDE_TF; } return; }
+    if (!badge) makeBadge();
+    badge.style.opacity = '1';
+    badge.style.transform = TF[step];
+  }
+  function inGame() {
+    try { return window.parent !== window && typeof window.parent.closeGame === 'function'; } catch (e) { return false; }
+  }
+  function leave() {
+    leaving = true;                    // never navigate twice
+    if (!IS_BOOK && inGame()) { setBadge(-1); try { window.parent.closeGame(); } catch (e) {} return; }
+    location.href = IS_BOOK ? '/' : '/factory/';
+  }
+  hub.fns.push(function (now, pads) {
+    if (leaving) return;
+    var down = comboDown(pads);
+    if (IS_BOOK) {
+      if (!player) player = document.getElementById('player');
+      if (player && player.classList.contains('open')) {   // the game's own overlay handles this hold
+        if (down) needRelease = true;
+        heldSince = 0; setBadge(-1); return;
+      }
+    }
+    if (needRelease) {                 // a hold that started elsewhere never counts here
+      if (down) return;
+      needRelease = false;
+    }
+    if (!down) { heldSince = 0; setBadge(-1); return; }
+    if (!heldSince) heldSince = now;
+    var p = (now - heldSince) / HOLD_MS;
+    setBadge(Math.round((p > 1 ? 1 : p) * STEPS));
+    if (p >= 1) leave();
+  });
+})();
+</script>
+<!-- injected by scripts/inject-factory.py — console (low-fx) mode only: no-op canvas
+     shadowBlur and kill CSS backdrop-filter (both measured fps killers on the Pi).
+     The mouse cursor is hidden only while the pad cursor is installed. -->
+<script id="__gf_lowfx">
+(function () {
+  var on = false;
+  try {
+    if (/[?&]fx=low\b/.test(location.search)) { on = true; localStorage.setItem('arcade_lowfx', '1'); }
+    else if (/[?&]fx=full\b/.test(location.search)) { localStorage.setItem('arcade_lowfx', '0'); }
+    else { on = localStorage.getItem('arcade_lowfx') === '1'; }
+  } catch (e) {}
+  if (!on) return;
+  try {
+    Object.defineProperty(CanvasRenderingContext2D.prototype, 'shadowBlur', {
+      set: function () {}, get: function () { return 0; }, configurable: true
+    });
+  } catch (e) {}
+  try {
+    var st = document.createElement('style');
+    st.textContent = '* { backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }' +
+      ' html.__gfx_padcursor, html.__gfx_padcursor * { cursor: none !important; }';
+    (document.head || document.documentElement).appendChild(st);
+  } catch (e) {}
+})();
+</script>
+<!-- injected by scripts/inject-factory.py — console mode only: the TV has no printer,
+     so window.print shows a friendly toast instead of a dead print dialog. -->
+<script id="__gf_print">
+(function () {
+  var on = false;
+  try { on = /[?&]fx=low\b/.test(location.search) || localStorage.getItem('arcade_lowfx') === '1'; } catch (e) {}
+  if (!on) return;
+  var toast = null, timer = 0;
+  function hide() { if (toast) toast.style.opacity = '0'; }
+  window.print = function () {
+    try {
+      if (!toast) {
+        toast = document.createElement('div');
+        toast.id = '__gfx_print';
+        toast.textContent = '🖨️ Printing works on the iPad — not on the TV!';
+        toast.style.cssText = 'position:fixed;left:50%;bottom:48px;transform:translateX(-50%);z-index:2147483001;' +
+          'pointer-events:none;padding:14px 26px;border-radius:16px;background:#10172a;color:#ffd23f;' +
+          'border:3px solid #ffd23f;font:bold 24px/1.2 "Trebuchet MS","Arial Rounded MT Bold",sans-serif;' +
+          'white-space:nowrap;opacity:0;transition:opacity .2s;';
+        (document.body || document.documentElement).appendChild(toast);
+      }
+      toast.style.opacity = '1';
+      clearTimeout(timer);
+      timer = setTimeout(hide, 2500);
+    } catch (e) {}
+  };
+})();
+</script>
+<!-- injected by scripts/inject-factory.py — pad cursor: a pad-driven mouse pointer so
+     tap/click-only games play on the console. Right stick moves it (left stick too in
+     pointer games); X / R1 clicks and drags (pointer + mouse events, like touchpad.js
+     turns fingers into mouse events). Never consumes pad input. -->
+<script id="__gf_cursor">
+(function () {
+  window.__GF_CURSOR_LEFT = false; /*@gf:cursor_left*/
+  var IS_BOOK = false; /*@gf:is_book*/
+  var LEFT = window.__GF_CURSOR_LEFT === true;
+  var DZ = 0.2, SPEED = 900, SLEEP_MS = 4000, CLICK_SLOP = 12;
+  // one rAF loop per page reads the pads for every __gf overlay
+  var hub = window.__gfHub;
+  if (!hub) {
+    hub = window.__gfHub = { fns: [], pads: [] };
+    (function () {
+      var NONE = [];
+      function loop(now) {
+        var p = null;
+        try { p = navigator.getGamepads ? navigator.getGamepads() : null; } catch (e) {}
+        hub.pads = p || NONE;
+        for (var i = 0; i < hub.fns.length; i++) { try { hub.fns[i](now, hub.pads); } catch (e) {} }
+        requestAnimationFrame(loop);
+      }
+      requestAnimationFrame(loop);
+    })();
+  }
+
+  var S = window.__gfCursorState = { installed: false, awake: false, held: false, x: 0, y: 0 };
+  var el = null, x = 0, y = 0, awake = false, lastMove = 0, lastT = 0;
+  var held = false, target = null, sx = 0, sy = 0, prevBtn = false, vx = 0, vy = 0, player = null;
+  var INIT = { bubbles: true, cancelable: true, composed: true, view: window, detail: 0,
+    clientX: 0, clientY: 0, screenX: 0, screenY: 0, button: 0, buttons: 0,
+    pointerId: 1, pointerType: 'mouse', isPrimary: true, width: 1, height: 1, pressure: 0 };
+  var HAS_PE = typeof window.PointerEvent === 'function';
+
+  function install() {
+    if (S.installed) return;
+    S.installed = true;
+    x = Math.round((window.innerWidth || 1280) / 2); y = Math.round((window.innerHeight || 720) / 2);
+    el = document.createElement('div');
+    el.id = '__gfx_cursor';
+    el.style.cssText = 'position:fixed;left:0;top:0;width:28px;height:28px;pointer-events:none;z-index:2147483000;' +
+      'opacity:0;transition:opacity .25s;will-change:transform;';
+    el.innerHTML = '<svg width="28" height="28" viewBox="0 0 28 28" style="display:block;overflow:visible">' +
+      '<path d="M3 2 L3 23.5 L8.6 18.3 L12.6 26.6 L17 24.5 L13 16.4 L20.8 16.4 Z" fill="#fff" stroke="#10172a" ' +
+      'stroke-width="2.2" stroke-linejoin="round"/></svg>';
+    (document.body || document.documentElement).appendChild(el);
+    try { document.documentElement.classList.add('__gfx_padcursor'); } catch (e) {}
+    place();
+  }
+  function place() {
+    el.style.transform = 'translate3d(' + (x - 3) + 'px,' + (y - 2) + 'px,0)';
+    S.x = x; S.y = y;
+  }
+  function wake() { awake = S.awake = true; el.style.opacity = '1'; }
+  function sleep() { awake = S.awake = false; el.style.opacity = '0'; }
+  function fire(type, node, buttons, pointer) {
+    if (!node) return;
+    INIT.clientX = x; INIT.clientY = y;
+    INIT.screenX = (window.screenX || 0) + x; INIT.screenY = (window.screenY || 0) + y;
+    INIT.buttons = buttons; INIT.pressure = buttons ? 0.5 : 0;
+    INIT.detail = type === 'click' ? 1 : 0;
+    var ev;
+    try { ev = pointer && HAS_PE ? new PointerEvent(type, INIT) : new MouseEvent(type, INIT); } catch (e) { return; }
+    try { node.dispatchEvent(ev); } catch (e) {}
+  }
+  function at() { return document.elementFromPoint(x, y) || document.body || document.documentElement; }
+  function press(now) {
+    target = at(); held = S.held = true; sx = x; sy = y; lastMove = now;
+    fire('pointermove', target, 0, true); fire('mousemove', target, 0, false);
+    fire('pointerdown', target, 1, true); fire('mousedown', target, 1, false);
+  }
+  function release(clickOk) {
+    var t = target;
+    held = S.held = false; target = null;
+    fire('pointerup', t, 0, true); fire('mouseup', t, 0, false);
+    if (clickOk) { var dx = x - sx, dy = y - sy; if (dx * dx + dy * dy < CLICK_SLOP * CLICK_SLOP) fire('click', t, 0, false); }
+  }
+  function stick(ax, ay) {
+    ax = +ax || 0; ay = +ay || 0;
+    var m = Math.sqrt(ax * ax + ay * ay);
+    if (m <= DZ) return;
+    var e = ((m > 1 ? 1 : m) - DZ) / (1 - DZ);
+    e = e * e * SPEED / m;              // mild ease: squared magnitude, ~900 px/s at full tilt
+    vx += ax * e; vy += ay * e;
+  }
+
+  window.addEventListener('gamepadconnected', install);
+  hub.fns.push(function (now, pads) {
+    var i, p, a, b, btn = false;
+    if (!S.installed) {
+      for (i = 0; i < pads.length; i++) { p = pads[i]; if (p && p.mapping === 'standard') { install(); break; } }
+      if (!S.installed) return;
+    }
+    var dt = lastT ? (now - lastT) / 1000 : 0;
+    if (dt > 0.05) dt = 0.05;
+    lastT = now;
+    vx = 0; vy = 0;
+    for (i = 0; i < pads.length; i++) {
+      p = pads[i];
+      if (!p || p.connected === false) continue;
+      a = p.axes; b = p.buttons;
+      if (a) { stick(a[2], a[3]); if (LEFT) stick(a[0], a[1]); }
+      if ((b[0] && b[0].pressed) || (b[5] && b[5].pressed)) btn = true;
+    }
+    if (IS_BOOK) {                      // the book: asleep and silent while a game is open
+      if (!player) player = document.getElementById('player');
+      if (player && player.classList.contains('open')) {
+        if (held) release(false);
+        if (awake) sleep();
+        prevBtn = btn; return;
+      }
+    }
+    if (vx !== 0 || vy !== 0) {
+      var w = window.innerWidth || 1280, h = window.innerHeight || 720;
+      x += vx * dt; y += vy * dt;
+      if (x < 0) x = 0; else if (x > w - 1) x = w - 1;
+      if (y < 0) y = 0; else if (y > h - 1) y = h - 1;
+      lastMove = now;
+      if (!awake) wake();
+      place();
+      if (held) { fire('pointermove', target, 1, true); fire('mousemove', target, 1, false); }
+      else { var t = at(); fire('pointermove', t, 0, true); fire('mousemove', t, 0, false); }
+    } else if (awake && !held && now - lastMove > SLEEP_MS) {
+      sleep();
+    }
+    if (btn && !prevBtn) { if (awake) press(now); }
+    else if (!btn && prevBtn) { if (held) release(true); }
+    if (held) lastMove = now;
+    prevBtn = btn;
+  });
+})();
+</script>
+<!-- injected by scripts/inject-factory.py — after 15 idle minutes (no pad / keyboard /
+     pointer / touch input): a game closes back to the book, anything else returns to
+     Stephens Arcade. Test override: ?idle=<seconds>. -->
+<script id="__gf_idle">
+(function () {
+  var IS_BOOK = false; /*@gf:is_book*/
+  var qs = null;
+  try { qs = new URLSearchParams(location.search).get('idle'); } catch (e) {}
+  var IDLE_MS = (qs ? Math.max(10, parseFloat(qs) || 900) : 15 * 60) * 1000;
+  var DEADZONE = 0.25;
+  // one rAF loop per page reads the pads for every __gf overlay
+  var hub = window.__gfHub;
+  if (!hub) {
+    hub = window.__gfHub = { fns: [], pads: [] };
+    (function () {
+      var NONE = [];
+      function loop(now) {
+        var p = null;
+        try { p = navigator.getGamepads ? navigator.getGamepads() : null; } catch (e) {}
+        hub.pads = p || NONE;
+        for (var i = 0; i < hub.fns.length; i++) { try { hub.fns[i](now, hub.pads); } catch (e) {} }
+        requestAnimationFrame(loop);
+      }
+      requestAnimationFrame(loop);
+    })();
+  }
+  var last = performance.now(), leaving = false, player = null;
+  function bump() { last = performance.now(); }
+  window.addEventListener('keydown', bump, { capture: true });
+  window.addEventListener('pointerdown', bump, { capture: true });
+  window.addEventListener('touchstart', bump, { capture: true, passive: true });
+  function padActive(pads) {
+    for (var i = 0; i < pads.length; i++) {
+      var gp = pads[i];
+      if (!gp || gp.connected === false) continue;
+      for (var b = 0; b < gp.buttons.length; b++) if (gp.buttons[b].pressed) return true;
+      for (var a = 0; a < gp.axes.length; a++) if (Math.abs(gp.axes[a]) > DEADZONE) return true;
+    }
+    return false;
+  }
+  hub.fns.push(function (now, pads) {
+    if (leaving) return;
+    if (IS_BOOK) {                     // while a game is open its own overlay owns the idle timer
+      if (!player) player = document.getElementById('player');
+      if (player && player.classList.contains('open')) { last = now; return; }
+    }
+    if (padActive(pads)) last = now;
+    if (now - last < IDLE_MS) return;
+    leaving = true;
+    var g = false;
+    try { g = window.parent !== window && typeof window.parent.closeGame === 'function'; } catch (e) {}
+    if (g) { try { window.parent.closeGame(); } catch (e) {} }
+    else location.href = '/';          // pagehide fires -> games persist their state
+  });
+})();
+</script>

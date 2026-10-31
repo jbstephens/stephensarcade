@@ -1,0 +1,869 @@
+<meta charset="utf-8">
+<title>Brawl Buddies</title>
+<script>TOUCHPAD = { dpad: true, south: ['z', 'PUNCH'], east: ['x', 'KICK'], north: ['c', 'SUPER'],
+  two: { p1: { dpad: { up: 'w', down: 's', left: 'a', right: 'd' }, buttons: [['f', 'PUNCH'], ['g', 'KICK'], ['h', 'SUPER']] },
+         p2: { buttons: [[',', 'PUNCH'], ['.', 'KICK'], ['/', 'SUPER']] } } };</script>
+<!-- injected by scripts/inject-factory.py (HEAD, before touchpad.js) — hide phantom
+     DualShock sub-devices ("... Motion Sensors", "... Touchpad") and, when a
+     standard-mapping pad exists, every non-standard device. Original indices
+     are kept (filtered slots read null), exactly like lib/controller.js. -->
+<script id="__gf_padfilter">
+(function () {
+  var nav = window.navigator;
+  if (!nav || typeof nav.getGamepads !== 'function' || nav.__gfPadFilter) return;
+  var orig = nav.getGamepads;
+  var PHANTOM = /motion sensors|touchpad/i;
+  var out = [];                       // reused every call: no per-frame allocation
+  function filtered() {
+    var src = orig.call(nav);
+    if (!src) return src;
+    var n = src.length, anyStd = false, i, p;
+    for (i = 0; i < n; i++) { p = src[i]; if (p && p.mapping === 'standard') anyStd = true; }
+    out.length = n;
+    for (i = 0; i < n; i++) {
+      p = src[i];
+      out[i] = (!p || PHANTOM.test(p.id || '') || (anyStd && p.mapping !== 'standard')) ? null : p;
+    }
+    return out;
+  }
+  try { nav.getGamepads = filtered; } catch (e) {}
+  if (nav.getGamepads !== filtered) {
+    try { Object.defineProperty(nav, 'getGamepads', { value: filtered, configurable: true, writable: true }); } catch (e) {}
+  }
+  try { nav.__gfPadFilter = true; } catch (e) {}
+})();
+</script>
+<script src="touchpad.js?v=2"></script>
+<style>
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: #10172a; display: flex;
+    align-items: center; justify-content: center; overflow: hidden;
+  }
+  canvas {
+    width: min(100vw, calc(100vh * 960 / 520));
+    height: auto; display: block; border-radius: 12px;
+    box-shadow: 0 10px 40px rgba(0,0,0,.5);
+  }
+</style>
+<canvas id="game" width="960" height="520"></canvas>
+<script>
+const C = document.getElementById('game'), ctx = C.getContext('2d');
+const W = 960, H = 520, FLOOR = 440, GRAV = 0.65;
+
+// ---------- Sound ----------
+let actx = null;
+function note(freq, start, dur, wave = 'square', vol = 0.1, slideTo = null) {
+  if (!actx) return;
+  const t = actx.currentTime + start, o = actx.createOscillator(), g = actx.createGain();
+  o.type = wave; o.frequency.setValueAtTime(freq, t);
+  if (slideTo) o.frequency.exponentialRampToValueAtTime(slideTo, t + dur);
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g); g.connect(actx.destination); o.start(t); o.stop(t + dur);
+}
+function noise(dur, vol, freq) {
+  if (!actx) return;
+  const len = Math.floor(actx.sampleRate * dur), buf = actx.createBuffer(1, len, actx.sampleRate), d = buf.getChannelData(0);
+  for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / len);
+  const src = actx.createBufferSource(), f = actx.createBiquadFilter(), g = actx.createGain();
+  src.buffer = buf; f.type = 'bandpass'; f.frequency.value = freq; g.gain.value = vol;
+  src.connect(f); f.connect(g); g.connect(actx.destination); src.start();
+}
+const sfx = {
+  swish:  () => noise(0.08, 0.25, 2500),
+  punch:  () => { noise(0.1, 0.8, 900); note(160, 0, 0.1, 'square', 0.1, 70); },
+  kick:   () => { noise(0.14, 0.9, 600); note(120, 0, 0.15, 'square', 0.12, 50); },
+  block:  () => note(1200, 0, 0.08, 'square', 0.06, 900),
+  zap:    () => note(300, 0, 0.3, 'sawtooth', 0.07, 1400),
+  jump:   () => note(300, 0, 0.12, 'sine', 0.1, 600),
+  ko:     () => { noise(0.5, 0.8, 300); [400, 300, 200, 120].forEach((f, i) => note(f, i * 0.12, 0.2, 'square', 0.1)); },
+  bell:   () => { note(880, 0, 0.6, 'sine', 0.15); note(1320, 0, 0.6, 'sine', 0.06); },
+  cheer:  () => { noise(1.4, 0.3, 1100); [523, 659, 784, 1047].forEach((f, i) => note(f, i * 0.1, 0.25, 'square', 0.06)); },
+  click:  () => note(660, 0, 0.05, 'square', 0.05),
+};
+
+// ---------- Input ----------
+const keys = {}, pressed = new Set();
+addEventListener('keydown', e => {
+  if (!actx) { try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch (_) {} }
+  const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+  if (!keys[k]) pressed.add(k);
+  keys[k] = true;
+  if ([' ', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', '/'].includes(k)) e.preventDefault();
+});
+addEventListener('keyup', e => { keys[e.key.length === 1 ? e.key.toLowerCase() : e.key] = false; });
+const CONTROLS = {
+  solo: { left: 'ArrowLeft', right: 'ArrowRight', up: 'ArrowUp', down: 'ArrowDown', punch: 'z', kick: 'x', special: 'c' },
+  p1:   { left: 'a', right: 'd', up: 'w', down: 's', punch: 'f', kick: 'g', special: 'h' },
+  p2:   { left: 'ArrowLeft', right: 'ArrowRight', up: 'ArrowUp', down: 'ArrowDown', punch: ',', kick: '.', special: '/' },
+};
+
+// ---------- Fighters ----------
+const CHARS = [
+  { name: 'Robo Max', color: '#42a5f5', speed: 4, power: 1, jump: 14, special: 'laser', desc: 'Shoots lasers!' },
+  { name: 'Ninja Kit', color: '#ff9800', speed: 5.2, power: 0.85, jump: 15.5, special: 'star', desc: 'Super fast!' },
+  { name: 'Dino Rex', color: '#66bb6a', speed: 3.2, power: 1.25, jump: 12.5, special: 'fire', desc: 'Super strong!' },
+  { name: 'Wizard Zap', color: '#ab47bc', speed: 3.8, power: 1, jump: 14, special: 'orb', desc: 'Magic blasts!' },
+];
+const MOVES = {
+  punch:   { start: 4, active: 5, end: 9, dmg: 5, range: 62, top: 92, bot: 62, kb: 4 },
+  kick:    { start: 7, active: 6, end: 13, dmg: 8, range: 78, top: 60, bot: 25, kb: 8 },
+  special: { start: 10, active: 1, end: 16 },
+};
+
+function trophy(id) { try { const t = JSON.parse(localStorage.getItem('gfTrophies') || '{}'); t[id] = 1; localStorage.setItem('gfTrophies', JSON.stringify(t)); } catch (_) {} }
+let tpMode = 'one';
+const TOUCH = navigator.maxTouchPoints > 0 || /[?&]touch=1/.test(location.search);
+let scene = 'title', mode = 'solo', sel = [0, 1], ready = [false, false], fighters = [], shots = [], particles = [], pops = [];
+let round = 1, roundT = 0, roundState = 'intro', timer = 60 * 60, frame = 0, shake = 0, menuSel = 0, matchWinner = null;
+
+function makeFighter(ci, x, face, ctrl, cpu) {
+  return { ci, ch: CHARS[ci], x, y: FLOOR, vx: 0, vy: 0, face, hp: 100, state: 'idle', st: 0, cd: 0, hitDone: false,
+           ctrl, cpu, wins: 0, combo: 0, comboT: 0, flash: 0, ai: { t: 0, hold: null, holdT: 0 } };
+}
+function startMatch() {
+  fighters = [
+    makeFighter(sel[0], 260, 1, mode === 'solo' ? CONTROLS.solo : CONTROLS.p1, false),
+    makeFighter(sel[1], 700, -1, CONTROLS.p2, mode === 'solo'),
+  ];
+  round = 1; startRound(); scene = 'fight';
+  if (mode === 'duo') trophy('brawl2p');
+}
+function startRound() {
+  fighters.forEach((f, i) => Object.assign(f, { x: i ? 700 : 260, y: FLOOR, vx: 0, vy: 0, hp: 100, state: 'idle', st: 0, cd: 60, combo: 0, flash: 0 }));
+  shots = []; pops = []; roundState = 'intro'; roundT = 0; timer = 60 * 60;
+  sfx.bell();
+}
+
+// ---------- Computer player ----------
+function cpuInput(f, o) {
+  const a = f.ai, dist = Math.abs(o.x - f.x), toward = o.x > f.x ? 'right' : 'left', away = toward === 'right' ? 'left' : 'right';
+  const inp = { left: false, right: false, up: false, down: false, punch: false, kick: false, special: false };
+  if (a.holdT > 0) { a.holdT--; inp[a.hold] = true; return inp; }
+  if (--a.t > 0) { if (dist > 75) inp[toward] = true; return inp; }
+  a.t = 10 + Math.floor(Math.random() * 14);                    // thinks a few times a second
+  const opAttacking = ['punch', 'kick'].includes(o.state);
+  const r = Math.random();
+  if (opAttacking && dist < 110 && r < 0.3) { a.hold = 'down'; a.holdT = 22; inp.down = true; }
+  else if (shots.some(s => s.owner === o) && r < 0.35 && f.y >= FLOOR) inp.up = true;
+  else if (dist > 230 && f.cd === 0 && r < 0.35) inp.special = true;
+  else if (dist > 75) { inp[toward] = true; if (r < 0.06) inp.up = true; }
+  else if (r < 0.42) inp.punch = true;
+  else if (r < 0.72) inp.kick = true;
+  else if (r < 0.82) inp.up = true;
+  else { a.hold = away; a.holdT = 15; inp[away] = true; }
+  return inp;
+}
+function humanInput(c) {
+  return { left: keys[c.left], right: keys[c.right], up: pressed.has(c.up), down: keys[c.down],
+           punch: pressed.has(c.punch), kick: pressed.has(c.kick), special: pressed.has(c.special) };
+}
+
+// ---------- Fighting ----------
+function hurtbox(f) { return { x: f.x - 28, y: f.y - 112, w: 56, h: 112 }; }
+const overlap = (a, b) => a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+const POPWORDS = ['POW!', 'BAM!', 'WHAM!', 'BOOM!', 'ZAP!', 'BONK!'];
+
+function landHit(att, def, dmg, kb, x, y, kickUp) {
+  const blocking = def.state === 'block' && Math.sign(att.x - def.x) === def.face;
+  if (blocking) {
+    def.hp -= dmg * 0.15; def.vx = -def.face * 3; sfx.block();
+    burst(x, y, ['#90caf9', '#fff'], 6, 3);
+    pops.push({ x, y: y - 20, text: 'BLOCK!', t: 40, color: '#90caf9' });
+  } else {
+    def.hp -= dmg; def.state = 'hurt'; def.st = 18; def.flash = 10;
+    def.vx = Math.sign(def.x - att.x || att.face) * kb; if (kickUp) def.vy = -5;
+    att.combo = att.comboT > 0 ? att.combo + 1 : 1; att.comboT = 50;
+    shake = 6 + kb;
+    burst(x, y, ['#ffeb3b', '#ff9800', '#fff'], 14, 5);
+    pops.push({ x, y: y - 20, text: att.combo > 1 ? `${att.combo} HITS!` : POPWORDS[Math.floor(Math.random() * POPWORDS.length)], t: 45, color: '#ffeb3b' });
+  }
+  if (def.hp <= 0) {
+    def.hp = 0; def.state = 'ko'; def.vy = -9; def.vx = Math.sign(def.x - att.x || 1) * 6;
+    att.wins++; roundState = 'ko'; roundT = 0; sfx.ko(); shake = 20;
+  }
+}
+
+function fireSpecial(f) {
+  const k = f.ch.special, y = f.y - 75;
+  if (k === 'laser') shots.push({ owner: f, x: f.x + f.face * 40, y, vx: f.face * 11, dmg: 9, r: 10, kind: k, life: 120 });
+  if (k === 'star') for (const dy of [-12, 12]) shots.push({ owner: f, x: f.x + f.face * 40, y: y + dy, vx: f.face * 9, dmg: 5, r: 10, kind: k, life: 120 });
+  if (k === 'fire') shots.push({ owner: f, x: f.x + f.face * 50, y: y + 10, vx: f.face * 6, dmg: 13, r: 28, kind: k, life: 32 });
+  if (k === 'orb') shots.push({ owner: f, x: f.x + f.face * 40, y: y - 10, vx: f.face * 5, dmg: 11, r: 18, kind: k, life: 200 });
+  f.cd = 110; sfx.zap();
+}
+
+function updateFighter(f, o) {
+  const canAct = roundState === 'fight';
+  const inp = canAct ? (f.cpu ? cpuInput(f, o) : humanInput(f.ctrl)) : {};
+  const onGround = f.y >= FLOOR;
+  if (f.cd > 0) f.cd--;
+  if (f.comboT > 0) f.comboT--;
+  if (f.flash > 0) f.flash--;
+
+  if (f.state === 'ko') { /* just fall over */ }
+  else if (f.state === 'hurt') { if (--f.st <= 0) f.state = 'idle'; }
+  else if (MOVES[f.state]) {
+    const m = MOVES[f.state];
+    f.st++;
+    if (onGround) f.vx *= 0.7;
+    if (f.state === 'special' && f.st === m.start) fireSpecial(f);
+    if (f.state !== 'special' && !f.hitDone && f.st >= m.start && f.st < m.start + m.active) {
+      const hb = { x: f.face > 0 ? f.x + 10 : f.x - 10 - m.range, y: f.y - m.top, w: m.range, h: m.top - m.bot };
+      if (o.state !== 'ko' && overlap(hb, hurtbox(o))) {
+        f.hitDone = true;
+        f.state === 'punch' ? sfx.punch() : sfx.kick();
+        landHit(f, o, m.dmg * f.ch.power, m.kb, f.x + f.face * (m.range - 5), f.y - (m.top + m.bot) / 2, f.state === 'kick');
+      }
+    }
+    if (f.st >= m.start + m.active + m.end) f.state = 'idle';
+  } else {
+    // free to move
+    if (inp.down && onGround) { f.state = 'block'; f.vx = 0; }
+    else {
+      f.state = onGround ? (inp.left || inp.right ? 'walk' : 'idle') : 'jump';
+      f.vx = ((inp.right ? 1 : 0) - (inp.left ? 1 : 0)) * f.ch.speed;
+      if (inp.up && onGround) { f.vy = -f.ch.jump; sfx.jump(); }
+    }
+    if (inp.punch) { f.state = 'punch'; f.st = 0; f.hitDone = false; sfx.swish(); }
+    else if (inp.kick) { f.state = 'kick'; f.st = 0; f.hitDone = false; sfx.swish(); }
+    else if (inp.special && f.cd === 0) { f.state = 'special'; f.st = 0; }
+    if (f.state !== 'block' && !MOVES[f.state] && f.state !== 'jump' && !inp.down) {}
+    if (onGround && f.state !== 'block') f.face = o.x > f.x ? 1 : -1;
+  }
+  f.vy += GRAV; f.y += f.vy;
+  if (f.y >= FLOOR) { f.y = FLOOR; f.vy = 0; if (f.state === 'hurt' || f.state === 'ko') f.vx *= 0.8; }
+  f.x += f.vx;
+  if (f.state === 'hurt') f.vx *= 0.88;
+  f.x = Math.max(40, Math.min(W - 40, f.x));
+}
+
+function burst(x, y, colors, n, power) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * 7, s = Math.random() * power + 1;
+    particles.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: 25 + Math.random() * 15, color: colors[i % colors.length], size: 4 + Math.random() * 4 });
+  }
+}
+
+function updateFight() {
+  roundT++;
+  if (roundState === 'intro' && roundT > 100) { roundState = 'fight'; roundT = 0; }
+  if (roundState === 'fight') {
+    timer--;
+    if (timer <= 0) {
+      const [a, b] = fighters;
+      roundState = 'ko'; roundT = 0; sfx.bell();
+      if (a.hp !== b.hp) (a.hp > b.hp ? a : b).wins++;
+    }
+  }
+  const [a, b] = fighters;
+  updateFighter(a, b); updateFighter(b, a);
+  // don't walk through each other
+  const dx = b.x - a.x;
+  if (Math.abs(dx) < 50 && Math.abs(a.y - b.y) < 90 && a.state !== 'ko' && b.state !== 'ko') {
+    const push = (50 - Math.abs(dx)) / 2 * Math.sign(dx || 1);
+    a.x -= push; b.x += push;
+  }
+  for (const s of shots) {
+    s.x += s.vx; s.life--;
+    if (s.kind === 'orb') s.y += Math.sin(s.life * 0.15) * 2;
+    const target = s.owner === a ? b : a;
+    if (target.state !== 'ko' && overlap({ x: s.x - s.r, y: s.y - s.r, w: s.r * 2, h: s.r * 2 }, hurtbox(target)) && roundState !== 'ko') {
+      s.life = 0; sfx.punch();
+      landHit(s.owner, target, s.dmg * s.owner.ch.power, 6, s.x, s.y, false);
+    }
+    for (const t of shots) if (t !== s && t.owner !== s.owner && Math.abs(t.x - s.x) < t.r + s.r && Math.abs(t.y - s.y) < t.r + s.r) {
+      s.life = t.life = 0; burst(s.x, s.y, ['#fff', '#ffeb3b'], 10, 4);
+    }
+    if (s.x < -50 || s.x > W + 50) s.life = 0;
+  }
+  shots = shots.filter(s => s.life > 0);
+  if (roundState === 'ko' && roundT > 160) {
+    const champ = fighters.find(f => f.wins >= 2);
+    if (champ) { matchWinner = champ; scene = 'results'; roundT = 0; sfx.cheer(); }
+    else { round++; startRound(); }
+  }
+}
+
+function update() {
+  frame++;
+  for (const p of particles) { p.x += p.vx; p.y += p.vy; p.vy += 0.15; p.life--; }
+  particles = particles.filter(p => p.life > 0);
+  for (const p of pops) { p.y -= 0.8; p.t--; }
+  pops = pops.filter(p => p.t > 0);
+  if (shake > 0) shake--;
+
+  const ok = pressed.has(' ') || pressed.has('Enter');
+  // on the iPad: 2-player games get a set of buttons on each side
+  const tpWant = mode === 'duo' && scene !== 'title' ? 'two' : 'one';
+  if (tpWant !== tpMode) { tpMode = tpWant; if (window.touchpadMode) touchpadMode(tpWant); }
+  if (scene === 'title') {
+    if (pressed.has('ArrowUp') || pressed.has('ArrowDown')) { menuSel = 1 - menuSel; sfx.click(); }
+    if (ok) { mode = menuSel ? 'duo' : 'solo'; scene = 'select'; ready = [false, false]; sel = [0, 1]; sfx.click(); }
+  } else if (scene === 'select') {
+    const pick = (i, left, right, go) => {
+      if (ready[i]) return;
+      if (pressed.has(left)) { sel[i] = (sel[i] + 3) % 4; sfx.click(); }
+      if (pressed.has(right)) { sel[i] = (sel[i] + 1) % 4; sfx.click(); }
+      if (go.some(k => pressed.has(k))) { ready[i] = true; sfx.punch(); }
+    };
+    if (mode === 'solo') {
+      pick(0, 'ArrowLeft', 'ArrowRight', [' ', 'Enter', 'z']);
+      if (ready[0]) { const others = [0, 1, 2, 3].filter(i => i !== sel[0]); sel[1] = others[Math.floor(Math.random() * 3)]; startMatch(); }
+    } else {
+      pick(0, 'a', 'd', ['f']);
+      pick(1, 'ArrowLeft', 'ArrowRight', [',', ' ', 'Enter']);
+      if (ready[0] && ready[1]) startMatch();
+    }
+    if (pressed.has('Escape')) scene = 'title';
+  } else if (scene === 'fight') {
+    if (pressed.has('Escape')) scene = 'title';
+    else updateFight();
+  } else if (scene === 'results') {
+    roundT++;
+    if (frame % 30 === 0) burst(Math.random() * W, Math.random() * 200, ['#ff5252', '#ffd740', '#69f0ae', '#40c4ff', '#e040fb'], 16, 5);
+    if (roundT > 60 && ok) startMatch();
+    if (pressed.has('Escape')) { scene = 'select'; ready = [false, false]; }
+  }
+  pressed.clear();
+}
+
+// ---------- Drawing ----------
+function roundRect(x, y, w, h, r, fill) { ctx.beginPath(); ctx.roundRect(x, y, w, h, r); ctx.fillStyle = fill; ctx.fill(); }
+function circle(x, y, r, color) { ctx.fillStyle = color; ctx.beginPath(); ctx.arc(x, y, r, 0, 7); ctx.fill(); }
+function text(str, x, y, size, color = '#fff', align = 'center') {
+  ctx.font = `bold ${size}px "Comic Sans MS", "Chalkboard SE", sans-serif`;
+  ctx.textAlign = align; ctx.lineJoin = 'round';
+  ctx.lineWidth = size / 5; ctx.strokeStyle = '#1b1b2f'; ctx.strokeText(str, x, y);
+  ctx.fillStyle = color; ctx.fillText(str, x, y);
+}
+function limb(x1, y1, x2, y2, w, color) {
+  ctx.strokeStyle = color; ctx.lineWidth = w; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+}
+
+// Draws a fighter facing right with feet at (0, 0)
+function drawBody(ci, state, st, t) {
+  const c = CHARS[ci], col = c.color, bob = state === 'idle' ? Math.sin(t * 0.1) * 2 : 0;
+  const walk = state === 'walk' ? Math.sin(t * 0.3) * 12 : 0;
+  const m = MOVES[state], active = m && st >= m.start;
+  const dark = ci === 0 ? '#1565c0' : ci === 1 ? '#263238' : ci === 2 ? '#388e3c' : '#6a1b9a';
+  ctx.save();
+  if (state === 'hurt') ctx.rotate(-0.15);
+  if (state === 'block') ctx.translate(-4, 0);
+  // tail for the dino
+  if (ci === 2) { ctx.fillStyle = col; ctx.beginPath(); ctx.moveTo(-14, -45); ctx.quadraticCurveTo(-55, -30, -60, -8); ctx.lineTo(-10, -30); ctx.fill(); }
+  // legs
+  const kickOut = state === 'kick' && active;
+  limb(-8, -45, -8 - walk * 0.6, 0, 13, dark);
+  if (kickOut) limb(8, -45, 70, -45, 14, dark); else if (state === 'jump') limb(8, -45, 18, -14, 13, dark); else limb(8, -45, 8 + walk * 0.6, 0, 13, dark);
+  // body
+  if (ci === 3) { ctx.fillStyle = col; ctx.beginPath(); ctx.moveTo(-22, -40 + bob); ctx.lineTo(22, -40 + bob); ctx.lineTo(10, -88 + bob); ctx.lineTo(-10, -88 + bob); ctx.fill(); }
+  else roundRect(-20, -88 + bob, 40, 48, 10, col);
+  if (ci === 0) { roundRect(-10, -78 + bob, 20, 14, 3, '#0d47a1'); circle(0, -71 + bob, 4, frame % 30 < 15 ? '#ff1744' : '#ffeb3b'); }
+  if (ci === 1) { ctx.fillStyle = '#263238'; ctx.fillRect(-20, -70 + bob, 40, 30); ctx.fillStyle = '#e53935'; ctx.fillRect(-20, -58 + bob, 40, 5); }
+  if (ci === 2) { ctx.fillStyle = '#c5e1a5'; ctx.beginPath(); ctx.ellipse(6, -62 + bob, 12, 18, 0, 0, 7); ctx.fill(); }
+  // back arm
+  const armY = -78 + bob;
+  if (state === 'block') limb(-6, armY, 22, armY - 22, 11, dark);
+  else limb(-6, armY, -18, armY + 26, 11, dark);
+  // head
+  const hy = -104 + bob;
+  if (ci === 0) {
+    roundRect(-17, hy - 16, 34, 30, 7, '#90a4ae'); roundRect(-10, hy - 8, 26, 12, 5, '#263238');
+    circle(4, hy - 2, 3.5, '#40c4ff'); circle(12, hy - 2, 3.5, '#40c4ff');
+    limb(0, hy - 16, 0, hy - 28, 3, '#90a4ae'); circle(0, hy - 30, 4, '#ff1744');
+  } else if (ci === 1) {
+    circle(0, hy, 17, '#ff9800');
+    ctx.fillStyle = '#ff9800'; ctx.beginPath(); ctx.moveTo(-15, hy - 6); ctx.lineTo(-12, hy - 26); ctx.lineTo(-2, hy - 14); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(15, hy - 6); ctx.lineTo(12, hy - 26); ctx.lineTo(2, hy - 14); ctx.fill();
+    ctx.fillStyle = '#e53935'; ctx.fillRect(-17, hy - 8, 34, 6);
+    limb(-16, hy - 5, -30, hy + 4 + Math.sin(t * 0.3) * 4, 3, '#e53935');
+    circle(6, hy + 2, 2.5, '#000'); circle(13, hy + 2, 2.5, '#000');
+    ctx.strokeStyle = '#000'; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(10, hy + 7); ctx.lineTo(24, hy + 5); ctx.moveTo(10, hy + 8); ctx.lineTo(24, hy + 10); ctx.stroke();
+  } else if (ci === 2) {
+    ctx.fillStyle = col; ctx.beginPath(); ctx.ellipse(6, hy, 22, 16, 0, 0, 7); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(22, hy + 6, 14, 9, 0, 0, 7); ctx.fill();
+    ctx.fillStyle = '#fff'; for (let i = 0; i < 3; i++) { ctx.beginPath(); ctx.moveTo(16 + i * 7, hy + 12); ctx.lineTo(19 + i * 7, hy + 17); ctx.lineTo(22 + i * 7, hy + 12); ctx.fill(); }
+    circle(8, hy - 6, 4, '#fff'); circle(9, hy - 6, 2, '#000');
+    ctx.fillStyle = '#2e7d32'; for (let i = 0; i < 4; i++) { ctx.beginPath(); ctx.moveTo(-14 - i * 2, hy - 12 + i * 16); ctx.lineTo(-26 - i * 2, hy - 6 + i * 16); ctx.lineTo(-16 - i * 2, hy + i * 16); ctx.fill(); }
+  } else {
+    circle(0, hy, 15, '#ffcc99');
+    ctx.fillStyle = '#eee'; ctx.beginPath(); ctx.moveTo(-10, hy + 4); ctx.lineTo(6, hy + 30); ctx.lineTo(14, hy + 4); ctx.fill();
+    circle(5, hy - 2, 2.5, '#000'); circle(11, hy - 2, 2.5, '#000');
+    ctx.fillStyle = col; ctx.beginPath(); ctx.moveTo(-20, hy - 8); ctx.lineTo(20, hy - 8); ctx.lineTo(-4, hy - 46); ctx.fill();
+    text('★', 0, hy - 14, 12, '#ffeb3b');
+  }
+  // front arm (punches!)
+  const punchOut = state === 'punch' && active;
+  if (state === 'block') { limb(6, armY, 26, armY - 26, 11, dark); roundRect(18, armY - 40, 14, 40, 6, 'rgba(144,202,249,.7)'); }
+  else if (punchOut) { limb(6, armY, 62, armY - 6, 12, dark); circle(64, armY - 6, 9, ci === 0 ? '#90a4ae' : col); }
+  else if (state === 'special' && st > 5) { limb(6, armY, 40, armY + 4, 11, dark); circle(42, armY + 4, 8, '#fff'); }
+  else limb(6, armY, 20, armY + 16, 11, dark);
+  if (ci === 3 && !punchOut && state !== 'block') { limb(20, armY + 16, 30, armY - 14, 3, '#8d6e63'); circle(30, armY - 15, 3.5, '#ffeb3b'); }
+  ctx.restore();
+}
+
+function drawFighter(f) {
+  ctx.save(); ctx.translate(f.x, f.y);
+  ctx.fillStyle = 'rgba(0,0,0,.25)'; ctx.beginPath(); ctx.ellipse(0, FLOOR - f.y + 2, 34, 8, 0, 0, 7); ctx.fill();
+  ctx.scale(f.face, 1);
+  if (f.state === 'ko') { ctx.rotate(-Math.min(1.5, (f.y < FLOOR ? 0.6 : 1.5))); ctx.translate(-10, 0); }
+  if (f.flash > 0 && frame % 4 < 2) ctx.globalAlpha = 0.5;
+  drawBody(f.ci, f.state, f.st, frame + f.ci * 40);
+  ctx.restore();
+  if (f.state === 'ko' && f.y >= FLOOR) for (let i = 0; i < 3; i++) {    // dizzy stars
+    const a = frame * 0.1 + i * 2.1;
+    text('★', f.x - f.face * 40 + Math.cos(a) * 20, f.y - 30 + Math.sin(a) * 6, 16, '#ffeb3b');
+  }
+}
+
+function drawShot(s) {
+  if (s.kind === 'laser') { roundRect(s.x - 22, s.y - 5, 44, 10, 5, '#ff1744'); roundRect(s.x - 18, s.y - 2, 36, 4, 2, '#fff'); }
+  if (s.kind === 'star') {
+    ctx.save(); ctx.translate(s.x, s.y); ctx.rotate(frame * 0.5); ctx.fillStyle = '#cfd8dc';
+    for (let i = 0; i < 4; i++) { ctx.rotate(Math.PI / 2); ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(4, -4); ctx.lineTo(0, -12); ctx.lineTo(-4, -4); ctx.fill(); }
+    circle(0, 0, 3, '#455a64'); ctx.restore();
+  }
+  if (s.kind === 'fire') {
+    for (let i = 0; i < 5; i++) circle(s.x - Math.sign(s.vx) * i * 8 + (Math.random() - .5) * 8, s.y + (Math.random() - .5) * 18, 20 - i * 3, i % 2 ? '#ff9100' : '#ffea00');
+  }
+  if (s.kind === 'orb') { circle(s.x, s.y, s.r + 6, 'rgba(224,64,251,.35)'); circle(s.x, s.y, s.r, '#e040fb'); circle(s.x - 5, s.y - 5, 5, '#fff'); }
+}
+
+function drawStage() {
+  const g = ctx.createLinearGradient(0, 0, 0, FLOOR); g.addColorStop(0, '#ff7043'); g.addColorStop(0.6, '#ffb74d'); g.addColorStop(1, '#ffe0b2');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  circle(W / 2, 330, 90, '#fff59d');
+  for (let i = 0; i < 12; i++) {                                 // city skyline
+    const bx = i * 85 - 10, bh = 90 + (i * 37) % 120;
+    ctx.fillStyle = '#5d4037'; ctx.fillRect(bx, FLOOR - 60 - bh, 70, bh + 60);
+    ctx.fillStyle = '#ffd54f'; for (let y = FLOOR - 50 - bh; y < FLOOR - 70; y += 24) for (let x = bx + 10; x < bx + 60; x += 20) if ((x + y) % 3) ctx.fillRect(x, y, 8, 10);
+  }
+  ctx.fillStyle = '#4e342e'; ctx.fillRect(0, FLOOR, W, H - FLOOR);   // rooftop floor
+  ctx.fillStyle = '#6d4c41'; ctx.fillRect(0, FLOOR, W, 8);
+  for (let x = 0; x < W; x += 60) { ctx.fillStyle = 'rgba(0,0,0,.2)'; ctx.fillRect(x, FLOOR + 8, 2, H); }
+}
+
+function drawHUD() {
+  fighters.forEach((f, i) => {
+    const x = i ? W - 420 : 20, w = 400;
+    roundRect(x, 18, w, 30, 10, 'rgba(0,0,0,.5)');
+    const hw = (w - 8) * f.hp / 100;
+    roundRect(i ? x + 4 + (w - 8 - hw) : x + 4, 22, Math.max(0, hw), 22, 8, f.hp > 50 ? '#69f0ae' : f.hp > 25 ? '#ffd740' : '#ff5252');
+    text(f.ch.name + (f.cpu ? ' (CPU)' : ''), i ? x + w : x, 72, 22, f.ch.color, i ? 'right' : 'left');
+    for (let k = 0; k < 2; k++) circle(i ? x + w - 200 - k * 22 : x + 200 + k * 22, 65, 8, k < f.wins ? '#ffd740' : 'rgba(0,0,0,.35)');
+    roundRect(i ? x + w - 120 : x, 84, 120, 10, 5, 'rgba(0,0,0,.35)');
+    roundRect(i ? x + w - 120 : x, 84, 120 * (1 - f.cd / 110), 10, 5, f.cd === 0 ? '#40c4ff' : '#546e7a');
+  });
+  roundRect(W / 2 - 34, 12, 68, 46, 10, 'rgba(0,0,0,.5)');
+  text(String(Math.ceil(timer / 60)), W / 2, 48, 32, timer < 600 ? '#ff5252' : '#fff');
+}
+
+function drawControls(c, x, y, who) {
+  const names = { ArrowLeft: '←', ArrowRight: '→', ArrowUp: '↑', ArrowDown: '↓' };
+  const n = k => (names[k] || k.toUpperCase());
+  text(who, x, y, 20, '#ffe082');
+  text(`Move ${n(c.left)} ${n(c.right)}   Jump ${n(c.up)}   Block ${n(c.down)}`, x, y + 26, 17);
+  text(`Punch ${n(c.punch)}   Kick ${n(c.kick)}   Special ${n(c.special)}`, x, y + 50, 17);
+}
+
+function draw() {
+  ctx.save();
+  if (shake) ctx.translate((Math.random() - .5) * shake, (Math.random() - .5) * shake);
+  drawStage();
+  if (scene === 'title') {
+    ctx.fillStyle = 'rgba(0,0,0,.35)'; ctx.fillRect(0, 0, W, H);
+    text('BRAWL BUDDIES', W / 2, 110 + Math.sin(frame * 0.06) * 5, 76, '#ffd740');
+    CHARS.forEach((c, i) => { ctx.save(); ctx.translate(180 + i * 200, 330); ctx.scale(i < 2 ? 1 : -1, 1); drawBody(i, 'idle', 0, frame + i * 30); ctx.restore(); });
+    ['1 Player  (vs Computer)', '2 Players'].forEach((t, i) => {
+      if (i === menuSel) roundRect(W / 2 - 200, 360 + i * 60, 400, 48, 14, '#ffd740');
+      text(t, W / 2, 394 + i * 60, 30, i === menuSel ? '#1b1b2f' : '#fff');
+    });
+    text('↑ ↓ to choose, SPACE to start', W / 2, 500, 18, '#ffe0b2');
+  } else if (scene === 'select') {
+    ctx.fillStyle = 'rgba(0,0,0,.45)'; ctx.fillRect(0, 0, W, H);
+    text('Pick your fighter!', W / 2, 60, 44, '#ffd740');
+    CHARS.forEach((c, i) => {
+      const x = 60 + i * 220, y = 90;
+      const p1 = sel[0] === i, p2 = mode === 'duo' && sel[1] === i;
+      roundRect(x - 6, y - 6, 192, 262, 18, p1 && p2 ? '#ffd740' : p1 ? '#40c4ff' : p2 ? '#ff5252' : 'rgba(0,0,0,0)');
+      roundRect(x, y, 180, 250, 14, 'rgba(255,255,255,.15)');
+      ctx.save(); ctx.translate(x + 90, y + 190); drawBody(i, (p1 && ready[0]) || (p2 && ready[1]) ? 'punch' : 'idle', 8, frame + i * 30); ctx.restore();
+      text(c.name, x + 90, y + 220, 22, c.color);
+      text(c.desc, x + 90, y + 243, 15);
+      if (p1) text(mode === 'solo' ? 'YOU' : 'P1', x + 30, y + 30, 22, '#40c4ff');
+      if (p2) text('P2', x + 150, y + 30, 22, '#ff5252');
+    });
+    if (mode === 'solo') {
+      drawControls(CONTROLS.solo, W / 2, 380, (TOUCH ? '◀ ▶ to pick, PUNCH to choose!' : '← → to pick, SPACE to choose!'));
+    } else {
+      drawControls(CONTROLS.p1, 240, 380, ready[0] ? 'P1 READY!' : (TOUCH ? 'P1: ◀ ▶ to pick, PUNCH to choose' : 'P1: A D to pick, F to choose'));
+      drawControls(CONTROLS.p2, 720, 380, ready[1] ? 'P2 READY!' : (TOUCH ? 'P2: ◀ ▶ to pick, PUNCH to choose' : 'P2: ← → to pick, , to choose'));
+    }
+    text('ESC = back', W / 2, 505, 15, '#ffe0b2');
+  } else {
+    for (const f of fighters) drawFighter(f);
+    for (const s of shots) drawShot(s);
+    for (const p of particles) { ctx.globalAlpha = Math.min(1, p.life / 15); ctx.fillStyle = p.color; ctx.fillRect(p.x, p.y, p.size, p.size); }
+    ctx.globalAlpha = 1;
+    for (const p of pops) { ctx.globalAlpha = Math.min(1, p.t / 15); text(p.text, p.x, p.y, 30, p.color); }
+    ctx.globalAlpha = 1;
+    drawHUD();
+    if (scene === 'fight') {
+      if (roundState === 'intro') text(roundT < 60 ? `ROUND ${round}` : 'FIGHT!', W / 2, 230, 90, roundT < 60 ? '#fff' : '#ff5252');
+      if (roundState === 'fight' && roundT < 240 && round === 1) {
+        const c = fighters[0].ctrl, n = { ArrowLeft: '←', ArrowRight: '→', ArrowUp: '↑', ArrowDown: '↓' };
+        if (mode === 'solo') text('Z = punch   X = kick   C = special   ↓ = block   ↑ = jump', W / 2, 140, 20);
+      }
+      if (roundState === 'ko') text(fighters.some(f => f.hp <= 0) ? 'K.O.!' : 'TIME!', W / 2, 230, 110, '#ffd740');
+    }
+    if (scene === 'results') {
+      ctx.fillStyle = 'rgba(0,0,0,.45)'; ctx.fillRect(0, 0, W, H);
+      const who = mode === 'solo' ? (matchWinner === fighters[0] ? 'YOU WIN!! 🏆' : 'The computer wins!') : (matchWinner === fighters[0] ? 'PLAYER 1 WINS!' : 'PLAYER 2 WINS!');
+      text(who, W / 2, 180, 70, '#ffd740');
+      text(`${matchWinner.ch.name} is the champion!`, W / 2, 245, 32, matchWinner.ch.color);
+      if (roundT > 60) { text('SPACE = rematch', W / 2, 400, 28, '#69f0ae'); text('ESC = pick new fighters', W / 2, 440, 22); }
+    }
+  }
+  ctx.restore();
+}
+
+let last = performance.now(), acc = 0;
+function loop(now) {
+  acc += Math.min(100, now - last); last = now;
+  while (acc >= 1000 / 60) { update(); acc -= 1000 / 60; }
+  draw();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+<!-- injected by scripts/inject-factory.py — hold PS (or SELECT+START) for 1s to go
+     up one level: game -> the book (parent.closeGame), standalone game -> /factory/,
+     the book -> Stephens Arcade (/). Shares one rAF pad poll with the cursor + idle overlays. -->
+<script id="__gf_pad_exit">
+(function () {
+  var IS_BOOK = false; /*@gf:is_book*/
+  var HOLD_MS = 1000;
+  // one rAF loop per page reads the pads for every __gf overlay
+  var hub = window.__gfHub;
+  if (!hub) {
+    hub = window.__gfHub = { fns: [], pads: [] };
+    (function () {
+      var NONE = [];
+      function loop(now) {
+        var p = null;
+        try { p = navigator.getGamepads ? navigator.getGamepads() : null; } catch (e) {}
+        hub.pads = p || NONE;
+        for (var i = 0; i < hub.fns.length; i++) { try { hub.fns[i](now, hub.pads); } catch (e) {} }
+        requestAnimationFrame(loop);
+      }
+      requestAnimationFrame(loop);
+    })();
+  }
+
+  var STEPS = 20, TF = [];               // precomputed badge transforms: zero allocations while held
+  for (var s = 0; s <= STEPS; s++) TF.push('translateX(-50%) scale(' + (1 + 0.35 * s / STEPS).toFixed(4) + ')');
+  var HIDE_TF = 'translateX(-50%) scale(0.85)';
+  var heldSince = 0, needRelease = true, leaving = false, badge = null, lastStep = -2;
+  var player = null;
+
+  function comboDown(pads) {
+    for (var i = 0; i < pads.length; i++) {
+      var gp = pads[i];
+      if (!gp || gp.connected === false) continue;
+      var b = gp.buttons;
+      if ((b[16] && b[16].pressed) || (b[8] && b[8].pressed && b[9] && b[9].pressed)) return true;
+    }
+    return false;
+  }
+  function makeBadge() {
+    badge = document.createElement('div');
+    badge.id = '__gfx_exit';
+    badge.textContent = IS_BOOK ? '◄ ARCADE' : '◄ BOOK';
+    badge.style.cssText = 'position:fixed;top:12px;left:50%;z-index:2147483001;pointer-events:none;' +
+      'padding:7px 18px;border-radius:999px;background:#10172a;color:#ffd23f;border:3px solid #ffd23f;' +
+      'font:bold 18px/1 "Trebuchet MS","Arial Rounded MT Bold",sans-serif;letter-spacing:1px;white-space:nowrap;' +
+      'transform-origin:50% 0;opacity:0;transform:' + HIDE_TF + ';transition:opacity .12s;';
+    (document.body || document.documentElement).appendChild(badge);
+  }
+  function setBadge(step) {            // step -1 = hidden, 0..STEPS = hold progress
+    if (step === lastStep) return;
+    lastStep = step;
+    if (step < 0) { if (badge) { badge.style.opacity = '0'; badge.style.transform = HIDE_TF; } return; }
+    if (!badge) makeBadge();
+    badge.style.opacity = '1';
+    badge.style.transform = TF[step];
+  }
+  function inGame() {
+    try { return window.parent !== window && typeof window.parent.closeGame === 'function'; } catch (e) { return false; }
+  }
+  function leave() {
+    leaving = true;                    // never navigate twice
+    if (!IS_BOOK && inGame()) { setBadge(-1); try { window.parent.closeGame(); } catch (e) {} return; }
+    location.href = IS_BOOK ? '/' : '/factory/';
+  }
+  hub.fns.push(function (now, pads) {
+    if (leaving) return;
+    var down = comboDown(pads);
+    if (IS_BOOK) {
+      if (!player) player = document.getElementById('player');
+      if (player && player.classList.contains('open')) {   // the game's own overlay handles this hold
+        if (down) needRelease = true;
+        heldSince = 0; setBadge(-1); return;
+      }
+    }
+    if (needRelease) {                 // a hold that started elsewhere never counts here
+      if (down) return;
+      needRelease = false;
+    }
+    if (!down) { heldSince = 0; setBadge(-1); return; }
+    if (!heldSince) heldSince = now;
+    var p = (now - heldSince) / HOLD_MS;
+    setBadge(Math.round((p > 1 ? 1 : p) * STEPS));
+    if (p >= 1) leave();
+  });
+})();
+</script>
+<!-- injected by scripts/inject-factory.py — console (low-fx) mode only: no-op canvas
+     shadowBlur and kill CSS backdrop-filter (both measured fps killers on the Pi).
+     The mouse cursor is hidden only while the pad cursor is installed. -->
+<script id="__gf_lowfx">
+(function () {
+  var on = false;
+  try {
+    if (/[?&]fx=low\b/.test(location.search)) { on = true; localStorage.setItem('arcade_lowfx', '1'); }
+    else if (/[?&]fx=full\b/.test(location.search)) { localStorage.setItem('arcade_lowfx', '0'); }
+    else { on = localStorage.getItem('arcade_lowfx') === '1'; }
+  } catch (e) {}
+  if (!on) return;
+  try {
+    Object.defineProperty(CanvasRenderingContext2D.prototype, 'shadowBlur', {
+      set: function () {}, get: function () { return 0; }, configurable: true
+    });
+  } catch (e) {}
+  try {
+    var st = document.createElement('style');
+    st.textContent = '* { backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }' +
+      ' html.__gfx_padcursor, html.__gfx_padcursor * { cursor: none !important; }';
+    (document.head || document.documentElement).appendChild(st);
+  } catch (e) {}
+})();
+</script>
+<!-- injected by scripts/inject-factory.py — console mode only: the TV has no printer,
+     so window.print shows a friendly toast instead of a dead print dialog. -->
+<script id="__gf_print">
+(function () {
+  var on = false;
+  try { on = /[?&]fx=low\b/.test(location.search) || localStorage.getItem('arcade_lowfx') === '1'; } catch (e) {}
+  if (!on) return;
+  var toast = null, timer = 0;
+  function hide() { if (toast) toast.style.opacity = '0'; }
+  window.print = function () {
+    try {
+      if (!toast) {
+        toast = document.createElement('div');
+        toast.id = '__gfx_print';
+        toast.textContent = '🖨️ Printing works on the iPad — not on the TV!';
+        toast.style.cssText = 'position:fixed;left:50%;bottom:48px;transform:translateX(-50%);z-index:2147483001;' +
+          'pointer-events:none;padding:14px 26px;border-radius:16px;background:#10172a;color:#ffd23f;' +
+          'border:3px solid #ffd23f;font:bold 24px/1.2 "Trebuchet MS","Arial Rounded MT Bold",sans-serif;' +
+          'white-space:nowrap;opacity:0;transition:opacity .2s;';
+        (document.body || document.documentElement).appendChild(toast);
+      }
+      toast.style.opacity = '1';
+      clearTimeout(timer);
+      timer = setTimeout(hide, 2500);
+    } catch (e) {}
+  };
+})();
+</script>
+<!-- injected by scripts/inject-factory.py — pad cursor: a pad-driven mouse pointer so
+     tap/click-only games play on the console. Right stick moves it (left stick too in
+     pointer games); X / R1 clicks and drags (pointer + mouse events, like touchpad.js
+     turns fingers into mouse events). Never consumes pad input. -->
+<script id="__gf_cursor">
+(function () {
+  window.__GF_CURSOR_LEFT = false; /*@gf:cursor_left*/
+  var IS_BOOK = false; /*@gf:is_book*/
+  var LEFT = window.__GF_CURSOR_LEFT === true;
+  var DZ = 0.2, SPEED = 900, SLEEP_MS = 4000, CLICK_SLOP = 12;
+  // one rAF loop per page reads the pads for every __gf overlay
+  var hub = window.__gfHub;
+  if (!hub) {
+    hub = window.__gfHub = { fns: [], pads: [] };
+    (function () {
+      var NONE = [];
+      function loop(now) {
+        var p = null;
+        try { p = navigator.getGamepads ? navigator.getGamepads() : null; } catch (e) {}
+        hub.pads = p || NONE;
+        for (var i = 0; i < hub.fns.length; i++) { try { hub.fns[i](now, hub.pads); } catch (e) {} }
+        requestAnimationFrame(loop);
+      }
+      requestAnimationFrame(loop);
+    })();
+  }
+
+  var S = window.__gfCursorState = { installed: false, awake: false, held: false, x: 0, y: 0 };
+  var el = null, x = 0, y = 0, awake = false, lastMove = 0, lastT = 0;
+  var held = false, target = null, sx = 0, sy = 0, prevBtn = false, vx = 0, vy = 0, player = null;
+  var INIT = { bubbles: true, cancelable: true, composed: true, view: window, detail: 0,
+    clientX: 0, clientY: 0, screenX: 0, screenY: 0, button: 0, buttons: 0,
+    pointerId: 1, pointerType: 'mouse', isPrimary: true, width: 1, height: 1, pressure: 0 };
+  var HAS_PE = typeof window.PointerEvent === 'function';
+
+  function install() {
+    if (S.installed) return;
+    S.installed = true;
+    x = Math.round((window.innerWidth || 1280) / 2); y = Math.round((window.innerHeight || 720) / 2);
+    el = document.createElement('div');
+    el.id = '__gfx_cursor';
+    el.style.cssText = 'position:fixed;left:0;top:0;width:28px;height:28px;pointer-events:none;z-index:2147483000;' +
+      'opacity:0;transition:opacity .25s;will-change:transform;';
+    el.innerHTML = '<svg width="28" height="28" viewBox="0 0 28 28" style="display:block;overflow:visible">' +
+      '<path d="M3 2 L3 23.5 L8.6 18.3 L12.6 26.6 L17 24.5 L13 16.4 L20.8 16.4 Z" fill="#fff" stroke="#10172a" ' +
+      'stroke-width="2.2" stroke-linejoin="round"/></svg>';
+    (document.body || document.documentElement).appendChild(el);
+    try { document.documentElement.classList.add('__gfx_padcursor'); } catch (e) {}
+    place();
+  }
+  function place() {
+    el.style.transform = 'translate3d(' + (x - 3) + 'px,' + (y - 2) + 'px,0)';
+    S.x = x; S.y = y;
+  }
+  function wake() { awake = S.awake = true; el.style.opacity = '1'; }
+  function sleep() { awake = S.awake = false; el.style.opacity = '0'; }
+  function fire(type, node, buttons, pointer) {
+    if (!node) return;
+    INIT.clientX = x; INIT.clientY = y;
+    INIT.screenX = (window.screenX || 0) + x; INIT.screenY = (window.screenY || 0) + y;
+    INIT.buttons = buttons; INIT.pressure = buttons ? 0.5 : 0;
+    INIT.detail = type === 'click' ? 1 : 0;
+    var ev;
+    try { ev = pointer && HAS_PE ? new PointerEvent(type, INIT) : new MouseEvent(type, INIT); } catch (e) { return; }
+    try { node.dispatchEvent(ev); } catch (e) {}
+  }
+  function at() { return document.elementFromPoint(x, y) || document.body || document.documentElement; }
+  function press(now) {
+    target = at(); held = S.held = true; sx = x; sy = y; lastMove = now;
+    fire('pointermove', target, 0, true); fire('mousemove', target, 0, false);
+    fire('pointerdown', target, 1, true); fire('mousedown', target, 1, false);
+  }
+  function release(clickOk) {
+    var t = target;
+    held = S.held = false; target = null;
+    fire('pointerup', t, 0, true); fire('mouseup', t, 0, false);
+    if (clickOk) { var dx = x - sx, dy = y - sy; if (dx * dx + dy * dy < CLICK_SLOP * CLICK_SLOP) fire('click', t, 0, false); }
+  }
+  function stick(ax, ay) {
+    ax = +ax || 0; ay = +ay || 0;
+    var m = Math.sqrt(ax * ax + ay * ay);
+    if (m <= DZ) return;
+    var e = ((m > 1 ? 1 : m) - DZ) / (1 - DZ);
+    e = e * e * SPEED / m;              // mild ease: squared magnitude, ~900 px/s at full tilt
+    vx += ax * e; vy += ay * e;
+  }
+
+  window.addEventListener('gamepadconnected', install);
+  hub.fns.push(function (now, pads) {
+    var i, p, a, b, btn = false;
+    if (!S.installed) {
+      for (i = 0; i < pads.length; i++) { p = pads[i]; if (p && p.mapping === 'standard') { install(); break; } }
+      if (!S.installed) return;
+    }
+    var dt = lastT ? (now - lastT) / 1000 : 0;
+    if (dt > 0.05) dt = 0.05;
+    lastT = now;
+    vx = 0; vy = 0;
+    for (i = 0; i < pads.length; i++) {
+      p = pads[i];
+      if (!p || p.connected === false) continue;
+      a = p.axes; b = p.buttons;
+      if (a) { stick(a[2], a[3]); if (LEFT) stick(a[0], a[1]); }
+      if ((b[0] && b[0].pressed) || (b[5] && b[5].pressed)) btn = true;
+    }
+    if (IS_BOOK) {                      // the book: asleep and silent while a game is open
+      if (!player) player = document.getElementById('player');
+      if (player && player.classList.contains('open')) {
+        if (held) release(false);
+        if (awake) sleep();
+        prevBtn = btn; return;
+      }
+    }
+    if (vx !== 0 || vy !== 0) {
+      var w = window.innerWidth || 1280, h = window.innerHeight || 720;
+      x += vx * dt; y += vy * dt;
+      if (x < 0) x = 0; else if (x > w - 1) x = w - 1;
+      if (y < 0) y = 0; else if (y > h - 1) y = h - 1;
+      lastMove = now;
+      if (!awake) wake();
+      place();
+      if (held) { fire('pointermove', target, 1, true); fire('mousemove', target, 1, false); }
+      else { var t = at(); fire('pointermove', t, 0, true); fire('mousemove', t, 0, false); }
+    } else if (awake && !held && now - lastMove > SLEEP_MS) {
+      sleep();
+    }
+    if (btn && !prevBtn) { if (awake) press(now); }
+    else if (!btn && prevBtn) { if (held) release(true); }
+    if (held) lastMove = now;
+    prevBtn = btn;
+  });
+})();
+</script>
+<!-- injected by scripts/inject-factory.py — after 15 idle minutes (no pad / keyboard /
+     pointer / touch input): a game closes back to the book, anything else returns to
+     Stephens Arcade. Test override: ?idle=<seconds>. -->
+<script id="__gf_idle">
+(function () {
+  var IS_BOOK = false; /*@gf:is_book*/
+  var qs = null;
+  try { qs = new URLSearchParams(location.search).get('idle'); } catch (e) {}
+  var IDLE_MS = (qs ? Math.max(10, parseFloat(qs) || 900) : 15 * 60) * 1000;
+  var DEADZONE = 0.25;
+  // one rAF loop per page reads the pads for every __gf overlay
+  var hub = window.__gfHub;
+  if (!hub) {
+    hub = window.__gfHub = { fns: [], pads: [] };
+    (function () {
+      var NONE = [];
+      function loop(now) {
+        var p = null;
+        try { p = navigator.getGamepads ? navigator.getGamepads() : null; } catch (e) {}
+        hub.pads = p || NONE;
+        for (var i = 0; i < hub.fns.length; i++) { try { hub.fns[i](now, hub.pads); } catch (e) {} }
+        requestAnimationFrame(loop);
+      }
+      requestAnimationFrame(loop);
+    })();
+  }
+  var last = performance.now(), leaving = false, player = null;
+  function bump() { last = performance.now(); }
+  window.addEventListener('keydown', bump, { capture: true });
+  window.addEventListener('pointerdown', bump, { capture: true });
+  window.addEventListener('touchstart', bump, { capture: true, passive: true });
+  function padActive(pads) {
+    for (var i = 0; i < pads.length; i++) {
+      var gp = pads[i];
+      if (!gp || gp.connected === false) continue;
+      for (var b = 0; b < gp.buttons.length; b++) if (gp.buttons[b].pressed) return true;
+      for (var a = 0; a < gp.axes.length; a++) if (Math.abs(gp.axes[a]) > DEADZONE) return true;
+    }
+    return false;
+  }
+  hub.fns.push(function (now, pads) {
+    if (leaving) return;
+    if (IS_BOOK) {                     // while a game is open its own overlay owns the idle timer
+      if (!player) player = document.getElementById('player');
+      if (player && player.classList.contains('open')) { last = now; return; }
+    }
+    if (padActive(pads)) last = now;
+    if (now - last < IDLE_MS) return;
+    leaving = true;
+    var g = false;
+    try { g = window.parent !== window && typeof window.parent.closeGame === 'function'; } catch (e) {}
+    if (g) { try { window.parent.closeGame(); } catch (e) {} }
+    else location.href = '/';          // pagehide fires -> games persist their state
+  });
+})();
+</script>

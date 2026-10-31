@@ -1,0 +1,1671 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Robo Detective: The Case of the Missing Crown</title>
+<!-- injected by scripts/inject-factory.py (HEAD, before touchpad.js) — hide phantom
+     DualShock sub-devices ("... Motion Sensors", "... Touchpad") and, when a
+     standard-mapping pad exists, every non-standard device. Original indices
+     are kept (filtered slots read null), exactly like lib/controller.js. -->
+<script id="__gf_padfilter">
+(function () {
+  var nav = window.navigator;
+  if (!nav || typeof nav.getGamepads !== 'function' || nav.__gfPadFilter) return;
+  var orig = nav.getGamepads;
+  var PHANTOM = /motion sensors|touchpad/i;
+  var out = [];                       // reused every call: no per-frame allocation
+  function filtered() {
+    var src = orig.call(nav);
+    if (!src) return src;
+    var n = src.length, anyStd = false, i, p;
+    for (i = 0; i < n; i++) { p = src[i]; if (p && p.mapping === 'standard') anyStd = true; }
+    out.length = n;
+    for (i = 0; i < n; i++) {
+      p = src[i];
+      out[i] = (!p || PHANTOM.test(p.id || '') || (anyStd && p.mapping !== 'standard')) ? null : p;
+    }
+    return out;
+  }
+  try { nav.getGamepads = filtered; } catch (e) {}
+  if (nav.getGamepads !== filtered) {
+    try { Object.defineProperty(nav, 'getGamepads', { value: filtered, configurable: true, writable: true }); } catch (e) {}
+  }
+  try { nav.__gfPadFilter = true; } catch (e) {}
+})();
+</script>
+<script src="touchpad.js?v=2"></script>
+<style>
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: #05060f; display: flex;
+    align-items: center; justify-content: center; overflow: hidden;
+  }
+  canvas {
+    width: min(100vw, calc(100vh * 960 / 520));
+    height: auto; display: block; border-radius: 12px;
+    box-shadow: 0 10px 40px rgba(0,0,0,.5);
+  }
+</style>
+<canvas id="game" width="960" height="520"></canvas>
+<script>
+// ROBO DETECTIVE: THE CASE OF THE MISSING CROWN
+// King Gloop's golden crown went missing on the night of his big party at the Goo Castle!
+// Detective Robo searches 6 rooms for 12 clues, talks to 6 suspects, solves 3 mini-puzzles,
+// then makes the ACCUSATION. (Spoiler: Baby Gloop borrowed it to look like his daddy!)
+// Point-and-tap: tap things, or use arrows to pick + SPACE/ENTER to choose, ESC to go back.
+const C = document.getElementById('game'), ctx = C.getContext('2d');
+const W = 960, H = 520;
+
+// ---------- Saves, trophies, stickers ----------
+function trophy(id) { try { const t = JSON.parse(localStorage.getItem('gfTrophies') || '{}'); t[id] = 1; localStorage.setItem('gfTrophies', JSON.stringify(t)); } catch (_) {} }
+let stickerNew = 0;
+function sticker(id) { try { const s = JSON.parse(localStorage.getItem('gfStickers') || '{}'); if (!s[id]) { s[id] = 1; localStorage.setItem('gfStickers', JSON.stringify(s)); stickerNew = 150; } } catch (_) {} }   // for the Sticker Book in the Game Factory book
+
+let save = { clues: {}, talked: {}, solvedPuzzles: {}, solved: false, cases: 0, music: true, started: false };
+function freshCase() { save.clues = {}; save.talked = {}; save.solvedPuzzles = {}; save.started = true; }
+function loadSave() {
+  try { const s = JSON.parse(localStorage.getItem('roboDetective') || 'null'); if (s && typeof s === 'object') save = Object.assign(save, s); } catch (_) {}
+  save.clues = save.clues || {}; save.talked = save.talked || {}; save.solvedPuzzles = save.solvedPuzzles || {};
+}
+function writeSave() { try { localStorage.setItem('roboDetective', JSON.stringify(save)); } catch (_) {} }
+loadSave();
+
+// ---------- The case: suspects, clues, rooms ----------
+// key: true = this clue proves Baby Gloop did it. who = the suspect a "red herring" clue really belongs to.
+const SUSPECTS = {
+  duke:     { name: 'Duke Googool', col: '#00c853', room: 'throne',
+              lines: ["Mwa-ha-ha! ...Oh. It's you, Detective Robo.", "I did NOT take the crown! I was busy eating ALL the goo-cupcakes.", "Besides, look at my feet. Size ENORMOUS! Gooey goo goo!"],
+              again: "I already told you! Goo-cupcakes! Big feet! Now shoo!",
+              note: "Was eating goo-cupcakes all night. Has ENORMOUS feet.",
+              hint: "Duke Googool's feet are ENORMOUS... but the goo footprints are TINY! Who has tiny feet?" },
+  sparks:   { name: 'Sparks', col: '#ff9100', room: 'kitchen',
+              lines: ["Woof woof! Hi Robo! Want a fish treat?", "I was in the kitchen eating fish treats all night. CRUNCH CRUNCH!", "I dropped crumbs everywhere. Oops! But paws are for treats, not crowns!"],
+              again: "Woof! Still eating fish treats. Crunch!",
+              note: "Ate fish treats in the kitchen. Dropped lots of crumbs.",
+              hint: "Sparks only took fish treats! Look for clues about someone SMALL who loves kings." },
+  pinch:    { name: 'Captain Pinch', col: '#ff3d00', room: 'garden',
+              lines: ["Ahoy, matey! Captain Pinch at yer service! Snip snip!", "I was diggin' for buried treasure in the garden all night.", "All I found was a bottle cap. Arr! And a crown would never fit on my shell anyway."],
+              again: "Arr, I'm still diggin'! Found another bottle cap!",
+              note: "Dug for treasure in the garden all night. Found a bottle cap.",
+              hint: "Captain Pinch was digging for treasure in the garden. Who could write a wobbly crayon note?" },
+  snatcher: { name: 'Snatcher', col: '#90a4ae', room: 'music',
+              lines: ["Meow. Snatcher has a REALLY good alibi.", "I was chasing a little blue bird around the castle. It got away. It ALWAYS gets away!", "Then I found a comfy box and took a nap. Purrrrr. So comfy."],
+              again: "Purrr... go away, I'm napping in my comfy box.",
+              note: "Chased a blue bird, then napped in a comfy box.",
+              hint: "Snatcher was chasing a bird and napping in a box. Who was reading a book about KINGS?" },
+  nega:     { name: 'Nega-Robo', col: '#e040fb', room: 'tower',
+              lines: ["Greetings, Robo. I am... looking at the stars.", "I was up in the Tower ALL night polishing my purple eyes. See how they sparkle?", "A crown? I don't need a crown. I only want a friend. ...Will you be my friend?"],
+              again: "The stars are pretty tonight, friend!",
+              note: "Looked at stars in the Tower all night. Wants a friend!",
+              hint: "Nega-Robo only wanted a friend! Who wants to look just like their daddy?" },
+  baby:     { name: 'Baby Gloop', col: '#b388ff', room: 'library',
+              lines: ["Goo goo! Hi Robo!", "Me? I was reading a book about KINGS. Kings are SO cool!", "Crown? What crown? ...I didn't see NO crown. Goo. (He looks away...)"],
+              again: "Goo goo... I'm just reading! (Something gold is shining behind him...)",
+              note: "Reading a book about kings. Looked a little nervous...",
+              hint: "" },
+};
+const SUSPECT_IDS = ['duke', 'sparks', 'pinch', 'snatcher', 'nega', 'baby'];
+const CLUES = {
+  footprints: { name: 'Goo Footprints', icon: '👣', room: 'throne', key: true, text: 'Sticky green goo footprints by the empty crown cushion... but they are TINY!' },
+  note:       { name: 'Crayon Note', icon: '📝', room: 'throne', key: true, text: "A wobbly crayon note: 'I BOROWD IT. I WIL GIV IT BAK.'" },
+  crumbs:     { name: 'Crumb Trail', icon: '🍪', room: 'kitchen', who: 'sparks', text: "A crumb trail of fish crackers... it goes to Sparks's food bowl." },
+  jelly:      { name: 'Lime Jelly', icon: '🍮', room: 'kitchen', key: true, text: 'Green lime jelly with a teeny-tiny spoon. That is where the green goo came from!' },
+  feather:    { name: 'Blue Feather', icon: '🪶', room: 'garden', who: 'snatcher', text: 'A little blue bird feather. Somebody was chasing a bird!' },
+  claws:      { name: 'Claw Marks', icon: '🦀', room: 'garden', who: 'pinch', text: 'Pinchy claw marks in the dirt, next to a dug-up hole.' },
+  sheet:      { name: 'Song Sheet', icon: '🎼', room: 'music', key: true, puzzle: 'memory', text: "A music note sheet in crayon: 'I WANT TO BE LIKE DADDY' (goo goo la la!)" },
+  thread:     { name: 'Cape Thread', icon: '🧵', room: 'music', who: 'duke', text: 'A black thread from a fancy cape, on the dance floor.' },
+  invite:     { name: 'Torn Invitation', icon: '💌', room: 'library', key: true, text: "A torn party invitation: 'Come dressed as your HERO!' It has tiny goo fingerprints." },
+  drawing:    { name: 'Crayon Drawing', icon: '🖍️', room: 'library', key: true, puzzle: 'slide', text: "A crayon drawing of a little blob wearing a BIG crown. It says 'ME!'" },
+  sparkles:   { name: 'Purple Sparkles', icon: '✨', room: 'tower', who: 'nega', text: 'Purple sparkles by the telescope. Whose eyes glow purple?' },
+  bib:        { name: 'Glitter Bib', icon: '🍼', room: 'tower', key: true, puzzle: 'lock', text: 'A tiny baby bib covered in GOLD crown glitter!' },
+};
+const CLUE_IDS = Object.keys(CLUES);
+const NEED = 8;                                        // clues needed before you can accuse
+const clueCount = () => CLUE_IDS.filter(c => save.clues[c]).length;
+
+// ---------- Sound effects ----------
+let actx = null, master = null, musicBus = null, sfxBus = null, delayIn = null, delayNode = null, noiseBuf = null;
+let musicOn = save.music !== false;
+function note(freq, start, dur, wave = 'square', vol = 0.12, slideTo = null) {
+  if (!actx) return;
+  const t = actx.currentTime + start;
+  const o = actx.createOscillator(), g = actx.createGain();
+  o.type = wave; o.frequency.setValueAtTime(freq, t);
+  if (slideTo) o.frequency.exponentialRampToValueAtTime(slideTo, t + dur);
+  g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(vol, t + 0.006);
+  g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g); g.connect(sfxBus || actx.destination);
+  o.start(t); o.stop(t + dur + 0.02);
+}
+const sfx = {
+  click:  () => note(700, 0, 0.06, 'square', 0.05),
+  move:   () => note(520, 0, 0.04, 'triangle', 0.05),
+  talk:   () => { note(300 + Math.random() * 200, 0, 0.07, 'triangle', 0.07); },
+  clue:   () => { [784, 988, 1175, 1568].forEach((f, i) => note(f, i * 0.08, 0.3, 'sine', 0.12)); note(2093, 0.34, 0.5, 'triangle', 0.06); },
+  nothing: () => { note(330, 0, 0.12, 'triangle', 0.08); note(262, 0.12, 0.2, 'triangle', 0.08); },
+  card:   m => note(midi(m), 0, 0.45, 'triangle', 0.13),
+  match:  () => { note(880, 0, 0.1, 'sine', 0.1); note(1320, 0.1, 0.25, 'sine', 0.1); },
+  nope:   () => { note(260, 0, 0.12, 'square', 0.06); note(200, 0.12, 0.2, 'square', 0.06); },
+  slide:  () => note(240, 0, 0.08, 'triangle', 0.1, 360),
+  dial:   () => { note(1400, 0, 0.03, 'square', 0.04); note(900, 0.03, 0.04, 'square', 0.04); },
+  unlock: () => { note(500, 0, 0.08, 'square', 0.08); note(750, 0.08, 0.08, 'square', 0.08); [1047, 1319, 1568].forEach((f, i) => note(f, 0.2 + i * 0.07, 0.3, 'sine', 0.1)); },
+  gasp:   () => note(300, 0, 0.5, 'sine', 0.12, 900),
+  wrong:  () => { note(392, 0, 0.18, 'triangle', 0.1); note(370, 0.2, 0.18, 'triangle', 0.1); note(349, 0.4, 0.4, 'triangle', 0.1); },
+  win:    () => [523, 659, 784, 1047, 784, 1047, 1319].forEach((f, i) => note(f, i * 0.11, 0.25, 'square', 0.08)),
+};
+
+// ---------- MUSIC ENGINE (voices from Robo Jump 4: lead with vibrato + echo, pads, bass, plucks, drums) ----------
+let MUSIC_LOG = null;                                  // tests set this to an array to see every scheduled note
+const midi = n => 440 * Math.pow(2, (n - 69) / 12);
+function setupAudio() {
+  master = actx.createGain(); master.gain.value = 0.9;
+  if (actx.createDynamicsCompressor) {
+    const comp = actx.createDynamicsCompressor();
+    comp.threshold.value = -14; comp.ratio.value = 4; comp.attack.value = 0.005; comp.release.value = 0.2;
+    master.connect(comp); comp.connect(actx.destination);
+  } else master.connect(actx.destination);
+  musicBus = actx.createGain(); musicBus.gain.value = musicOn ? 0.6 : 0; musicBus.connect(master);
+  sfxBus = actx.createGain(); sfxBus.gain.value = 0.85; sfxBus.connect(master);
+  // feedback-delay echo for the lead (time is set per song)
+  delayIn = actx.createGain(); delayIn.gain.value = 0.28;
+  delayNode = actx.createDelay(2); delayNode.delayTime.value = 0.32;
+  const fb = actx.createGain(); fb.gain.value = 0.34;
+  const dlp = actx.createBiquadFilter(); dlp.type = 'lowpass'; dlp.frequency.value = 2400;
+  delayIn.connect(delayNode); delayNode.connect(dlp); dlp.connect(fb); fb.connect(delayNode); dlp.connect(musicBus);
+  noiseBuf = actx.createBuffer(1, actx.sampleRate, actx.sampleRate);
+  const d = noiseBuf.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+}
+function toggleMusic() {
+  musicOn = !musicOn; save.music = musicOn; writeSave();
+  if (actx && musicBus) { const t = actx.currentTime; musicBus.gain.cancelScheduledValues(t); musicBus.gain.setValueAtTime(musicBus.gain.value, t); musicBus.gain.linearRampToValueAtTime(musicOn ? 0.6 : 0, t + 0.25); }
+  if (musicOn) { nextT = 0; }
+}
+// a smooth gain envelope: 0 -> peak (attack) -> sustain level -> 0 (release). No clicks!
+function envGain(t, a, peak, sus, dur, rel, out) {
+  const g = actx.createGain(), hold = t + Math.max(a + 0.002, dur);
+  g.gain.setValueAtTime(0, t);
+  g.gain.linearRampToValueAtTime(peak, t + a);
+  if (sus < 1) g.gain.setTargetAtTime(peak * sus, t + a, Math.max(0.03, dur * 0.35));
+  g.gain.setTargetAtTime(0, hold, rel / 4);           // smooth exponential release, never a jump
+  g.connect(out);
+  return g;
+}
+function osc(type, f, t, end, detune = 0) {
+  const o = actx.createOscillator(); o.type = type; o.frequency.setValueAtTime(f, t);
+  if (detune) o.detune.setValueAtTime(detune, t);
+  o.start(t); o.stop(end + 0.05); return o;
+}
+function lowpass(f, q, t) { const b = actx.createBiquadFilter(); b.type = 'lowpass'; b.frequency.setValueAtTime(f, t); b.Q.value = q; return b; }
+// 🎺 LEAD: detuned oscillators, filter, delayed vibrato on long notes, and an echo send
+function leadVoice(m, t, dur, vol, kind, out, echo = true) {
+  const f = midi(m), end = t + dur + 0.25;
+  let g;
+  if (kind === 'steel' || kind === 'bell') {           // hit-and-ring voices (steel drum, crystal bell)
+    g = envGain(t, 0.004, vol, 0.25, Math.min(dur, 0.6), 0.25, out);
+    const parts = kind === 'steel' ? [[1, 1], [2, 0.35], [3.01, 0.12]] : [[1, 1], [2.01, 0.25], [4.02, 0.12], [5.4, 0.05]];
+    for (const [k, v] of parts) { const pg = actx.createGain(); pg.gain.value = v; osc('sine', f * k, t, end).connect(pg); pg.connect(g); }
+  } else {
+    g = envGain(t, kind === 'flute' || kind === 'glass' ? 0.035 : 0.012, vol, 0.8, dur, 0.12, out);
+    const types = { saw: ['sawtooth', 'sawtooth'], square: ['square', 'square'], brass: ['sawtooth', 'sawtooth'],
+                    flute: ['sine', 'triangle'], glass: ['triangle', 'sine'] }[kind] || ['sawtooth', 'square'];
+    const cut = { saw: 3000, square: 2600, brass: 1400, flute: 4000, glass: 3500 }[kind] || 2800;
+    const lp = lowpass(cut, kind === 'brass' ? 3 : 1.5, t);
+    if (kind === 'brass') { lp.frequency.linearRampToValueAtTime(3600, t + 0.06); lp.frequency.setTargetAtTime(1700, t + 0.08, 0.2); }
+    lp.connect(g);
+    const o1 = osc(types[0], f, t, end, -7), o2 = osc(types[1], kind === 'glass' ? f * 2 : f, t, end, 7);
+    const mix = actx.createGain(); mix.gain.value = kind === 'glass' ? 0.6 : 0.5;
+    o1.connect(mix); o2.connect(mix); mix.connect(lp);
+    if (dur > 0.28) {                                  // vibrato fades in on held notes
+      const lfo = osc('sine', 5.6, t, end), lg = actx.createGain();
+      lg.gain.setValueAtTime(0, t); lg.gain.linearRampToValueAtTime(0, t + 0.12); lg.gain.linearRampToValueAtTime(f * 0.009, t + 0.4);
+      lfo.connect(lg); lg.connect(o1.frequency); lg.connect(o2.frequency);
+    }
+  }
+  if (echo && delayIn) g.connect(delayIn);
+}
+// 🎹 PAD: soft detuned saws (strings), a vowel-filtered "choir", or an organ
+function padVoice(notes, t, dur, vol, kind, out) {
+  for (const m of notes) {
+    const f = midi(m), end = t + dur + 0.6;
+    const g = envGain(t, kind === 'choir' ? 0.35 : 0.22, vol, 0.85, dur, 0.5, out);
+    if (kind === 'organ') {
+      osc('sine', f, t, end).connect(g);
+      const g2 = actx.createGain(); g2.gain.value = 0.4; osc('sine', f * 2, t, end).connect(g2); g2.connect(g);
+    } else if (kind === 'choir') {                     // "aah": two formant filters + slow vibrato
+      const src = actx.createGain(); src.gain.value = 0.5;
+      const o1 = osc('sawtooth', f, t, end, -9), o2 = osc('sawtooth', f, t, end, 9);
+      o1.connect(src); o2.connect(src);
+      for (const [ff, q, v] of [[730, 6, 1], [1090, 7, 0.6], [2440, 8, 0.25]]) {
+        const bp = actx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = ff; bp.Q.value = q;
+        const bg = actx.createGain(); bg.gain.value = v * 2.2; src.connect(bp); bp.connect(bg); bg.connect(g);
+      }
+      const lfo = osc('sine', 4.8, t, end), lg = actx.createGain(); lg.gain.value = f * 0.006; lfo.connect(lg); lg.connect(o1.frequency); lg.connect(o2.frequency);
+    } else {
+      const lp = lowpass(kind === 'saw' ? 1500 : 1100, 0.7, t); lp.connect(g);
+      osc('sawtooth', f, t, end, -11).connect(lp); osc('sawtooth', f, t, end, 11).connect(lp);
+    }
+  }
+}
+// 🎸 BASS: punchy filter envelope
+function bassVoice(m, t, dur, vol, kind, out) {
+  const f = midi(m), end = t + dur + 0.1;
+  const g = envGain(t, 0.006, vol, 0.7, dur, 0.06, out);
+  const lp = lowpass(kind === 'slap' ? 3200 : 1600, kind === 'slap' ? 8 : 5, t);
+  lp.frequency.setTargetAtTime(kind === 'slap' ? 380 : 260, t + 0.01, kind === 'slap' ? 0.05 : 0.09);
+  lp.connect(g);
+  osc(kind === 'square' ? 'square' : 'sawtooth', f, t, end).connect(lp);
+  const sg = actx.createGain(); sg.gain.value = 0.6; osc(kind === 'sub' ? 'triangle' : 'sine', f, t, end).connect(sg); sg.connect(g);
+}
+// 🎨 COUNTER-MELODY / arpeggio pluck
+function pluckVoice(m, t, dur, vol, kind, out) {
+  const f = midi(m), end = t + dur + 0.2;
+  const g = envGain(t, 0.004, vol, 0.35, dur, 0.12, out);
+  if (kind === 'bell') { osc('sine', f, t, end).connect(g); const g2 = actx.createGain(); g2.gain.value = 0.3; osc('sine', f * 3.01, t, end).connect(g2); g2.connect(g); }
+  else { const lp = lowpass(2600, 1, t); lp.frequency.setTargetAtTime(900, t, 0.08); lp.connect(g); osc(kind === 'square' ? 'square' : 'triangle', f, t, end).connect(lp); osc('sawtooth', f, t, end, 5).connect(lp); }
+}
+function noiseHit(t, type, freq, q, vol, decay, out) {
+  const s = actx.createBufferSource(); s.buffer = noiseBuf;
+  const fl = actx.createBiquadFilter(); fl.type = type; fl.frequency.value = freq; fl.Q.value = q;
+  const g = actx.createGain(); g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(vol, t + 0.002); g.gain.exponentialRampToValueAtTime(0.001, t + decay);
+  s.connect(fl); fl.connect(g); g.connect(out); s.start(t); s.stop(t + decay + 0.05);
+}
+// 🥁 DRUMS
+function drumHit(kind, t, vol, out) {
+  if (kind === 'k') {                                  // kick: a sine that drops in pitch fast
+    const o = osc('sine', 150, t, t + 0.35); o.frequency.exponentialRampToValueAtTime(42, t + 0.12);
+    const g = actx.createGain(); g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(vol, t + 0.003); g.gain.exponentialRampToValueAtTime(0.001, t + 0.32);
+    o.connect(g); g.connect(out);
+  } else if (kind === 's') {                           // snare: noise + a little tone
+    noiseHit(t, 'highpass', 1400, 0.7, vol * 0.8, 0.16, out);
+    const o = osc('triangle', 190, t, t + 0.1), g = actx.createGain();
+    g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(vol * 0.5, t + 0.002); g.gain.exponentialRampToValueAtTime(0.001, t + 0.09); o.connect(g); g.connect(out);
+  } else if (kind === 'h') noiseHit(t, 'highpass', 7500, 1, vol, 0.04, out);
+  else if (kind === 'o') noiseHit(t, 'highpass', 6500, 1, vol, 0.22, out);
+  else if (kind === 'c') { for (let i = 0; i < 3; i++) noiseHit(t + i * 0.011, 'bandpass', 1500, 2, vol, 0.03 + (i === 2 ? 0.1 : 0), out); }
+  else if (kind === 'x') noiseHit(t, 'highpass', 4000, 0.5, vol, 1.2, out);          // crash cymbal
+  else if (kind === 'r') { const o = osc('sine', 2400, t, t + 0.06), g = actx.createGain(); g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(vol, t + 0.002); g.gain.exponentialRampToValueAtTime(0.001, t + 0.04); o.connect(g); g.connect(out); }
+  else if (kind === 't') {                             // tom
+    const o = osc('sine', 140, t, t + 0.3); o.frequency.exponentialRampToValueAtTime(75, t + 0.25);
+    const g = actx.createGain(); g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(vol, t + 0.003); g.gain.exponentialRampToValueAtTime(0.001, t + 0.28); o.connect(g); g.connect(out);
+  }
+}
+// ---- sequencer: every bar has a chord + 8 melody 8th-notes (MIDI number, -1 = hold, 0 = rest) ----
+const Dm = [62, 65, 69], Bb = [58, 62, 65], A = [57, 61, 64], A7 = [57, 61, 67], Gm = [55, 58, 62], Cmaj = [60, 64, 67], Am = [57, 60, 64];
+const Dmaj = [62, 66, 69], Gmaj = [55, 59, 62], Amaj = [57, 61, 64], Bm = [59, 62, 66], Em = [55, 59, 64];
+const _ = -1;
+// 🕵️ "Sneaky Sleuth" (main theme): D minor, tiptoeing chromatic melody, pizzicato walking bass, finger snaps
+const SNEAKY_BARS = [
+  [Dm, [62, 0, 65, 0, 69, _, 68, 69]], [Dm, [74, _, 72, 69, 65, _, 0, 0]], [Bb, [70, 0, 69, 0, 67, _, 65, 67]], [A, [69, _, _, _, 0, 61, 64, 67]],
+  [Dm, [62, 0, 65, 0, 69, _, 68, 69]], [Gm, [70, _, 74, _, 72, 70, 69, 67]], [A, [69, _, 73, _, 76, _, 73, 69]], [A7, [67, _, _, _, 0, 0, 0, 0]],
+  [Bb, [74, _, 74, 72, 70, _, 72, 74]], [Cmaj, [76, _, 72, _, 67, _, 0, 0]], [Am, [72, _, 72, 71, 69, _, 64, _]], [Dm, [65, _, 69, _, 74, _, 0, 0]],
+  [Gm, [70, 0, 70, 0, 74, 0, 70, 0]], [A, [73, _, 69, _, 64, _, 73, 76]], [Dm, [74, _, _, _, 69, _, 65, _]], [A, [61, 0, 64, 0, 67, 0, 69, 0]],
+];
+const SONGS = {
+  mystery: { bpm: 104, bars: SNEAKY_BARS, scale: [2, 4, 5, 7, 9, 10, 0, 1], lead: 'flute', lead2: 'bell', harm: 'glass', pad: 'saw', bass: 'sub',
+             bassPat: ['R', '.', '5', '.', '8', '.', '5', 'A'], bassLen: 0.55, arp: 'pluck', arpPat: ['.', 0, '.', 1, '.', 2, '.', 1],
+             drums: { k: [[0, 0.5], [3, 0.35]], c: [[2, 0.12], [6, 0.12]], h: [[1, 0.03], [3, 0.03], [5, 0.03], [7, 0.05]], r: [[4, 0.06]] } },
+  puzzle:  { bpm: 92, bars: SNEAKY_BARS, scale: [2, 4, 5, 7, 9, 10, 0, 1], lead: 'bell', lead2: 'glass', harm: 'glass', pad: 'saw', bass: 'sub',
+             bassPat: ['R', '.', '.', '.', '5', '.', '.', '.'], bassLen: 1.6, arp: 'bell', arpPat: [0, '.', 1, '.', 2, '.', 1, '.'],
+             drums: { h: [[2, 0.02], [6, 0.02]], k: [[0, 0.3]] } },
+  // 🎉 "Case Closed!" (happy ending): bouncy D major with brass, bells and handclaps
+  happy:   { bpm: 132, scale: [2, 4, 6, 7, 9, 11, 1], lead: 'brass', lead2: 'square', harm: 'glass', pad: 'saw', bass: 'saw',
+             bassPat: ['R', '.', '8', '.', 'R', '.', '8', '5'], bassLen: 0.7, arp: 'bell', arpPat: [0, 1, 2, 3, 2, 1, 0, 1],
+             drums: { k: [[0, 0.6], [4, 0.6], [5, 0.3]], s: [[2, 0.35], [6, 0.35]], c: [[6, 0.2]], h: [[0, 0.05], [1, 0.04], [2, 0.05], [3, 0.04], [4, 0.05], [5, 0.04], [6, 0.05], [7, 0.06]] },
+             bars: [
+               [Dmaj, [74, _, 73, 74, 78, _, 74, _]], [Gmaj, [79, _, 78, 76, 74, _, 71, _]], [Amaj, [73, _, 74, 76, 78, _, 76, _]], [Dmaj, [74, _, _, _, 0, 69, 71, 73]],
+               [Bm, [74, _, 71, _, 78, _, 74, _]], [Gmaj, [79, _, 83, _, 81, 79, 78, 76]], [Amaj, [76, _, 78, _, 79, _, 76, _]], [Dmaj, [74, _, _, _, 0, 69, 71, 73]],
+               [Gmaj, [71, _, 74, _, 79, _, 78, 79]], [Dmaj, [81, _, 78, _, 74, _, 0, 0]], [Em, [79, _, 78, _, 76, 74, 71, _]], [Amaj, [73, _, 76, _, 81, _, 0, 0]],
+               [Gmaj, [83, _, 81, 79, 78, _, 79, 81]], [Dmaj, [78, _, 74, _, 69, _, 74, 78]], [Amaj, [76, _, 74, 73, 69, _, 73, 76]], [Dmaj, [74, _, _, _, _, _, 0, 0]],
+             ] },
+};
+let song = 'mystery', songPos = 0, songLoop = 0, nextT = 0, songOut = null;
+const stepDur = S => 60 / S.bpm / 2;
+function setSong(id) {
+  if (song === id) return;
+  song = id; songPos = 0; songLoop = 0; nextT = 0;
+  if (songOut && actx) { const o = songOut, t = actx.currentTime; o.gain.setValueAtTime(o.gain.value, t); o.gain.linearRampToValueAtTime(0, t + 0.4); setTimeout(() => { try { o.disconnect(); } catch (_) {} }, 600); }
+  songOut = null;
+}
+function logNote(part, m) { if (MUSIC_LOG) MUSIC_LOG.push([song, part, m]); }
+function bassRoot(ch) { let r = ch[0] - 24; while (r < 33) r += 12; while (r > 44) r -= 12; return r; }
+function thirdBelow(S, m) {                             // the scale note two steps under m (for the harmony part)
+  let n = m, found = 0;
+  while (found < 2 && n > m - 6) { n--; if (S.scale.includes(((n % 12) + 12) % 12)) found++; }
+  return n;
+}
+function scheduleStep(S, pos, t) {
+  const out = songOut, sd = stepDur(S), bi = Math.floor(pos / 8), st = pos % 8, b = S.bars[bi], ch = b[0];
+  // 🥁 drums
+  for (const k in S.drums) for (const [s, v] of S.drums[k]) if (s === st) { drumHit(k, t, v, out); logNote('drum', 0); }
+  // 🎸 bass (short and plucky = pizzicato)
+  const bp = S.bassPat[st];
+  if (bp !== '.') {
+    const r = bassRoot(ch), nextR = bassRoot(S.bars[(bi + 1) % S.bars.length][0]);
+    const m = bp === 'R' ? r : bp === '5' ? r + 7 : bp === '8' ? r + 12 : nextR - 1;
+    bassVoice(m, t, sd * S.bassLen, 0.17, S.bass, out); logNote('bass', m);
+  }
+  // 🎹 pads
+  if (st === 0) { padVoice(ch.map(n => n - 12), t, 8 * sd * 0.98, 0.028, S.pad, out); logNote('pad', ch[0]); }
+  // 🎻 pizzicato / bell arpeggio
+  const ap = S.arpPat[st];
+  if (ap !== '.') { const m = (ap === 3 ? ch[0] + 12 : ch[ap]) + 12; pluckVoice(m, t, sd * 0.9, 0.04, S.arp, out); logNote('arp', m); }
+  // 🎺 lead melody (+ harmony and a different lead sound the 2nd time round)
+  const e = b[1][st];
+  if (e > 0) {
+    let len = 1; while (st + len < 8 && b[1][st + len] === _) len++;
+    const kind = songLoop % 2 ? S.lead2 : S.lead;
+    leadVoice(e, t, len * sd * 0.92, kind === 'bell' ? 0.14 : 0.1, kind, out); logNote('lead', e);
+    if (songLoop % 2) { const hm = thirdBelow(S, e); leadVoice(hm, t, len * sd * 0.92, 0.045, S.harm, out, false); logNote('harm', hm); }
+  }
+}
+function playMusic() {
+  if (!actx || !musicBus || !musicOn) return;
+  const S = SONGS[song] || SONGS.mystery;
+  if (!songOut) {
+    songOut = actx.createGain(); songOut.gain.value = 1; songOut.connect(musicBus);
+    if (delayNode) delayNode.delayTime.setValueAtTime(stepDur(S) * 3, actx.currentTime);     // dotted-8th echo
+    nextT = 0;
+  }
+  if (nextT < actx.currentTime) nextT = actx.currentTime + 0.05;
+  while (nextT < actx.currentTime + 0.16) {
+    scheduleStep(S, songPos, nextT);
+    nextT += stepDur(S); songPos++;
+    if (songPos >= S.bars.length * 8) { songPos = 0; songLoop++; }
+  }
+}
+
+// ---------- Drawing helpers ----------
+let frame = 0;
+function roundRect(x, y, w, h, r, fill) {
+  ctx.fillStyle = fill; ctx.beginPath();
+  if (ctx.roundRect) ctx.roundRect(x, y, Math.max(0, w), Math.max(0, h), r); else ctx.rect(x, y, Math.max(0, w), Math.max(0, h));
+  ctx.fill();
+}
+function strokeRound(x, y, w, h, r, col, lw) {
+  ctx.strokeStyle = col; ctx.lineWidth = lw; ctx.beginPath();
+  if (ctx.roundRect) ctx.roundRect(x, y, Math.max(0, w), Math.max(0, h), r); else ctx.rect(x, y, Math.max(0, w), Math.max(0, h));
+  ctx.stroke();
+}
+function text(str, x, y, size, color = '#fff', align = 'center') {
+  ctx.font = `bold ${size}px "Trebuchet MS", Arial, sans-serif`;
+  ctx.textAlign = align; ctx.lineJoin = 'round';
+  ctx.strokeStyle = 'rgba(0,0,0,.6)'; ctx.lineWidth = Math.max(3, size / 6);
+  ctx.strokeText(str, x, y); ctx.fillStyle = color; ctx.fillText(str, x, y);
+}
+function plain(str, x, y, size, color = '#222', align = 'left') {   // text with no outline (for paper and bubbles)
+  ctx.font = `bold ${size}px "Trebuchet MS", Arial, sans-serif`; ctx.textAlign = align; ctx.fillStyle = color; ctx.fillText(str, x, y);
+}
+function wrap(str, maxW, size) {                        // splits a sentence into lines that fit
+  ctx.font = `bold ${size}px "Trebuchet MS", Arial, sans-serif`;
+  const words = String(str).split(' '), lines = []; let cur = '';
+  for (const w of words) { const t = cur ? cur + ' ' + w : w; if (cur && ctx.measureText(t).width > maxW) { lines.push(cur); cur = w; } else cur = t; }
+  if (cur) lines.push(cur);
+  return lines;
+}
+function circle(x, y, r, fill) { ctx.fillStyle = fill; ctx.beginPath(); ctx.arc(x, y, Math.max(0, r), 0, 7); ctx.fill(); }
+function ellipse(x, y, rx, ry, fill, rot = 0) { ctx.fillStyle = fill; ctx.beginPath(); ctx.ellipse(x, y, Math.max(0, rx), Math.max(0, ry), rot, 0, 7); ctx.fill(); }
+function drawStar(x, y, r, fill, rot = 0) {
+  ctx.fillStyle = fill; ctx.beginPath();
+  for (let i = 0; i < 10; i++) { const a = rot + i * Math.PI / 5 - Math.PI / 2, rr = i % 2 ? r * 0.45 : r; ctx.lineTo(x + Math.cos(a) * rr, y + Math.sin(a) * rr); }
+  ctx.fill();
+}
+function drawHeart(x, y, r, fill) {
+  ctx.fillStyle = fill; ctx.beginPath(); ctx.moveTo(x, y + r * 0.9);
+  ctx.bezierCurveTo(x - r * 1.4, y - r * 0.1, x - r * 0.7, y - r * 1.1, x, y - r * 0.35);
+  ctx.bezierCurveTo(x + r * 0.7, y - r * 1.1, x + r * 1.4, y - r * 0.1, x, y + r * 0.9); ctx.fill();
+}
+function drawMoon(x, y, r, fill, bg) { circle(x, y, r, fill); circle(x + r * 0.45, y - r * 0.25, r * 0.85, bg); }
+function drawSun(x, y, r, fill) {
+  ctx.strokeStyle = fill; ctx.lineWidth = Math.max(1, r * 0.18);
+  for (let i = 0; i < 8; i++) { const a = i * Math.PI / 4; ctx.beginPath(); ctx.moveTo(x + Math.cos(a) * r * 0.75, y + Math.sin(a) * r * 0.75); ctx.lineTo(x + Math.cos(a) * r * 1.15, y + Math.sin(a) * r * 1.15); ctx.stroke(); }
+  circle(x, y, r * 0.6, fill);
+}
+function drawCrown(x, y, w, fill = '#ffd740') {        // (x, y) = bottom middle of the crown
+  const h = w * 0.6;
+  ctx.fillStyle = fill; ctx.beginPath(); ctx.moveTo(x - w / 2, y);
+  ctx.lineTo(x - w / 2, y - h); ctx.lineTo(x - w / 4, y - h * 0.45); ctx.lineTo(x, y - h * 1.05); ctx.lineTo(x + w / 4, y - h * 0.45); ctx.lineTo(x + w / 2, y - h); ctx.lineTo(x + w / 2, y);
+  ctx.fill();
+  ctx.fillStyle = '#ffb300'; ctx.fillRect(x - w / 2, y - h * 0.22, w, h * 0.22);
+  circle(x, y - h * 0.5, w * 0.08, '#ff1744'); circle(x - w * 0.3, y - h * 0.11, w * 0.05, '#2979ff'); circle(x + w * 0.3, y - h * 0.11, w * 0.05, '#00e676');
+  for (const k of [-0.5, 0, 0.5]) circle(x + k * w, y - h * (k ? 1 : 1.05), w * 0.06, '#fff59d');
+}
+function sparkle(x, y, r, a = 0, col = '#fff59d') {     // a 4-point twinkle
+  ctx.fillStyle = col; ctx.beginPath();
+  for (let i = 0; i < 8; i++) { const ang = a + i * Math.PI / 4, rr = i % 2 ? r * 0.25 : r; ctx.lineTo(x + Math.cos(ang) * rr, y + Math.sin(ang) * rr); }
+  ctx.fill();
+}
+
+// ---------- Characters: every one is drawn with (cx, by) = middle of the feet, s = size ----------
+const PAL_ROBO = { head: '#ffffff', body: '#f5f7ff', visor: '#111827', eye: '#40c4ff', legs: '#3d5afe', pod: '#2979ff' };
+const PAL_NEGA = { head: '#37474f', body: '#263238', visor: '#b71c1c', eye: '#e040fb', legs: '#4a148c', pod: '#7b1fa2' };
+// 🤖 Robo (same look as Robo Jump: white round robot, dark visor, blue eyes, blue ear pods), plus a detective hat + magnifying glass
+function drawRobo(cx, by, s, opt = {}) {
+  const pal = opt.nega ? PAL_NEGA : PAL_ROBO, face = opt.face || 1;
+  ctx.save(); ctx.translate(cx, by); ctx.scale(s, s);
+  const bob = opt.still ? 0 : Math.sin(frame * 0.08) * 0.8;
+  const x = -15, y = -40 + bob, w = 30, h = 40 - bob;
+  ctx.fillStyle = pal.legs; ctx.fillRect(x + 4, y + h - 7, 8, 7); ctx.fillRect(x + w - 12, y + h - 7, 8, 7);
+  roundRect(x + 2, y + h * 0.5, w - 4, h * 0.4, 6, pal.body);
+  circle(x + w / 2, y + h * 0.7, 3, opt.nega ? '#e040fb' : pal.pod);
+  roundRect(x - 5, y + h * 0.3 - 3, 6, 9, 3, pal.pod);
+  roundRect(x + w - 1, y + h * 0.3 - 3, 6, 9, 3, pal.pod);
+  roundRect(x - 2, y, w + 4, h * 0.55, 12, pal.head);
+  roundRect(x + 2, y + 4, w - 4, h * 0.55 - 9, 9, pal.visor);
+  const ex = x + w / 2 + face * 3, ey = y + h * 0.27, blink = frame % 200 < 6 ? 0.6 : 5;
+  if (opt.nega) { circle(ex - 6, ey, 6, 'rgba(224,64,251,.35)'); circle(ex + 6, ey, 6, 'rgba(224,64,251,.35)'); }
+  ctx.fillStyle = pal.eye;
+  ctx.beginPath(); ctx.ellipse(ex - 6, ey, 3.5, blink, 0, 0, 7); ctx.ellipse(ex + 6, ey, 3.5, blink, 0, 0, 7); ctx.fill();
+  if (opt.nega && opt.smile) { ctx.strokeStyle = '#e040fb'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(ex, ey + 5, 3, 0.2, Math.PI - 0.2); ctx.stroke(); }
+  if (!opt.nega) {                                     // 🕵️ detective hat (a little brown deerstalker)
+    ellipse(0, y + 1, 21, 4.5, '#5d4037');
+    roundRect(-14, y - 11, 28, 13, [12, 12, 2, 2], '#8d6e63');
+    ctx.fillStyle = '#6d4c41'; ctx.fillRect(-14, y - 3, 28, 3.5);
+    ctx.strokeStyle = '#a1887f'; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(-8, y - 10); ctx.lineTo(-8, y - 3); ctx.moveTo(8, y - 10); ctx.lineTo(8, y - 3); ctx.stroke();
+    circle(0, y - 11, 2, '#6d4c41');
+    if (!opt.noGlass) {                                // 🔍 magnifying glass in his hand
+      const gx = face * 23, gy = y + h * 0.62 - 8 + Math.sin(frame * 0.05) * 1.5;
+      ctx.strokeStyle = '#6d4c41'; ctx.lineWidth = 3.5; ctx.beginPath(); ctx.moveTo(face * 14, y + h * 0.75); ctx.lineTo(gx - face * 4, gy + 6); ctx.stroke();
+      circle(gx, gy, 8, 'rgba(179,229,252,.55)'); ctx.strokeStyle = '#ffb300'; ctx.lineWidth = 2.5; ctx.beginPath(); ctx.arc(gx, gy, 8, 0, 7); ctx.stroke();
+      ellipse(gx - 2.5, gy - 3, 2.5, 1.5, 'rgba(255,255,255,.9)', -0.6);
+      circle(face * 14, y + h * 0.75, 3.2, pal.pod);
+    }
+  }
+  ctx.restore();
+}
+// 👑 King Gloop + 🟣 Baby Gloop: purple goo blobs (from Robo Jump). Baby is smaller, lighter, with a little curl
+function drawGloop(cx, by, s, opt = {}) {
+  ctx.save(); ctx.translate(cx - 50 * s, by - 90 * s); ctx.scale(s, s);
+  const wob = Math.sin(frame * 0.15 + (opt.baby ? 1 : 0)) * 3, body = opt.baby ? '#b388ff' : '#7c4dff';
+  if (opt.glint) { const a = 0.5 + Math.sin(frame * 0.2) * 0.5; sparkle(98, 40, 10 + a * 6, frame * 0.05); drawCrown(96, 70, 26); }   // something gold hidden behind him...
+  roundRect(-wob / 2, wob, 100 + wob, 90 - wob, [45, 45, 14, 14], body);
+  ellipse(25, 22 + wob, 12, 7, 'rgba(255,255,255,.35)', -0.5);
+  if (opt.crown) drawCrown(50, 8 + wob, 52);
+  if (opt.baby && !opt.bigCrown) { ctx.strokeStyle = body; ctx.lineWidth = 5; ctx.beginPath(); ctx.arc(54, wob - 4, 7, Math.PI * 0.9, Math.PI * 2.3); ctx.stroke(); }
+  const sad = opt.sad, look = opt.look || 2;
+  for (const ex of [32, 68]) { circle(ex, 34 + wob, 11, '#fff'); circle(ex + look, 35 + wob + (sad ? 2 : 0), 5, '#000'); circle(ex + look + 2, 33 + wob, 2, '#fff'); }
+  ctx.fillStyle = '#311b92'; ctx.strokeStyle = '#311b92'; ctx.lineWidth = 4;
+  if (sad) { ctx.beginPath(); ctx.arc(50, 64 + wob, 10, Math.PI + 0.4, -0.4); ctx.stroke(); }
+  else if (opt.nervous) { ctx.beginPath(); ctx.moveTo(38, 58 + wob); for (let k = 0; k < 5; k++) ctx.lineTo(42 + k * 4, 58 + wob + (k % 2 ? -3 : 3)); ctx.stroke(); }
+  else { ctx.beginPath(); ctx.arc(50, 54 + wob, 16, 0.1, Math.PI - 0.1); ctx.fill(); }
+  circle(22, 54 + wob, 6, 'rgba(255,128,171,.6)'); circle(78, 54 + wob, 6, 'rgba(255,128,171,.6)');
+  if (opt.bigCrown) drawCrown(50, 30 + wob, 120);      // Daddy's crown is WAY too big for him!
+  ctx.restore();
+}
+// 🎩 Duke Googool (from Robo Jump 3): tall green goo duke, black cape, monocle, spiky top hat. About 150 tall at s = 1
+function drawDuke(cx, by, s) {
+  ctx.save(); ctx.translate(cx - 35 * s, by - 150 * s); ctx.scale(s, s);
+  const wob = Math.sin(frame * 0.12) * 3;
+  ctx.fillStyle = '#212121'; ctx.beginPath(); ctx.moveTo(4, 150); ctx.lineTo(14, 70); ctx.lineTo(56, 70); ctx.lineTo(66, 150); ctx.fill();
+  roundRect(10, 40 + wob, 50, 110 - wob, [25, 25, 10, 10], '#00c853');
+  for (let k = 0; k < 3; k++) circle(35, 92 + k * 16, 4, '#212121');
+  ellipse(22, 56 + wob, 6, 9, 'rgba(255,255,255,.35)', -0.3);
+  roundRect(4, 138, 26, 12, 6, '#00a152'); roundRect(40, 138, 26, 12, 6, '#00a152');   // his ENORMOUS feet
+  ctx.fillStyle = '#212121'; ctx.fillRect(2, 36 + wob, 66, 7);
+  ctx.beginPath(); ctx.moveTo(14, 38 + wob); ctx.lineTo(16, 4 + wob);
+  for (let k = 0; k < 5; k++) { ctx.lineTo(19 + k * 8, -8 + wob); ctx.lineTo(23 + k * 8, 4 + wob); }
+  ctx.lineTo(56, 38 + wob); ctx.fill();
+  ctx.fillStyle = '#76ff03'; ctx.fillRect(16, 28 + wob, 40, 5);
+  circle(25, 62 + wob, 7, '#fff'); circle(46, 62 + wob, 8, '#fff');
+  circle(26, 63 + wob, 3.5, '#000'); circle(47, 63 + wob, 4, '#000');
+  ctx.strokeStyle = '#ffd740'; ctx.lineWidth = 2.5; ctx.beginPath(); ctx.arc(46, 62 + wob, 11, 0, 7); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(56, 66 + wob); ctx.quadraticCurveTo(62, 85, 54, 100); ctx.stroke();
+  ctx.strokeStyle = '#1b5e20'; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(24, 80 + wob); ctx.quadraticCurveTo(35, 88 + wob, 48, 78 + wob); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(16, 50 + wob); ctx.lineTo(30, 55 + wob); ctx.moveTo(56, 50 + wob); ctx.lineTo(41, 55 + wob); ctx.stroke();
+  ctx.restore();
+}
+// 🦀 Captain Pinch: a red crab in a captain's hat. About 90 tall at s = 1
+function drawPinch(cx, by, s) {
+  ctx.save(); ctx.translate(cx, by); ctx.scale(s, s);
+  const wob = Math.sin(frame * 0.1) * 2, snap = Math.sin(frame * 0.25) > 0.6 ? 0.5 : 0.15;
+  ctx.strokeStyle = '#d84315'; ctx.lineWidth = 5;
+  for (const d of [-1, 1]) for (let k = 0; k < 3; k++) { ctx.beginPath(); ctx.moveTo(d * 30, -24 + k * 6); ctx.lineTo(d * (48 + k * 4), -10 + k * 4); ctx.lineTo(d * (52 + k * 4), 0); ctx.stroke(); }
+  for (const d of [-1, 1]) {                           // big claws
+    ctx.beginPath(); ctx.moveTo(d * 34, -34); ctx.lineTo(d * 56, -58 + wob); ctx.stroke();
+    ctx.fillStyle = '#ff3d00'; ctx.beginPath(); ctx.arc(d * 60, -66 + wob, 16, d > 0 ? -Math.PI / 2 + snap : Math.PI / 2 + snap, d > 0 ? Math.PI * 1.5 - snap : Math.PI * 2.5 - snap); ctx.lineTo(d * 60, -66 + wob); ctx.fill();
+  }
+  ellipse(0, -32, 42, 26, '#ff3d00'); ellipse(-14, -42, 12, 6, 'rgba(255,255,255,.3)', -0.3);
+  ctx.strokeStyle = '#ff3d00'; ctx.lineWidth = 4;
+  for (const d of [-1, 1]) { ctx.beginPath(); ctx.moveTo(d * 12, -52); ctx.lineTo(d * 15, -66); ctx.stroke(); circle(d * 15, -70, 8, '#fff'); circle(d * 15 + 2, -70, 4, '#000'); }
+  ctx.fillStyle = '#bf360c'; ctx.beginPath(); ctx.arc(0, -26, 9, 0.2, Math.PI - 0.2); ctx.fill();
+  roundRect(-26, -86, 52, 8, 4, '#1a237e'); roundRect(-18, -104, 36, 20, [10, 10, 2, 2], '#283593');   // captain hat
+  ctx.fillStyle = '#fff'; ctx.fillRect(-18, -90, 36, 4); circle(0, -96, 5, '#ffd740');
+  ctx.restore();
+}
+// 🐶 Sparks: a brave orange puppy with a red collar. About 100 tall at s = 1
+function drawSparks(cx, by, s) {
+  ctx.save(); ctx.translate(cx, by); ctx.scale(s, s);
+  const wag = Math.sin(frame * 0.35) * 0.5;
+  ctx.save(); ctx.translate(26, -30); ctx.rotate(-0.8 + wag); roundRect(-4, -26, 8, 28, 4, '#e65100'); ctx.restore();   // wagging tail
+  ellipse(0, -30, 30, 28, '#ff9100');
+  ellipse(-14, -4, 9, 6, '#e65100'); ellipse(14, -4, 9, 6, '#e65100');
+  ellipse(0, -26, 16, 18, '#ffe0b2');
+  roundRect(-20, -58, 40, 8, 4, '#d50000'); circle(0, -48, 5, '#ffd740');
+  circle(0, -80, 26, '#ff9100');
+  ellipse(-25, -78, 9, 18, '#e65100', 0.3); ellipse(25, -78, 9, 18, '#e65100', -0.3);
+  ellipse(0, -70, 14, 11, '#ffe0b2');
+  circle(-10, -86, 5, '#000'); circle(10, -86, 5, '#000'); circle(-8, -88, 1.8, '#fff'); circle(12, -88, 1.8, '#fff');
+  ellipse(0, -74, 6, 4, '#3e2723');
+  ctx.fillStyle = '#ff5c8a'; ctx.beginPath(); ctx.ellipse(4, -63, 5, 7, 0, 0, Math.PI); ctx.fill();
+  ctx.restore();
+}
+// 😼 Snatcher: the sneaky grey cat from Captain Woof, with a black mask. About 120 tall at s = 1
+function drawSnatcher(cx, by, s) {
+  ctx.save(); ctx.translate(cx, by); ctx.scale(s, s);
+  const sw = Math.sin(frame * 0.07) * 0.3;
+  ctx.strokeStyle = '#78909c'; ctx.lineWidth = 9; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(18, -14); ctx.quadraticCurveTo(52, -20 + sw * 20, 44 + sw * 20, -66); ctx.stroke(); ctx.lineCap = 'butt';
+  roundRect(-24, -66, 48, 62, 22, '#90a4ae');
+  ellipse(0, -34, 14, 20, '#cfd8dc');
+  ellipse(-12, -4, 11, 6, '#78909c'); ellipse(12, -4, 11, 6, '#78909c');
+  ctx.fillStyle = '#90a4ae';
+  for (const d of [-1, 1]) { ctx.beginPath(); ctx.moveTo(d * 8, -106); ctx.lineTo(d * 24, -124); ctx.lineTo(d * 28, -98); ctx.fill(); }
+  circle(0, -92, 28, '#90a4ae');
+  roundRect(-26, -104, 52, 16, 8, '#212121');          // black bandit mask
+  ellipse(-11, -96, 6, 5, '#c6ff00'); ellipse(11, -96, 6, 5, '#c6ff00');
+  ellipse(-11, -96, 2, 4.5, '#000'); ellipse(11, -96, 2, 4.5, '#000');
+  ctx.fillStyle = '#ff80ab'; ctx.beginPath(); ctx.moveTo(-4, -84); ctx.lineTo(4, -84); ctx.lineTo(0, -80); ctx.fill();
+  ctx.strokeStyle = '#37474f'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(0, -80); ctx.quadraticCurveTo(-5, -74, -9, -78); ctx.moveTo(0, -80); ctx.quadraticCurveTo(5, -74, 9, -78);
+  for (const d of [-1, 1]) for (const k of [-1, 1]) { ctx.moveTo(d * 12, -82); ctx.lineTo(d * 34, -84 + k * 5); }
+  ctx.stroke();
+  ctx.restore();
+}
+function drawChar(id, cx, by, s, opt = {}) {
+  if (id === 'duke') drawDuke(cx, by, s * 0.85);
+  else if (id === 'sparks') drawSparks(cx, by, s * 1.05);
+  else if (id === 'pinch') drawPinch(cx, by, s * 1.1);
+  else if (id === 'snatcher') drawSnatcher(cx, by, s);
+  else if (id === 'nega') drawRobo(cx, by, s * 2.9, Object.assign({ nega: true, smile: true }, opt));
+  else if (id === 'baby') drawGloop(cx, by, s * 0.75, Object.assign({ baby: true }, opt));
+  else if (id === 'king') drawGloop(cx, by, s * 1.25, Object.assign({ crown: false }, opt));
+  else if (id === 'robo') drawRobo(cx, by, s * 2.9, opt);
+}
+
+// ---------- The 6 rooms of the Goo Castle ----------
+// Each hotspot: [x, y, w, h], kind = clue / suspect / thing / puzzle. "thing" = Robo says a funny line.
+const ROOMS = [
+  { id: 'throne', name: 'Throne Room', icon: '👑', wall: '#7b1fa2', wall2: '#6a1b9a', floor: '#c62828', spots: [
+    { r: [150, 100, 150, 140], kind: 'thing', say: "A painting of King Gloop wearing his crown. He looks SO happy in it!" },
+    { r: [400, 140, 170, 240], kind: 'thing', say: "The King's big throne. Very comfy... but no crown here!" },
+    { r: [440, 385, 90, 50], kind: 'clue', id: 'note' },
+    { r: [600, 270, 110, 120], kind: 'thing', say: "The crown cushion. It's EMPTY! This is where the crown should be." },
+    { r: [575, 400, 175, 70], kind: 'clue', id: 'footprints' },
+    { r: [780, 270, 110, 180], kind: 'suspect', id: 'duke' } ] },
+  { id: 'kitchen', name: 'Kitchen', icon: '🍰', wall: '#4fc3f7', wall2: '#29b6f6', floor: '#eceff1', spots: [
+    { r: [160, 200, 130, 200], kind: 'thing', say: "A big oven. It smells like goo-cupcakes! Yum!" },
+    { r: [300, 150, 95, 250], kind: 'thing', say: "The fridge is full of goo-milk and pickles. No crown in here!" },
+    { r: [430, 270, 90, 75], kind: 'clue', id: 'jelly' },
+    { r: [540, 270, 90, 75], kind: 'thing', say: "A stack of party plates. Somebody had a LOT of cake!" },
+    { r: [600, 415, 170, 60], kind: 'clue', id: 'crumbs' },
+    { r: [790, 330, 100, 130], kind: 'suspect', id: 'sparks' } ] },
+  { id: 'garden', name: 'Garden', icon: '🌷', wall: '#1a237e', wall2: '#283593', floor: '#43a047', spots: [
+    { r: [150, 290, 140, 120], kind: 'clue', id: 'feather' },
+    { r: [300, 380, 80, 80], kind: 'thing', say: "Pretty goo-flowers! They smell like bubblegum." },
+    { r: [400, 250, 150, 170], kind: 'thing', say: "A fountain! Splish splash. Just water... and one rubber duck." },
+    { r: [590, 400, 150, 70], kind: 'clue', id: 'claws' },
+    { r: [760, 330, 140, 130], kind: 'suspect', id: 'pinch' } ] },
+  { id: 'music', name: 'Music Room', icon: '🎵', wall: '#4a148c', wall2: '#38006b', floor: '#8d6e63', spots: [
+    { r: [150, 230, 190, 170], kind: 'thing', say: "Plink plonk! The castle piano.", sound: 'piano' },
+    { r: [370, 210, 110, 190], kind: 'puzzle', id: 'sheet', puzzle: 'memory' },
+    { r: [500, 270, 140, 140], kind: 'thing', say: "Ba-dum TSSS! The party drums.", sound: 'drums' },
+    { r: [640, 415, 120, 55], kind: 'clue', id: 'thread' },
+    { r: [770, 300, 130, 160], kind: 'suspect', id: 'snatcher' } ] },
+  { id: 'library', name: 'Library', icon: '📚', wall: '#6d4c41', wall2: '#5d4037', floor: '#a1887f', spots: [
+    { r: [140, 90, 170, 310], kind: 'thing', say: "So many books! 'The Big Blob', 'Goo Goes to Space', 'Robo's Joke Book'..." },
+    { r: [340, 110, 150, 150], kind: 'puzzle', id: 'drawing', puzzle: 'slide' },
+    { r: [510, 405, 110, 55], kind: 'clue', id: 'invite' },
+    { r: [630, 270, 100, 140], kind: 'thing', say: "A spinny globe! Wheee! ...Okay, back to work." },
+    { r: [770, 330, 130, 130], kind: 'suspect', id: 'baby' } ] },
+  { id: 'tower', name: 'Tower', icon: '🔭', wall: '#263238', wall2: '#1c2529', floor: '#546e7a', spots: [
+    { r: [160, 130, 180, 110], kind: 'thing', say: "Something is scratched on the wall: a STAR, a MOON and a HEART. Maybe it's a secret code!" },
+    { r: [380, 320, 130, 100], kind: 'puzzle', id: 'bib', puzzle: 'lock' },
+    { r: [550, 190, 120, 210], kind: 'thing', say: "A telescope! I can see the moon... and a cow? No, just a cloud." },
+    { r: [560, 405, 160, 60], kind: 'clue', id: 'sparkles' },
+    { r: [780, 290, 120, 170], kind: 'suspect', id: 'nega' } ] },
+];
+const ROOM = {}; ROOMS.forEach(r => ROOM[r.id] = r);
+const spotDone = sp => (sp.kind === 'clue' || sp.kind === 'puzzle') ? !!save.clues[sp.id] : sp.kind === 'suspect' ? !!save.talked[sp.id] : false;
+const roomClues = rm => rm.spots.filter(s => s.kind === 'clue' || s.kind === 'puzzle');
+
+// ---------- Drawing the rooms ----------
+function drawBackdrop(rm) {
+  ctx.fillStyle = rm.wall; ctx.fillRect(0, 0, W, 400);
+  ctx.fillStyle = rm.wall2; for (let x = 0; x < W; x += 80) ctx.fillRect(x, 0, 40, 400);
+  ctx.fillStyle = rm.floor; ctx.fillRect(0, 400, W, 120);
+  ctx.fillStyle = 'rgba(0,0,0,.18)'; ctx.fillRect(0, 400, W, 8);
+}
+function drawProps(rm) {
+  const id = rm.id, t = frame;
+  if (id === 'throne') {
+    ctx.fillStyle = '#b71c1c'; ctx.fillRect(330, 400, 300, 120);                                       // red carpet
+    ctx.fillStyle = '#ffd740'; ctx.fillRect(330, 400, 8, 120); ctx.fillRect(622, 400, 8, 120);
+    for (const x of [60, 900]) { ctx.fillStyle = '#d50000'; ctx.beginPath(); ctx.moveTo(x - 50, 0); ctx.lineTo(x + 50, 0); ctx.lineTo(x + 30, 400); ctx.lineTo(x - 30, 400); ctx.fill(); }
+    roundRect(150, 100, 150, 140, 8, '#ffb300'); roundRect(162, 112, 126, 116, 4, '#b39ddb');            // painting of the King
+    drawGloop(225, 215, 0.85, { crown: true });
+    roundRect(400, 140, 170, 240, [60, 60, 8, 8], '#ffc400'); roundRect(420, 165, 130, 150, [50, 50, 4, 4], '#d32f2f');   // throne
+    roundRect(410, 300, 150, 40, 8, '#ffb300'); ctx.fillStyle = '#ffa000'; ctx.fillRect(415, 340, 18, 40); ctx.fillRect(537, 340, 18, 40);
+    drawStar(485, 160, 14, '#fff59d', t * 0.01);
+    roundRect(475, 405, 34, 24, 3, '#fffde7'); ctx.strokeStyle = '#e91e63'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(480, 413); ctx.lineTo(500, 413); ctx.moveTo(480, 420); ctx.lineTo(495, 420); ctx.stroke();   // little note
+    roundRect(615, 330, 80, 70, 6, '#ffd740'); ellipse(655, 318, 48, 16, '#e91e63'); ellipse(655, 314, 40, 10, '#f06292');   // empty cushion
+    text('?', 655, 300, 34, '#fff59d');
+    for (let k = 0; k < 5; k++) { const fx = 590 + k * 34, fy = 455 - (k % 2) * 22; ellipse(fx, fy, 7, 4.5, '#76ff03'); circle(fx + 7, fy - 3, 1.8, '#76ff03'); circle(fx + 8, fy + 1, 1.8, '#76ff03'); }   // tiny goo prints
+    for (const [x, c] of [[330, '#ff4081'], [355, '#40c4ff'], [380, '#ffea00']]) { ctx.strokeStyle = '#fff'; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(x, 120 + Math.sin(t * 0.05 + x) * 4); ctx.lineTo(x + 5, 260); ctx.stroke(); ellipse(x, 100 + Math.sin(t * 0.05 + x) * 4, 16, 20, c); }
+  } else if (id === 'kitchen') {
+    ctx.fillStyle = '#b0bec5'; for (let x = 0; x < W; x += 40) for (let y = 400; y < H; y += 40) if (((x + y) / 40) % 2 === 0) ctx.fillRect(x, y, 40, 40);
+    roundRect(160, 200, 130, 200, 8, '#607d8b'); roundRect(175, 260, 100, 80, 6, '#263238'); roundRect(185, 270, 80, 60, 4, `rgba(255,${120 + Math.sin(t * 0.1) * 30},0,.6)`);
+    for (let k = 0; k < 4; k++) circle(185 + k * 27, 225, 8, '#37474f');
+    roundRect(300, 150, 95, 250, 10, '#eceff1'); ctx.fillStyle = '#90a4ae'; ctx.fillRect(300, 250, 95, 4); ctx.fillRect(375, 180, 6, 50); ctx.fillRect(375, 270, 6, 60);
+    roundRect(410, 340, 240, 18, 4, '#8d6e63'); ctx.fillStyle = '#6d4c41'; ctx.fillRect(425, 358, 14, 42); ctx.fillRect(620, 358, 14, 42);   // table
+    ellipse(475, 336, 40, 9, '#e0e0e0'); roundRect(445, 300, 60, 36, [18, 18, 4, 4], '#76ff03'); ellipse(462, 308, 8, 5, 'rgba(255,255,255,.6)');   // lime jelly
+    ctx.fillStyle = '#5bbf00'; ctx.beginPath(); ctx.arc(495, 303, 8, 0, 7); ctx.fill();                  // a tiny bite
+    ctx.strokeStyle = '#cfd8dc'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(510, 330); ctx.lineTo(522, 312); ctx.stroke(); ellipse(523, 310, 3, 2, '#cfd8dc');   // teeny spoon
+    for (let k = 0; k < 4; k++) ellipse(585, 334 - k * 7, 34, 6, k % 2 ? '#fff' : '#f8bbd0');            // plates
+    for (let k = 0; k < 9; k++) circle(610 + k * 18, 445 + Math.sin(k * 1.7) * 9, 3.5, '#d7a86e');       // crumbs
+    ellipse(765, 455, 30, 10, '#d50000'); ellipse(765, 451, 22, 6, '#8d6e63');                             // dog bowl
+  } else if (id === 'garden') {
+    for (let k = 0; k < 30; k++) circle((k * 157) % W, (k * 71) % 220, 1.5 + (k % 3), `rgba(255,255,255,${0.4 + 0.4 * Math.sin(t * 0.05 + k)})`);
+    drawMoon(840, 80, 36, '#fff9c4', rm.wall);
+    ctx.fillStyle = '#2e7d32'; for (let x = 0; x < W; x += 30) { ctx.beginPath(); ctx.moveTo(x, 400); ctx.lineTo(x + 15, 385); ctx.lineTo(x + 30, 400); ctx.fill(); }
+    for (const [bx, by, r] of [[190, 360, 50], [250, 350, 45], [220, 320, 45]]) circle(bx, by, r, '#1b5e20');   // bush
+    ctx.save(); ctx.translate(232, 330); ctx.rotate(0.5 + Math.sin(t * 0.06) * 0.1); ellipse(0, 0, 6, 18, '#29b6f6'); ctx.strokeStyle = '#0277bd'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(0, -16); ctx.lineTo(0, 20); ctx.stroke(); ctx.restore();   // blue feather
+    for (let k = 0; k < 4; k++) { const fx = 310 + k * 20, fy = 420 + (k % 2) * 16; ctx.fillStyle = '#66bb6a'; ctx.fillRect(fx - 1, fy, 3, 30); for (let p = 0; p < 5; p++) circle(fx + Math.cos(p * 1.26) * 7, fy + Math.sin(p * 1.26) * 7, 5, ['#ff80ab', '#ffeb3b', '#ea80fc', '#ff8a65'][k]); circle(fx, fy, 4, '#fff59d'); }
+    ellipse(475, 400, 75, 18, '#90a4ae'); roundRect(410, 340, 130, 60, 10, '#b0bec5'); ellipse(475, 340, 62, 14, '#4fc3f7');   // fountain
+    roundRect(465, 270, 20, 70, 6, '#b0bec5');
+    for (let k = 0; k < 6; k++) { const a = (t * 0.04 + k / 6) % 1; circle(475 + (k - 2.5) * 14 * a, 270 - Math.sin(a * Math.PI) * 30 + a * 60, 4, '#81d4fa'); }
+    ellipse(505, 336, 9, 7, '#ffeb3b'); circle(500, 328, 5, '#ffeb3b'); ctx.fillStyle = '#ff9800'; ctx.fillRect(493, 327, 5, 3);   // rubber duck
+    ellipse(690, 440, 40, 14, '#4e342e'); ellipse(690, 437, 30, 9, '#3e2723');                               // dug-up hole
+    ctx.strokeStyle = '#5d4037'; ctx.lineWidth = 3;
+    for (let k = 0; k < 3; k++) { const cx = 610 + k * 22; ctx.beginPath(); ctx.moveTo(cx, 415); ctx.lineTo(cx + 8, 445); ctx.moveTo(cx + 8, 415); ctx.lineTo(cx + 14, 445); ctx.stroke(); }
+  } else if (id === 'music') {
+    for (let k = 0; k < 6; k++) { ctx.fillStyle = `hsla(${(t * 2 + k * 60) % 360},100%,70%,.25)`; ctx.beginPath(); ctx.moveTo(100 + k * 150, 0); ctx.lineTo(60 + k * 150, 400); ctx.lineTo(160 + k * 150, 400); ctx.fill(); }
+    ctx.fillStyle = '#fff'; for (let k = 0; k < 3; k++) text('♪', 200 + k * 260 + Math.sin(t * 0.03 + k) * 20, 80 + Math.sin(t * 0.05 + k * 2) * 15, 30, '#ea80fc');
+    roundRect(150, 230, 190, 100, 10, '#212121'); roundRect(160, 300, 170, 30, 2, '#fff');                   // piano
+    ctx.fillStyle = '#212121'; for (let k = 0; k < 11; k++) { ctx.fillRect(160 + k * 15.5, 300, 1.5, 30); if (k % 7 !== 2 && k % 7 !== 6) ctx.fillRect(170 + k * 15.5, 300, 8, 18); }
+    ctx.fillRect(165, 330, 12, 70); ctx.fillRect(313, 330, 12, 70);
+    ctx.fillStyle = '#9e9e9e'; ctx.fillRect(422, 300, 6, 100); ctx.fillRect(400, 395, 50, 5);               // music stand
+    roundRect(385, 220, 80, 85, 4, '#fffde7'); ctx.strokeStyle = '#7e57c2'; ctx.lineWidth = 1.5;
+    for (let k = 0; k < 5; k++) { ctx.beginPath(); ctx.moveTo(392, 238 + k * 13); ctx.lineTo(458, 238 + k * 13); ctx.stroke(); }
+    for (let k = 0; k < 4; k++) circle(402 + k * 15, 250 + (k % 2) * 18, 4, '#e91e63');
+    ellipse(570, 385, 50, 20, '#e53935'); roundRect(520, 335, 100, 50, 6, '#e53935'); ellipse(570, 335, 50, 16, '#fafafa');   // drums
+    ellipse(625, 290, 26, 6, '#ffd740'); ctx.fillStyle = '#9e9e9e'; ctx.fillRect(623, 292, 4, 100);
+    ctx.strokeStyle = '#212121'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(650, 440); ctx.bezierCurveTo(675, 420, 700, 460, 740, 438); ctx.stroke();   // cape thread
+    roundRect(860, 400, 70, 50, 4, '#c69c6d'); ctx.fillStyle = '#a1785a'; ctx.fillRect(860, 400, 70, 8);       // Snatcher's comfy box
+  } else if (id === 'library') {
+    roundRect(140, 90, 170, 310, 6, '#4e342e');                                                              // bookshelf
+    const bc = ['#e53935', '#1e88e5', '#43a047', '#fdd835', '#8e24aa', '#fb8c00'];
+    for (let sh = 0; sh < 4; sh++) { ctx.fillStyle = '#3e2723'; ctx.fillRect(140, 160 + sh * 75, 170, 8); for (let k = 0; k < 9; k++) { ctx.fillStyle = bc[(k + sh * 2) % 6]; ctx.fillRect(150 + k * 17, 100 + sh * 75 + (k % 3) * 4, 14, 58 - (k % 3) * 4); } }
+    roundRect(340, 110, 150, 150, 6, '#ffb300'); roundRect(352, 122, 126, 126, 3, '#fffde7');                 // the jumbled picture frame
+    if (save.clues.drawing) drawPicture(352, 122, 126);
+    else { for (let k = 0; k < 9; k++) { ctx.fillStyle = ['#b39ddb', '#ffe082', '#80deea'][(k * 5) % 3]; ctx.fillRect(354 + (k % 3) * 41, 124 + Math.floor(k / 3) * 41, 39, 39); } text('?', 415, 205, 50, '#fff'); }
+    ctx.save(); ctx.translate(565, 440); ctx.rotate(-0.15); roundRect(-40, -18, 80, 34, 3, '#1e88e5'); roundRect(-30, -28, 46, 22, 2, '#f8bbd0');
+    ctx.strokeStyle = '#ad1457'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(16, -28); ctx.lineTo(10, -18); ctx.lineTo(16, -8); ctx.stroke(); ctx.restore();   // torn invite in a book
+    ctx.fillStyle = '#8d6e63'; ctx.fillRect(675, 360, 10, 40); ellipse(680, 400, 26, 6, '#6d4c41');           // globe
+    ctx.save(); ctx.translate(680, 320); circle(0, 0, 42, '#29b6f6'); ctx.fillStyle = '#66bb6a';
+    for (let k = 0; k < 3; k++) { const ox = ((t * 0.6 + k * 30) % 84) - 42; if (Math.abs(ox) < 34) ellipse(ox, -12 + k * 12, 10 * Math.cos(ox / 42), 8, '#66bb6a'); }
+    ctx.strokeStyle = '#ffb300'; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(0, 0, 46, -1.9, 1.9); ctx.stroke(); ctx.restore();
+  } else if (id === 'tower') {
+    ctx.fillStyle = '#37474f'; for (let y = 0; y < 400; y += 40) for (let x = (y / 40) % 2 * 40; x < W; x += 80) ctx.fillRect(x, y, 78, 38);
+    circle(480, 110, 80, '#0d1b3e');                                                                          // round window
+    for (let k = 0; k < 14; k++) circle(420 + (k * 37) % 120, 50 + (k * 53) % 120, 1.5 + k % 2, `rgba(255,255,255,${0.5 + 0.5 * Math.sin(t * 0.06 + k)})`);
+    drawMoon(510, 90, 22, '#fff9c4', '#0d1b3e');
+    ctx.strokeStyle = '#78909c'; ctx.lineWidth = 8; ctx.beginPath(); ctx.arc(480, 110, 80, 0, 7); ctx.stroke();
+    roundRect(160, 130, 180, 110, 10, 'rgba(255,255,255,.08)');                                               // the scratched code
+    ctx.globalAlpha = 0.85; drawStar(200, 185, 26, '#cfd8dc'); drawMoon(250, 185, 24, '#cfd8dc', '#2e3b42'); drawHeart(300, 182, 24, '#cfd8dc'); ctx.globalAlpha = 1;
+    roundRect(385, 340, 120, 75, [12, 12, 4, 4], '#8d6e63'); ctx.fillStyle = '#5d4037'; ctx.fillRect(385, 365, 120, 6);   // locked chest
+    roundRect(430, 362, 30, 30, 4, save.clues.bib ? '#9e9e9e' : '#ffd740'); circle(445, 374, 4, '#3e2723');
+    ctx.save(); ctx.translate(610, 300); ctx.rotate(-0.5); roundRect(-20, -90, 40, 130, 12, '#b0bec5'); roundRect(-26, -96, 52, 20, 8, '#78909c'); ctx.restore();   // telescope
+    ctx.strokeStyle = '#78909c'; ctx.lineWidth = 6; ctx.beginPath(); ctx.moveTo(620, 310); ctx.lineTo(580, 400); ctx.moveTo(620, 310); ctx.lineTo(660, 400); ctx.stroke();
+    for (let k = 0; k < 7; k++) sparkle(580 + k * 20, 430 + Math.sin(k * 2) * 15, 6 + 3 * Math.sin(t * 0.1 + k), t * 0.02, '#e040fb');
+  }
+}
+// 🖍️ Baby Gloop's crayon drawing (the Library picture puzzle). (x, y) = top-left, size = width
+function drawPicture(x, y, size) {
+  ctx.save(); ctx.translate(x, y); ctx.scale(size / 300, size / 300);
+  ctx.fillStyle = '#fffde7'; ctx.fillRect(0, 0, 300, 300);
+  ctx.fillStyle = '#81d4fa'; ctx.fillRect(0, 0, 300, 70);
+  drawSun(45, 45, 30, '#ffca28');
+  ctx.fillStyle = '#7cb342'; ctx.fillRect(0, 250, 300, 50);
+  for (let k = 0; k < 10; k++) { ctx.fillStyle = '#558b2f'; ctx.fillRect(10 + k * 30, 240, 4, 14); }
+  ctx.fillStyle = '#b388ff'; ctx.beginPath(); ctx.ellipse(150, 205, 80, 60, 0, 0, 7); ctx.fill();
+  circle(122, 195, 14, '#fff'); circle(178, 195, 14, '#fff'); circle(124, 197, 6, '#000'); circle(180, 197, 6, '#000');
+  ctx.strokeStyle = '#4527a0'; ctx.lineWidth = 5; ctx.beginPath(); ctx.arc(150, 215, 22, 0.2, Math.PI - 0.2); ctx.stroke();
+  drawCrown(150, 155, 150);                             // a GIANT crown on a little blob
+  text('ME!', 240, 60, 52, '#e53935');
+  drawHeart(255, 125, 18, '#ff4081'); drawHeart(40, 135, 14, '#ff4081');
+  ctx.restore();
+}
+
+// ---------- Game state ----------
+let state = 'title', curRoom = ROOMS[0], sel = 0, overlay = null, inputMode = 'mouse';
+let mouse = { x: W / 2, y: H / 2 }, cursor = { x: W / 2, y: H / 2 }, particles = [], msg = null;
+let accuse = { step: 'who', who: null, picks: [] };
+let mem = null, slide = null, lock = null, endT = 0;
+const press = { l: false, r: false, u: false, d: false, ok: false, esc: false };
+let tap = null;
+function wakeAudio() {
+  if (!actx) { try { actx = new (window.AudioContext || window.webkitAudioContext)(); setupAudio(); } catch (_) { actx = null; } }
+  else if (actx.state === 'suspended' && actx.resume) actx.resume();
+}
+addEventListener('keydown', e => {
+  wakeAudio();
+  const k = e.key;
+  if (k === 'ArrowLeft' || k === 'a' || k === 'A') press.l = true;
+  if (k === 'ArrowRight' || k === 'd' || k === 'D') press.r = true;
+  if (k === 'ArrowUp' || k === 'w' || k === 'W') press.u = true;
+  if (k === 'ArrowDown' || k === 's' || k === 'S') press.d = true;
+  if ((k === ' ' || k === 'Enter' || k === 'x' || k === 'X') && !e.repeat) press.ok = true;
+  if (k === 'Escape' && !e.repeat) press.esc = true;
+  if (k === 'm' || k === 'M') toggleMusic();
+  if (k.startsWith('Arrow') || k === ' ') { inputMode = 'key'; if (e.preventDefault) e.preventDefault(); }
+});
+function canvasXY(e) { const r = C.getBoundingClientRect(); return { x: (e.clientX - r.left) * W / r.width, y: (e.clientY - r.top) * H / r.height }; }
+C.addEventListener('mousedown', e => { wakeAudio(); tap = canvasXY(e); mouse = tap; inputMode = 'mouse'; });   // touchpad.js turns finger taps into mouse events
+C.addEventListener('mousemove', e => { mouse = canvasXY(e); inputMode = 'mouse'; });
+const inBox = (t, b) => t && t.x >= b.x && t.x <= b.x + b.w && t.y >= b.y && t.y <= b.y + b.h;
+const BACK = { x: 16, y: 12, w: 130, h: 46 };
+
+// ---------- Particles ----------
+function burst(x, y, cols, n = 24, sp = 5) {
+  for (let i = 0; i < n; i++) { const a = Math.random() * Math.PI * 2, v = 1 + Math.random() * sp; particles.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 2, life: 40 + Math.random() * 30, c: cols[i % cols.length], r: 3 + Math.random() * 4 }); }
+}
+function confetti() { particles.push({ x: Math.random() * W, y: -10, vx: Math.random() * 2 - 1, vy: 1 + Math.random() * 2, life: 300, c: ['#ff4081', '#ffd740', '#40c4ff', '#76ff03', '#e040fb'][Math.floor(Math.random() * 5)], r: 4 + Math.random() * 3, conf: true }); }
+function updateParticles() {
+  for (const p of particles) { p.x += p.vx; p.y += p.vy; if (!p.conf) p.vy += 0.15; p.life--; }
+  particles = particles.filter(p => p.life > 0 && p.y < H + 20);
+}
+function drawParticles() {
+  for (const p of particles) { ctx.globalAlpha = Math.min(1, p.life / 30); if (p.conf) { ctx.fillStyle = p.c; ctx.fillRect(p.x, p.y, p.r * 1.6, p.r); } else sparkle(p.x, p.y, p.r * 1.6, p.life * 0.1, p.c); }
+  ctx.globalAlpha = 1;
+}
+
+// ---------- Talking + clue cards (tap to go on) ----------
+const NAMES = { robo: 'Detective Robo', king: 'King Gloop' }; SUSPECT_IDS.forEach(id => NAMES[id] = SUSPECTS[id].name);
+function talk(lines, after) { overlay = { type: 'talk', lines, i: 0, chars: 0, after }; sfx.talk(); }
+function showClue(id, isNew, after) { overlay = { type: 'clue', id, isNew, t: 0, after }; }
+function advanceOverlay() {
+  const o = overlay;
+  if (o.type === 'talk') {
+    const full = o.lines[o.i][1].length;
+    if (o.chars < full) { o.chars = full; return; }
+    o.i++; o.chars = 0;
+    if (o.i < o.lines.length) { sfx.talk(); return; }
+  } else if (o.t < 15) return;                          // don't skip a new clue card by accident
+  overlay = null; sfx.click();
+  if (o.after) o.after();
+}
+function findClue(id, x, y) {
+  const first = !save.clues[id];
+  save.clues[id] = 1; writeSave();
+  if (first) { sfx.clue(); burst(x, y, ['#fff59d', '#ffd740', '#fff']); }
+  showClue(id, first, () => {
+    if (first && clueCount() === NEED) talk([['robo', `That's ${NEED} clues! I can make the ACCUSATION now. (Or keep looking for more!)`]]);
+  });
+}
+
+// ---------- Screens: every screen is a list of buttons (tap them, or arrows + SPACE) ----------
+const btn = (x, y, w, h, act, extra = {}) => Object.assign({ x, y, w, h, act }, extra);
+function newCase() {
+  freshCase(); writeSave(); accuse = { step: 'who', who: null, picks: [] };
+  state = 'map'; sel = 0; setSong('mystery');
+  talk([['king', "Detective Robo! HELP! My golden crown is GONE!"],
+        ['king', "Tonight is my big party, and a king can't party without his crown!"],
+        ['robo', "Don't worry, King Gloop! Detective Robo is on the case!"],
+        ['robo', "I'll search all 6 rooms for clues and talk to everyone at the party."],
+        ['king', `Find at least ${NEED} clues, then tell me WHO took it! Good luck!`]]);
+}
+function goRoom(rm) { curRoom = rm; state = 'room'; sel = 2; sfx.click(); }
+function goMap() { state = 'map'; sel = Math.max(0, ROOMS.indexOf(curRoom)); setSong('mystery'); sfx.click(); }
+function openNotebook(from) { state = 'notebook'; notebookFrom = from; sel = 1; sfx.click(); }
+let notebookFrom = 'map';
+function useSpot(sp) {
+  const cx = sp.r[0] + sp.r[2] / 2, cy = sp.r[1] + sp.r[3] / 2;
+  if (sp.kind === 'clue') findClue(sp.id, cx, cy);
+  else if (sp.kind === 'thing') {
+    if (sp.sound === 'piano') [62, 65, 69, 74].forEach((m, i) => note(midi(m), i * 0.12, 0.4, 'triangle', 0.1));
+    if (sp.sound === 'drums' && actx) { drumHit('t', actx.currentTime, 0.4, sfxBus); drumHit('t', actx.currentTime + 0.15, 0.4, sfxBus); drumHit('x', actx.currentTime + 0.3, 0.2, sfxBus); }
+    if (!sp.sound) sfx.nothing();
+    talk([['robo', sp.say]]);
+  } else if (sp.kind === 'suspect') {
+    const S = SUSPECTS[sp.id];
+    if (save.talked[sp.id]) talk([[sp.id, S.again]]);
+    else talk(S.lines.map(l => [sp.id, l]).concat(sp.id === 'nega' ? [['robo', "Of course I'll be your friend!"]] : []).concat([['robo', '(I wrote that in my Detective Notebook!)']]),
+              () => { save.talked[sp.id] = 1; writeSave(); });
+  } else if (sp.kind === 'puzzle') {
+    if (save.clues[sp.id]) showClue(sp.id, false);
+    else startPuzzle(sp.puzzle);
+  }
+}
+function buttons() {
+  const b = [];
+  if (state === 'title') {
+    b.push(btn(330, 300, 300, 70, newCase, { label: save.started && clueCount() > 0 ? '🔎 NEW CASE' : '🔎 START THE CASE!' }));
+    if (save.started && clueCount() > 0) b.push(btn(330, 385, 300, 60, () => { state = 'map'; sel = 0; sfx.click(); }, { label: `▶ KEEP GOING (${clueCount()}/12)` }));
+    b.push(btn(W - 74, 12, 58, 46, toggleMusic, { label: musicOn ? '🎵' : '🔇' }));
+  } else if (state === 'map') {
+    b.push(btn(BACK.x, BACK.y, BACK.w, BACK.h, () => { state = 'title'; sel = 0; }, { label: '◀ TITLE' }));
+    ROOMS.forEach((rm, i) => b.push(btn(50 + (i % 3) * 292, 80 + Math.floor(i / 3) * 152, 276, 138, () => goRoom(rm), { room: rm })));
+    b.push(btn(50, 400, 330, 80, () => openNotebook('map'), { label: '📒 NOTEBOOK' }));
+    b.push(btn(400, 400, 510, 80, () => {
+      if (clueCount() >= NEED) { state = 'accuse'; accuse = { step: 'who', who: null, picks: [] }; sel = 1; sfx.gasp(); }
+      else { sfx.nope(); talk([['robo', `I need ${NEED} clues before I can accuse anybody. I have ${clueCount()}. Let's keep searching!`]]); }
+    }, { label: 'accuse' }));
+    b.push(btn(W - 74, 12, 58, 46, toggleMusic, { label: musicOn ? '🎵' : '🔇' }));
+  } else if (state === 'room') {
+    b.push(btn(BACK.x, BACK.y, BACK.w, BACK.h, goMap, { label: '◀ MAP' }));
+    b.push(btn(W - 196, 12, 180, 46, () => openNotebook('room'), { label: '📒 NOTEBOOK' }));
+    for (const sp of curRoom.spots) b.push(btn(sp.r[0], sp.r[1], sp.r[2], sp.r[3], () => useSpot(sp), { spot: sp }));
+  } else if (state === 'notebook') {
+    b.push(btn(BACK.x, BACK.y, BACK.w, BACK.h, () => { if (notebookFrom === 'room') { state = 'room'; sel = 2; } else { state = 'map'; sel = 7; } sfx.click(); }, { label: '◀ BACK' }));
+    CLUE_IDS.forEach((id, i) => b.push(btn(52 + (i % 3) * 136, 112 + Math.floor(i / 3) * 66, 128, 58, () => { if (save.clues[id]) showClue(id, false); else sfx.nope(); }, { clue: id })));
+    SUSPECT_IDS.forEach((id, i) => b.push(btn(500, 112 + i * 44, 410, 40, () => sfx.click(), { suspect: id })));
+  } else if (state === 'accuse') accuseButtons(b);
+  else if (state === 'memory') memButtons(b);
+  else if (state === 'slide') slideButtons(b);
+  else if (state === 'lock') lockButtons(b);
+  else if (state === 'end') {
+    b.push(btn(250, 440, 220, 60, newCase, { label: '🔎 PLAY AGAIN' }));
+    b.push(btn(490, 440, 220, 60, () => { state = 'title'; sel = 0; setSong('mystery'); sfx.click(); }, { label: '🏠 TITLE' }));
+  }
+  return b;
+}
+function goBack() {                                     // ESC
+  if (state === 'map') { state = 'title'; sel = 0; }
+  else if (state === 'room') goMap();
+  else if (state === 'accuse' && accuse.step === 'clues') { accuse.step = 'who'; sel = 1; }
+  else if (state === 'end') { state = 'title'; sel = 0; setSong('mystery'); }
+  else if (state !== 'title') { const b = buttons()[0]; if (b) b.act(); }
+}
+// arrows: jump to the nearest button in that direction
+function navigate(b, i, dx, dy) {
+  const cur = b[i]; if (!cur) return 0;
+  const cx = cur.x + cur.w / 2, cy = cur.y + cur.h / 2;
+  let best = i, bestD = 1e9;
+  b.forEach((o, j) => {
+    if (j === i) return;
+    const ox = o.x + o.w / 2 - cx, oy = o.y + o.h / 2 - cy, along = ox * dx + oy * dy, side = Math.abs(ox * dy - oy * dx);
+    if (along <= 4) return;
+    const d = along + side * 2.5;
+    if (d < bestD) { bestD = d; best = j; }
+  });
+  return best;
+}
+
+// ---------- 👉 The ACCUSATION ----------
+function accuseButtons(b) {
+  if (accuse.step === 'who') {
+    b.push(btn(BACK.x, BACK.y, BACK.w, BACK.h, () => { state = 'map'; sel = 8; sfx.click(); }, { label: '◀ MAP' }));
+    SUSPECT_IDS.forEach((id, i) => b.push(btn(90 + (i % 3) * 270, 80 + Math.floor(i / 3) * 210, 240, 196, () => { accuse.who = id; accuse.step = 'clues'; accuse.picks = []; sel = 1; sfx.click(); }, { suspect: id })));
+  } else {
+    b.push(btn(BACK.x, BACK.y, BACK.w, BACK.h, () => { accuse.step = 'who'; sel = 1; sfx.click(); }, { label: '◀ WHO' }));
+    const found = CLUE_IDS.filter(c => save.clues[c]);
+    found.forEach((id, i) => b.push(btn(36 + (i % 6) * 150, 120 + Math.floor(i / 6) * 122, 140, 112, () => {
+      const k = accuse.picks.indexOf(id);
+      if (k >= 0) accuse.picks.splice(k, 1); else if (accuse.picks.length < 3) accuse.picks.push(id); else { accuse.picks.shift(); accuse.picks.push(id); }
+      sfx.click();
+    }, { clue: id })));
+    b.push(btn(330, 400, 300, 80, () => { if (accuse.picks.length === 3) judge(); else { sfx.nope(); } }, { label: 'go' }));
+  }
+}
+function judge() {
+  const who = accuse.who, bad = accuse.picks.find(c => !CLUES[c].key);
+  if (who === 'baby' && !bad) { solveCase(); return; }
+  sfx.wrong();
+  const hint = who !== 'baby' ? SUSPECTS[who].hint
+    : `Baby Gloop... maybe! But the ${CLUES[bad].name} belongs to ${SUSPECTS[CLUES[bad].who].name}. Pick 3 clues that point to Baby Gloop!`;
+  talk([['robo', "Hmm, that doesn't fit the clues… try again!"], ['robo', 'Hint: ' + hint]], () => {
+    if (who !== 'baby') { accuse.step = 'who'; sel = 1; } else { accuse.picks = accuse.picks.filter(c => CLUES[c].key); }
+  });
+}
+function solveCase() {
+  sfx.gasp();
+  talk([['robo', "I know who took the crown... It was BABY GLOOP!"],
+        ['baby', "Goo... you're right. I'm sorry, Robo!"],
+        ['baby', "I just wanted to look like my Daddy at the big party..."],
+        ['king', "Oh, Baby Gloop! You don't need a crown to be like me."],
+        ['king', "You just need a big, kind heart. And you already have one!"],
+        ['baby', "Can I wear it to the party? Just for tonight? Pleeease?"],
+        ['king', "Of course, my little prince! Now... LET'S PARTY!"],
+        ['robo', "CASE CLOSED!"]], () => {
+    state = 'end'; endT = 0; sel = 0; setSong('happy'); sfx.win();
+    save.solved = true; save.cases = (save.cases || 0) + 1; save.started = false; writeSave();
+    trophy('caseClosed'); sticker('detective-robo');
+  });
+}
+
+// ---------- 🧩 Mini-puzzles ----------
+function startPuzzle(kind) {
+  sfx.click(); setSong('puzzle'); sel = 1;
+  if (kind === 'memory') {
+    const notes = [[60, '#ff5252'], [64, '#ffd740'], [67, '#69f0ae'], [72, '#40c4ff']], cards = [];
+    for (const n of notes) { cards.push({ m: n[0], c: n[1], up: false, done: false }); cards.push({ m: n[0], c: n[1], up: false, done: false }); }
+    for (let i = cards.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [cards[i], cards[j]] = [cards[j], cards[i]]; }
+    mem = { cards, open: [], wait: 0, won: 0 };
+    state = 'memory';
+  } else if (kind === 'slide') {
+    let tiles;
+    do {
+      tiles = [0, 1, 2, 3, 4, 5, 6, 7, 8]; slide = { tiles, hist: [], won: 0 };
+      let prev = -1;
+      for (let k = 0; k < 16; k++) {
+        const bl = tiles.indexOf(8), opts = neighbors(bl).filter(p => p !== prev);
+        const p = opts[Math.floor(Math.random() * opts.length)];
+        prev = bl; slideMove(p);
+      }
+    } while (slideSolved());
+    state = 'slide';
+  } else if (kind === 'lock') {
+    lock = { dials: [3, 3, 3], tries: 0, open: 0, shake: 0 };
+    state = 'lock';
+  }
+}
+function puzzleDone(clueId, x, y) {
+  save.solvedPuzzles[clueId] = 1;
+  state = 'room'; sel = 2; setSong('mystery');
+  findClue(clueId, x, y);
+}
+// 🎵 Music Room: match the music notes
+function memButtons(b) {
+  b.push(btn(BACK.x, BACK.y, BACK.w, BACK.h, () => { state = 'room'; sel = 2; setSong('mystery'); sfx.click(); }, { label: '◀ ROOM' }));
+  mem.cards.forEach((c, i) => b.push(btn(196 + (i % 4) * 146, 120 + Math.floor(i / 4) * 170, 130, 155, () => flipCard(i), { card: i })));
+}
+function flipCard(i) {
+  const c = mem.cards[i];
+  if (mem.wait > 0 || mem.won || c.up || c.done) return;
+  c.up = true; sfx.card(c.m); mem.open.push(i);
+  if (mem.open.length === 2) {
+    const [a, d] = mem.open.map(k => mem.cards[k]);
+    if (a.m === d.m) { a.done = d.done = true; mem.open = []; setTimeout(() => sfx.match(), 250); burst(260 + (i % 4) * 146, 200 + Math.floor(i / 4) * 170, [a.c, '#fff']); }
+    else mem.wait = 55;
+  }
+  if (mem.cards.every(k => k.done)) mem.won = 1;
+}
+function updateMem() {
+  if (mem.wait > 0 && --mem.wait === 0) { for (const k of mem.open) mem.cards[k].up = false; mem.open = []; }
+  if (mem.won && ++mem.won > 70) puzzleDone('sheet', 425, 260);
+}
+// 📚 Library: the 3x3 sliding picture puzzle
+const SL = { x: 330, y: 100, s: 300 };
+function neighbors(p) { const r = Math.floor(p / 3), c = p % 3, n = []; if (r > 0) n.push(p - 3); if (r < 2) n.push(p + 3); if (c > 0) n.push(p - 1); if (c < 2) n.push(p + 1); return n; }
+function slideMove(p, undo = false) {
+  const t = slide.tiles, bl = t.indexOf(8);
+  if (!neighbors(bl).includes(p)) return false;
+  t[bl] = t[p]; t[p] = 8;
+  if (!undo) slide.hist.push(bl);
+  return true;
+}
+const slideSolved = () => slide.tiles.every((v, i) => v === i);
+function slideButtons(b) {
+  b.push(btn(BACK.x, BACK.y, BACK.w, BACK.h, () => { state = 'room'; sel = 2; setSong('mystery'); sfx.click(); }, { label: '◀ ROOM' }));
+  for (let p = 0; p < 9; p++) b.push(btn(SL.x + (p % 3) * 100, SL.y + Math.floor(p / 3) * 100, 100, 100, () => {
+    if (slide.won) return;
+    if (slideMove(p)) { sfx.slide(); if (slideSolved()) { slide.won = 1; sfx.unlock(); } } else sfx.nope();
+  }, { tile: p }));
+  b.push(btn(700, 330, 210, 70, () => {                // HELP: does one correct move for you
+    if (slide.won || !slide.hist.length) return;
+    slideMove(slide.hist.pop(), true); sfx.slide();
+    if (slideSolved()) { slide.won = 1; sfx.unlock(); }
+  }, { label: '💡 HELP ME' }));
+}
+function updateSlide() { if (slide.won && ++slide.won > 80) puzzleDone('drawing', 415, 185); }
+// 🔭 Tower: the code lock on the chest
+const SYMS = ['star', 'moon', 'heart', 'sun'], CODE = [0, 1, 2];
+function lockButtons(b) {
+  b.push(btn(BACK.x, BACK.y, BACK.w, BACK.h, () => { state = 'room'; sel = 2; setSong('mystery'); sfx.click(); }, { label: '◀ ROOM' }));
+  for (let i = 0; i < 3; i++) b.push(btn(275 + i * 145, 150, 125, 150, () => { if (!lock.open) { lock.dials[i] = (lock.dials[i] + 1) % 4; sfx.dial(); } }, { dial: i }));
+  b.push(btn(355, 330, 250, 76, () => {
+    if (lock.open) return;
+    if (lock.dials.every((d, i) => d === CODE[i])) { lock.open = 1; sfx.unlock(); burst(W / 2, 250, ['#ffd740', '#fff']); }
+    else { lock.tries++; lock.shake = 20; sfx.nope(); }
+  }, { label: '🔓 OPEN!' }));
+}
+function updateLock() { if (lock.shake > 0) lock.shake--; if (lock.open && ++lock.open > 70) puzzleDone('bib', 445, 370); }
+function drawSym(k, x, y, r, col, bg) {
+  if (k === 0) drawStar(x, y, r, col); else if (k === 1) drawMoon(x, y, r * 0.9, col, bg); else if (k === 2) drawHeart(x, y, r * 0.9, col); else drawSun(x, y, r * 0.8, col);
+}
+
+// ---------- Drawing the screens ----------
+function drawBtn(b, fill, label, size = 26, col = '#fff') {
+  roundRect(b.x, b.y + 5, b.w, b.h, 16, 'rgba(0,0,0,.3)');
+  roundRect(b.x, b.y, b.w, b.h, 16, fill);
+  roundRect(b.x + 6, b.y + 4, b.w - 12, b.h * 0.35, 12, 'rgba(255,255,255,.18)');
+  if (label) text(label, b.x + b.w / 2, b.y + b.h / 2 + size * 0.36, size, col);
+}
+function drawSel(b) {
+  if (!b) return;
+  const p = 3 + Math.sin(frame * 0.2) * 2;
+  strokeRound(b.x - p, b.y - p, b.w + p * 2, b.h + p * 2, 18, '#ffea00', 4);
+}
+function nightSky(top = '#1a1446', bot = '#4a2a7a') {
+  const g = ctx.createLinearGradient(0, 0, 0, H); g.addColorStop(0, top); g.addColorStop(1, bot);
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  for (let k = 0; k < 40; k++) circle((k * 211) % W, (k * 97) % H, 1 + k % 2, `rgba(255,255,255,${0.3 + 0.3 * Math.sin(frame * 0.04 + k)})`);
+}
+function drawCastle(x, y, s, col = '#6a3fb5') {         // the Goo Castle on the hill
+  ctx.save(); ctx.translate(x, y); ctx.scale(s, s);
+  ctx.fillStyle = col; ctx.fillRect(-90, -80, 180, 80);
+  for (const tx of [-110, 70]) { ctx.fillRect(tx, -140, 40, 140); ctx.beginPath(); ctx.moveTo(tx - 6, -140); ctx.lineTo(tx + 20, -185); ctx.lineTo(tx + 46, -140); ctx.fill(); }
+  ctx.fillRect(-25, -150, 50, 70); ctx.beginPath(); ctx.moveTo(-32, -150); ctx.lineTo(0, -200); ctx.lineTo(32, -150); ctx.fill();
+  roundRect(-20, -45, 40, 45, [20, 20, 0, 0], '#311b92');
+  for (const [wx, wy] of [[-90, -110], [90, -110], [0, -120], [-55, -55], [55, -55]]) roundRect(wx - 7, wy - 10, 14, 20, [7, 7, 0, 0], frame % 120 < 60 && wx === 0 ? '#fff59d' : '#ffd740');
+  ctx.fillStyle = '#b388ff'; for (let k = 0; k < 6; k++) ellipse(-80 + k * 32, -82, 10, 6 + Math.sin(frame * 0.1 + k) * 2, '#b388ff');   // goo dripping off the roof
+  ctx.restore();
+}
+function drawTitle(b) {
+  nightSky();
+  ellipse(W / 2, H + 60, 600, 140, '#2e1a5e');
+  drawCastle(W / 2, 470, 1.1, '#3b2370');
+  text('ROBO DETECTIVE', W / 2, 100, 74, '#ffd740');
+  text('THE CASE OF THE MISSING CROWN', W / 2, 150, 32, '#fff');
+  drawRobo(170, 470, 4.2, { face: 1 });
+  ctx.save(); ctx.globalAlpha = 0.85; drawCrown(800, 330, 120, '#ffd740'); ctx.restore();
+  text('?', 800 + Math.sin(frame * 0.1) * 4, 260, 90, '#fff');
+  for (let i = 1; i < b.length; i++) drawBtn(b[i], i === 1 && b.length > 2 ? '#7c4dff' : '#ff4081', b[i].label, 26);
+  drawBtn(b[0], '#00c853', b[0].label, 28);
+  drawSel(b[sel]);
+  text('Tap things to search!  Arrows + SPACE to pick  •  ESC = back', W / 2, 505, 18, '#e1bee7');
+  if (save.cases) text(`🏆 Cases solved: ${save.cases}`, W - 20, 505, 18, '#ffd740', 'right');
+}
+function drawMap(b) {
+  nightSky('#20124d', '#3a1f6e');
+  text("🏰 GOO CASTLE MAP", W / 2, 50, 36, '#ffd740');
+  text(`🔍 Clues: ${clueCount()}/12`, W - 90, 92 - 40, 22, '#fff', 'right');
+  for (let i = 1; i <= 6; i++) {
+    const bt = b[i], rm = bt.room, cl = roomClues(rm), sus = rm.spots.find(s => s.kind === 'suspect');
+    roundRect(bt.x, bt.y + 5, bt.w, bt.h, 18, 'rgba(0,0,0,.3)');
+    roundRect(bt.x, bt.y, bt.w, bt.h, 18, rm.wall); roundRect(bt.x, bt.y + bt.h - 34, bt.w, 34, [0, 0, 18, 18], rm.floor);
+    text(rm.icon, bt.x + 40, bt.y + 56, 40); text(rm.name, bt.x + 140, bt.y + 44, 26, '#fff');
+    cl.forEach((s, k) => text(save.clues[s.id] ? '🔍' : '❔', bt.x + 120 + k * 40, bt.y + 90, 26));
+    drawChar(sus.id, bt.x + bt.w - 36, bt.y + bt.h - 8, 0.42);
+    if (!save.talked[sus.id]) text('💬', bt.x + bt.w - 62, bt.y + 30 + Math.sin(frame * 0.1) * 3, 22);
+  }
+  drawBtn(b[7], '#8d6e63', b[7].label, 30);
+  const ok = clueCount() >= NEED;
+  drawBtn(b[8], ok ? '#ff1744' : '#616161', ok ? '👉 MAKE THE ACCUSATION!' : `👉 ACCUSE (find ${NEED} clues: ${clueCount()}/${NEED})`, ok ? 30 : 24);
+  drawBtn(b[0], '#5e35b1', b[0].label, 22); drawBtn(b[9], '#5e35b1', b[9].label, 24);
+  drawSel(b[sel]);
+  text('Pick a room to search!', W / 2, 508, 18, '#e1bee7');
+}
+function drawRoomScreen(b) {
+  const rm = curRoom;
+  drawBackdrop(rm); drawProps(rm);
+  for (const sp of rm.spots) if (sp.kind === 'suspect') {
+    const cx = sp.r[0] + sp.r[2] / 2, by = sp.r[1] + sp.r[3];
+    drawChar(sp.id, cx, by, 1, sp.id === 'baby' ? { glint: true, nervous: save.talked.baby } : {});
+    if (!save.talked[sp.id]) { roundRect(cx - 24, sp.r[1] - 44, 48, 36, 14, '#fff'); text('💬', cx, sp.r[1] - 16, 22); }
+  }
+  drawRobo(78, 492, 2.6, { face: 1 });
+  for (const sp of rm.spots) if (spotDone(sp) && sp.kind !== 'suspect') { circle(sp.r[0] + sp.r[2] - 6, sp.r[1] + 6, 14, '#00c853'); text('✔', sp.r[0] + sp.r[2] - 6, sp.r[1] + 14, 20); }
+  // ✨ hidden clues sparkle, more and more as the magnifying glass gets close
+  let hot = 0;
+  for (const sp of roomClues(rm)) {
+    if (save.clues[sp.id]) continue;
+    const cx = sp.r[0] + sp.r[2] / 2, cy = sp.r[1] + sp.r[3] / 2, d = Math.hypot(cursor.x - cx, cursor.y - cy), near = Math.max(0, 1 - d / 230);
+    hot = Math.max(hot, near);
+    const n = 1 + Math.floor(near * 5);
+    for (let k = 0; k < n; k++) {
+      const a = frame * 0.05 + k * 1.3 + cx, rr = 0.3 + near * 0.7;
+      ctx.globalAlpha = Math.min(1, 0.35 + near) * (0.5 + 0.5 * Math.sin(frame * 0.15 + k * 2));
+      sparkle(cx + Math.cos(a) * sp.r[2] * 0.45, cy + Math.sin(a * 1.3) * sp.r[3] * 0.45, 6 + 10 * rr, a);
+    }
+    ctx.globalAlpha = 1;
+  }
+  roundRect(0, 0, W, 66, 0, 'rgba(0,0,0,.35)');
+  text(`${rm.icon} ${rm.name}`, W / 2, 46, 34, '#ffd740');
+  drawBtn(b[0], '#5e35b1', b[0].label, 22); drawBtn(b[1], '#8d6e63', b[1].label, 22);
+  if (inputMode === 'key' && sel < 2) drawSel(b[sel]);
+  text('Tap things to search! Look for the ✨ sparkles!', W / 2, 512, 18, '#fff');
+  // 🔍 the magnifying-glass cursor
+  const cx = cursor.x, cy = cursor.y;
+  ctx.save();
+  if (hot > 0.25) { ctx.globalAlpha = hot * 0.6; circle(cx, cy, 40 + hot * 12, '#fff59d'); ctx.globalAlpha = 1; }
+  ctx.strokeStyle = '#5d4037'; ctx.lineWidth = 10; ctx.lineCap = 'round'; ctx.beginPath(); ctx.moveTo(cx + 22, cy + 22); ctx.lineTo(cx + 46, cy + 46); ctx.stroke(); ctx.lineCap = 'butt';
+  circle(cx, cy, 28, `rgba(179,229,252,${0.25 + hot * 0.3})`);
+  ctx.strokeStyle = hot > 0.5 ? '#ffea00' : '#ffb300'; ctx.lineWidth = 6; ctx.beginPath(); ctx.arc(cx, cy, 30, 0, 7); ctx.stroke();
+  ellipse(cx - 10, cy - 12, 8, 4, 'rgba(255,255,255,.8)', -0.6);
+  if (hot > 0.6) text('!', cx, cy + 12, 34, '#ffea00');
+  ctx.restore();
+}
+function paperPage() {
+  ctx.fillStyle = '#5d4037'; ctx.fillRect(0, 0, W, H);
+  roundRect(30, 70, W - 60, H - 84, 14, '#fff8e1');
+  ctx.strokeStyle = '#bbdefb'; ctx.lineWidth = 1.5; for (let y = 110; y < H - 20; y += 28) { ctx.beginPath(); ctx.moveTo(40, y); ctx.lineTo(W - 40, y); ctx.stroke(); }
+}
+function drawNotebook(b) {
+  paperPage();
+  ctx.fillStyle = '#8d6e63'; ctx.fillRect(W / 2 + 4 - 25, 70, 6, H - 84);
+  text('📒 DETECTIVE NOTEBOOK', W / 2 + 60, 48, 32, '#ffd740');
+  plain(`CLUES  ${clueCount()}/12`, 52, 102, 20, '#5d4037'); plain('SUSPECTS', 500, 102, 20, '#5d4037');
+  for (const bt of b) {
+    if (bt.clue) {
+      const has = save.clues[bt.clue], c = CLUES[bt.clue];
+      roundRect(bt.x, bt.y, bt.w, bt.h, 10, has ? '#ffe082' : '#e0e0e0');
+      if (has) { ctx.font = '26px sans-serif'; ctx.textAlign = 'center'; ctx.fillText(c.icon, bt.x + 22, bt.y + 38); wrap(c.name, 86, 15).forEach((l, k) => plain(l, bt.x + 40, bt.y + 26 + k * 17, 15, '#4e342e')); }
+      else plain('? ? ?', bt.x + bt.w / 2, bt.y + 36, 20, '#9e9e9e', 'center');
+    } else if (bt.suspect) {
+      const id = bt.suspect, S = SUSPECTS[id], t = save.talked[id];
+      roundRect(bt.x, bt.y, bt.w, bt.h, 8, t ? 'rgba(255,224,130,.6)' : 'rgba(0,0,0,.06)');
+      circle(bt.x + 20, bt.y + 20, 13, S.col);
+      plain(S.name, bt.x + 40, bt.y + 26, 18, '#4e342e');
+      plain(t ? '✔ talked' : 'not yet', bt.x + bt.w - 10, bt.y + 26, 15, t ? '#2e7d32' : '#9e9e9e', 'right');
+    }
+  }
+  drawBtn(b[0], '#5e35b1', b[0].label, 22);
+  const cur = b[sel]; drawSel(cur);
+  roundRect(40, 400, W - 80, 96, 12, '#fff3c4'); strokeRound(40, 400, W - 80, 96, 12, '#ffb300', 3);
+  let info = 'Tap a clue or a suspect to read about it!';
+  if (cur && cur.clue) info = save.clues[cur.clue] ? CLUES[cur.clue].text : "I haven't found this clue yet. Keep searching!";
+  if (cur && cur.suspect) info = save.talked[cur.suspect] ? SUSPECTS[cur.suspect].name + ': ' + SUSPECTS[cur.suspect].note : `I haven't talked to ${SUSPECTS[cur.suspect].name} yet. Find them in the ${ROOM[SUSPECTS[cur.suspect].room].name}!`;
+  wrap(info, W - 120, 22).slice(0, 3).forEach((l, k) => plain(l, 60, 432 + k * 28, 22, '#4e342e'));
+}
+function drawAccuse(b) {
+  nightSky('#3e0d1f', '#7a1f3d');
+  drawBtn(b[0], '#5e35b1', b[0].label, 22);
+  if (accuse.step === 'who') {
+    text('👉 WHO TOOK THE CROWN?', W / 2, 52, 36, '#ffd740');
+    for (const bt of b) if (bt.suspect) {
+      roundRect(bt.x, bt.y, bt.w, bt.h, 18, 'rgba(255,255,255,.12)');
+      drawChar(bt.suspect, bt.x + bt.w / 2, bt.y + bt.h - 40, 0.85);
+      text(SUSPECTS[bt.suspect].name, bt.x + bt.w / 2, bt.y + bt.h - 12, 22, '#fff');
+    }
+  } else {
+    text(`Pick 3 clues that prove ${SUSPECTS[accuse.who].name} did it!`, W / 2, 52, 28, '#ffd740');
+    text(`Picked: ${accuse.picks.length}/3`, W / 2, 96, 22, '#fff');
+    for (const bt of b) if (bt.clue) {
+      const on = accuse.picks.includes(bt.clue), c = CLUES[bt.clue];
+      roundRect(bt.x, bt.y, bt.w, bt.h, 14, on ? '#ffd740' : '#fff8e1');
+      ctx.font = '38px sans-serif'; ctx.textAlign = 'center'; ctx.fillText(c.icon, bt.x + bt.w / 2, bt.y + 50);
+      wrap(c.name, bt.w - 10, 17).forEach((l, k) => plain(l, bt.x + bt.w / 2, bt.y + 80 + k * 18, 17, '#4e342e', 'center'));
+      if (on) { circle(bt.x + bt.w - 12, bt.y + 12, 14, '#00c853'); text('✔', bt.x + bt.w - 12, bt.y + 20, 20); }
+    }
+    const go = b[b.length - 1];
+    drawBtn(go, accuse.picks.length === 3 ? '#ff1744' : '#616161', `IT WAS ${SUSPECTS[accuse.who].name.toUpperCase()}!`, 24);
+    drawChar(accuse.who, 120, 500, 0.7);
+  }
+  drawSel(b[sel]);
+}
+function drawMem(b) {
+  nightSky('#2a0a4a', '#4a148c');
+  text('🎵 Match the music notes!', W / 2, 50, 34, '#ffd740');
+  text('Tap two cards. Same note = a match!', W / 2, 90, 20, '#fff');
+  for (const bt of b) if (bt.card !== undefined) {
+    const c = mem.cards[bt.card];
+    if (c.up || c.done) {
+      roundRect(bt.x, bt.y, bt.w, bt.h, 14, c.c);
+      const x = bt.x + bt.w / 2, y = bt.y + bt.h / 2;
+      ellipse(x - 10, y + 22, 18, 13, '#212121', -0.4); ctx.fillStyle = '#212121'; ctx.fillRect(x + 4, y - 40, 6, 62);
+      ctx.beginPath(); ctx.moveTo(x + 10, y - 40); ctx.quadraticCurveTo(x + 36, y - 26, x + 28, y - 4); ctx.lineTo(x + 10, y - 22); ctx.fill();
+      if (c.done) { ctx.globalAlpha = 0.6; sparkle(bt.x + 18, bt.y + 18, 12, frame * 0.05); ctx.globalAlpha = 1; }
+    } else {
+      roundRect(bt.x, bt.y, bt.w, bt.h, 14, '#7e57c2'); strokeRound(bt.x + 8, bt.y + 8, bt.w - 16, bt.h - 16, 10, '#b39ddb', 3);
+      text('?', bt.x + bt.w / 2, bt.y + bt.h / 2 + 18, 50, '#ede7f6');
+    }
+  }
+  drawBtn(b[0], '#5e35b1', b[0].label, 22);
+  drawSel(b[sel]);
+  if (mem.won) text('🎶 YOU MATCHED THEM ALL! 🎶', W / 2, 500, 32, '#ffea00');
+}
+function drawSlide(b) {
+  ctx.fillStyle = '#4e342e'; ctx.fillRect(0, 0, W, H);
+  text('🖼️ Fix the jumbled picture!', W / 2, 50, 34, '#ffd740');
+  text('Tap a piece next to the empty spot to slide it.', W / 2, 86, 20, '#fff');
+  roundRect(SL.x - 12, SL.y - 12, SL.s + 24, SL.s + 24, 10, '#ffb300');
+  for (let p = 0; p < 9; p++) {
+    const v = slide.tiles[p], x = SL.x + (p % 3) * 100, y = SL.y + Math.floor(p / 3) * 100;
+    if (v === 8 && !slide.won) { roundRect(x + 2, y + 2, 96, 96, 6, '#3e2723'); continue; }
+    ctx.save(); ctx.beginPath(); ctx.rect(x + 1, y + 1, 98, 98); ctx.clip();
+    drawPicture(x - (v % 3) * 100, y - Math.floor(v / 3) * 100, 300); ctx.restore();
+    if (!slide.won) strokeRound(x + 1, y + 1, 98, 98, 4, '#6d4c41', 2);
+  }
+  text('Picture:', 120, 140, 20, '#fff'); drawPicture(55, 155, 130);
+  drawBtn(b[b.length - 1], '#00897b', b[b.length - 1].label, 24);
+  text('Stuck? HELP does', 805, 430, 16, '#ffe0b2'); text('one move for you!', 805, 452, 16, '#ffe0b2');
+  drawBtn(b[0], '#5e35b1', b[0].label, 22);
+  drawSel(b[sel]);
+  if (slide.won) text('✨ YOU FIXED IT! ✨', W / 2, 460, 34, '#ffea00');
+}
+function drawLock(b) {
+  ctx.fillStyle = '#263238'; ctx.fillRect(0, 0, W, H);
+  text('🔒 The locked chest', W / 2, 50, 34, '#ffd740');
+  text('Tap the pictures to change them. Then tap OPEN!', W / 2, 90, 20, '#fff');
+  const sh = lock.shake ? Math.sin(lock.shake * 1.5) * 8 : 0;
+  roundRect(240 + sh, 120, 480, 200, 20, '#8d6e63'); roundRect(250 + sh, 130, 460, 180, 14, '#6d4c41');
+  for (const bt of b) if (bt.dial !== undefined) {
+    roundRect(bt.x + sh, bt.y, bt.w, bt.h, 14, '#fff8e1');
+    drawSym(lock.dials[bt.dial], bt.x + bt.w / 2 + sh, bt.y + bt.h / 2 - 8, 40, ['#ffb300', '#ffd740', '#ff4081', '#ff9100'][lock.dials[bt.dial]], '#fff8e1');
+    plain('tap ▲', bt.x + bt.w / 2 + sh, bt.y + bt.h - 10, 15, '#8d6e63', 'center');
+  }
+  drawBtn(b[b.length - 1], lock.open ? '#00c853' : '#ff9100', lock.open ? 'OPEN! 🎉' : b[b.length - 1].label, 28);
+  drawBtn(b[0], '#5e35b1', b[0].label, 22);
+  drawSel(b[sel]);
+  if (lock.tries > 0 && !lock.open) text(lock.tries < 2 ? 'Not quite! Look at the scratches on the Tower wall.' : 'Hint: the wall says STAR, MOON, HEART!', W / 2, 460, 22, '#ffab91');
+  if (lock.tries >= 2 && !lock.open) for (let i = 0; i < 3; i++) drawSym(CODE[i], 400 + i * 80, 492, 16, '#cfd8dc', '#263238');
+}
+function drawEnd(b) {
+  nightSky('#311b92', '#ad1457');
+  for (let k = 0; k < 8; k++) { ctx.fillStyle = `hsla(${(frame * 3 + k * 45) % 360},100%,70%,.2)`; ctx.beginPath(); ctx.moveTo(W / 2, -20); ctx.lineTo(k * 140 - 40, H); ctx.lineTo(k * 140 + 20, H); ctx.fill(); }
+  ctx.fillStyle = '#4a148c'; ctx.fillRect(0, 420, W, 100);
+  const hop = k => -Math.abs(Math.sin(frame * 0.12 + k)) * 14;
+  drawChar('duke', 90, 425 + hop(0), 0.75); drawChar('pinch', 200, 425 + hop(1), 0.8); drawChar('sparks', 300, 425 + hop(2), 0.85);
+  drawChar('king', 450, 425 + hop(3) * 0.5, 1, { crown: false });
+  drawChar('baby', 560, 425 + hop(4), 0.95, { bigCrown: true });
+  drawChar('snatcher', 670, 425 + hop(5), 0.8); drawChar('nega', 770, 425 + hop(6), 0.85); drawChar('robo', 870, 425 + hop(7), 1);
+  const s = 1 + Math.sin(frame * 0.1) * 0.05;
+  ctx.save(); ctx.translate(W / 2, 70); ctx.scale(s, s); text('🎉 CASE CLOSED! 🎉', 0, 0, 60, '#ffea00'); ctx.restore();
+  text("Baby Gloop just wanted to look like his daddy! 💜", W / 2, 120, 26, '#fff');
+  drawParticles();
+  for (const bt of b) drawBtn(bt, bt === b[0] ? '#ff4081' : '#5e35b1', bt.label, 24);
+  drawSel(b[sel]);
+  if (stickerNew > 0) text('⭐ New sticker: Detective Robo!  🏆 Trophy: Case Closed!', W / 2, 160, 22, '#ffd740');
+}
+function portrait(who, x, y) {
+  circle(x, y, 92, '#fff'); circle(x, y, 86, who === 'robo' ? '#90caf9' : who === 'king' ? '#d1c4e9' : (SUSPECTS[who] ? SUSPECTS[who].col : '#ccc'));
+  ctx.save(); ctx.beginPath(); ctx.arc(x, y, 86, 0, 7); ctx.clip();
+  const big = { robo: 1.25, nega: 1.25, king: 0.95, baby: 1.3, duke: 1.05, sparks: 1.3, pinch: 1.2, snatcher: 1.15 }[who] || 1;
+  const drop = { robo: 115, nega: 105, king: 75, baby: 60, duke: 90, sparks: 110, pinch: 100, snatcher: 115 }[who] || 100;
+  drawChar(who, x, y + drop, big, who === 'king' ? { sad: state === 'map' } : {});
+  ctx.restore();
+}
+function drawOverlay() {
+  const o = overlay;
+  ctx.fillStyle = 'rgba(0,0,0,.5)'; ctx.fillRect(0, 0, W, H);
+  if (o.type === 'talk') {
+    const [who, str] = o.lines[o.i];
+    portrait(who, 130, 390);
+    roundRect(240, 300, 690, 190, 26, '#fff');
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.moveTo(244, 370); ctx.lineTo(214, 400); ctx.lineTo(250, 405); ctx.fill();
+    plain(NAMES[who] || who, 270, 336, 24, (SUSPECTS[who] && SUSPECTS[who].col) || (who === 'king' ? '#7c4dff' : '#1e88e5'));
+    wrap(str.slice(0, Math.floor(o.chars)), 620, 26).forEach((l, k) => plain(l, 270, 376 + k * 34, 26, '#222'));
+    if (o.chars >= str.length) text('▶ tap', 880, 475 + Math.sin(frame * 0.2) * 3, 18, '#ff4081');
+  } else {
+    const c = CLUES[o.id], k = Math.min(1, o.t / 12), sc = 0.6 + 0.4 * k;
+    ctx.save(); ctx.translate(W / 2, H / 2); ctx.scale(sc, sc);
+    roundRect(-300, -200, 600, 400, 30, '#fff8e1'); strokeRound(-300, -200, 600, 400, 30, '#ffb300', 8);
+    for (let i = 0; i < 8; i++) sparkle(Math.cos(frame * 0.03 + i * 0.785) * 250, Math.sin(frame * 0.03 + i * 0.785) * 160, 10, frame * 0.05);
+    text(o.isNew ? '🔍 NEW CLUE!' : '🔍 CLUE', 0, -140, 40, '#ffb300');
+    ctx.font = '84px sans-serif'; ctx.textAlign = 'center'; ctx.fillText(c.icon, 0, -30);
+    plain(c.name, 0, 20, 34, '#4e342e', 'center');
+    wrap(c.text, 520, 23).forEach((l, i) => plain(l, 0, 64 + i * 30, 23, '#5d4037', 'center'));
+    plain(`Clues: ${clueCount()}/12`, 0, 175, 20, '#8d6e63', 'center');
+    ctx.restore();
+    if (o.t > 15) text('▶ tap', W / 2 + 250, 470, 18, '#ff4081');
+  }
+}
+
+// ---------- Main loop ----------
+let lastMouse = null;
+function update() {
+  frame++;
+  updateParticles();
+  if (stickerNew > 0) stickerNew--;
+  if (overlay) {
+    if (overlay.type === 'talk') overlay.chars += 1.4; else overlay.t++;
+    if (press.ok || tap || press.esc) advanceOverlay();
+  } else {
+    const b = buttons();
+    if (sel >= b.length) sel = Math.max(0, b.length - 1);
+    const dir = press.l ? [-1, 0] : press.r ? [1, 0] : press.u ? [0, -1] : press.d ? [0, 1] : null;
+    if (dir) { const ns = navigate(b, sel, dir[0], dir[1]); if (ns !== sel) { sel = ns; sfx.move(); } }
+    if (inputMode === 'mouse' && mouse !== lastMouse) { const h = b.findIndex(bt => inBox(mouse, bt)); if (h >= 0) sel = h; }
+    lastMouse = mouse;
+    if (tap) { const h = b.findIndex(bt => inBox(tap, bt)); if (h >= 0) { sel = h; b[h].act(); } }
+    else if (press.ok && b[sel]) b[sel].act();
+    else if (press.esc) goBack();
+  }
+  if (state === 'memory' && mem) updateMem();
+  if (state === 'slide' && slide) updateSlide();
+  if (state === 'lock' && lock) updateLock();
+  if (state === 'end') { endT++; if (frame % 3 === 0) confetti(); }
+  // the magnifying glass glides to the mouse, or to the picked thing when using the keyboard
+  if (state === 'room') {
+    const b = buttons(), tgt = inputMode === 'key' && b[sel] ? { x: b[sel].x + b[sel].w / 2, y: b[sel].y + b[sel].h / 2 } : mouse;
+    cursor.x += (tgt.x - cursor.x) * 0.3; cursor.y += (tgt.y - cursor.y) * 0.3;
+  }
+  for (const k in press) press[k] = false;
+  tap = null;
+  playMusic();
+}
+function draw() {
+  ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.globalAlpha = 1;
+  const b = buttons();
+  if (state === 'title') drawTitle(b);
+  else if (state === 'map') drawMap(b);
+  else if (state === 'room') drawRoomScreen(b);
+  else if (state === 'notebook') drawNotebook(b);
+  else if (state === 'accuse') drawAccuse(b);
+  else if (state === 'memory') drawMem(b);
+  else if (state === 'slide') drawSlide(b);
+  else if (state === 'lock') drawLock(b);
+  else if (state === 'end') drawEnd(b);
+  if (state !== 'end') drawParticles();
+  if (overlay) drawOverlay();
+}
+function loop() { update(); draw(); requestAnimationFrame(loop); }
+loop();
+</script>
+<!-- injected by scripts/inject-factory.py — hold PS (or SELECT+START) for 1s to go
+     up one level: game -> the book (parent.closeGame), standalone game -> /factory/,
+     the book -> Stephens Arcade (/). Shares one rAF pad poll with the cursor + idle overlays. -->
+<script id="__gf_pad_exit">
+(function () {
+  var IS_BOOK = false; /*@gf:is_book*/
+  var HOLD_MS = 1000;
+  // one rAF loop per page reads the pads for every __gf overlay
+  var hub = window.__gfHub;
+  if (!hub) {
+    hub = window.__gfHub = { fns: [], pads: [] };
+    (function () {
+      var NONE = [];
+      function loop(now) {
+        var p = null;
+        try { p = navigator.getGamepads ? navigator.getGamepads() : null; } catch (e) {}
+        hub.pads = p || NONE;
+        for (var i = 0; i < hub.fns.length; i++) { try { hub.fns[i](now, hub.pads); } catch (e) {} }
+        requestAnimationFrame(loop);
+      }
+      requestAnimationFrame(loop);
+    })();
+  }
+
+  var STEPS = 20, TF = [];               // precomputed badge transforms: zero allocations while held
+  for (var s = 0; s <= STEPS; s++) TF.push('translateX(-50%) scale(' + (1 + 0.35 * s / STEPS).toFixed(4) + ')');
+  var HIDE_TF = 'translateX(-50%) scale(0.85)';
+  var heldSince = 0, needRelease = true, leaving = false, badge = null, lastStep = -2;
+  var player = null;
+
+  function comboDown(pads) {
+    for (var i = 0; i < pads.length; i++) {
+      var gp = pads[i];
+      if (!gp || gp.connected === false) continue;
+      var b = gp.buttons;
+      if ((b[16] && b[16].pressed) || (b[8] && b[8].pressed && b[9] && b[9].pressed)) return true;
+    }
+    return false;
+  }
+  function makeBadge() {
+    badge = document.createElement('div');
+    badge.id = '__gfx_exit';
+    badge.textContent = IS_BOOK ? '◄ ARCADE' : '◄ BOOK';
+    badge.style.cssText = 'position:fixed;top:12px;left:50%;z-index:2147483001;pointer-events:none;' +
+      'padding:7px 18px;border-radius:999px;background:#10172a;color:#ffd23f;border:3px solid #ffd23f;' +
+      'font:bold 18px/1 "Trebuchet MS","Arial Rounded MT Bold",sans-serif;letter-spacing:1px;white-space:nowrap;' +
+      'transform-origin:50% 0;opacity:0;transform:' + HIDE_TF + ';transition:opacity .12s;';
+    (document.body || document.documentElement).appendChild(badge);
+  }
+  function setBadge(step) {            // step -1 = hidden, 0..STEPS = hold progress
+    if (step === lastStep) return;
+    lastStep = step;
+    if (step < 0) { if (badge) { badge.style.opacity = '0'; badge.style.transform = HIDE_TF; } return; }
+    if (!badge) makeBadge();
+    badge.style.opacity = '1';
+    badge.style.transform = TF[step];
+  }
+  function inGame() {
+    try { return window.parent !== window && typeof window.parent.closeGame === 'function'; } catch (e) { return false; }
+  }
+  function leave() {
+    leaving = true;                    // never navigate twice
+    if (!IS_BOOK && inGame()) { setBadge(-1); try { window.parent.closeGame(); } catch (e) {} return; }
+    location.href = IS_BOOK ? '/' : '/factory/';
+  }
+  hub.fns.push(function (now, pads) {
+    if (leaving) return;
+    var down = comboDown(pads);
+    if (IS_BOOK) {
+      if (!player) player = document.getElementById('player');
+      if (player && player.classList.contains('open')) {   // the game's own overlay handles this hold
+        if (down) needRelease = true;
+        heldSince = 0; setBadge(-1); return;
+      }
+    }
+    if (needRelease) {                 // a hold that started elsewhere never counts here
+      if (down) return;
+      needRelease = false;
+    }
+    if (!down) { heldSince = 0; setBadge(-1); return; }
+    if (!heldSince) heldSince = now;
+    var p = (now - heldSince) / HOLD_MS;
+    setBadge(Math.round((p > 1 ? 1 : p) * STEPS));
+    if (p >= 1) leave();
+  });
+})();
+</script>
+<!-- injected by scripts/inject-factory.py — console (low-fx) mode only: no-op canvas
+     shadowBlur and kill CSS backdrop-filter (both measured fps killers on the Pi).
+     The mouse cursor is hidden only while the pad cursor is installed. -->
+<script id="__gf_lowfx">
+(function () {
+  var on = false;
+  try {
+    if (/[?&]fx=low\b/.test(location.search)) { on = true; localStorage.setItem('arcade_lowfx', '1'); }
+    else if (/[?&]fx=full\b/.test(location.search)) { localStorage.setItem('arcade_lowfx', '0'); }
+    else { on = localStorage.getItem('arcade_lowfx') === '1'; }
+  } catch (e) {}
+  if (!on) return;
+  try {
+    Object.defineProperty(CanvasRenderingContext2D.prototype, 'shadowBlur', {
+      set: function () {}, get: function () { return 0; }, configurable: true
+    });
+  } catch (e) {}
+  try {
+    var st = document.createElement('style');
+    st.textContent = '* { backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }' +
+      ' html.__gfx_padcursor, html.__gfx_padcursor * { cursor: none !important; }';
+    (document.head || document.documentElement).appendChild(st);
+  } catch (e) {}
+})();
+</script>
+<!-- injected by scripts/inject-factory.py — console mode only: the TV has no printer,
+     so window.print shows a friendly toast instead of a dead print dialog. -->
+<script id="__gf_print">
+(function () {
+  var on = false;
+  try { on = /[?&]fx=low\b/.test(location.search) || localStorage.getItem('arcade_lowfx') === '1'; } catch (e) {}
+  if (!on) return;
+  var toast = null, timer = 0;
+  function hide() { if (toast) toast.style.opacity = '0'; }
+  window.print = function () {
+    try {
+      if (!toast) {
+        toast = document.createElement('div');
+        toast.id = '__gfx_print';
+        toast.textContent = '🖨️ Printing works on the iPad — not on the TV!';
+        toast.style.cssText = 'position:fixed;left:50%;bottom:48px;transform:translateX(-50%);z-index:2147483001;' +
+          'pointer-events:none;padding:14px 26px;border-radius:16px;background:#10172a;color:#ffd23f;' +
+          'border:3px solid #ffd23f;font:bold 24px/1.2 "Trebuchet MS","Arial Rounded MT Bold",sans-serif;' +
+          'white-space:nowrap;opacity:0;transition:opacity .2s;';
+        (document.body || document.documentElement).appendChild(toast);
+      }
+      toast.style.opacity = '1';
+      clearTimeout(timer);
+      timer = setTimeout(hide, 2500);
+    } catch (e) {}
+  };
+})();
+</script>
+<!-- injected by scripts/inject-factory.py — pad cursor: a pad-driven mouse pointer so
+     tap/click-only games play on the console. Right stick moves it (left stick too in
+     pointer games); X / R1 clicks and drags (pointer + mouse events, like touchpad.js
+     turns fingers into mouse events). Never consumes pad input. -->
+<script id="__gf_cursor">
+(function () {
+  window.__GF_CURSOR_LEFT = true; /*@gf:cursor_left*/
+  var IS_BOOK = false; /*@gf:is_book*/
+  var LEFT = window.__GF_CURSOR_LEFT === true;
+  var DZ = 0.2, SPEED = 900, SLEEP_MS = 4000, CLICK_SLOP = 12;
+  // one rAF loop per page reads the pads for every __gf overlay
+  var hub = window.__gfHub;
+  if (!hub) {
+    hub = window.__gfHub = { fns: [], pads: [] };
+    (function () {
+      var NONE = [];
+      function loop(now) {
+        var p = null;
+        try { p = navigator.getGamepads ? navigator.getGamepads() : null; } catch (e) {}
+        hub.pads = p || NONE;
+        for (var i = 0; i < hub.fns.length; i++) { try { hub.fns[i](now, hub.pads); } catch (e) {} }
+        requestAnimationFrame(loop);
+      }
+      requestAnimationFrame(loop);
+    })();
+  }
+
+  var S = window.__gfCursorState = { installed: false, awake: false, held: false, x: 0, y: 0 };
+  var el = null, x = 0, y = 0, awake = false, lastMove = 0, lastT = 0;
+  var held = false, target = null, sx = 0, sy = 0, prevBtn = false, vx = 0, vy = 0, player = null;
+  var INIT = { bubbles: true, cancelable: true, composed: true, view: window, detail: 0,
+    clientX: 0, clientY: 0, screenX: 0, screenY: 0, button: 0, buttons: 0,
+    pointerId: 1, pointerType: 'mouse', isPrimary: true, width: 1, height: 1, pressure: 0 };
+  var HAS_PE = typeof window.PointerEvent === 'function';
+
+  function install() {
+    if (S.installed) return;
+    S.installed = true;
+    x = Math.round((window.innerWidth || 1280) / 2); y = Math.round((window.innerHeight || 720) / 2);
+    el = document.createElement('div');
+    el.id = '__gfx_cursor';
+    el.style.cssText = 'position:fixed;left:0;top:0;width:28px;height:28px;pointer-events:none;z-index:2147483000;' +
+      'opacity:0;transition:opacity .25s;will-change:transform;';
+    el.innerHTML = '<svg width="28" height="28" viewBox="0 0 28 28" style="display:block;overflow:visible">' +
+      '<path d="M3 2 L3 23.5 L8.6 18.3 L12.6 26.6 L17 24.5 L13 16.4 L20.8 16.4 Z" fill="#fff" stroke="#10172a" ' +
+      'stroke-width="2.2" stroke-linejoin="round"/></svg>';
+    (document.body || document.documentElement).appendChild(el);
+    try { document.documentElement.classList.add('__gfx_padcursor'); } catch (e) {}
+    place();
+  }
+  function place() {
+    el.style.transform = 'translate3d(' + (x - 3) + 'px,' + (y - 2) + 'px,0)';
+    S.x = x; S.y = y;
+  }
+  function wake() { awake = S.awake = true; el.style.opacity = '1'; }
+  function sleep() { awake = S.awake = false; el.style.opacity = '0'; }
+  function fire(type, node, buttons, pointer) {
+    if (!node) return;
+    INIT.clientX = x; INIT.clientY = y;
+    INIT.screenX = (window.screenX || 0) + x; INIT.screenY = (window.screenY || 0) + y;
+    INIT.buttons = buttons; INIT.pressure = buttons ? 0.5 : 0;
+    INIT.detail = type === 'click' ? 1 : 0;
+    var ev;
+    try { ev = pointer && HAS_PE ? new PointerEvent(type, INIT) : new MouseEvent(type, INIT); } catch (e) { return; }
+    try { node.dispatchEvent(ev); } catch (e) {}
+  }
+  function at() { return document.elementFromPoint(x, y) || document.body || document.documentElement; }
+  function press(now) {
+    target = at(); held = S.held = true; sx = x; sy = y; lastMove = now;
+    fire('pointermove', target, 0, true); fire('mousemove', target, 0, false);
+    fire('pointerdown', target, 1, true); fire('mousedown', target, 1, false);
+  }
+  function release(clickOk) {
+    var t = target;
+    held = S.held = false; target = null;
+    fire('pointerup', t, 0, true); fire('mouseup', t, 0, false);
+    if (clickOk) { var dx = x - sx, dy = y - sy; if (dx * dx + dy * dy < CLICK_SLOP * CLICK_SLOP) fire('click', t, 0, false); }
+  }
+  function stick(ax, ay) {
+    ax = +ax || 0; ay = +ay || 0;
+    var m = Math.sqrt(ax * ax + ay * ay);
+    if (m <= DZ) return;
+    var e = ((m > 1 ? 1 : m) - DZ) / (1 - DZ);
+    e = e * e * SPEED / m;              // mild ease: squared magnitude, ~900 px/s at full tilt
+    vx += ax * e; vy += ay * e;
+  }
+
+  window.addEventListener('gamepadconnected', install);
+  hub.fns.push(function (now, pads) {
+    var i, p, a, b, btn = false;
+    if (!S.installed) {
+      for (i = 0; i < pads.length; i++) { p = pads[i]; if (p && p.mapping === 'standard') { install(); break; } }
+      if (!S.installed) return;
+    }
+    var dt = lastT ? (now - lastT) / 1000 : 0;
+    if (dt > 0.05) dt = 0.05;
+    lastT = now;
+    vx = 0; vy = 0;
+    for (i = 0; i < pads.length; i++) {
+      p = pads[i];
+      if (!p || p.connected === false) continue;
+      a = p.axes; b = p.buttons;
+      if (a) { stick(a[2], a[3]); if (LEFT) stick(a[0], a[1]); }
+      if ((b[0] && b[0].pressed) || (b[5] && b[5].pressed)) btn = true;
+    }
+    if (IS_BOOK) {                      // the book: asleep and silent while a game is open
+      if (!player) player = document.getElementById('player');
+      if (player && player.classList.contains('open')) {
+        if (held) release(false);
+        if (awake) sleep();
+        prevBtn = btn; return;
+      }
+    }
+    if (vx !== 0 || vy !== 0) {
+      var w = window.innerWidth || 1280, h = window.innerHeight || 720;
+      x += vx * dt; y += vy * dt;
+      if (x < 0) x = 0; else if (x > w - 1) x = w - 1;
+      if (y < 0) y = 0; else if (y > h - 1) y = h - 1;
+      lastMove = now;
+      if (!awake) wake();
+      place();
+      if (held) { fire('pointermove', target, 1, true); fire('mousemove', target, 1, false); }
+      else { var t = at(); fire('pointermove', t, 0, true); fire('mousemove', t, 0, false); }
+    } else if (awake && !held && now - lastMove > SLEEP_MS) {
+      sleep();
+    }
+    if (btn && !prevBtn) { if (awake) press(now); }
+    else if (!btn && prevBtn) { if (held) release(true); }
+    if (held) lastMove = now;
+    prevBtn = btn;
+  });
+})();
+</script>
+<!-- injected by scripts/inject-factory.py — after 15 idle minutes (no pad / keyboard /
+     pointer / touch input): a game closes back to the book, anything else returns to
+     Stephens Arcade. Test override: ?idle=<seconds>. -->
+<script id="__gf_idle">
+(function () {
+  var IS_BOOK = false; /*@gf:is_book*/
+  var qs = null;
+  try { qs = new URLSearchParams(location.search).get('idle'); } catch (e) {}
+  var IDLE_MS = (qs ? Math.max(10, parseFloat(qs) || 900) : 15 * 60) * 1000;
+  var DEADZONE = 0.25;
+  // one rAF loop per page reads the pads for every __gf overlay
+  var hub = window.__gfHub;
+  if (!hub) {
+    hub = window.__gfHub = { fns: [], pads: [] };
+    (function () {
+      var NONE = [];
+      function loop(now) {
+        var p = null;
+        try { p = navigator.getGamepads ? navigator.getGamepads() : null; } catch (e) {}
+        hub.pads = p || NONE;
+        for (var i = 0; i < hub.fns.length; i++) { try { hub.fns[i](now, hub.pads); } catch (e) {} }
+        requestAnimationFrame(loop);
+      }
+      requestAnimationFrame(loop);
+    })();
+  }
+  var last = performance.now(), leaving = false, player = null;
+  function bump() { last = performance.now(); }
+  window.addEventListener('keydown', bump, { capture: true });
+  window.addEventListener('pointerdown', bump, { capture: true });
+  window.addEventListener('touchstart', bump, { capture: true, passive: true });
+  function padActive(pads) {
+    for (var i = 0; i < pads.length; i++) {
+      var gp = pads[i];
+      if (!gp || gp.connected === false) continue;
+      for (var b = 0; b < gp.buttons.length; b++) if (gp.buttons[b].pressed) return true;
+      for (var a = 0; a < gp.axes.length; a++) if (Math.abs(gp.axes[a]) > DEADZONE) return true;
+    }
+    return false;
+  }
+  hub.fns.push(function (now, pads) {
+    if (leaving) return;
+    if (IS_BOOK) {                     // while a game is open its own overlay owns the idle timer
+      if (!player) player = document.getElementById('player');
+      if (player && player.classList.contains('open')) { last = now; return; }
+    }
+    if (padActive(pads)) last = now;
+    if (now - last < IDLE_MS) return;
+    leaving = true;
+    var g = false;
+    try { g = window.parent !== window && typeof window.parent.closeGame === 'function'; } catch (e) {}
+    if (g) { try { window.parent.closeGame(); } catch (e) {} }
+    else location.href = '/';          // pagehide fires -> games persist their state
+  });
+})();
+</script>

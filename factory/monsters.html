@@ -1,0 +1,2063 @@
+<meta charset="utf-8">
+<title>Monster Pals</title>
+<script>TOUCHPAD = { dpad: true, south: [' ', 'OK'], east: ['x', 'BACK'] };</script>
+<!-- injected by scripts/inject-factory.py (HEAD, before touchpad.js) — hide phantom
+     DualShock sub-devices ("... Motion Sensors", "... Touchpad") and, when a
+     standard-mapping pad exists, every non-standard device. Original indices
+     are kept (filtered slots read null), exactly like lib/controller.js. -->
+<script id="__gf_padfilter">
+(function () {
+  var nav = window.navigator;
+  if (!nav || typeof nav.getGamepads !== 'function' || nav.__gfPadFilter) return;
+  var orig = nav.getGamepads;
+  var PHANTOM = /motion sensors|touchpad/i;
+  var out = [];                       // reused every call: no per-frame allocation
+  function filtered() {
+    var src = orig.call(nav);
+    if (!src) return src;
+    var n = src.length, anyStd = false, i, p;
+    for (i = 0; i < n; i++) { p = src[i]; if (p && p.mapping === 'standard') anyStd = true; }
+    out.length = n;
+    for (i = 0; i < n; i++) {
+      p = src[i];
+      out[i] = (!p || PHANTOM.test(p.id || '') || (anyStd && p.mapping !== 'standard')) ? null : p;
+    }
+    return out;
+  }
+  try { nav.getGamepads = filtered; } catch (e) {}
+  if (nav.getGamepads !== filtered) {
+    try { Object.defineProperty(nav, 'getGamepads', { value: filtered, configurable: true, writable: true }); } catch (e) {}
+  }
+  try { nav.__gfPadFilter = true; } catch (e) {}
+})();
+</script>
+<script src="touchpad.js?v=2"></script>
+<style>
+  html, body { height: 100%; }
+  body { margin: 0; background: #10172a; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+  canvas { width: min(100vw, calc(100vh * 960 / 520)); height: auto; display: block; border-radius: 12px; box-shadow: 0 10px 40px rgba(0,0,0,.5); }
+</style>
+<canvas id="game" width="960" height="520"></canvas>
+<script>
+'use strict';
+const C = document.getElementById('game'), ctx = C.getContext('2d');
+const W = 960, H = 520, TS = 40;
+let frame = 0;
+
+// ================= Utilities =================
+const rnd = (a, b) => a + Math.random() * (b - a);
+const ri = (a, b) => Math.floor(rnd(a, b + 1));
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const lerp = (a, b, k) => a + (b - a) * k;
+const pick = a => a[Math.floor(Math.random() * a.length)];
+function hash(x, y) { let h = Math.imul(x + 11, 374761393) ^ Math.imul(y + 7, 668265263); h = Math.imul(h ^ (h >>> 13), 1274126177); return ((h ^ (h >>> 16)) >>> 0) / 4294967296; }
+function easeBack(k) { k = clamp(k, 0, 1); const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(k - 1, 3) + c1 * Math.pow(k - 1, 2); }
+
+// ================= Drawing helpers =================
+function rrPath(x, y, w, h, r) {
+  r = Math.max(0, Math.min(r, w / 2, h / 2));
+  ctx.beginPath(); ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+}
+function rr(x, y, w, h, r, fill, stroke, lw = 4) {
+  rrPath(x, y, w, h, r);
+  if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lw; ctx.stroke(); }
+}
+function fel(x, y, rx, ry, c) { ctx.beginPath(); ctx.ellipse(x, y, Math.max(0.1, rx), Math.max(0.1, ry), 0, 0, Math.PI * 2); ctx.fillStyle = c; ctx.fill(); }
+function fcirc(x, y, r, c) { fel(x, y, r, r, c); }
+function star(x, y, r, c, rot = 0) {
+  ctx.beginPath();
+  for (let i = 0; i < 10; i++) { const a = rot - Math.PI / 2 + i * Math.PI / 5, q = i % 2 ? r * 0.45 : r; ctx.lineTo(x + Math.cos(a) * q, y + Math.sin(a) * q); }
+  ctx.closePath(); ctx.fillStyle = c; ctx.fill();
+}
+const FONT = '"Comic Sans MS", "Chalkboard SE", sans-serif';
+function text(s, x, y, size = 24, color = '#fff', align = 'center', outline = '#1d2340', lw) {
+  ctx.font = `bold ${size}px ${FONT}`; ctx.textAlign = align; ctx.textBaseline = 'middle'; ctx.lineJoin = 'round';
+  if (outline) { ctx.lineWidth = lw != null ? lw : Math.max(3, size / 4.5); ctx.strokeStyle = outline; ctx.strokeText(s, x, y); }
+  ctx.fillStyle = color; ctx.fillText(s, x, y);
+}
+function wrap(s, maxW, size) {
+  ctx.font = `bold ${size}px ${FONT}`;
+  const words = String(s).split(' '), lines = []; let cur = '';
+  for (const w of words) { const t = cur ? cur + ' ' + w : w; if (ctx.measureText(t).width > maxW && cur) { lines.push(cur); cur = w; } else cur = t; }
+  if (cur) lines.push(cur); return lines;
+}
+function panel(x, y, w, h, fill = '#fffaf0', stroke = '#2d3561') { rr(x + 3, y + 5, w, h, 16, 'rgba(0,0,0,.25)'); rr(x, y, w, h, 16, fill, stroke, 5); }
+function arrowDown(x, y, c = '#ff5a7a') { const b = Math.sin(frame * 0.15) * 3; ctx.beginPath(); ctx.moveTo(x - 9, y - 5 + b); ctx.lineTo(x + 9, y - 5 + b); ctx.lineTo(x, y + 6 + b); ctx.closePath(); ctx.fillStyle = c; ctx.fill(); }
+function arrowRight(x, y, c = '#ff5a7a') { const b = Math.sin(frame * 0.2) * 3; ctx.beginPath(); ctx.moveTo(x - 6 + b, y - 9); ctx.lineTo(x + 6 + b, y); ctx.lineTo(x - 6 + b, y + 9); ctx.closePath(); ctx.fillStyle = c; ctx.fill(); }
+
+// ================= Input =================
+const keys = {}, pressed = new Set();
+function keyName(e) { return e.key && e.key.length === 1 ? e.key.toLowerCase() : e.key; }
+addEventListener('keydown', e => {
+  const k = keyName(e);
+  if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' ', 'Enter'].includes(e.key)) e.preventDefault();
+  if (!keys[k]) pressed.add(k);
+  keys[k] = true;
+  initAudio();
+});
+addEventListener('keyup', e => { keys[keyName(e)] = false; });
+addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
+const has = (...ks) => ks.some(k => pressed.has(k));
+const okP = () => has(' ', 'Enter');
+const backP = () => has('Escape', 'x');
+const upP = () => has('ArrowUp', 'w'), downP = () => has('ArrowDown', 's');
+const leftP = () => has('ArrowLeft', 'a'), rightP = () => has('ArrowRight', 'd');
+function heldDir() {
+  if (keys.ArrowDown || keys.s) return 0; if (keys.ArrowUp || keys.w) return 1;
+  if (keys.ArrowLeft || keys.a) return 2; if (keys.ArrowRight || keys.d) return 3; return -1;
+}
+function gridNav(cur, cols, n) {
+  let c = cur;
+  if (leftP() && c % cols > 0) c--;
+  else if (rightP() && c % cols < cols - 1 && c + 1 < n) c++;
+  else if (upP() && c - cols >= 0) c -= cols;
+  else if (downP() && c + cols < n) c += cols;
+  if (c !== cur) sfx.move();
+  return c;
+}
+
+// ================= Sound =================
+let actx = null, master = null, musicOn = true;
+function initAudio() {
+  if (actx) { if (actx.state === 'suspended' && actx.resume) actx.resume(); return; }
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext; if (!AC) return;
+    actx = new AC(); master = actx.createGain(); master.gain.value = 0.9; master.connect(actx.destination);
+  } catch (e) { actx = null; }
+}
+function note(f, start, dur, wave = 'square', vol = 0.08, slide = null) {
+  if (!actx) return;
+  try {
+    const t = actx.currentTime + Math.max(0, start);
+    const o = actx.createOscillator(), g = actx.createGain();
+    o.type = wave; o.frequency.setValueAtTime(f, t);
+    if (slide) o.frequency.exponentialRampToValueAtTime(slide, t + dur);
+    g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(vol, t + 0.01);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(g); g.connect(master); o.start(t); o.stop(t + dur + 0.05);
+  } catch (e) {}
+}
+const mtof = m => 440 * Math.pow(2, (m - 69) / 12);
+function tune(notes, step = 0.1, wave = 'square', vol = 0.06) { notes.forEach((m, i) => { if (m) note(mtof(m), i * step, step * 1.2, wave, vol); }); }
+const sfx = {
+  move: () => note(660, 0, 0.05, 'square', 0.035),
+  ok: () => { note(880, 0, 0.06, 'square', 0.045); note(1320, 0.06, 0.08, 'square', 0.045); },
+  back: () => note(500, 0, 0.09, 'square', 0.04, 300),
+  bump: () => note(110, 0, 0.08, 'square', 0.05),
+  swoosh: () => note(300, 0, 0.15, 'triangle', 0.06, 900),
+  hit: () => { note(220, 0, 0.12, 'square', 0.09, 90); note(110, 0, 0.12, 'triangle', 0.1); },
+  superHit: () => { note(330, 0, 0.1, 'sawtooth', 0.08, 120); note(660, 0.08, 0.18, 'square', 0.07, 200); },
+  weak: () => note(200, 0, 0.12, 'triangle', 0.08, 150),
+  heal: () => tune([72, 76, 79, 84], 0.08, 'triangle', 0.09),
+  center: () => tune([72, 76, 79, 76, 79, 84, 0, 88], 0.12, 'triangle', 0.09),
+  level: () => tune([67, 71, 74, 79, 0, 79, 83], 0.08, 'square', 0.055),
+  throw: () => note(400, 0, 0.35, 'triangle', 0.08, 1200),
+  wobble: () => { note(300, 0, 0.07, 'square', 0.05); note(240, 0.1, 0.07, 'square', 0.05); },
+  gotcha: () => tune([72, 76, 79, 84, 0, 79, 84, 88], 0.09, 'square', 0.06),
+  pop: () => note(700, 0, 0.15, 'square', 0.06, 200),
+  faint: () => note(520, 0, 0.55, 'triangle', 0.09, 110),
+  encounter: () => { for (let i = 0; i < 8; i++) note(400 + i * 110, i * 0.045, 0.06, 'square', 0.045); },
+  evolve: () => tune([60, 64, 67, 72, 76, 79, 84, 88], 0.11, 'triangle', 0.09),
+  win: () => tune([72, 72, 72, 76, 0, 79, 0, 84, 0, 0, 79, 84, 84], 0.12, 'square', 0.06),
+  talk: () => note(760, 0, 0.04, 'triangle', 0.05),
+};
+const TRACKS = {
+  world: { bpm: 104, mel: [72,0,76,0,79,0,76,0, 77,0,81,0,79,0,0,0, 76,0,79,0,84,0,83,81, 79,0,77,0,76,0,0,0,
+    74,0,77,0,81,0,79,77, 76,0,79,0,72,0,0,0, 77,76,74,0,79,77,76,0, 74,0,71,0,72,0,0,0], bass: [48,53,48,55,50,48,55,48] },
+  battle: { bpm: 156, mel: [69,72,76,72, 74,0,72,71, 69,72,76,79, 81,0,79,76, 77,76,74,72, 74,0,76,0, 72,71,69,71, 72,0,0,0], bass: [45,41,43,45] },
+};
+let track = 'world', mStep = 0, mTime = 0;
+function setTrack(n) { if (track !== n) { track = n; mStep = 0; if (actx) mTime = actx.currentTime + 0.15; } }
+function musicTick() {
+  if (!actx || !musicOn) return;
+  const now = actx.currentTime; if (typeof now !== 'number') return;
+  if (mTime < now) mTime = now + 0.05;
+  const tr = TRACKS[track], st = 60 / tr.bpm / 2;
+  let guard = 0;
+  while (mTime < now + 0.25 && guard++ < 16) {
+    const i = mStep % tr.mel.length, m = tr.mel[i];
+    if (m) note(mtof(m), mTime - now, st * 0.95, 'triangle', 0.035);
+    if (i % 2 === 0) { const root = tr.bass[Math.floor(i / 8) % tr.bass.length]; note(mtof(root + (i % 4 === 2 ? 7 : 0)), mTime - now, st * 1.7, 'sine', 0.06); }
+    mTime += st; mStep++;
+  }
+}
+function toggleMusic() { musicOn = !musicOn; if (actx) mTime = actx.currentTime + 0.1; toast = { text: musicOn ? 'Music ON' : 'Music OFF', t: 90 }; save(); }
+
+// ================= Monster data =================
+const TYPES = {
+  fire: { n: 'Fire', c: '#ff7a3d' }, water: { n: 'Water', c: '#3d9bff' }, leaf: { n: 'Leaf', c: '#3fbf55' },
+  zap: { n: 'Zap', c: '#f5c400' }, rock: { n: 'Rock', c: '#a07a50' }, fluff: { n: 'Fluffy', c: '#ff8cc6' }, star: { n: 'Star', c: '#a07cff' },
+};
+const STRONG = { fire: ['leaf'], water: ['fire', 'rock'], leaf: ['water', 'rock'], zap: ['water'], rock: ['fire', 'zap'], fluff: [], star: [] };
+const WEAK = { fire: ['water', 'rock'], water: ['leaf'], leaf: ['fire'], zap: ['rock'], rock: [], fluff: [], star: [] };
+function effOf(at, dt) { if (STRONG[at].includes(dt)) return 2; if (WEAK[at].includes(dt)) return 0.5; return 1; }
+const MOVES = {
+  bump: { n: 'Bump', t: 'fluff', p: 40 }, bonk: { n: 'Big Bonk', t: 'fluff', p: 66 }, snack: { n: 'Snack Time', t: 'fluff', p: 0, heal: true },
+  ember: { n: 'Ember Pop', t: 'fire', p: 45 }, toasty: { n: 'Toasty Toss', t: 'fire', p: 62 }, swirl: { n: 'Flame Swirl', t: 'fire', p: 80 },
+  splash: { n: 'Splash Shot', t: 'water', p: 45 }, bubble: { n: 'Bubble Blast', t: 'water', p: 62 }, wave: { n: 'Wave Crash', t: 'water', p: 80 },
+  leaf: { n: 'Leaf Flick', t: 'leaf', p: 45 }, petal: { n: 'Petal Storm', t: 'leaf', p: 62 }, vine: { n: 'Vine Whirl', t: 'leaf', p: 80 },
+  zip: { n: 'Zip Zap', t: 'zap', p: 45 }, snap: { n: 'Static Snap', t: 'zap', p: 62 }, bolt: { n: 'Bolt Boom', t: 'zap', p: 80 },
+  pebble: { n: 'Pebble Toss', t: 'rock', p: 45 }, roll: { n: 'Rock Roll', t: 'rock', p: 62 }, boulder: { n: 'Boulder Bash', t: 'rock', p: 80 },
+  sprinkle: { n: 'Star Sprinkle', t: 'star', p: 62 }, comet: { n: 'Comet Dash', t: 'star', p: 82 },
+};
+const SP = {
+  emberpup: { n: 'Emberpup', t: 'fire', b: [46, 54, 42, 58], r: 0.8, evo: ['flarewolf', 14], home: 'Ember Peak (rare)', d: 'A warm little pup. Its tail flame wiggles when it is happy!', mv: [['bump', 1], ['ember', 1], ['toasty', 10], ['swirl', 20]] },
+  flarewolf: { n: 'Flarewolf', t: 'fire', b: [72, 80, 60, 78], r: 0.5, home: 'Ember Peak, or level up Emberpup to 14', d: 'A brave, fluffy wolf with a mane of friendly flames.', mv: [['bump', 1], ['ember', 1], ['toasty', 10], ['bonk', 14], ['swirl', 18]] },
+  splashlet: { n: 'Splashlet', t: 'water', b: [50, 48, 52, 50], r: 0.8, evo: ['tidalotl', 14], home: 'Sunny Meadow', d: 'A bouncy raindrop. It loves puddles and bubble baths.', mv: [['bump', 1], ['splash', 1], ['bubble', 10], ['wave', 20]] },
+  tidalotl: { n: 'Tidalotl', t: 'water', b: [78, 70, 68, 62], r: 0.5, home: 'Sparkly stone by the Sunny Meadow pond!', d: 'Always smiling! Its pink frills sway like seaweed.', mv: [['bump', 1], ['splash', 1], ['bubble', 10], ['bonk', 14], ['wave', 18]] },
+  budbun: { n: 'Budbun', t: 'leaf', b: [50, 50, 48, 54], r: 0.8, evo: ['blossomhop', 14], home: 'Whisper Woods (rare)', d: 'A hoppy bunny with leafy ears. It naps in sunny spots.', mv: [['bump', 1], ['leaf', 1], ['petal', 10], ['vine', 20]] },
+  blossomhop: { n: 'Blossomhop', t: 'leaf', b: [74, 74, 66, 70], r: 0.5, home: 'Ember Peak, or level up Budbun to 14', d: 'It wears a flower crown and hops higher than trees!', mv: [['bump', 1], ['leaf', 1], ['petal', 10], ['bonk', 14], ['vine', 18]] },
+  buzzbolt: { n: 'Buzzbolt', t: 'zap', b: [40, 52, 38, 72], r: 0.9, home: 'Sunny Meadow, Whisper Woods', d: 'A fuzzy buzzing bee. Its antennae go ZAP when it giggles.', mv: [['bump', 1], ['zip', 1], ['snap', 12], ['bolt', 22]] },
+  hootvolt: { n: 'Hootvolt', t: 'zap', b: [58, 64, 52, 62], r: 0.65, home: 'Whisper Woods, Ember Peak', d: 'A wise owl. Its feathers crackle with tiny sparks at night.', mv: [['bump', 1], ['zip', 1], ['snap', 9], ['bolt', 16]] },
+  pebblet: { n: 'Pebblet', t: 'rock', b: [46, 50, 66, 26], r: 1.0, home: 'Sunny Meadow, Ember Peak', d: 'A tiny rock with a mossy hairdo. It rolls everywhere.', mv: [['bump', 1], ['pebble', 1], ['roll', 12], ['boulder', 22]] },
+  boulderbear: { n: 'Boulderbear', t: 'rock', b: [78, 74, 74, 34], r: 0.6, home: 'Ember Peak', d: 'Big and strong but very gentle. Gives the best bear hugs.', mv: [['bump', 1], ['pebble', 1], ['roll', 10], ['bonk', 14], ['boulder', 16]] },
+  fluffum: { n: 'Fluffum', t: 'fluff', b: [62, 42, 46, 40], r: 1.0, home: 'Sunny Meadow, Whisper Woods', d: 'A cloud-soft sheep. Hugging it feels like a pillow.', mv: [['bump', 1], ['snack', 4], ['bonk', 12]] },
+  shroomy: { n: 'Shroomy', t: 'leaf', b: [52, 46, 52, 36], r: 0.95, home: 'Whisper Woods', d: 'A shy mushroom. Its spotty cap makes a great umbrella.', mv: [['bump', 1], ['leaf', 1], ['snack', 8], ['petal', 14]] },
+  jellybop: { n: 'Jellybop', t: 'water', b: [52, 46, 46, 52], r: 0.9, home: 'Sunny Meadow, Whisper Woods', d: 'A wobbly jelly that floats and bops along to music.', mv: [['bump', 1], ['splash', 1], ['bubble', 12], ['wave', 22]] },
+  magmallow: { n: 'Magmallow', t: 'fire', b: [58, 58, 52, 40], r: 0.85, home: 'Ember Peak', d: 'A toasty marshmallow buddy. It smells like a campfire.', mv: [['bump', 1], ['ember', 1], ['toasty', 12], ['snack', 14], ['swirl', 22]] },
+  lumidra: { n: 'Lumidra', t: 'star', b: [74, 68, 68, 70], r: 0.45, legend: true, home: 'Whisper Woods shrine (legendary!)', d: 'A legendary star dragon. Wishes come true where it sleeps.', mv: [['bump', 1], ['sprinkle', 1], ['comet', 14]] },
+  prismo: { n: 'Prismo', t: 'star', b: [86, 84, 80, 86], r: 0.3, legend: true, home: 'A prize from Prof. Pip for finishing the Monster Book!', d: 'A rainbow unicorn that only appears for true Monster Masters!', mv: [['bump', 1], ['sprinkle', 1], ['comet', 1]] },
+  solmane: { n: 'Solmane', t: 'fire', b: [80, 74, 70, 72], r: 0.45, legend: true, home: 'Ember Peak shrine (legendary!)', d: 'A legendary sun lion. Its mane shines like a sunrise.', mv: [['bump', 1], ['ember', 1], ['toasty', 1], ['sprinkle', 10], ['comet', 20]] },
+};
+const DEX = ['emberpup', 'flarewolf', 'splashlet', 'tidalotl', 'budbun', 'blossomhop', 'buzzbolt', 'hootvolt', 'pebblet', 'boulderbear', 'fluffum', 'shroomy', 'jellybop', 'magmallow', 'lumidra', 'solmane'];
+const STARTERS = ['emberpup', 'splashlet', 'budbun'];
+
+function maxHp(m) { return Math.floor(SP[m.sp].b[0] * m.lvl / 50) + m.lvl + 12; }
+function stat(m, i) { return Math.floor(SP[m.sp].b[i] * m.lvl / 50) + 5; }
+function movesOf(m) { return SP[m.sp].mv.filter(x => x[1] <= m.lvl).map(x => x[0]).slice(-4); }
+function need(l) { return l * 10 + 10; }
+function makeMon(sp, lvl) { const m = { sp, name: SP[sp].n, lvl, xp: 0, hp: 0 }; m.hp = maxHp(m); return m; }
+function healAll() { for (const m of G.team) m.hp = maxHp(m); for (const m of G.box) m.hp = maxHp(m); }
+function calcDmg(a, d, mv) {
+  const e = effOf(mv.t, SP[d.sp].t), stab = mv.t === SP[a.sp].t ? 1.25 : 1;
+  const base = (2 * a.lvl / 5 + 2) * mv.p * stat(a, 1) / Math.max(1, stat(d, 2)) / 50 + 2;
+  return { dmg: Math.max(1, Math.floor(base * e * stab * rnd(0.85, 1))), eff: e };
+}
+
+// ================= Monster art =================
+let SIL = false, SLEEPY = false;
+const OUTC = 'rgba(50,25,45,.6)';
+function col(c) { return SIL ? SIL : c; }
+function el(x, y, rx, ry, c, rot = 0, out = false) {
+  ctx.beginPath(); ctx.ellipse(x, y, Math.max(0.1, rx), Math.max(0.1, ry), rot, 0, Math.PI * 2);
+  if (out) { ctx.strokeStyle = SIL ? SIL : OUTC; ctx.lineWidth = 3; ctx.stroke(); }
+  ctx.fillStyle = col(c); ctx.fill();
+}
+function poly(pts, c, out = false) {
+  ctx.beginPath(); ctx.moveTo(pts[0], pts[1]);
+  for (let i = 2; i < pts.length; i += 2) ctx.lineTo(pts[i], pts[i + 1]);
+  ctx.closePath();
+  if (out) { ctx.strokeStyle = SIL ? SIL : OUTC; ctx.lineWidth = 3; ctx.stroke(); }
+  ctx.fillStyle = col(c); ctx.fill();
+}
+function stroke(pts, c, w) { ctx.beginPath(); ctx.moveTo(pts[0], pts[1]); for (let i = 2; i < pts.length; i += 2) ctx.lineTo(pts[i], pts[i + 1]); ctx.strokeStyle = col(c); ctx.lineWidth = w; ctx.stroke(); }
+function eye(x, y, r) {
+  if (SIL) return;
+  if (SLEEPY) { ctx.beginPath(); ctx.arc(x, y - r * 0.3, r * 0.8, 0.15 * Math.PI, 0.85 * Math.PI); ctx.strokeStyle = '#2a1a2a'; ctx.lineWidth = 2.5; ctx.stroke(); return; }
+  el(x, y, r * 0.78, r, '#22202e'); el(x + r * 0.25, y - r * 0.38, r * 0.33, r * 0.33, '#fff'); el(x - r * 0.22, y + r * 0.42, r * 0.15, r * 0.15, '#fff');
+}
+function blush(x, y, r = 6) { if (!SIL) el(x, y, r, r * 0.6, 'rgba(255,110,150,.55)'); }
+function smile(x, y, w = 5) { if (SIL) return; ctx.beginPath(); ctx.arc(x, y, w, 0.15 * Math.PI, 0.85 * Math.PI); ctx.strokeStyle = '#3a2034'; ctx.lineWidth = 2.5; ctx.stroke(); }
+function mstar(x, y, r, c, rot = 0) { star(x, y, r, col(c), rot); }
+
+const MART = {
+  prismo(t) {
+    const RB = ['#ff5a7a', '#ff9a3d', '#ffd84a', '#7fdc6a', '#5ab4ff', '#c9a0ff'];
+    for (let i = 0; i < 6; i++) el(-44 - i * 3, -46 + i * 6 + Math.sin(t * 0.1 + i) * 3, 7, 14, RB[i], 0.6, true);   // rainbow tail
+    el(-24, -10, 9, 14, '#f4ecff', 0, true); el(18, -10, 9, 14, '#f4ecff', 0, true);
+    el(-4, -40, 38, 24, '#ffffff', 0, true);
+    el(-16, -8, 9, 14, '#ffffff', 0, true); el(28, -8, 9, 14, '#ffffff', 0, true);
+    el(30, -76, 24, 22, '#ffffff', 0, true);                                   // head
+    for (let i = 0; i < 6; i++) el(12 - i * 2, -92 + i * 9, 9, 7, RB[i], -0.3, true);   // rainbow mane
+    poly([32, -96, 40, -134, 46, -94], '#ffe066', true);                        // golden horn
+    stroke([36, -108, 44, -110], '#ffb020', 2); stroke([37, -118, 43, -120], '#ffb020', 2);
+    eye(28, -78, 5.5); eye(44, -78, 5); blush(22, -68, 5); blush(48, -68, 4); smile(38, -66, 4);
+    if (!SIL) for (let i = 0; i < 5; i++) { const a = t * 0.05 + i * 1.26; star(Math.cos(a) * 60, -56 + Math.sin(a) * 44, 4, RB[i]); }
+  },
+  emberpup(t) {
+    const fl = Math.sin(t * 0.3) * 3;
+    el(-36, -30, 9, 7, '#ff8a3d', 0.5, true);
+    el(-46, -48, 11, 17, '#ff6a2a', -0.4, true); el(-46, -48, 6, 10, '#ffd84a', -0.4);
+    poly([-55, -60, -50, -80 + fl, -40, -62], '#ff6a2a');
+    el(-16, -6, 10, 7, '#e0601c', 0, true); el(18, -6, 10, 7, '#e0601c', 0, true);
+    el(0, -30, 31, 25, '#ff8a3d', 0, true); el(6, -24, 17, 14, '#ffe2b8');
+    poly([-8, -72, -6, -102, 10, -80], '#ff8a3d', true); poly([14, -80, 28, -102, 32, -72], '#ff8a3d', true);
+    poly([-4, -78, -4, -94, 6, -82], '#ffc08a'); poly([18, -80, 27, -95, 28, -76], '#ffc08a');
+    el(10, -60, 26, 22, '#ff8a3d', 0, true); el(16, -52, 12, 9, '#ffe2b8');
+    poly([4, -80, 10, -93 + fl, 16, -80], '#ffd84a');
+    eye(2, -63, 6); eye(22, -63, 6);
+    el(16, -56, 3.5, 2.5, '#3a2034'); smile(16, -53, 4); blush(-4, -54); blush(32, -54);
+  },
+  flarewolf(t) {
+    const fl = Math.sin(t * 0.3) * 4;
+    el(-50, -62, 14, 24, '#ff5a1f', -0.6, true); el(-52, -64, 8, 14, '#ffd84a', -0.6); poly([-64, -76, -58, -102 + fl, -46, -80], '#ff5a1f');
+    el(-28, -14, 10, 16, '#c8481a', 0, true); el(24, -14, 10, 16, '#c8481a', 0, true);
+    el(-2, -44, 44, 28, '#ff7a2d', 0, true); el(4, -36, 26, 14, '#ffe2b8');
+    el(-14, -12, 10, 15, '#ff7a2d', 0, true); el(36, -12, 10, 15, '#ff7a2d', 0, true);
+    for (let i = 0; i < 5; i++) { const a = -2.7 + i * 0.55; el(32 + Math.cos(a) * 28, -84 + Math.sin(a) * 28 + (i % 2 ? fl : -fl) * 0.5, 12, 16, i % 2 ? '#ffd84a' : '#ff5a1f', a + 1.57, true); }
+    poly([18, -100, 22, -128, 36, -104], '#ff7a2d', true); poly([38, -104, 52, -126, 54, -96], '#ff7a2d', true);
+    el(34, -86, 26, 22, '#ff7a2d', 0, true); el(50, -76, 15, 10, '#ffe2b8', 0, true);
+    eye(28, -90, 6); eye(46, -90, 6);
+    el(62, -80, 4, 3, '#3a2034'); smile(54, -74, 5); blush(22, -78);
+  },
+  splashlet(t) {
+    el(-32, -10, 14, 7, '#3d8be0', -0.3, true);
+    el(-16, -4, 10, 5, '#3d8be0', 0, true); el(16, -4, 10, 5, '#3d8be0', 0, true);
+    poly([-18, -58, 2, -94, 20, -58], '#5ab4ff', true);
+    el(0, -34, 32, 32, '#5ab4ff', 0, true);
+    poly([-16, -60, 2, -90, 18, -60], '#5ab4ff');
+    el(6, -26, 19, 18, '#d4f0ff');
+    el(-30, -42, 7, 14, '#3d8be0', 0.5, true);
+    el(4, -72, 3, 6, '#e8f8ff');
+    eye(-2, -44, 6); eye(18, -44, 6); smile(8, -36, 5); blush(-10, -34); blush(26, -34);
+  },
+  tidalotl(t) {
+    const w = Math.sin(t * 0.1) * 0.15;
+    el(-48, -36, 24, 10, '#6cc4f0', -0.35 + w, true);
+    el(-22, -6, 9, 9, '#5ab0e0', 0, true); el(20, -6, 9, 9, '#5ab0e0', 0, true);
+    el(-6, -30, 42, 22, '#8fd6ff', 0, true); el(0, -24, 28, 12, '#e0f6ff');
+    el(4, -82, 6, 16, '#ff8fc8', -0.9 - w, true); el(0, -66, 6, 15, '#ff8fc8', -1.4, true); el(4, -50, 6, 14, '#ff8fc8', -1.9 + w, true);
+    el(56, -82, 6, 16, '#ff8fc8', 0.9 + w, true); el(60, -66, 6, 15, '#ff8fc8', 1.4, true); el(56, -50, 6, 14, '#ff8fc8', 1.9 - w, true);
+    el(30, -62, 28, 24, '#8fd6ff', 0, true);
+    eye(20, -66, 6); eye(42, -66, 6); smile(31, -57, 9); blush(13, -56); blush(49, -56);
+  },
+  budbun(t) {
+    const e = Math.sin(t * 0.07) * 0.08;
+    el(-28, -24, 9, 9, '#ffffff', 0, true);
+    el(-14, -5, 11, 6, '#4cb84a', 0, true); el(16, -5, 11, 6, '#4cb84a', 0, true);
+    el(0, -28, 28, 26, '#7fdc6a', 0, true); el(5, -24, 16, 15, '#e8ffd8');
+    el(-4, -96, 8, 22, '#4cb84a', -0.25 - e, true); el(20, -96, 8, 22, '#4cb84a', 0.25 + e, true);
+    stroke([-4, -114, -2, -78], '#2f8a36', 2); stroke([20, -114, 18, -78], '#2f8a36', 2);
+    el(8, -62, 24, 21, '#7fdc6a', 0, true);
+    stroke([8, -82, 8, -90], '#2f8a36', 3); el(3, -92, 5, 3, '#4cb84a', -0.5); el(13, -92, 5, 3, '#4cb84a', 0.5);
+    eye(0, -64, 5.5); eye(18, -64, 5.5); el(10, -56, 3, 2.2, '#ff7aa0'); smile(10, -53, 3.5); blush(-6, -54); blush(26, -54);
+  },
+  blossomhop(t) {
+    const e = Math.sin(t * 0.07) * 0.08;
+    for (let i = 0; i < 5; i++) { const a = i * 1.257; el(-38 + Math.cos(a) * 6, -36 + Math.sin(a) * 6, 5, 5, '#ffb8de'); }
+    el(-38, -36, 4, 4, '#ffe066');
+    el(-22, -8, 15, 9, '#3fa846', 0, true); el(24, -8, 15, 9, '#3fa846', 0, true);
+    el(0, -38, 34, 32, '#62c95a', 0, true); el(6, -32, 20, 20, '#e8ffd8');
+    el(-2, -126, 9, 28, '#3fa846', -0.2 - e, true); el(26, -126, 9, 28, '#3fa846', 0.2 + e, true);
+    el(12, -84, 27, 24, '#62c95a', 0, true);
+    for (let i = 0; i < 6; i++) { const a = i * 1.047 + t * 0.01; el(12 + Math.cos(a) * 9, -108 + Math.sin(a) * 6, 6, 6, '#ff9ed2', 0, true); }
+    el(12, -108, 5, 5, '#ffe066');
+    eye(3, -86, 6); eye(23, -86, 6); el(14, -77, 3, 2.2, '#ff7aa0'); smile(14, -74, 4); blush(-4, -76); blush(30, -76);
+  },
+  buzzbolt(t) {
+    ctx.translate(0, Math.sin(t * 0.15) * 5 - 16);
+    const w = Math.sin(t * 0.8) * 0.3;
+    el(-14, -80, 12, 20, 'rgba(220,240,255,.85)', -0.6 + w, true); el(6, -84, 12, 20, 'rgba(220,240,255,.85)', 0.4 - w, true);
+    poly([-26, -42, -44, -50, -36, -40, -48, -32, -26, -32], '#ffd84a', true);
+    el(0, -46, 30, 27, '#ffd84a', 0, true);
+    ctx.save(); ctx.beginPath(); ctx.ellipse(0, -46, 30, 27, 0, 0, Math.PI * 2); ctx.clip();
+    ctx.fillStyle = col('#5a4030'); ctx.fillRect(-22, -78, 7, 64); ctx.fillRect(-9, -78, 6, 64); ctx.restore();
+    stroke([6, -70, 0, -86], '#5a4030', 3); stroke([20, -68, 26, -86], '#5a4030', 3);
+    poly([-4, -92, 4, -88, 0, -86, 6, -80, -6, -86, -1, -88], '#fff3a0'); poly([22, -92, 30, -88, 26, -86, 32, -80, 20, -86, 25, -88], '#fff3a0');
+    eye(8, -50, 6); eye(24, -50, 6); smile(17, -40, 4); blush(2, -40); blush(31, -40);
+  },
+  hootvolt(t) {
+    el(-10, -3, 8, 4, '#ffa030', 0, true); el(14, -3, 8, 4, '#ffa030', 0, true);
+    el(-30, -44, 12, 26, '#2c3a85', 0.25, true);
+    poly([-14, -76, -22, -102, -12, -94, -14, -110, -2, -80], '#ffd84a', true);
+    poly([22, -80, 24, -106, 32, -96, 36, -110, 32, -78], '#ffd84a', true);
+    el(2, -44, 32, 40, '#3d4fa8', 0, true); el(6, -32, 20, 24, '#c8d4ff');
+    for (let i = 0; i < 3; i++) stroke([0, -36 + i * 9, 6, -32 + i * 9, 12, -36 + i * 9], '#8a9ae0', 2);
+    el(0, -62, 12, 12, '#ffe680', 0, true); el(24, -62, 12, 12, '#ffe680', 0, true);
+    el(0, -62, 9, 9, '#fff'); el(24, -62, 9, 9, '#fff');
+    eye(2, -62, 5.5); eye(26, -62, 5.5);
+    poly([9, -53, 17, -53, 13, -45], '#ffa030', true);
+    el(32, -38, 10, 22, '#2c3a85', -0.3, true);
+  },
+  pebblet(t) {
+    el(-14, -2, 9, 5, '#7a808a', 0, true); el(14, -2, 9, 5, '#7a808a', 0, true);
+    poly([-34, -8, -38, -34, -22, -56, 6, -62, 30, -46, 36, -16, 22, -2, -20, -2], '#a0a6ae', true);
+    poly([-18, -50, 6, -56, 24, -44, 6, -46], '#bcc2ca');
+    stroke([-28, -30, -20, -24, -24, -14], '#6a707a', 2.5);
+    el(-4, -58, 13, 5, '#6cbf5a'); el(-10, -62, 5, 4, '#7fd06a'); el(2, -63, 5, 4, '#7fd06a');
+    eye(4, -32, 5); eye(20, -32, 5); smile(12, -24, 3.5); blush(-4, -24, 5); blush(28, -24, 5);
+  },
+  boulderbear(t) {
+    el(-20, -8, 14, 9, '#6e5038', 0, true); el(22, -8, 14, 9, '#6e5038', 0, true);
+    el(0, -42, 36, 34, '#8a6a4a', 0, true); el(5, -36, 21, 22, '#d8b894');
+    poly([-34, -58, -22, -74, -6, -70, -10, -54], '#9aa0a8', true); poly([18, -70, 34, -72, 40, -56, 24, -54], '#9aa0a8', true);
+    el(-30, -34, 9, 14, '#7a5a3a', 0.3, true); el(34, -34, 9, 14, '#7a5a3a', -0.3, true);
+    el(-4, -102, 10, 10, '#8a6a4a', 0, true); el(28, -102, 10, 10, '#8a6a4a', 0, true);
+    el(-4, -102, 5, 5, '#d8b894'); el(28, -102, 5, 5, '#d8b894');
+    el(12, -84, 25, 22, '#8a6a4a', 0, true);
+    poly([4, -104, 12, -112, 22, -106, 18, -100], '#9aa0a8', true);
+    el(16, -76, 11, 8, '#d8b894'); el(17, -80, 4, 3, '#3a2034'); smile(17, -76, 3.5);
+    eye(4, -88, 5); eye(26, -88, 5); blush(-3, -77, 5); blush(33, -77, 5);
+  },
+  fluffum(t) {
+    el(-14, -8, 5, 10, '#6b5a6e', 0, true); el(10, -8, 5, 10, '#6b5a6e', 0, true);
+    const puffs = [[-22, -38, 16], [20, -38, 16], [0, -54, 18], [-14, -52, 14], [14, -52, 14], [0, -26, 20], [-14, -26, 14], [14, -26, 14]];
+    ctx.lineWidth = 6; ctx.strokeStyle = SIL ? SIL : OUTC;
+    for (const p of puffs) { ctx.beginPath(); ctx.arc(p[0], p[1], p[2], 0, Math.PI * 2); ctx.stroke(); }
+    for (const p of puffs) el(p[0], p[1], p[2], p[2], '#fff6fb');
+    ctx.beginPath(); ctx.arc(4, -60, 6, 0.5, 5.5); ctx.strokeStyle = col('#b08860'); ctx.lineWidth = 4; ctx.stroke();
+    ctx.beginPath(); ctx.arc(26, -58, 6, -2.4, 2.6); ctx.stroke();
+    el(15, -40, 13, 12, '#ffd0e0', 0, true);
+    eye(10, -42, 4); eye(21, -42, 4); smile(15.5, -36, 3); blush(6, -35, 3.5); blush(25, -35, 3.5);
+  },
+  shroomy(t) {
+    el(-12, -4, 9, 5, '#e8d0a8', 0, true); el(12, -4, 9, 5, '#e8d0a8', 0, true);
+    el(-22, -26, 5, 8, '#fff1d6', 0.5, true); el(22, -26, 5, 8, '#fff1d6', -0.5, true);
+    el(0, -26, 22, 24, '#fff1d6', 0, true);
+    ctx.beginPath(); ctx.ellipse(0, -48, 42, 30, 0, Math.PI, 0); ctx.quadraticCurveTo(0, -36, -42, -48); ctx.closePath();
+    ctx.strokeStyle = SIL ? SIL : OUTC; ctx.lineWidth = 3; ctx.stroke(); ctx.fillStyle = col('#ff5a6a'); ctx.fill();
+    el(-20, -60, 6, 5, '#fff'); el(4, -70, 7, 5, '#fff'); el(24, -58, 5, 4, '#fff'); el(-4, -54, 4, 3, '#fff');
+    eye(-4, -26, 5); eye(12, -26, 5); smile(4, -18, 4); blush(-12, -18, 5); blush(20, -18, 5);
+  },
+  jellybop(t) {
+    ctx.translate(0, Math.sin(t * 0.1) * 4 - 12);
+    for (let i = 0; i < 5; i++) {
+      const x0 = -20 + i * 10; const pts = [x0, -40];
+      for (let k = 1; k <= 4; k++) pts.push(x0 + Math.sin(t * 0.15 + i + k) * 5, -40 + k * 9);
+      stroke(pts, '#b88cf0', 5);
+    }
+    ctx.beginPath(); ctx.ellipse(0, -46, 32, 30, 0, Math.PI, 0); ctx.lineTo(32, -38); ctx.lineTo(-32, -38); ctx.closePath();
+    ctx.strokeStyle = SIL ? SIL : OUTC; ctx.lineWidth = 3; ctx.stroke(); ctx.fillStyle = col('#c9a0ff'); ctx.fill();
+    el(-14, -62, 6, 9, 'rgba(255,255,255,.6)', -0.4);
+    eye(-3, -52, 5.5); eye(15, -52, 5.5); smile(6, -45, 4); blush(-13, -45, 5); blush(25, -45, 5);
+  },
+  magmallow(t) {
+    const fl = Math.sin(t * 0.3) * 3;
+    el(-12, -3, 9, 5, '#e07a3a', 0, true); el(12, -3, 9, 5, '#e07a3a', 0, true);
+    rrPath(-27, -64, 54, 60, 18); ctx.strokeStyle = SIL ? SIL : OUTC; ctx.lineWidth = 3; ctx.stroke(); ctx.fillStyle = col('#fff0dc'); ctx.fill();
+    ctx.save(); rrPath(-27, -64, 54, 60, 18); ctx.clip();
+    ctx.fillStyle = col('#d98a4a'); ctx.fillRect(-30, -68, 60, 20);
+    el(-14, -48, 5, 8, '#d98a4a'); el(6, -46, 5, 10, '#d98a4a'); el(20, -50, 4, 6, '#d98a4a'); ctx.restore();
+    poly([-7, -62, 0, -82 + fl, 7, -62], '#ff6a2a'); poly([-3, -62, 0, -73 + fl, 3, -62], '#ffd84a');
+    eye(-4, -32, 5); eye(14, -32, 5);
+    if (!SIL) { el(5, -20, 5, 4, '#a33a50'); el(5, -18, 3, 2, '#ff8aa0'); }
+    blush(-14, -22, 5); blush(23, -22, 5);
+  },
+  lumidra(t) {
+    ctx.translate(0, Math.sin(t * 0.08) * 5 - 18);
+    ctx.beginPath(); ctx.moveTo(-18, -38); ctx.quadraticCurveTo(-58, -40, -52, -80);
+    ctx.strokeStyle = col('#d8c8ff'); ctx.lineWidth = 9; ctx.stroke();
+    mstar(-52, -84, 10, '#ffe066', t * 0.03);
+    el(-26, -80, 12, 26, 'rgba(190,160,255,.85)', -0.7, true); el(-8, -86, 10, 24, 'rgba(210,185,255,.85)', -0.2, true);
+    el(-10, -22, 7, 8, '#d8c8ff', 0, true); el(12, -22, 7, 8, '#d8c8ff', 0, true);
+    el(0, -48, 26, 28, '#ece2ff', 0, true);
+    mstar(4, -44, 11, '#ffe066');
+    poly([6, -98, 4, -118, 14, -100], '#ffe066', true); poly([22, -100, 28, -118, 30, -98], '#ffe066', true);
+    el(16, -84, 22, 19, '#ece2ff', 0, true);
+    eye(8, -86, 5.5); eye(26, -86, 5.5); smile(18, -78, 4); blush(2, -78, 5); blush(32, -78, 5);
+    if (!SIL) for (let i = 0; i < 3; i++) { const a = t * 0.04 + i * 2.1; star(Math.cos(a) * 52, -60 + Math.sin(a) * 40, 4, 'rgba(255,246,160,.9)'); }
+  },
+  solmane(t) {
+    stroke([-38, -40, -60, -60], '#e8b040', 6); el(-62, -64, 8, 8, '#ff8a20', 0, true);
+    el(-28, -12, 10, 14, '#e8b040', 0, true); el(16, -12, 10, 14, '#e8b040', 0, true);
+    el(-6, -40, 40, 26, '#ffd25a', 0, true);
+    el(-14, -10, 10, 14, '#ffd25a', 0, true); el(28, -10, 10, 14, '#ffd25a', 0, true);
+    for (let i = 0; i < 12; i++) {
+      const a = i * Math.PI / 6 + t * 0.01;
+      poly([24 + Math.cos(a) * 46, -80 + Math.sin(a) * 46, 24 + Math.cos(a - 0.26) * 26, -80 + Math.sin(a - 0.26) * 26, 24 + Math.cos(a + 0.26) * 26, -80 + Math.sin(a + 0.26) * 26], i % 2 ? '#ff8a20' : '#ffb020', true);
+    }
+    el(24, -80, 30, 30, '#ff9a20', 0, true);
+    el(14, -96, 6, 6, '#ffe08a', 0, true); el(42, -96, 6, 6, '#ffe08a', 0, true);
+    el(28, -78, 22, 20, '#ffe08a', 0, true);
+    eye(20, -82, 5.5); eye(37, -82, 5.5);
+    el(32, -69, 9, 6, '#fff3c8'); el(32, -73, 3, 2, '#6a3a20'); smile(32, -69, 3.5);
+  },
+};
+function drawMon(sp, x, y, s, flip, o = {}) {
+  if (s <= 0.01) return;
+  ctx.save(); ctx.translate(x, y);
+  if (o.alpha != null) ctx.globalAlpha = clamp(o.alpha, 0, 1);
+  const bob = o.still ? 0 : Math.sin((frame + (o.ph || 0)) * 0.08);
+  if (!o.noShadow) { ctx.fillStyle = 'rgba(0,0,0,.16)'; ctx.beginPath(); ctx.ellipse(0, 0, 36 * s, 8 * s, 0, 0, Math.PI * 2); ctx.fill(); }
+  ctx.scale(flip ? -s : s, s * (1 + bob * 0.025));
+  SIL = o.sil || false; SLEEPY = !!o.sleepy;
+  ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+  (MART[sp] || MART.fluffum)(frame + (o.ph || 0));
+  SIL = false; SLEEPY = false;
+  ctx.restore();
+}
+function drawBall(x, y, r, rot = 0, open = false) {
+  ctx.save(); ctx.translate(x, y); ctx.rotate(rot);
+  ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.fillStyle = '#fff'; ctx.fill();
+  ctx.beginPath(); ctx.arc(0, open ? -r * 0.3 : 0, r, Math.PI, 0); ctx.closePath(); ctx.fillStyle = '#ffc93d'; ctx.fill();
+  ctx.lineWidth = 3; ctx.strokeStyle = '#2d3561'; ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(-r, 0); ctx.lineTo(r, 0); ctx.stroke();
+  fcirc(0, 0, r * 0.38, '#2d3561'); star(0, 0, r * 0.3, '#ff7ab0');
+  ctx.restore();
+}
+function typeBadge(t, x, y, size = 16) {
+  const w = size * 4.4, h = size * 1.5;
+  rr(x, y - h / 2, w, h, h / 2, TYPES[t].c, '#2d3561', 3);
+  text(TYPES[t].n, x + w / 2, y + 1, size, '#fff', 'center', '#2d3561', 3);
+}
+
+// ================= Maps =================
+const THEMES = {
+  meadow: { g1: '#8fd36c', g2: '#88cc65', path: '#ecd59a', path2: '#dcc282', grass: '#3c9e4a', grass2: '#56bd5e', tree: 'round', leaf1: '#3f9f4c', leaf2: '#5cbf60', trunk: '#8a5a33', water: '#4ab0f0', sky1: '#a8dcff', sky2: '#e8f8ff', f1: '#b2e692', f2: '#7cc46a', plat: '#7ac768' },
+  woods: { g1: '#6db55c', g2: '#67ad56', path: '#d6bd88', path2: '#c6ad78', grass: '#2a7f40', grass2: '#40a052', tree: 'pine', leaf1: '#25704a', leaf2: '#3a9060', trunk: '#6e4426', water: '#3a9ad8', sky1: '#b8ecd0', sky2: '#effbe8', f1: '#9ad08a', f2: '#5a9e58', plat: '#5aa85a' },
+  volcano: { g1: '#cfa47c', g2: '#c89d75', path: '#a9825e', path2: '#94704f', grass: '#c26a30', grass2: '#e0904a', tree: 'crag', leaf1: '#6e5a52', leaf2: '#8a746c', trunk: '#4a3a34', water: '#ff6a2a', sky1: '#ffc8a0', sky2: '#fff0e0', f1: '#e8c098', f2: '#c99468', plat: '#c08860' },
+};
+const MAPS = {
+  meadow: {
+    name: 'Sunny Meadow', theme: 'meadow', lv: [2, 4], exits: { east: 'woods' },
+    shrine: { sp: 'tidalotl', lvl: 9, lines: ['A sparkly stone by the pond...', 'Bubbles are coming out of the water!', 'SPLASH! A Tidalotl pops out to play!'] },
+    wild: [['fluffum', 26], ['pebblet', 20], ['buzzbolt', 16], ['jellybop', 14], ['splashlet', 14]],
+    rows: [
+      'TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT',
+      'T......................................T',
+      'T..f.........f.........TTT....f........T',
+      'T......................gggggggggg......T',
+      'T.....................ggggggggggggg....T',
+      'T....f................ggggggggggggg....T',
+      'T......=...............gggggggggggg....T',
+      'T..=====================...gggggg......T',
+      'T..=..........f........=...............T',
+      'T..=...................=........f......T',
+      'T..=......f............=...............T',
+      'T..==========================================',
+      'T..=...................=...............==========',
+      'T..=...................=......f........T',
+      'T..=...................=...gggggggg....T',
+      'T..=..wwwww............=..gggggggggg...T',
+      'T..=.wwwwwww.S.f.......=.gggggggggggg..T',
+      'T..=.wwwwwww...........=.gggggggggggg..T',
+      'T..=..wwwww............=..gggggggggg...T',
+      'T..=...................=...gggggggg....T',
+      'T..======================..............T',
+      'T....f.......f.......ggggg......f......T',
+      'T...................ggggggg............T',
+      'TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT',
+    ],
+    buildings: [{ k: 'center', x: 5, y: 2, w: 5, h: 4 }, { k: 'house', x: 12, y: 3, w: 4, h: 3, c: '#5a8cff' }, { k: 'house', x: 13, y: 12, w: 4, h: 3, c: '#ffb03a' }],
+    npcs: [
+      { x: 10, y: 8, kind: 'sign', lines: ['Pebble Town', 'Whisper Woods is to the EAST! -->'] },
+      { x: 18, y: 9, kind: 'prof', lines: ["Prof. Pip: Hello again! Walk in the TALL GRASS to find wild monsters.", 'Make a wild monster sleepy with FIGHT, then try CATCH!', 'Low HP means an easier catch. Good luck!', 'Press B to look at your Monster Book. Can you fill every page?'] },
+      { x: 36, y: 10, kind: 'kid', lines: ['Mo: Did you know? FIRE beats LEAF, LEAF beats WATER, and WATER beats FIRE!', 'Mo: Super effective moves do DOUBLE bonks!'] },
+    ],
+  },
+  woods: {
+    name: 'Whisper Woods', theme: 'woods', lv: [6, 10], exits: { west: 'meadow', east: 'volcano' }, shrine: { sp: 'lumidra', lvl: 12 },
+    wild: [['shroomy', 28], ['buzzbolt', 16], ['hootvolt', 14], ['jellybop', 14], ['fluffum', 14], ['budbun', 9]],
+    rows: [
+      'TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT',
+      'TTTTTTTTTTTTTTTTTT..f.f..TTTTTTTTTTTTTTT',
+      'TT......TTTTTTTTTT...S...TTTTTT.......TT',
+      'TT.gggg..TTTTTTTT.f.....f.TTTTT.ggggg.TT',
+      'TT.ggggg..TTTTTTTT...=...TTTTT..ggggg.TT',
+      'TT..gggg...TTTTTTTT..=..TTTTT..gggggg.TT',
+      'TT...........TTTTTT..=..TTTT....ggggg.TT',
+      'TT..T.T..........gg..=..gg.............T',
+      'T...........ggggggg..=..ggggggg........T',
+      'T..T....T...ggggggg..=..ggggggg..T.....T',
+      'T.........T..ggggg...=...ggggg.....T...T',
+      '==================================================',
+      '==================================================',
+      'T......T......gggg.......gggg..........T',
+      'T..T.......ggggggggg...ggggggggg...T...T',
+      'T......T...ggggggggg...ggggggggg.......T',
+      'T...........ggggggg.....ggggggg....T...T',
+      'TT..T....T.......................T....TT',
+      'TT....wwwwww......T.....T....ggggg....TT',
+      'TT...wwwwwwww.........T.....ggggggg...TT',
+      'TT....wwwwww....T............ggggg....TT',
+      'TTT..........T......T................TTT',
+      'TTTTT.......TTTTT.......TTTTT.......TTTT',
+      'TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT',
+    ],
+    buildings: [{ k: 'center', x: 5, y: 7, w: 5, h: 4 }],
+    npcs: [
+      { x: 12, y: 10, kind: 'sign', lines: ['Whisper Woods', 'A glowing shrine sits at the end of the north path...', 'Ember Peak is to the EAST! -->'] },
+      { x: 30, y: 13, kind: 'ranger', lines: ['Ranger Fern: ZAP moves are super strong against WATER monsters!', 'Ranger Fern: And ROCK moves are great against FIRE and ZAP!', 'Ranger Fern: If your team is full, new friends go to your BOX. Press X to see it!'] },
+    ],
+  },
+  volcano: {
+    name: 'Ember Peak', theme: 'volcano', lv: [11, 15], exits: { west: 'woods' }, shrine: { sp: 'solmane', lvl: 17 },
+    wild: [['magmallow', 22], ['pebblet', 14], ['boulderbear', 14], ['hootvolt', 10], ['emberpup', 10], ['flarewolf', 10], ['tidalotl', 10], ['blossomhop', 10]],
+    rows: [
+      'TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT',
+      'TTTTTTTTTTTTTTTT.........TTTTTTTTTTTTTTT',
+      'TTTTTTTTTTTTTTTT....C....TTTTTTTT..S..TT',
+      'TTllllllTTTTTTTT.........TTTTTTTT.....TT',
+      'TTllllll...rr.TTT...=...TTTTTTTT..=..TTT',
+      'TT.llll.....ggg.TT..=..TT..gggg...=...TT',
+      'TT..ll....gggggg....=....ggggggg..=...TT',
+      'TT.......ggggggg....=....gggggg...=....T',
+      'T....rr...ggggg.....=.....gggg....=....T',
+      'T...................=.............=....T',
+      'T..r.....ll.........=....rr.......=....T',
+      '=======================================T',
+      '=======================================T',
+      'T......ggggg.......ll......ggggg.......T',
+      'T.....ggggggg....lllll....ggggggg......T',
+      'T.....ggggggg...lllllll...ggggggg..rr..T',
+      'T......ggggg.....lllll.....ggggg.......T',
+      'T..rr.............ll...................T',
+      'T........ggggggggg......gggggggggg.....T',
+      'T.......ggggggggggg....gggggggggggg....T',
+      'T........ggggggggg......gggggggggg.....T',
+      'TT...rr..............................rTT',
+      'TTTTTTTTTT.....TTTTTTTTTT......TTTTTTTTT',
+      'TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT',
+    ],
+    buildings: [{ k: 'center', x: 4, y: 7, w: 5, h: 4 }],
+    npcs: [
+      { x: 22, y: 4, kind: 'sign', lines: ["Champion's Peak", 'The Monster Champion waits at the top. Be brave!'] },
+      { x: 12, y: 9, kind: 'hiker', lines: ['Hiker Hal: Phew! Champion Juniper is at the very top of the path.', 'Hiker Hal: Her monsters are around level 13 to 16. Train up in the grass first!', 'Hiker Hal: Rumor says a SUN LION naps at the shrine in the top right corner...'] },
+      { x: 20, y: 2, kind: 'champ', lines: [] },
+    ],
+  },
+};
+const WALK = new Set(['.', '=', 'g', 'f']);
+function buildMaps() {
+  for (const id in MAPS) {
+    const m = MAPS[id]; m.id = id; m.w = 40; m.h = m.rows.length;
+    m.tiles = m.rows.map(r => { let s = r.slice(0, 40); while (s.length < 40) s += 'T'; return s.split(''); });
+    for (const b of m.buildings) {
+      for (let y = b.y; y < b.y + b.h; y++) for (let x = b.x; x < b.x + b.w; x++) m.tiles[y][x] = b.k === 'center' ? 'M' : 'H';
+      if (b.k === 'center') { b.dx = b.x + Math.floor(b.w / 2); b.dy = b.y + b.h - 1; m.tiles[b.dy][b.dx] = 'D'; m.center = { x: b.dx, y: b.dy + 1 }; }
+    }
+    for (let y = 0; y < m.h; y++) for (let x = 0; x < m.w; x++) {
+      if (m.tiles[y][x] === 'S' && m.shrine) { m.shrine.x = x; m.shrine.y = y; }
+      if (m.tiles[y][x] === 'C') m.tiles[y][x] = '.';
+    }
+    for (const n of m.npcs) { m.tiles[n.y][n.x] = 'N'; n.dir = 0; }
+  }
+}
+buildMaps();
+function tileAt(map, x, y) { const m = MAPS[map]; if (y < 0 || y >= m.h || x < 0 || x >= m.w) return 'T'; return m.tiles[y][x]; }
+function isWalk(map, x, y) { return !!MAPS[map] && WALK.has(tileAt(map, x, y)); }
+
+// ================= Game state =================
+const G = { team: [], box: [], seen: {}, caught: {}, flags: {}, center: { map: 'meadow', x: 7, y: 6 } };
+const START = { map: 'meadow', x: 7, y: 7 };
+const P = { map: 'meadow', x: 7, y: 7, px: 280, py: 280, dir: 0, moving: false, tx: 7, ty: 7, walk: 0, grace: 3, bumpT: 0 };
+function snapP() { P.px = P.x * TS; P.py = P.y * TS; P.tx = P.x; P.ty = P.y; P.moving = false; }
+let scene = 'title';
+const world = { dialog: null, banner: null, saveT: 0, labT: 0 };
+function labClue(n) { try { const c = JSON.parse(localStorage.getItem('gfLabClues') || '{}'); c[n] = 1; localStorage.setItem('gfLabClues', JSON.stringify(c)); } catch (_) {} }   // Mad Science Lab clue seen (Game Factory book)
+let battle = null;
+const title = { cur: 0, confirm: false }, starter = { cur: 0 }, naming = { cur: 0, sp: 'emberpup' };
+const menu = { cur: 0 }, teamS = { cur: 0, from: -1, ret: 'world' }, boxS = { cur: 0, pick: false, tcur: 0, ret: 'world' }, bookS = { cur: 0, ret: 'world' }, win = { t: 0 };
+let toast = null;
+const parts = [];
+
+// ================= Save / Load =================
+const SAVE_KEY = 'monsterPalsSave_v1';
+function save() {
+  if (!G.team.length) return;
+  try { localStorage.setItem(SAVE_KEY, JSON.stringify({ team: G.team, box: G.box, seen: G.seen, caught: G.caught, flags: G.flags, center: G.center, map: P.map, x: P.x, y: P.y, dir: P.dir, music: musicOn })); } catch (e) {}
+}
+function readSave() {
+  try { const s = JSON.parse(localStorage.getItem(SAVE_KEY) || 'null'); if (s && Array.isArray(s.team) && s.team.some(m => m && SP[m.sp])) return s; } catch (e) {}
+  return null;
+}
+function fixMon(m) {
+  if (!m || !SP[m.sp]) return null;
+  const o = { sp: m.sp, name: String(m.name || SP[m.sp].n).slice(0, 14), lvl: clamp(Math.floor(m.lvl) || 1, 1, 50), xp: Math.max(0, Math.floor(m.xp) || 0), hp: 0 };
+  o.hp = clamp(Math.floor(m.hp), 0, maxHp(o)); if (isNaN(o.hp)) o.hp = maxHp(o);
+  return o;
+}
+function loadGame(s) {
+  G.team = s.team.map(fixMon).filter(Boolean).slice(0, 6);
+  G.box = (Array.isArray(s.box) ? s.box : []).map(fixMon).filter(Boolean);
+  G.seen = s.seen || {}; G.caught = s.caught || {}; G.flags = s.flags || {};
+  G.center = (s.center && MAPS[s.center.map] && isWalk(s.center.map, s.center.x, s.center.y)) ? s.center : { map: 'meadow', x: 7, y: 6 };
+  P.map = MAPS[s.map] ? s.map : 'meadow'; P.x = s.x | 0; P.y = s.y | 0;
+  if (!isWalk(P.map, P.x, P.y)) { P.map = G.center.map; P.x = G.center.x; P.y = G.center.y; }
+  P.dir = clamp(s.dir | 0, 0, 3); snapP(); P.grace = 3;
+  musicOn = s.music !== false;
+  if (!G.team.some(m => m.hp > 0)) healAll();
+}
+function newGame() {
+  G.team = []; G.box = []; G.seen = {}; G.caught = {}; G.flags = {}; G.center = { map: 'meadow', x: 7, y: 6 };
+  P.map = START.map; P.x = START.x; P.y = START.y; P.dir = 0; snapP(); P.grace = 3;
+}
+
+// ================= Fade / particles =================
+const fade = { a: 0, v: 0, cb: null, col: '#000' };
+function startFade(cb, c = '#000') { if (fade.v !== 0) return false; fade.v = 0.07; fade.cb = cb; fade.col = c; return true; }
+function updFade() {
+  if (fade.v > 0) { fade.a += fade.v; if (fade.a >= 1) { fade.a = 1; const cb = fade.cb; fade.cb = null; fade.v = -0.07; if (cb) cb(); } }
+  else if (fade.v < 0) { fade.a += fade.v; if (fade.a <= 0) { fade.a = 0; fade.v = 0; } }
+}
+function burst(x, y, n, cols, o = {}) {
+  for (let i = 0; i < n; i++) {
+    const a = rnd(0, Math.PI * 2), s = rnd(o.min || 1, o.max || 5);
+    parts.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s - (o.up || 0), life: o.life || rnd(30, 60), col: pick(cols), sz: rnd(3, 7), kind: o.kind || 'dot', rot: rnd(0, 6), g: o.g != null ? o.g : 0.12 });
+  }
+}
+function updParts() { for (let i = parts.length - 1; i >= 0; i--) { const p = parts[i]; p.x += p.vx; p.y += p.vy; p.vy += p.g; p.rot += 0.1; if (--p.life <= 0) parts.splice(i, 1); } }
+function drawParts() {
+  for (const p of parts) {
+    ctx.globalAlpha = clamp(p.life / 20, 0, 1);
+    if (p.kind === 'star') star(p.x, p.y, p.sz * 1.4, p.col, p.rot);
+    else if (p.kind === 'conf') { ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(p.rot); ctx.fillStyle = p.col; ctx.fillRect(-p.sz, -p.sz / 3, p.sz * 2, p.sz * 0.7); ctx.restore(); }
+    else fcirc(p.x, p.y, p.sz, p.col);
+  }
+  ctx.globalAlpha = 1;
+}
+const CONFETTI = ['#ff5a7a', '#ffd84a', '#5ab4ff', '#7fdc6a', '#c9a0ff', '#ff9a3d'];
+
+// ================= Title / starter / naming =================
+let titleSave = readSave();
+function enterTitle() { scene = 'title'; title.cur = 0; title.confirm = false; titleSave = readSave(); setTrack('world'); }
+function titleOpts() { return titleSave ? ['Continue', 'New Game'] : ['New Game']; }
+function updTitle() {
+  const opts = titleOpts();
+  if (title.confirm) {
+    if (okP()) { sfx.ok(); title.confirm = false; newGame(); scene = 'starter'; starter.cur = 0; }
+    else if (backP()) { sfx.back(); title.confirm = false; }
+    return;
+  }
+  title.cur = clamp(gridNav(title.cur, 1, opts.length), 0, opts.length - 1);
+  if (okP()) {
+    sfx.ok();
+    const o = opts[title.cur];
+    if (o === 'Continue') { const s = titleSave; if (s) { startFade(() => { loadGame(s); scene = 'world'; world.banner = { text: MAPS[P.map].name, t: 150 }; }); } }
+    else if (titleSave) title.confirm = true;
+    else { newGame(); scene = 'starter'; starter.cur = 0; }
+  }
+}
+function updStarter() {
+  starter.cur = gridNav(starter.cur, 3, 3);
+  if (backP()) { sfx.back(); enterTitle(); return; }
+  if (okP()) { sfx.ok(); naming.sp = STARTERS[starter.cur]; naming.cur = 0; scene = 'naming'; }
+}
+function nameOpts() { const sp = naming.sp; return [SP[sp].n, 'Buddy', { fire: 'Sparky', water: 'Splashy', leaf: 'Sprouty' }[SP[sp].t] || 'Sunny', 'Captain', 'Noodle', 'Pickle', 'Rocket', 'Waffles']; }
+function updNaming() {
+  const opts = nameOpts();
+  naming.cur = gridNav(naming.cur, 2, opts.length);
+  if (backP()) { sfx.back(); scene = 'starter'; return; }
+  if (okP()) {
+    sfx.gotcha();
+    const m = makeMon(naming.sp, 5); m.name = opts[naming.cur];
+    G.team = [m]; G.seen[m.sp] = true; G.caught[m.sp] = true;
+    startFade(() => {
+      scene = 'world'; snapP(); world.banner = { text: 'Sunny Meadow', t: 150 };
+      say(['Prof. Pip: Hooray! ' + m.name + ' is your very first monster buddy!', 'Walk into the TALL GRASS to meet wild monsters.', 'Make them sleepy with FIGHT, then use CATCH to make a new friend!', 'The red-roof building is the Monster Center. Walk into its door to heal!', 'Champion Juniper waits far to the EAST, at the top of Ember Peak. Have fun!']);
+      save();
+    });
+  }
+}
+
+// ================= World =================
+const DX = [0, 0, -1, 1], DY = [1, -1, 0, 0];
+function say(lines, then) { world.dialog = { lines, i: 0, then: then || null, t: 0 }; }
+function updWorld() {
+  if (world.banner) { world.banner.t--; if (world.banner.t <= 0) world.banner = null; }
+  if (world.labT > 0) world.labT--;
+  if (world.dialog) {
+    world.dialog.t++;
+    if (world.dialog.t > 8 && (okP() || backP())) {
+      sfx.talk(); world.dialog.i++; world.dialog.t = 0;
+      if (world.dialog.i >= world.dialog.lines.length) { const cb = world.dialog.then; world.dialog = null; if (cb) cb(); }
+    }
+    return;
+  }
+  if (P.moving) {
+    const sp = 5, tx = P.tx * TS, ty = P.ty * TS;
+    P.px += clamp(tx - P.px, -sp, sp); P.py += clamp(ty - P.py, -sp, sp); P.walk++;
+    if (P.px === tx && P.py === ty) { P.moving = false; P.x = P.tx; P.y = P.ty; onStep(); }
+    return;
+  }
+  if (P.bumpT > 0) P.bumpT--;
+  if (backP()) { sfx.ok(); scene = 'menu'; menu.cur = 0; return; }
+  if (has('b')) { sfx.ok(); openBook('world'); return; }
+  if (has('t')) { sfx.ok(); openTeam('world'); return; }
+  if (okP()) { interact(); return; }
+  const d = heldDir();
+  if (d >= 0) { P.dir = d; tryMove(d); }
+  if (++world.saveT > 600) { world.saveT = 0; save(); }
+  if (bookDone() && !G.flags.prizeHint && !G.flags.bookPrize) {
+    G.flags.prizeHint = true; save(); sfx.gotcha();
+    say(['The Monster Book is COMPLETE! All 16 monsters caught!', 'Go talk to Prof. Pip in Sunny Meadow for a SPECIAL PRIZE!']);
+  }
+}
+function bump() { if (P.bumpT <= 0) { sfx.bump(); P.bumpT = 18; } }
+function tryMove(d) {
+  const m = MAPS[P.map], nx = P.x + DX[d], ny = P.y + DY[d];
+  if (nx < 0 || nx >= m.w || ny < 0 || ny >= m.h) {
+    const ex = nx < 0 ? 'west' : nx >= m.w ? 'east' : ny < 0 ? 'north' : 'south';
+    const to = m.exits[ex];
+    if (to && (ex === 'east' || ex === 'west')) changeMap(to, ex, ny); else bump();
+    return;
+  }
+  const t = m.tiles[ny][nx];
+  if (t === 'D') { useCenter(nx, ny); return; }
+  if (WALK.has(t)) { P.moving = true; P.tx = nx; P.ty = ny; return; }
+  bump();
+}
+function changeMap(to, ex, row) {
+  startFade(() => {
+    const tm = MAPS[to];
+    P.map = to; P.x = ex === 'east' ? 0 : tm.w - 1; P.y = row;
+    if (!isWalk(to, P.x, P.y)) { P.x = tm.center.x; P.y = tm.center.y; }
+    snapP(); P.grace = 2; world.banner = { text: tm.name, t: 150 }; save();
+  });
+}
+function onStep() {
+  if (tileAt(P.map, P.x, P.y) === 'g') {
+    if (P.grace > 0) P.grace--;
+    else if (Math.random() < 1 / 12) wildEncounter();
+  }
+}
+function wildEncounter() {
+  const m = MAPS[P.map];
+  const tot = m.wild.reduce((s, w) => s + w[1], 0);
+  let r = Math.random() * tot, sp = m.wild[0][0];
+  for (const [s, w] of m.wild) { r -= w; if (r < 0) { sp = s; break; } }
+  startBattle({ kind: 'wild', team: [makeMon(sp, ri(m.lv[0], m.lv[1]))] });
+}
+function useCenter(dx, dy) {
+  healAll(); sfx.center();
+  G.center = { map: P.map, x: dx, y: dy + 1 }; save();
+  P.dir = 1;
+  say(['Nurse Nibbles: Welcome to the Monster Center!', "Let's give your monsters a yummy snack and a cozy nap...", 'Ta-da! Your whole team is full of energy! Come back anytime!']);
+}
+function interact() {
+  const m = MAPS[P.map], fx = P.x + DX[P.dir], fy = P.y + DY[P.dir];
+  const t = tileAt(P.map, fx, fy);
+  if (t === 'N') {
+    const n = m.npcs.find(q => q.x === fx && q.y === fy); if (!n) return;
+    if (n.kind !== 'sign') n.dir = [1, 0, 3, 2][P.dir];
+    sfx.talk();
+    if (n.kind === 'champ') champTalk(); else if (n.kind === 'prof' && bookDone()) profPrize(); else say(n.lines);
+  } else if (t === 'S') shrineTalk();
+  else if (t === 'D') useCenter(fx, fy);
+  else if (t === 'w') say(['The water sparkles. Splish splash!']);
+  else if (t === 'l') say(['Hot hot HOT! Better not touch the lava!']);
+  else if (t === 'H') say(['Somebody lives here. Knock knock! Nobody is home right now.']);
+}
+const bookDone = () => DEX.every(sp => G.caught[sp]);
+function profPrize() {
+  if (G.flags.bookPrize) { say(['Prof. Pip: Hello, MONSTER MASTER! That crown looks great on you!', 'Prof. Pip: Take good care of Prismo. It loves rainbows and hugs!']); return; }
+  say(['Prof. Pip: WOW! You caught ALL 16 monsters! The whole Monster Book is full!',
+       'Prof. Pip: In all my years, I have never seen anything like it!',
+       'Prof. Pip: You are a true MONSTER MASTER! This GOLDEN CROWN is for you!',
+       'Prof. Pip: And look... something is sparkling over the rainbow...',
+       'A secret rainbow monster, PRISMO, wants to be your friend!'], () => {
+    G.flags.bookPrize = true;
+    const m = makeMon('prismo', 25);
+    G.seen.prismo = G.caught.prismo = true;
+    let where = 'Prismo joined your team!';
+    if (G.team.length < 6) G.team.push(m); else { G.box.push(m); where = 'Prismo went to your Box. Swap it into your team from the menu!'; }
+    sfx.gotcha(); save();
+    for (let i = 0; i < 6; i++) burst(rnd(100, W - 100), rnd(60, 300), 30, CONFETTI, { kind: 'conf' });
+    say(['You got the GOLDEN CROWN! 👑', where, 'Prismo is super strong and knows the COMET move! Have fun!']);
+  });
+}
+const CHAMP_TEAM = [['fluffum', 13], ['hootvolt', 14], ['boulderbear', 15], ['blossomhop', 16]];
+function champTalk() {
+  const bonus = G.flags.champ ? 3 : 0;
+  const lines = G.flags.champ
+    ? ["Juniper: Hi, Champion! Your monsters look so happy!", "Want a rematch? I've been training too! Here we go!"]
+    : ["Juniper: Hello there! I'm Juniper, the Monster Champion!", 'I can tell you really love your monsters. That makes you strong!', "Let's have a friendly battle! Ready? Here I go!"];
+  say(lines, () => startBattle({ kind: 'champ', team: CHAMP_TEAM.map(([s, l]) => makeMon(s, l + bonus)) }));
+}
+function shrineTalk() {
+  const sh = MAPS[P.map].shrine; if (!sh) return;
+  if (G.flags['got_' + sh.sp]) { say(['The shrine is quiet now. A warm, happy feeling fills the air.']); return; }
+  say(sh.lines || ['A glowing stone shrine...', 'Something is sparkling inside!', 'WHOA! A legendary monster appears!'], () => startBattle({ kind: 'legend', legend: sh.sp, team: [makeMon(sh.sp, sh.lvl)] }));
+}
+
+// ================= Menus =================
+function menuOpts() { return ['Team', 'Box', 'Monster Book', musicOn ? 'Music: ON' : 'Music: OFF', 'Close']; }
+function updMenu() {
+  const o = menuOpts();
+  menu.cur = gridNav(menu.cur, 1, o.length);
+  if (backP()) { sfx.back(); scene = 'world'; return; }
+  if (okP()) {
+    sfx.ok();
+    if (menu.cur === 0) openTeam('menu');
+    else if (menu.cur === 1) { boxS.cur = 0; boxS.pick = false; boxS.ret = 'menu'; scene = 'box'; }
+    else if (menu.cur === 2) openBook('menu');
+    else if (menu.cur === 3) toggleMusic();
+    else scene = 'world';
+  }
+}
+function openTeam(ret) { teamS.cur = 0; teamS.from = -1; teamS.ret = ret; scene = 'team'; }
+function openBook(ret) { bookS.ret = ret; scene = 'book'; }
+function updTeam() {
+  teamS.cur = gridNav(teamS.cur, 2, G.team.length);
+  if (backP()) { sfx.back(); if (teamS.from >= 0) teamS.from = -1; else scene = teamS.ret; return; }
+  if (okP()) {
+    if (teamS.from < 0) { sfx.ok(); teamS.from = teamS.cur; }
+    else {
+      const a = teamS.from, b = teamS.cur;
+      if (a !== b) { const tmp = G.team[a]; G.team[a] = G.team[b]; G.team[b] = tmp; sfx.ok(); save(); } else sfx.back();
+      teamS.from = -1;
+    }
+  }
+}
+function updBox() {
+  const n = G.box.length;
+  if (boxS.pick) {
+    const slots = Math.min(6, G.team.length + 1);
+    boxS.tcur = gridNav(boxS.tcur, 2, slots);
+    if (backP()) { sfx.back(); boxS.pick = false; return; }
+    if (okP()) {
+      const bm = G.box[boxS.cur]; if (!bm) { boxS.pick = false; return; }
+      if (boxS.tcur < G.team.length) { G.box[boxS.cur] = G.team[boxS.tcur]; G.team[boxS.tcur] = bm; }
+      else { G.team.push(bm); G.box.splice(boxS.cur, 1); }
+      sfx.gotcha(); boxS.pick = false; boxS.cur = clamp(boxS.cur, 0, Math.max(0, G.box.length - 1)); save();
+    }
+    return;
+  }
+  if (n) boxS.cur = gridNav(boxS.cur, 6, n);
+  if (backP()) { sfx.back(); scene = boxS.ret; return; }
+  if (okP() && n) { sfx.ok(); boxS.pick = true; boxS.tcur = 0; }
+}
+function updBook() {
+  bookS.cur = gridNav(bookS.cur, 8, DEX.length);
+  if (backP() || has('b')) { sfx.back(); scene = bookS.ret; }
+}
+function updWin() {
+  win.t++;
+  if (win.t % 4 === 0) parts.push({ x: rnd(0, W), y: -10, vx: rnd(-1, 1), vy: rnd(1, 3), life: 260, col: pick(CONFETTI), sz: rnd(4, 8), kind: 'conf', rot: rnd(0, 6), g: 0.02 });
+  if (win.t > 60 && okP()) {
+    sfx.ok();
+    startFade(() => { parts.length = 0; scene = 'world'; say(['Juniper: Wow! You and your monsters make an AMAZING team!', "You're the new Monster Champion! Come back for a rematch anytime!", 'Keep exploring and try to fill your whole Monster Book!']); });
+  }
+}
+
+// ================= Battle =================
+const EPOS = { x: 700, y: 236 }, PPOS = { x: 240, y: 388 };
+function pm() { return G.team[battle.pi]; }
+function ePre() { return battle.kind === 'wild' ? 'Wild ' : battle.kind === 'champ' ? "Juniper's " : ''; }
+function now(...steps) { battle.queue.unshift(...steps); }
+function startBattle(o) {
+  if (scene !== 'world') return;
+  sfx.encounter(); P.moving = false; snapP();
+  startFade(() => setupBattle(o), '#fff');
+}
+function setupBattle(o) {
+  parts.length = 0;
+  if (!G.team.some(m => m.hp > 0)) healAll();
+  battle = { kind: o.kind, eteam: o.team, ei: 0, legend: o.legend || null, enemy: o.team[0], pi: G.team.findIndex(m => m.hp > 0), queue: [], cur: null, mode: 'queue', cursor: 0, mcur: 0, scur: 0, forced: false,
+    hideE: true, hideP: true, shakeP: 0, shakeE: 0, ballOn: false, skip: false, ending: null, lastMsg: '', dispP: 0, dispE: 0 };
+  battle.dispP = pm().hp; battle.dispE = battle.enemy.hp;
+  G.seen[battle.enemy.sp] = true;
+  scene = 'battle'; setTrack('battle');
+  const E = battle.enemy, q = battle.queue;
+  if (o.kind === 'wild') q.push({ anim: 'enter', who: 'e', dur: 30 }, { msg: `A wild ${E.name} appeared!` });
+  else if (o.kind === 'legend') q.push({ anim: 'enter', who: 'e', dur: 50, snd: 'evolve' }, { msg: SP[E.sp].legend ? `WOW! The legendary ${E.name} appeared!` : `A splashy ${E.name} wants to play!` }, { msg: SP[E.sp].legend ? 'It looks super strong! Do your best!' : 'Make it sleepy, then CATCH it!', auto: 80 });
+  else q.push({ msg: 'Champion Juniper wants to have a friendly battle!' }, { msg: `Juniper sends out ${E.name}!`, auto: 50 }, { anim: 'enter', who: 'e', dur: 30, snd: 'pop' });
+  q.push({ anim: 'enter', who: 'p', dur: 30, snd: 'pop' }, { msg: `Go, ${pm().name}! You can do it!`, auto: 50 });
+}
+function startStep(s) {
+  if (s.snd && sfx[s.snd]) sfx[s.snd]();
+  if (s.msg !== undefined) battle.lastMsg = s.msg;
+  if (!s.anim) return;
+  const pos = s.who === 'e' ? { x: EPOS.x, y: EPOS.y - 60 } : { x: PPOS.x, y: PPOS.y - 80 };
+  switch (s.anim) {
+    case 'enter': if (s.who === 'e') battle.hideE = false; else battle.hideP = false; break;
+    case 'throw': battle.ballOn = true; sfx.throw(); break;
+    case 'absorb': burst(EPOS.x, EPOS.y - 80, 14, ['#fff', '#ffd84a', '#ff9ed2'], { kind: 'star', max: 3, g: 0 }); break;
+    case 'breakout': battle.hideE = false; battle.ballOn = false; sfx.pop(); burst(EPOS.x, EPOS.y - 20, 16, ['#fff', '#ffd84a'], { max: 4 }); break;
+    case 'wobble': sfx.wobble(); break;
+    case 'lunge': sfx.swoosh(); break;
+    case 'faint': sfx.faint(); break;
+    case 'recall': sfx.back(); break;
+    case 'sparkle': if (s.who) burst(pos.x, pos.y, 18, ['#fff6a0', '#ffffff', '#ffd84a'], { kind: 'star', max: 4, g: -0.02 }); break;
+    case 'evolve': sfx.evolve(); break;
+    case 'gotcha': burst(EPOS.x, EPOS.y - 10, 40, CONFETTI, { kind: 'conf', max: 7, up: 3, life: 70 }); break;
+  }
+}
+function endStep(s) {
+  if (s.anim === 'faint') { if (s.who === 'e') battle.hideE = true; else battle.hideP = true; }
+  else if (s.anim === 'recall') battle.hideP = true;
+  else if (s.anim === 'absorb') battle.hideE = true;
+}
+function barsDone() { return Math.abs(battle.dispP - pm().hp) < 0.5 && Math.abs(battle.dispE - battle.enemy.hp) < 0.5; }
+function runQueue() {
+  for (let g = 0; g < 40; g++) {
+    if (!battle || battle.mode !== 'queue') return;
+    if (!battle.cur) {
+      const nx = battle.queue.shift();
+      if (!nx) {
+        if (battle.ending) { const e = battle.ending; battle.ending = null; battle.mode = 'done'; endBattle(e); }
+        else { battle.mode = 'menu'; }
+        return;
+      }
+      battle.cur = nx; nx.t = 0; startStep(nx);
+    }
+    const s = battle.cur;
+    if (s.fn) { battle.cur = null; s.fn(); continue; }
+    s.t++;
+    let done = false;
+    if (s.msg !== undefined) done = (s.t > 10 && okP()) || (s.auto && s.t >= s.auto);
+    else if (s.anim) done = s.t >= s.dur;
+    else if (s.bar) done = barsDone() || s.t > 150;
+    else if (s.wait) done = s.t >= s.wait;
+    else done = true;
+    if (done) {
+      if (s.anim) endStep(s);
+      battle.cur = null;
+      if (s.msg !== undefined) { pressed.delete(' '); pressed.delete('Enter'); }
+      continue;
+    }
+    return;
+  }
+}
+function updBattle() {
+  const b = battle; if (!b) return;
+  const P0 = pm(), E = b.enemy;
+  const rp = Math.max(0.3, maxHp(P0) / 45), re = Math.max(0.3, maxHp(E) / 45);
+  b.dispP += clamp(P0.hp - b.dispP, -rp, rp); b.dispE += clamp(E.hp - b.dispE, -re, re);
+  if (b.shakeP > 0) b.shakeP--; if (b.shakeE > 0) b.shakeE--;
+  if (b.mode === 'queue') { runQueue(); return; }
+  if (b.mode === 'menu') {
+    b.cursor = gridNav(b.cursor, 2, 4);
+    if (okP()) {
+      sfx.ok();
+      if (b.cursor === 0) { b.mode = 'fight'; b.mcur = clamp(b.mcur, 0, movesOf(P0).length - 1); }
+      else if (b.cursor === 1) {
+        if (b.kind === 'champ') { b.queue.push({ msg: "You can't catch Juniper's monsters. They're her best friends!" }); b.mode = 'queue'; }
+        else doTurn({ type: 'catch' });
+      } else if (b.cursor === 2) {
+        if (!G.team.some((m, i) => m.hp > 0 && i !== b.pi)) { b.queue.push({ msg: 'Nobody else can battle right now!' }); b.mode = 'queue'; }
+        else { b.mode = 'switch'; b.forced = false; b.scur = b.pi; }
+      } else doTurn({ type: 'run' });
+    }
+    return;
+  }
+  if (b.mode === 'fight') {
+    const mv = movesOf(P0);
+    b.mcur = gridNav(b.mcur, 2, mv.length);
+    if (backP()) { sfx.back(); b.mode = 'menu'; return; }
+    if (okP()) { sfx.ok(); doTurn({ type: 'move', mv: mv[b.mcur] }); }
+    return;
+  }
+  if (b.mode === 'switch') {
+    b.scur = gridNav(b.scur, 2, G.team.length);
+    if (backP() && !b.forced) { sfx.back(); b.mode = 'menu'; return; }
+    if (okP()) {
+      const m = G.team[b.scur];
+      if (!m || m.hp <= 0 || b.scur === b.pi) { sfx.bump(); return; }
+      sfx.ok();
+      if (b.forced) {
+        b.forced = false; b.mode = 'queue';
+        const idx = b.scur;
+        b.queue.push({ fn: () => { b.pi = idx; b.dispP = pm().hp; } }, { anim: 'enter', who: 'p', dur: 30, snd: 'pop' }, { msg: `Go, ${m.name}! You can do it!`, auto: 50 });
+      } else doTurn({ type: 'switch', idx: b.scur });
+    }
+  }
+}
+function enemyPick() {
+  const E = battle.enemy, P0 = pm(), mv = movesOf(E);
+  if (mv.includes('snack') && E.hp < maxHp(E) * 0.4 && Math.random() < 0.5) return 'snack';
+  const dmgMoves = mv.filter(x => !MOVES[x].heal);
+  if (Math.random() < 0.35) return pick(dmgMoves);
+  let best = dmgMoves[0], bs = -1;
+  for (const x of dmgMoves) { const M = MOVES[x]; const sc = M.p * effOf(M.t, SP[P0.sp].t) * (M.t === SP[E.sp].t ? 1.25 : 1); if (sc > bs) { bs = sc; best = x; } }
+  return best;
+}
+function actStep(side, mvId) {
+  return { fn: () => {
+    if (battle.skip) return;
+    const a = side === 'p' ? pm() : battle.enemy, d = side === 'p' ? battle.enemy : pm();
+    if (a.hp <= 0 || d.hp <= 0) return;
+    now(...attackSteps(side, mvId));
+  } };
+}
+function attackSteps(side, mvId) {
+  const a = side === 'p' ? pm() : battle.enemy, mv = MOVES[mvId], other = side === 'p' ? 'e' : 'p';
+  const pre = side === 'e' ? ePre() : '';
+  const st = [{ msg: `${pre}${a.name} used ${mv.n}!`, auto: 45 }];
+  if (mv.heal) {
+    st.push({ anim: 'sparkle', who: side, dur: 30, snd: 'heal' }, { fn: () => { a.hp = Math.min(maxHp(a), a.hp + Math.ceil(maxHp(a) * 0.4)); } }, { bar: 1 }, { msg: `${pre}${a.name} munched a snack and feels better!`, auto: 60 });
+    return st;
+  }
+  st.push({ anim: 'lunge', who: side, dur: 22 });
+  st.push({ fn: () => {
+    const d = side === 'p' ? battle.enemy : pm();
+    const r = calcDmg(a, d, mv);
+    if (side === 'e') r.dmg = Math.max(1, Math.floor(r.dmg * (battle.kind === 'champ' ? 0.8 : 0.7)));  // kid-friendly: wild monsters bonk softer
+    d.hp = Math.max(0, d.hp - r.dmg);
+    const pos = other === 'e' ? { x: EPOS.x, y: EPOS.y - 60 } : { x: PPOS.x, y: PPOS.y - 80 };
+    if (other === 'e') battle.shakeE = 24; else battle.shakeP = 24;
+    const tc = TYPES[mv.t].c;
+    burst(pos.x, pos.y, r.eff > 1 ? 30 : 16, [tc, '#fff', tc], { max: r.eff > 1 ? 7 : 4, kind: r.eff > 1 ? 'star' : 'dot' });
+    if (r.eff > 1) { sfx.superHit(); now({ bar: 1 }, { msg: 'Super effective! POW!', auto: 60 }); }
+    else if (r.eff < 1) { sfx.weak(); now({ bar: 1 }, { msg: "It's not very effective...", auto: 60 }); }
+    else { sfx.hit(); now({ bar: 1 }); }
+  } });
+  st.push({ fn: () => checkFaint(other) });
+  return st;
+}
+function xpFor(E) { return Math.floor((E.lvl * 7 + 10) * (battle.kind === 'champ' ? 1.5 : 1) * (SP[E.sp].legend ? 2 : 1)); }
+function checkFaint(who) {
+  if (who === 'e') {
+    const E = battle.enemy; if (E.hp > 0) return;
+    battle.skip = true;
+    now({ anim: 'faint', who: 'e', dur: 40 }, { msg: `${ePre()}${E.name} got sleepy! Zzz...` }, ...xpSteps(xpFor(E)), { fn: afterEnemyFaint });
+  } else {
+    const M = pm(); if (M.hp > 0) return;
+    battle.skip = true;
+    now({ anim: 'faint', who: 'p', dur: 40 }, { msg: `${M.name} got sleepy! Zzz...` }, { fn: () => {
+      if (G.team.some(m => m.hp > 0)) now({ msg: 'Pick another monster to help!' }, { fn: () => { battle.mode = 'switch'; battle.forced = true; battle.scur = G.team.findIndex(m => m.hp > 0); } });
+      else now({ msg: 'Oh no! All your monsters are too sleepy to play!' }, { msg: 'You hurry back to the Monster Center...' }, { fn: () => { battle.ending = 'lose'; } });
+    } });
+  }
+}
+function afterEnemyFaint() {
+  if (battle.kind === 'champ' && battle.ei < battle.eteam.length - 1) {
+    battle.ei++; battle.enemy = battle.eteam[battle.ei]; battle.dispE = battle.enemy.hp; G.seen[battle.enemy.sp] = true;
+    now({ msg: `Juniper sends out ${battle.enemy.name}!`, auto: 50 }, { anim: 'enter', who: 'e', dur: 30, snd: 'pop' });
+    return;
+  }
+  if (battle.kind === 'champ') { sfx.win(); now({ msg: 'You beat Champion Juniper! HOORAY!' }, { fn: () => { battle.ending = 'champ'; } }); return; }
+  if (battle.kind === 'legend') now({ msg: `${battle.enemy.name} floated back into the shrine to rest.` }, { msg: 'Visit the shrine again to try catching it!' });
+  now({ fn: () => { battle.ending = 'win'; } });
+}
+function xpSteps(xp) {
+  const a = pm(), st = [];
+  if (a.hp > 0) st.push({ msg: `${a.name} got ${xp} XP!`, auto: 70 }, { fn: () => { a.xp += xp; now(lvlCheck(a)); } });
+  const others = G.team.filter(m => m !== a && m.hp > 0), sh = Math.max(1, Math.floor(xp / 3));
+  if (others.length) {
+    st.push({ msg: `Your team buddies got ${sh} XP too!`, auto: 60 });
+    for (const m of others) st.push({ fn: () => { m.xp += sh; now(lvlCheck(m)); } });
+  }
+  return st;
+}
+function lvlCheck(mon) {
+  return { fn: () => {
+    if (mon.lvl < 50 && mon.xp >= need(mon.lvl)) {
+      mon.xp -= need(mon.lvl);
+      const oldMax = maxHp(mon); mon.lvl++; mon.hp = Math.min(maxHp(mon), mon.hp + maxHp(mon) - oldMax);
+      const learned = SP[mon.sp].mv.filter(x => x[1] === mon.lvl).map(x => MOVES[x[0]].n);
+      sfx.level();
+      now({ anim: 'sparkle', who: mon === pm() ? 'p' : null, dur: 30 }, { msg: `${mon.name} grew to level ${mon.lvl}! Yay!` }, ...learned.map(n => ({ msg: `${mon.name} learned ${n}!` })), lvlCheck(mon));
+    } else {
+      const e = SP[mon.sp].evo;
+      if (e && mon.lvl >= e[1]) now(...evolveSteps(mon));
+    }
+  } };
+}
+function evolveSteps(mon) {
+  const oldName = mon.name, nsp = SP[mon.sp].evo[0];
+  return [{ msg: `What? ${oldName} is glowing!` }, { anim: 'evolve', who: mon === pm() ? 'p' : null, dur: 100 }, { fn: () => {
+    const oldSp = mon.sp, oldMax = maxHp(mon);
+    mon.sp = nsp; if (mon.name === SP[oldSp].n) mon.name = SP[nsp].n;
+    mon.hp = Math.min(maxHp(mon), mon.hp + maxHp(mon) - oldMax);
+    G.seen[nsp] = true; G.caught[nsp] = true;
+    sfx.gotcha(); if (mon === pm()) battle.dispP = mon.hp;
+    burst(PPOS.x, PPOS.y - 90, 40, CONFETTI, { kind: 'conf', max: 7, up: 2 });
+  } }, { msg: `${oldName} grew into ${SP[nsp].n}! So cool!` }];
+}
+function catchSteps(enemyAct) {
+  const E = battle.enemy, ratio = E.hp / maxHp(E);
+  const p = clamp(SP[E.sp].r * (1.15 - 0.95 * ratio), 0.1, 0.97);
+  const ok = Math.random() < p, wob = ok ? 3 : (p > 0.5 ? 2 : ri(0, 2));
+  const st = [{ msg: 'You threw a Catch Ball!', auto: 30 }, { anim: 'throw', dur: 36 }, { anim: 'absorb', dur: 30 }];
+  for (let i = 0; i < wob; i++) st.push({ anim: 'wobble', dur: 34 });
+  if (ok) {
+    st.push({ fn: () => sfx.gotcha() }, { anim: 'gotcha', dur: 50 }, { msg: `Gotcha! ${E.name} was caught!` }, { fn: () => {
+      const m = makeMon(E.sp, E.lvl), isNew = !G.caught[E.sp];
+      G.caught[E.sp] = true; G.seen[E.sp] = true;
+      if (battle.legend) G.flags['got_' + battle.legend] = true;
+      const st2 = [];
+      if (isNew) st2.push({ msg: `NEW! ${m.name} was added to your Monster Book!` });
+      if (G.team.length < 6) { G.team.push(m); st2.push({ msg: `${m.name} joined your team!` }); }
+      else { G.box.push(m); st2.push({ msg: `${m.name} went to your Box. (Your team is full!)` }); }
+      now(...st2, ...xpSteps(xpFor(E)), { fn: () => { battle.ending = 'catch'; } });
+    } });
+  } else {
+    st.push({ anim: 'breakout', dur: 20 }, { msg: pick(['Oh no! It popped out!', 'Aww! So close!', 'Almost had it! Try again!']) }, enemyAct);
+  }
+  return st;
+}
+function doTurn(action) {
+  const b = battle; b.skip = false; b.mode = 'queue';
+  const P0 = pm(), E = b.enemy, enemyAct = actStep('e', enemyPick()), q = [];
+  if (action.type === 'move') {
+    // Ben's rule: YOUR monster always attacks first (no matter how fast the other one is)
+    const pAct = actStep('p', action.mv);
+    q.push(pAct, enemyAct);
+  } else if (action.type === 'switch') {
+    const old = P0.name, idx = action.idx;
+    q.push({ msg: `Come back, ${old}!`, auto: 40 }, { anim: 'recall', who: 'p', dur: 20 }, { fn: () => { b.pi = idx; b.dispP = pm().hp; } },
+      { anim: 'enter', who: 'p', dur: 30, snd: 'pop' }, { msg: `Go, ${G.team[idx].name}!`, auto: 40 }, enemyAct);
+  } else if (action.type === 'catch') {
+    q.push(...catchSteps(enemyAct));
+  } else if (action.type === 'run') {
+    if (b.kind === 'champ') q.push({ msg: "No running from a Champion battle! You can do it!" });
+    else q.push({ fn: () => sfx.swoosh() }, { msg: 'You got away safely!' }, { fn: () => { b.ending = 'run'; } });
+  }
+  b.queue.push(...q);
+}
+function endBattle(res) {
+  startFade(() => {
+    parts.length = 0; battle = null; setTrack('world'); P.grace = 3; snapP();
+    if (res === 'lose') {
+      healAll(); P.map = G.center.map; P.x = G.center.x; P.y = G.center.y; P.dir = 0; snapP(); scene = 'world';
+      say(['You rushed back to the Monster Center.', 'Nurse Nibbles: Your monsters had a cozy nap. They feel all better now!']);
+    } else if (res === 'champ') { G.flags.champ = true; scene = 'win'; win.t = 0; sfx.win(); }
+    else scene = 'world';
+    if (res === 'win' || res === 'catch') { world.labT = 420; labClue(2); }   // 🧪 secret lab clue after winning or catching
+    if (res !== 'lose') for (const m of G.team) if (m.hp > 0) m.hp = Math.min(maxHp(m), m.hp + Math.ceil(maxHp(m) * 0.25));
+    save();
+  });
+}
+
+// ================= Drawing: world =================
+function drawTile(m, th, x, y, sx, sy) {
+  const t = m.tiles[y][x], h = hash(x, y);
+  ctx.fillStyle = ((x + y) & 1) ? th.g1 : th.g2; ctx.fillRect(sx, sy, TS, TS);
+  switch (t) {
+    case '=':
+      ctx.fillStyle = th.path; ctx.fillRect(sx, sy, TS, TS);
+      fcirc(sx + 6 + h * 26, sy + 8 + h * 22, 2.5, th.path2); fcirc(sx + 32 - h * 12, sy + 30, 2, th.path2); break;
+    case '.': if (h < 0.18) { fcirc(sx + 10 + h * 80, sy + 20, 2, th.f2); fcirc(sx + 14 + h * 80, sy + 17, 2, th.f2); } break;
+    case 'f': {
+      const cols = ['#ff7aa8', '#ffffff', '#ffd84a', '#c08aff'];
+      for (let i = 0; i < 3; i++) {
+        const fx = sx + 8 + ((h * 97 + i * 13) % 24), fy = sy + 8 + ((h * 53 + i * 17) % 24), c = cols[(i + Math.floor(h * 4)) % 4];
+        for (let k = 0; k < 4; k++) fcirc(fx + Math.cos(k * 1.57) * 3.5, fy + Math.sin(k * 1.57) * 3.5, 3, c);
+        fcirc(fx, fy, 2.2, '#ffb030');
+      }
+      break;
+    }
+    case 'g': {
+      ctx.fillStyle = th.grass; ctx.fillRect(sx, sy, TS, TS);
+      for (let r = 0; r < 2; r++) for (let i = 0; i < 4; i++) {
+        const bx = sx + 2 + i * 10 + (r ? 5 : 0), by = sy + 20 + r * 18, sw = Math.sin(frame * 0.05 + x + i) * 2;
+        ctx.beginPath(); ctx.moveTo(bx, by); ctx.lineTo(bx + 3 + sw, by - 18); ctx.lineTo(bx + 6, by); ctx.lineTo(bx + 8 + sw, by - 14); ctx.lineTo(bx + 10, by); ctx.closePath();
+        ctx.fillStyle = (i + r) % 2 ? th.grass2 : th.leaf2; ctx.fill();
+      }
+      break;
+    }
+    case 'w': {
+      ctx.fillStyle = th.water; ctx.fillRect(sx, sy, TS, TS);
+      ctx.strokeStyle = 'rgba(255,255,255,.55)'; ctx.lineWidth = 2;
+      const o = Math.sin(frame * 0.05 + x * 0.7 + y) * 4;
+      ctx.beginPath(); ctx.arc(sx + 14 + o, sy + 16, 6, 0.2 * Math.PI, 0.8 * Math.PI); ctx.stroke();
+      ctx.beginPath(); ctx.arc(sx + 28 - o, sy + 30, 5, 0.2 * Math.PI, 0.8 * Math.PI); ctx.stroke();
+      break;
+    }
+    case 'l': {
+      ctx.fillStyle = '#ff6a2a'; ctx.fillRect(sx, sy, TS, TS);
+      const o = (frame * 0.4 + h * 40) % 40;
+      fcirc(sx + 10 + h * 20, sy + 40 - o, 4 + h * 3, '#ffb03a'); fcirc(sx + 28, sy + (60 - o) % 40, 3, '#ffd84a');
+      break;
+    }
+    case 'T': {
+      if (th.tree === 'round') {
+        ctx.fillStyle = th.trunk; ctx.fillRect(sx + 16, sy + 24, 8, 14);
+        fcirc(sx + 20, sy + 17, 18, th.leaf1); fcirc(sx + 14, sy + 11, 8, th.leaf2); fcirc(sx + 27, sy + 20, 5, th.leaf2);
+      } else if (th.tree === 'pine') {
+        ctx.fillStyle = th.trunk; ctx.fillRect(sx + 17, sy + 28, 6, 10);
+        for (let i = 0; i < 3; i++) { ctx.beginPath(); ctx.moveTo(sx + 20, sy - 4 + i * 9); ctx.lineTo(sx + 2 + i * 0, sy + 18 + i * 6); ctx.lineTo(sx + 38, sy + 18 + i * 6); ctx.closePath(); ctx.fillStyle = i % 2 ? th.leaf2 : th.leaf1; ctx.fill(); }
+      } else {
+        ctx.beginPath(); ctx.moveTo(sx, sy + 40); ctx.lineTo(sx + 4, sy + 10); ctx.lineTo(sx + 16, sy + 2); ctx.lineTo(sx + 30, sy + 6); ctx.lineTo(sx + 40, sy + 22); ctx.lineTo(sx + 40, sy + 40); ctx.closePath();
+        ctx.fillStyle = th.leaf1; ctx.fill();
+        ctx.beginPath(); ctx.moveTo(sx + 8, sy + 14); ctx.lineTo(sx + 16, sy + 6); ctx.lineTo(sx + 26, sy + 10); ctx.lineTo(sx + 16, sy + 16); ctx.closePath(); ctx.fillStyle = th.leaf2; ctx.fill();
+      }
+      break;
+    }
+    case 'r': fel(sx + 20, sy + 30, 18, 6, 'rgba(0,0,0,.15)'); fel(sx + 20, sy + 24, 16, 13, '#8a8f98'); fel(sx + 15, sy + 19, 6, 4, '#b4b9c2'); break;
+    case 'S': {
+      const sh = m.shrine, got = sh && G.flags['got_' + sh.sp];
+      rr(sx + 4, sy + 22, 32, 16, 4, '#9aa0b8', '#5a6078', 2); rr(sx + 9, sy + 14, 22, 10, 3, '#b8bed4', '#5a6078', 2);
+      if (!got) {
+        const gl = 0.6 + Math.sin(frame * 0.08) * 0.3, c = sh && sh.sp === 'solmane' ? '255,170,60' : sh && sh.sp === 'tidalotl' ? '110,200,255' : '200,170,255';
+        fcirc(sx + 20, sy + 6, 14, `rgba(${c},${gl * 0.4})`); fcirc(sx + 20, sy + 6, 8, `rgba(${c},1)`); fcirc(sx + 17, sy + 3, 3, '#fff');
+        star(sx + 20 + Math.cos(frame * 0.05) * 16, sy + 6 + Math.sin(frame * 0.05) * 10, 3, '#fff6a0');
+      }
+      break;
+    }
+  }
+}
+function drawBuilding(b, sx, sy) {
+  const w = b.w * TS, h = b.h * TS;
+  if (b.k === 'center') {
+    rr(sx + 2, sy + 34, w - 4, h - 36, 6, '#fff4ec', '#5a3a4a', 3);
+    rr(sx - 4, sy + 6, w + 8, 40, 12, '#ff5a7a', '#8a2a44', 3);
+    ctx.fillStyle = 'rgba(255,255,255,.75)'; ctx.fillRect(sx + 2, sy + 30, w - 4, 5);
+    fcirc(sx + w / 2, sy + 22, 15, '#fff');
+    const hx = sx + w / 2, hy = sy + 22;
+    fcirc(hx - 4, hy - 3, 5, '#ff5a7a'); fcirc(hx + 4, hy - 3, 5, '#ff5a7a');
+    ctx.beginPath(); ctx.moveTo(hx - 9, hy - 1); ctx.lineTo(hx + 9, hy - 1); ctx.lineTo(hx, hy + 9); ctx.closePath(); ctx.fillStyle = '#ff5a7a'; ctx.fill();
+    text('MONSTER CENTER', sx + w / 2, sy + 58, 13, '#ff5a7a', 'center', '#fff', 3);
+    rr(sx + 12, sy + 74, 30, 24, 4, '#8fd8ff', '#5a3a4a', 2); rr(sx + w - 42, sy + 74, 30, 24, 4, '#8fd8ff', '#5a3a4a', 2);
+    const dx = (b.dx - b.x) * TS + sx;
+    rr(dx + 4, sy + h - 42, 32, 42, 4, '#9ae4ff', '#5a3a4a', 3);
+    ctx.fillStyle = '#5a3a4a'; ctx.fillRect(dx + 19, sy + h - 40, 2, 40);
+  } else {
+    rr(sx + 6, sy + 40, w - 12, h - 42, 4, '#ffe8c8', '#6a4a3a', 3);
+    ctx.beginPath(); ctx.moveTo(sx - 4, sy + 46); ctx.lineTo(sx + w / 2, sy + 2); ctx.lineTo(sx + w + 4, sy + 46); ctx.closePath();
+    ctx.fillStyle = b.c || '#5a8cff'; ctx.fill(); ctx.strokeStyle = 'rgba(0,0,0,.35)'; ctx.lineWidth = 3; ctx.stroke();
+    rr(sx + w / 2 - 12, sy + h - 34, 24, 32, 4, '#a8693a', '#6a4a3a', 2); fcirc(sx + w / 2 + 6, sy + h - 18, 2, '#ffd84a');
+    rr(sx + 16, sy + 58, 22, 20, 3, '#bfe8ff', '#6a4a3a', 2); rr(sx + w - 38, sy + 58, 22, 20, 3, '#bfe8ff', '#6a4a3a', 2);
+  }
+}
+const LOOKS = {
+  player: { skin: '#ffd8b0', hair: '#5a3a20', shirt: '#3d7bff', pants: '#2a3a6a', cap: '#ff4a5a' },
+  prof: { skin: '#ffd8b0', hair: '#d8d8e0', shirt: '#ffffff', pants: '#6a6a80' },
+  kid: { skin: '#e8b48a', hair: '#2a1a10', shirt: '#4cc95a', pants: '#3a5a8a', cap: '#ffd84a' },
+  ranger: { skin: '#ffd8b0', hair: '#8a4a20', shirt: '#6a8a3a', pants: '#4a3a2a', cap: '#8a6a3a' },
+  hiker: { skin: '#c88a60', hair: '#3a2a1a', shirt: '#ff8a3d', pants: '#5a4a3a', cap: '#3a6a3a' },
+  champ: { skin: '#ffe0c0', hair: '#9a5adf', shirt: '#ffffff', pants: '#7a4aaf', cape: '#c9a0ff', long: true, crown: true },
+};
+function drawPerson(sx, sy, dir, walk, L) {
+  const cx = sx + 20, by = sy + 38, step = walk ? Math.sin(walk * 0.6) : 0, bob = walk ? Math.abs(step) * 2 : 0;
+  fel(cx, by, 13, 5, 'rgba(0,0,0,.2)');
+  ctx.fillStyle = L.pants; ctx.fillRect(cx - 8, by - 12 - (step > 0 ? 2 : 0), 6, 12); ctx.fillRect(cx + 2, by - 12 - (step < 0 ? 2 : 0), 6, 12);
+  if (L.cape) rr(cx - 14, by - 30 - bob, 28, 24, 6, L.cape);
+  rr(cx - 11, by - 27 - bob, 22, 17, 7, L.shirt, 'rgba(0,0,0,.25)', 1.5);
+  fel(cx - 12, by - 20 - bob + step * 2, 4, 6, L.shirt); fel(cx + 12, by - 20 - bob - step * 2, 4, 6, L.shirt);
+  const hy = by - 35 - bob;
+  if (L.long) { fel(cx - 9, hy + 5, 4.5, 9, L.hair); fel(cx + 9, hy + 5, 4.5, 9, L.hair); }
+  fcirc(cx, hy, 11, L.skin);
+  if (dir === 1) fel(cx, hy - 1, 11.5, 10, L.hair); else fel(cx, hy - 6, 11.5, 6.5, L.hair);
+  if (L.cap) {
+    ctx.beginPath(); ctx.arc(cx, hy - 3, 11.5, Math.PI, 0); ctx.closePath(); ctx.fillStyle = L.cap; ctx.fill();
+    if (dir === 0) fel(cx, hy - 3, 10, 3.5, L.cap); else if (dir === 2) fel(cx - 10, hy - 3, 7, 3, L.cap); else if (dir === 3) fel(cx + 10, hy - 3, 7, 3, L.cap);
+  }
+  if (dir === 0) { fcirc(cx - 4, hy + 1, 1.8, '#2a2030'); fcirc(cx + 4, hy + 1, 1.8, '#2a2030'); fel(cx - 7, hy + 5, 2.5, 1.5, 'rgba(255,120,140,.5)'); fel(cx + 7, hy + 5, 2.5, 1.5, 'rgba(255,120,140,.5)'); }
+  else if (dir === 2) fcirc(cx - 5, hy + 1, 1.8, '#2a2030');
+  else if (dir === 3) fcirc(cx + 5, hy + 1, 1.8, '#2a2030');
+  if (L.crown) star(cx, hy - 15, 6, '#ffd84a');
+  if (L.goldCrown) {
+    ctx.beginPath(); ctx.moveTo(cx - 9, hy - 9); ctx.lineTo(cx - 10, hy - 20); ctx.lineTo(cx - 4, hy - 14); ctx.lineTo(cx, hy - 23);
+    ctx.lineTo(cx + 4, hy - 14); ctx.lineTo(cx + 10, hy - 20); ctx.lineTo(cx + 9, hy - 9); ctx.closePath();
+    ctx.fillStyle = '#ffd84a'; ctx.fill(); ctx.strokeStyle = '#c8901a'; ctx.lineWidth = 1.5; ctx.stroke();
+    fcirc(cx, hy - 13, 2, '#ff5a7a'); fcirc(cx - 6, hy - 12, 1.5, '#5ab4ff'); fcirc(cx + 6, hy - 12, 1.5, '#7fdc6a');
+    if (frame % 50 < 8) star(cx + 8, hy - 21, 3, '#fff');
+  }
+}
+function drawSign(sx, sy) {
+  ctx.fillStyle = '#7a5030'; ctx.fillRect(sx + 17, sy + 20, 6, 18);
+  rr(sx + 4, sy + 6, 32, 20, 4, '#c8945a', '#6a4020', 3);
+  ctx.fillStyle = '#6a4020'; ctx.fillRect(sx + 10, sy + 12, 20, 2); ctx.fillRect(sx + 10, sy + 18, 14, 2);
+}
+function camera() {
+  const m = MAPS[P.map];
+  return { x: clamp(P.px + 20 - W / 2, 0, m.w * TS - W), y: clamp(P.py + 20 - H / 2, 0, m.h * TS - H) };
+}
+function drawWorld() {
+  const m = MAPS[P.map], th = THEMES[m.theme], cam = camera();
+  const cx = Math.floor(cam.x), cy = Math.floor(cam.y);
+  const x0 = Math.floor(cx / TS), y0 = Math.floor(cy / TS);
+  ctx.fillStyle = th.g1; ctx.fillRect(0, 0, W, H);
+  for (let y = y0; y <= y0 + 14 && y < m.h; y++) for (let x = x0; x <= x0 + 24 && x < m.w; x++) drawTile(m, th, x, y, x * TS - cx, y * TS - cy);
+  for (const b of m.buildings) drawBuilding(b, b.x * TS - cx, b.y * TS - cy);
+  for (const n of m.npcs) {
+    const sx = n.x * TS - cx, sy = n.y * TS - cy;
+    if (sx < -60 || sx > W + 60 || sy < -60 || sy > H + 60) continue;
+    if (n.kind === 'sign') drawSign(sx, sy); else drawPerson(sx, sy, n.dir, 0, LOOKS[n.kind]);
+  }
+  const psx = Math.round(P.px - cx), psy = Math.round(P.py - cy);
+  drawPerson(psx, psy, P.dir, P.moving ? P.walk : 0, G.flags.bookPrize ? { ...LOOKS.player, goldCrown: true } : LOOKS.player);
+  const gx = Math.round(P.px / TS), gy = Math.round(P.py / TS);
+  if (tileAt(P.map, gx, gy) === 'g') {
+    for (let i = 0; i < 4; i++) {
+      const bx = psx + 2 + i * 10, by = psy + 40, sw = Math.sin(frame * 0.05 + gx + i) * 2;
+      ctx.beginPath(); ctx.moveTo(bx, by); ctx.lineTo(bx + 3 + sw, by - 14); ctx.lineTo(bx + 6, by); ctx.lineTo(bx + 8 + sw, by - 11); ctx.lineTo(bx + 10, by); ctx.closePath();
+      ctx.fillStyle = i % 2 ? th.grass2 : th.leaf2; ctx.fill();
+    }
+  }
+  drawHUD();
+  if (world.banner) {
+    const a = clamp(Math.min(world.banner.t, 150 - world.banner.t) / 20, 0, 1);
+    ctx.globalAlpha = a; panel(W / 2 - 170, 18, 340, 56, '#fffaf0'); text(world.banner.text, W / 2, 46, 30, '#ff7a3d', 'center', '#2d3561'); ctx.globalAlpha = 1;
+  }
+  if (world.labT > 0 && scene === 'world') { ctx.globalAlpha = clamp(Math.min(world.labT, 420 - world.labT) / 20, 0, 1); drawLabClue(W / 2, 150, 700, 54, '🧪 SECRET LAB CLUE 2 of 3: The SECOND potion is PURPLE! 🟣', '#b05cff', frame); ctx.globalAlpha = 1; }
+  if (world.dialog) drawDialog(world.dialog.lines[world.dialog.i] || '');
+}
+// 🧪 Mad Science Lab clue: a glowing, bubbly panel (a flask + bubbles drawn with shapes)
+function drawLabClue(cx, cy, w, h, msg, liquid, t) {
+  const x = cx - w / 2, y = cy - h / 2, glow = 0.5 + 0.5 * Math.sin(t * 0.08), a0 = ctx.globalAlpha;
+  ctx.save();
+  ctx.shadowColor = liquid; ctx.shadowBlur = 14 + glow * 16;
+  rr(x, y, w, h, h / 2, 'rgba(30,14,56,.93)');
+  ctx.shadowBlur = 0;
+  rr(x, y, w, h, h / 2, null, liquid, 3 + glow * 2);
+  for (let i = 0; i < 9; i++) {                     // bubbles floating up inside the panel
+    const bx = x + 20 + ((i * 97) % (w - 40)), by = y + h - ((t * 0.6 + i * 23) % h);
+    ctx.globalAlpha = a0 * 0.35; ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(bx, by, 3 + (i % 3) * 2, 0, 7); ctx.stroke();
+  }
+  ctx.globalAlpha = a0;
+  const fx = x + h * 0.55, fy = cy + 2;             // the flask
+  const flask = () => { ctx.beginPath(); ctx.moveTo(fx - 4, fy - 20); ctx.lineTo(fx - 4, fy - 10); ctx.lineTo(fx - 15, fy + 14); ctx.lineTo(fx + 15, fy + 14); ctx.lineTo(fx + 4, fy - 10); ctx.lineTo(fx + 4, fy - 20); };
+  flask(); ctx.fillStyle = 'rgba(255,255,255,.25)'; ctx.fill();
+  ctx.beginPath(); ctx.moveTo(fx - 9, fy + 1); ctx.lineTo(fx - 15, fy + 14); ctx.lineTo(fx + 15, fy + 14); ctx.lineTo(fx + 9, fy + 1); ctx.closePath(); ctx.fillStyle = liquid; ctx.fill();
+  flask(); ctx.lineWidth = 2; ctx.strokeStyle = '#fff'; ctx.stroke();
+  for (let i = 0; i < 3; i++) fcirc(fx - 5 + i * 5, fy - 24 - ((t * 0.5 + i * 9) % 18), 2.5 + i * 0.5, liquid);
+  ctx.restore();
+  let size = 22; const room = w - h * 1.5;
+  ctx.font = `bold ${size}px ${FONT}`;
+  const mw = ctx.measureText(msg).width; if (mw > room) size = Math.max(12, Math.floor(size * room / mw));
+  text(msg, cx + h * 0.4, cy, size, '#fff', 'center', '#1d2340');
+}
+function drawHUD() {
+  const L = G.team[0];
+  if (L) {
+    rr(10, 10, 230, 50, 12, 'rgba(255,250,240,.9)', '#2d3561', 3);
+    drawMon(L.sp, 36, 54, 0.38, false, { noShadow: true, sleepy: L.hp <= 0 });
+    text(L.name, 66, 25, 16, '#2d3561', 'left', null); text('Lv' + L.lvl, 228, 25, 15, '#2d3561', 'right', null);
+    hpBar(66, 40, 160, 10, L.hp / maxHp(L));
+  }
+  const seen = DEX.filter(s => G.seen[s]).length, caught = DEX.filter(s => G.caught[s]).length;
+  rr(W - 210, 10, 200, 34, 12, 'rgba(255,250,240,.9)', '#2d3561', 3);
+  text(`Book: ${caught}/${DEX.length} caught`, W - 110, 28, 16, '#2d3561', 'center', null);
+  if (G.flags.champ) { star(W - 226, 27, 12, '#ffd84a'); }
+  if (!world.dialog) {
+    ctx.fillStyle = 'rgba(16,23,42,.65)'; ctx.fillRect(0, H - 30, W, 30);
+    text('Arrows: walk   SPACE: talk   X: menu   B: book   T: team   M: music', W / 2, H - 15, 16, '#fff', 'center', null);
+  }
+}
+function hpBar(x, y, w, h, k) {
+  k = clamp(k, 0, 1);
+  rr(x, y, w, h, h / 2, '#3a3f5a');
+  if (k > 0) rr(x + 1, y + 1, Math.max(h - 2, (w - 2) * k), h - 2, (h - 2) / 2, k > 0.5 ? '#4cd964' : k > 0.2 ? '#ffcc33' : '#ff4a5a');
+}
+function drawDialog(s) {
+  panel(20, H - 140, W - 40, 120);
+  const lines = wrap(s, W - 100, 26);
+  lines.slice(0, 3).forEach((l, i) => text(l, 50, H - 108 + i * 34, 26, '#2d3561', 'left', null));
+  arrowDown(W - 50, H - 40);
+}
+
+// ================= Drawing: battle =================
+function animOf(who) {
+  const o = { x: 0, y: 0, s: 1, a: 1 }, st = battle.cur;
+  if (st && st.anim) {
+    const k = st.t / st.dur;
+    if (st.who === who) {
+      if (st.anim === 'lunge') { o.x = Math.sin(k * Math.PI) * (who === 'p' ? 70 : -70); o.y = -Math.sin(k * Math.PI) * 14; }
+      else if (st.anim === 'faint') { o.y = k * 40; o.a = 1 - k; }
+      else if (st.anim === 'enter') o.s = easeBack(k);
+      else if (st.anim === 'recall') { o.s = 1 - k; o.a = 1 - k; }
+    }
+    if (who === 'e' && st.anim === 'absorb') { o.s = Math.max(0.01, 1 - k * 1.6); o.a = 1 - k; o.y = -k * 60; }
+    if (who === 'e' && st.anim === 'breakout') o.s = easeBack(k);
+  }
+  const sh = who === 'p' ? battle.shakeP : battle.shakeE;
+  if (sh > 0) { o.x += Math.sin(sh * 1.7) * 7; if (Math.floor(sh / 3) % 2) o.a *= 0.35; }
+  o.s = Math.max(0.01, o.s);
+  return o;
+}
+function drawBattleBg() {
+  const th = THEMES[MAPS[P.map].theme];
+  ctx.fillStyle = th.sky1; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = th.sky2; ctx.fillRect(0, 140, W, 60);
+  for (let i = 0; i < 4; i++) { const x = (i * 300 + frame * 0.2) % (W + 200) - 100, y = 50 + (i % 2) * 40; fel(x, y, 50, 18, 'rgba(255,255,255,.8)'); fel(x + 30, y - 10, 30, 16, 'rgba(255,255,255,.8)'); }
+  ctx.fillStyle = th.f1; ctx.fillRect(0, 200, W, H - 200);
+  ctx.fillStyle = th.f2; for (let i = 0; i < 18; i++) fel((i * 137) % W, 230 + ((i * 71) % 170), 22, 6, th.f2);
+  fel(EPOS.x, EPOS.y + 4, 140, 30, th.plat); fel(EPOS.x, EPOS.y, 128, 24, th.f2);
+  fel(PPOS.x, PPOS.y + 8, 165, 36, th.plat); fel(PPOS.x, PPOS.y + 3, 150, 28, th.f2);
+}
+function drawInfo(m, x, y, w, h, disp, isP) {
+  panel(x, y, w, h);
+  text(m.name, x + 18, y + 24, 24, '#2d3561', 'left', null);
+  text('Lv' + m.lvl, x + w - 16, y + 24, 22, '#2d3561', 'right', null);
+  typeBadge(SP[m.sp].t, x + w - 150, y + 24, 13);
+  if (!isP && G.caught[m.sp]) drawBall(x + w - 168, y + 24, 8);
+  text('HP', x + 18, y + 54, 16, '#ff7a3d', 'left', null);
+  hpBar(x + 50, y + 46, w - 70, 16, disp / maxHp(m));
+  if (isP) {
+    text(`${Math.ceil(Math.max(0, disp))} / ${maxHp(m)}`, x + w - 20, y + 76, 16, '#2d3561', 'right', null);
+    text('XP', x + 18, y + 76, 13, '#3d9bff', 'left', null);
+    rr(x + 50, y + 71, 150, 8, 4, '#d0d4e8'); rr(x + 50, y + 71, Math.max(8, 150 * clamp(m.xp / need(m.lvl), 0, 1)), 8, 4, '#3d9bff');
+  }
+}
+function btn(x, y, w, h, label, c, sel, size = 26) {
+  const lift = sel ? -3 : 0;
+  rr(x + 2, y + 5, w, h, 14, 'rgba(0,0,0,.25)');
+  rr(x, y + lift, w, h, 14, c, sel ? '#ffffff' : '#2d3561', sel ? 5 : 3);
+  text(label, x + w / 2, y + h / 2 + lift + 1, size, '#fff', 'center', '#2d3561');
+  if (sel) arrowRight(x - 14, y + h / 2 + lift, '#fff');
+}
+function drawBattle() {
+  const b = battle; drawBattleBg();
+  const E = b.enemy, M = pm(), st = b.cur;
+  if (!b.hideE || (st && st.anim === 'absorb')) {
+    const o = animOf('e');
+    drawMon(E.sp, EPOS.x + o.x, EPOS.y + o.y, 1.4 * o.s, true, { alpha: o.a, sleepy: E.hp <= 0, ph: 40 });
+  }
+  if (!b.hideP) {
+    const o = animOf('p');
+    if (st && st.anim === 'evolve' && st.who === 'p') {
+      const fast = st.t > 50 ? 4 : 9, alt = Math.floor(st.t / fast) % 2, sp = alt ? SP[M.sp].evo[0] : M.sp;
+      fcirc(PPOS.x, PPOS.y - 90, 110 + Math.sin(frame * 0.3) * 10, 'rgba(255,255,255,.35)');
+      drawMon(sp, PPOS.x, PPOS.y, 1.7, false, { sil: '#ffffff' });
+    } else drawMon(M.sp, PPOS.x + o.x, PPOS.y + o.y, 1.7 * o.s, false, { alpha: o.a, sleepy: M.hp <= 0 });
+  }
+  if (b.ballOn) {
+    let bx = EPOS.x, by = EPOS.y - 8, rot = 0, open = false;
+    if (st && st.anim === 'throw') { const k = st.t / st.dur; bx = lerp(PPOS.x + 20, EPOS.x, k); by = lerp(PPOS.y - 100, EPOS.y - 90, k) - Math.sin(k * Math.PI) * 130; rot = k * 12; }
+    else if (st && st.anim === 'absorb') { const k = st.t / st.dur; by = k < 0.5 ? EPOS.y - 90 : lerp(EPOS.y - 90, EPOS.y - 8, (k - 0.5) * 2); open = k < 0.5; if (open) fcirc(bx, by, 26, 'rgba(255,240,160,.5)'); }
+    else if (st && st.anim === 'wobble') rot = Math.sin(st.t / st.dur * Math.PI * 2) * 0.55;
+    drawBall(bx, by, 16, rot, open);
+    if (st && st.anim === 'gotcha') for (let i = 0; i < 3; i++) star(bx - 30 + i * 30, by - 34 - Math.sin(frame * 0.2 + i) * 6, 9, '#ffd84a');
+  }
+  drawParts();
+  drawInfo(E, 24, 24, 380, 74, b.dispE, false);
+  drawInfo(M, 560, 296, 380, 94, b.dispP, true);
+  // bottom panel
+  if (b.mode === 'menu') {
+    panel(12, 404, 450, 104);
+    const ls = wrap(`What will ${M.name} do?`, 400, 26);
+    ls.slice(0, 2).forEach((l, i) => text(l, 34, 438 + i * 34, 26, '#2d3561', 'left', null));
+    const labels = [['FIGHT', '#ff5a5a'], ['CATCH', '#ffb020'], ['SWITCH', '#3fbf55'], ['RUN', '#3d9bff']];
+    labels.forEach(([l, c], i) => btn(496 + (i % 2) * 226, 410 + Math.floor(i / 2) * 50, 212, 42, l, c, b.cursor === i, 24));
+    text('Arrows: choose  SPACE: pick', 240, 496, 13, '#7a7f9a', 'center', null);
+  } else if (b.mode === 'fight') {
+    const mv = movesOf(M);
+    panel(12, 404, 936, 104);
+    mv.forEach((id, i) => btn(40 + (i % 2) * 300, 412 + Math.floor(i / 2) * 48, 280, 40, MOVES[id].n, TYPES[MOVES[id].t].c, b.mcur === i, 22));
+    const cur = MOVES[mv[b.mcur]];
+    if (cur) {
+      typeBadge(cur.t, 660, 432, 16);
+      let hint = 'Okay!', hc = '#2d3561';
+      if (cur.heal) { hint = 'Heals your buddy!'; hc = '#ff5a9a'; }
+      else { const e = effOf(cur.t, SP[E.sp].t); if (e > 1) { hint = 'Super strong!'; hc = '#ff5a2a'; } else if (e < 1) { hint = 'Not so strong...'; hc = '#7a7f9a'; } }
+      text(hint, 790, 470, 22, hc, 'center', null);
+      if (!cur.heal) text('Power ' + cur.p, 850, 432, 16, '#2d3561', 'center', null);
+      text('X: back', 900, 496, 13, '#7a7f9a', 'right', null);
+    }
+  } else {
+    panel(12, 404, 936, 104);
+    const s = st && st.msg !== undefined ? st.msg : b.lastMsg;
+    wrap(s, 860, 26).slice(0, 2).forEach((l, i) => text(l, 40, 440 + i * 34, 26, '#2d3561', 'left', null));
+    if (st && st.msg !== undefined && !st.auto && st.t > 10) arrowDown(910, 480);
+  }
+  if (b.mode === 'switch') drawTeamGrid(b.scur, b.forced ? 'Who should help next?' : 'Switch to which buddy?', b.pi, b.forced ? 'Arrows: choose  SPACE: pick' : 'Arrows: choose  SPACE: pick  X: back');
+}
+function drawTeamCard(m, x, y, w, h, sel, tag) {
+  rr(x + 3, y + 5, w, h, 14, 'rgba(0,0,0,.25)');
+  rr(x, y, w, h, 14, sel ? '#fff3c4' : '#fffaf0', sel ? '#ff7a3d' : '#2d3561', sel ? 5 : 3);
+  if (!m) { text('(empty spot)', x + w / 2, y + h / 2, 22, '#9aa0b8', 'center', null); return; }
+  drawMon(m.sp, x + 60, y + h - 12, 0.6, false, { sleepy: m.hp <= 0, ph: x + y });
+  text(m.name, x + 120, y + 24, 22, '#2d3561', 'left', null);
+  text('Lv' + m.lvl, x + w - 14, y + 24, 20, '#2d3561', 'right', null);
+  typeBadge(SP[m.sp].t, x + 120, y + 52, 12);
+  if (m.hp <= 0) text('Sleepy Zzz', x + 200, y + 52, 15, '#9a7aff', 'left', null);
+  if (tag) text(tag, x + w - 14, y + 52, 15, '#ff7a3d', 'right', null);
+  hpBar(x + 120, y + h - 34, w - 200, 12, m.hp / maxHp(m));
+  text(`${m.hp}/${maxHp(m)}`, x + w - 14, y + h - 28, 15, '#2d3561', 'right', null);
+}
+function drawTeamGrid(cur, head, activeIdx, hint, extraSlot) {
+  ctx.fillStyle = 'rgba(16,23,42,.8)'; ctx.fillRect(0, 0, W, H);
+  text(head, W / 2, 32, 32, '#ffd84a');
+  const n = extraSlot ? Math.min(6, G.team.length + 1) : G.team.length;
+  for (let i = 0; i < n; i++) {
+    const x = 24 + (i % 2) * 462, y = 64 + Math.floor(i / 2) * 136;
+    drawTeamCard(G.team[i], x, y, 450, 120, i === cur, i === activeIdx ? 'Battling!' : (i === 0 && activeIdx == null ? 'Leader' : ''));
+  }
+  text(hint, W / 2, H - 14, 16, '#fff', 'center', null);
+}
+
+// ================= Drawing: menus =================
+function drawTitle() {
+  const g = ctx.createLinearGradient(0, 0, 0, H); g.addColorStop(0, '#8fd0ff'); g.addColorStop(1, '#ffe0f0');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  for (let i = 0; i < 5; i++) { const x = (i * 230 + frame * 0.3) % (W + 200) - 100; fel(x, 60 + (i % 3) * 30, 60, 20, 'rgba(255,255,255,.8)'); }
+  fel(W / 2, H + 60, 700, 180, '#8fd36c');
+  const t1 = 'MONSTER PALS', cols = ['#ff5a7a', '#ffb020', '#ffd84a', '#4cc95a', '#3d9bff', '#a07cff'];
+  ctx.font = `bold 78px ${FONT}`;
+  let x = W / 2 - ctx.measureText(t1).width / 2;
+  if (!(x > 0)) x = 180;
+  for (let i = 0; i < t1.length; i++) {
+    const ch = t1[i]; ctx.font = `bold 78px ${FONT}`; const cw = ctx.measureText(ch).width || 50;
+    text(ch, x + cw / 2, 100 + Math.sin(frame * 0.06 + i * 0.5) * 8, 78, cols[i % cols.length], 'center', '#2d3561', 12);
+    x += cw;
+  }
+  text('Catch them, train them, and make new friends!', W / 2, 162, 22, '#fff', 'center', '#2d3561');
+  const parade = ['emberpup', 'splashlet', 'budbun', 'fluffum', 'buzzbolt', 'jellybop', 'shroomy', 'pebblet'];
+  parade.forEach((sp, i) => { const px = ((i * 140 + frame * 0.8) % (W + 280)) - 140; drawMon(sp, px, 500 - Math.abs(Math.sin(frame * 0.1 + i)) * 12, 0.75, false, { ph: i * 20 }); });
+  if (title.confirm) {
+    panel(W / 2 - 300, 220, 600, 150);
+    text('Start a brand new adventure?', W / 2, 256, 28, '#2d3561', 'center', null);
+    text('Your old save will be erased!', W / 2, 294, 22, '#ff5a5a', 'center', null);
+    text('SPACE = Yes, start over     X = No', W / 2, 340, 20, '#2d3561', 'center', null);
+    return;
+  }
+  const opts = titleOpts();
+  opts.forEach((o, i) => btn(W / 2 - 130, 210 + i * 66, 260, 54, o, i === 0 ? '#ff7a3d' : '#3d9bff', title.cur === i, 28));
+  if (titleSave && titleSave.flags && titleSave.flags.champ) text('Champion!', W / 2 + 200, 236, 20, '#ffd84a');
+  text('Arrows to choose, SPACE to start', W / 2, 360, 18, '#2d3561', 'center', '#fff');
+}
+function drawStarter() {
+  ctx.fillStyle = '#ffeedd'; ctx.fillRect(0, 0, W, H);
+  text("Prof. Pip: Pick your very first monster buddy!", W / 2, 38, 28, '#ff7a3d');
+  STARTERS.forEach((sp, i) => {
+    const x = 40 + i * 300, y = 74, w = 280, h = 380, sel = starter.cur === i, S = SP[sp];
+    rr(x + 4, y + 6, w, h, 20, 'rgba(0,0,0,.2)');
+    rr(x, y - (sel ? 8 : 0), w, h, 20, sel ? '#fffef4' : '#fff6ea', sel ? TYPES[S.t].c : '#2d3561', sel ? 7 : 3);
+    const yy = y - (sel ? 8 : 0);
+    fcirc(x + w / 2, yy + 140, 95, TYPES[S.t].c + '33');
+    drawMon(sp, x + w / 2, yy + 220 - (sel ? Math.abs(Math.sin(frame * 0.12)) * 16 : 0), 1.45, false, { ph: i * 30 });
+    text(S.n, x + w / 2, yy + 252, 32, '#2d3561', 'center', null);
+    typeBadge(S.t, x + w / 2 - 35, yy + 290, 16);
+    wrap(S.d, w - 40, 17).slice(0, 3).forEach((l, k) => text(l, x + w / 2, yy + 322 + k * 22, 17, '#5a5f7a', 'center', null));
+  });
+  text('Arrows: look   SPACE: choose   X: back', W / 2, H - 28, 18, '#2d3561', 'center', null);
+}
+function drawNaming() {
+  ctx.fillStyle = '#e8f6ff'; ctx.fillRect(0, 0, W, H);
+  fcirc(220, 260, 150, TYPES[SP[naming.sp].t].c + '33');
+  drawMon(naming.sp, 220, 380, 2.0, false);
+  text('What will you call it?', 640, 50, 34, '#ff7a3d');
+  nameOpts().forEach((n, i) => btn(440 + (i % 2) * 250, 92 + Math.floor(i / 2) * 82, 220, 62, n, ['#ff7a3d', '#3d9bff', '#3fbf55', '#a07cff'][i % 4], naming.cur === i, 26));
+  text('Arrows: choose   SPACE: pick   X: back', 640, H - 28, 18, '#2d3561', 'center', null);
+}
+function drawMenu() {
+  drawWorld();
+  ctx.fillStyle = 'rgba(16,23,42,.4)'; ctx.fillRect(0, 0, W, H);
+  const o = menuOpts();
+  panel(W - 330, 60, 300, 70 + o.length * 64);
+  text('MENU', W - 180, 96, 30, '#ff7a3d', 'center', '#2d3561');
+  o.forEach((l, i) => btn(W - 300, 124 + i * 64, 240, 50, l, ['#3fbf55', '#ffb020', '#ff5a7a', '#a07cff', '#3d9bff'][i], menu.cur === i, 24));
+}
+function drawTeam() {
+  ctx.fillStyle = '#2d3561'; ctx.fillRect(0, 0, W, H);
+  drawTeamGrid(teamS.cur, teamS.from < 0 ? 'Your Team' : 'Move it where?', null,
+    teamS.from < 0 ? 'Pick a monster, then pick a new spot. The first one battles first!   X: back' : `Moving ${G.team[teamS.from].name}... pick a spot!   X: cancel`);
+  if (teamS.from >= 0) { const i = teamS.from; rr(24 + (i % 2) * 462, 64 + Math.floor(i / 2) * 136, 450, 120, 14, null, '#3fbf55', 6); }
+}
+function drawBox() {
+  ctx.fillStyle = '#2d3561'; ctx.fillRect(0, 0, W, H);
+  if (boxS.pick) { drawTeamGrid(boxS.tcur, `Swap ${G.box[boxS.cur] ? G.box[boxS.cur].name : ''} with who?`, null, 'Pick a team spot   X: cancel', true); return; }
+  text('Monster Box', W / 2, 34, 34, '#ffd84a');
+  if (!G.box.length) { text('Your Box is empty!', W / 2, 220, 28, '#fff'); text('When your team has 6 monsters, new friends come here.', W / 2, 270, 20, '#cfd6ff', 'center', null); }
+  const rowFirst = Math.max(0, Math.floor(boxS.cur / 6) - 2);
+  for (let i = rowFirst * 6; i < Math.min(G.box.length, rowFirst * 6 + 18); i++) {
+    const r = Math.floor(i / 6) - rowFirst, c = i % 6, x = 24 + c * 154, y = 66 + r * 138, m = G.box[i], sel = i === boxS.cur;
+    rr(x, y, 140, 126, 14, sel ? '#fff3c4' : '#fffaf0', sel ? '#ff7a3d' : '#2d3561', sel ? 5 : 3);
+    drawMon(m.sp, x + 70, y + 92, 0.58, false, { ph: i * 10, sleepy: m.hp <= 0 });
+    text(m.name, x + 70, y + 106, 16, '#2d3561', 'center', null); text('Lv' + m.lvl, x + 70, y + 16, 14, '#7a7f9a', 'center', null);
+  }
+  text(G.box.length ? 'SPACE: swap with your team   X: back' : 'X: back', W / 2, H - 14, 16, '#fff', 'center', null);
+}
+function drawBook() {
+  ctx.fillStyle = '#ffeacc'; ctx.fillRect(0, 0, W, H);
+  const seen = DEX.filter(s => G.seen[s]).length, caught = DEX.filter(s => G.caught[s]).length;
+  if (caught === DEX.length) text('👑 MONSTER MASTER! All 16 caught! 👑', W / 2, 30, 28, '#ffb020');
+  else text(`Monster Book   Seen ${seen}   Caught ${caught} / ${DEX.length}`, W / 2, 30, 28, '#ff7a3d');
+  DEX.forEach((sp, i) => {
+    const x = 24 + (i % 8) * 114, y = 56 + Math.floor(i / 8) * 128, sel = i === bookS.cur;
+    rr(x, y, 106, 118, 12, sel ? '#fff3c4' : G.caught[sp] ? '#fffaf0' : '#e8dcc8', sel ? '#ff7a3d' : '#2d3561', sel ? 5 : 3);
+    text('#' + (i + 1), x + 16, y + 14, 12, '#9a8a7a', 'center', null);
+    if (G.caught[sp]) { drawMon(sp, x + 53, y + 92, 0.55, false, { ph: i * 15, still: !sel }); text(SP[sp].n, x + 53, y + 106, 13, '#2d3561', 'center', null); drawBall(x + 92, y + 14, 7); }
+    else if (G.seen[sp]) { drawMon(sp, x + 53, y + 92, 0.55, false, { sil: '#4a5070', still: true }); text(SP[sp].n, x + 53, y + 106, 13, '#6a6f8a', 'center', null); }
+    else text('?', x + 53, y + 58, 48, '#c8b8a0', 'center', '#fff');
+  });
+  const sp = DEX[bookS.cur], S = SP[sp];
+  panel(24, 318, 912, 178);
+  if (G.seen[sp]) {
+    fcirc(130, 410, 70, TYPES[S.t].c + '33');
+    drawMon(sp, 130, 480, 0.95, false, G.caught[sp] ? {} : { sil: '#4a5070' });
+    text(S.n, 250, 350, 32, '#2d3561', 'left', null);
+    typeBadge(S.t, 470, 350, 16);
+    if (S.legend) text('LEGENDARY', 580, 350, 18, '#a07cff', 'left', null);
+    text(G.caught[sp] ? 'Caught!' : 'Seen, not caught yet', 900, 350, 18, G.caught[sp] ? '#3fbf55' : '#ff7a3d', 'right', null);
+    wrap(S.d, 640, 20).slice(0, 2).forEach((l, k) => text(l, 250, 394 + k * 28, 20, '#5a5f7a', 'left', null));
+    text('Found in: ' + S.home, 250, 460, 18, '#3d9bff', 'left', null);
+  } else {
+    text('???', 250, 370, 40, '#c8b8a0', 'left', '#fff');
+    text("You haven't met this monster yet. Keep exploring!", 250, 430, 22, '#5a5f7a', 'left', null);
+  }
+  text('Arrows: look   X or B: back', W / 2, H - 12, 14, '#7a6a5a', 'center', null);
+}
+function drawWin() {
+  const g = ctx.createLinearGradient(0, 0, 0, H); g.addColorStop(0, '#ffd8f0'); g.addColorStop(1, '#fff6c8');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  for (let i = 0; i < 12; i++) { const a = i * Math.PI / 6 + frame * 0.005; ctx.beginPath(); ctx.moveTo(W / 2, 130); ctx.lineTo(W / 2 + Math.cos(a) * 900, 130 + Math.sin(a) * 900); ctx.lineTo(W / 2 + Math.cos(a + 0.2) * 900, 130 + Math.sin(a + 0.2) * 900); ctx.closePath(); ctx.fillStyle = 'rgba(255,255,255,.35)'; ctx.fill(); }
+  star(W / 2, 110, 60 + Math.sin(frame * 0.1) * 5, '#ffd84a', Math.sin(frame * 0.03) * 0.2);
+  text("YOU'RE THE CHAMPION!", W / 2, 210, 56, '#ff5a7a', 'center', '#2d3561', 10);
+  text('You and your monster pals beat Champion Juniper!', W / 2, 262, 24, '#fff', 'center', '#2d3561');
+  G.team.forEach((m, i) => { const n = G.team.length, x = W / 2 + (i - (n - 1) / 2) * 140; drawMon(m.sp, x, 440 - Math.abs(Math.sin(frame * 0.12 + i)) * 30, 0.95, false, { ph: i * 12 }); });
+  drawParts();
+  if (win.t > 60) text('Press SPACE to keep playing!', W / 2, 490, 24, '#ffd84a', 'center', '#2d3561');
+}
+
+// ================= Main update / draw =================
+function update() {
+  frame++;
+  musicTick();
+  if (has('m')) toggleMusic();
+  updFade(); updParts();
+  if (toast && --toast.t <= 0) toast = null;
+  if (fade.v === 0) {
+    switch (scene) {
+      case 'title': updTitle(); break;
+      case 'starter': updStarter(); break;
+      case 'naming': updNaming(); break;
+      case 'world': updWorld(); break;
+      case 'battle': updBattle(); break;
+      case 'menu': updMenu(); break;
+      case 'team': updTeam(); break;
+      case 'box': updBox(); break;
+      case 'book': updBook(); break;
+      case 'win': updWin(); break;
+    }
+  } else if (scene === 'battle' && battle) { const b = battle; if (b.shakeP > 0) b.shakeP--; if (b.shakeE > 0) b.shakeE--; }
+  pressed.clear();
+}
+function draw() {
+  ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.globalAlpha = 1;
+  switch (scene) {
+    case 'title': drawTitle(); break;
+    case 'starter': drawStarter(); break;
+    case 'naming': drawNaming(); break;
+    case 'world': drawWorld(); break;
+    case 'battle': if (battle) drawBattle(); else drawWorld(); break;
+    case 'menu': drawMenu(); break;
+    case 'team': drawTeam(); break;
+    case 'box': drawBox(); break;
+    case 'book': drawBook(); break;
+    case 'win': drawWin(); break;
+  }
+  if (toast) { panel(W / 2 - 100, 70, 200, 44); text(toast.text, W / 2, 93, 22, '#a07cff', 'center', null); }
+  if (fade.a > 0) { ctx.globalAlpha = fade.a; ctx.fillStyle = fade.col; ctx.fillRect(0, 0, W, H); ctx.globalAlpha = 1; }
+}
+
+// ================= Debug helpers (for grown-ups) =================
+window.monsterDebug = {
+  battle(sp = 'fluffum', lvl = 5) { if (SP[sp] && scene === 'world') startBattle({ kind: 'wild', team: [makeMon(sp, lvl)] }); },
+  give(sp = 'lumidra', lvl = 10) { if (!SP[sp]) return; const m = makeMon(sp, lvl); G.seen[sp] = G.caught[sp] = true; if (G.team.length < 6) G.team.push(m); else G.box.push(m); save(); },
+  levelUp(n = 5) { for (const m of G.team) { m.lvl = Math.min(50, m.lvl + n); m.hp = maxHp(m); } save(); },
+  heal() { healAll(); },
+  champ() { if (scene === 'world') startBattle({ kind: 'champ', team: CHAMP_TEAM.map(([s, l]) => makeMon(s, l)) }); },
+  go(map = 'volcano') { if (MAPS[map]) { P.map = map; P.x = MAPS[map].center.x; P.y = MAPS[map].center.y; snapP(); } },
+};
+
+let last = performance.now(), acc = 0;
+function loop(now) { acc += Math.min(100, now - last); last = now; while (acc >= 1000 / 60) { update(); acc -= 1000 / 60; } draw(); requestAnimationFrame(loop); }
+requestAnimationFrame(loop);
+</script>
+<!-- injected by scripts/inject-factory.py — hold PS (or SELECT+START) for 1s to go
+     up one level: game -> the book (parent.closeGame), standalone game -> /factory/,
+     the book -> Stephens Arcade (/). Shares one rAF pad poll with the cursor + idle overlays. -->
+<script id="__gf_pad_exit">
+(function () {
+  var IS_BOOK = false; /*@gf:is_book*/
+  var HOLD_MS = 1000;
+  // one rAF loop per page reads the pads for every __gf overlay
+  var hub = window.__gfHub;
+  if (!hub) {
+    hub = window.__gfHub = { fns: [], pads: [] };
+    (function () {
+      var NONE = [];
+      function loop(now) {
+        var p = null;
+        try { p = navigator.getGamepads ? navigator.getGamepads() : null; } catch (e) {}
+        hub.pads = p || NONE;
+        for (var i = 0; i < hub.fns.length; i++) { try { hub.fns[i](now, hub.pads); } catch (e) {} }
+        requestAnimationFrame(loop);
+      }
+      requestAnimationFrame(loop);
+    })();
+  }
+
+  var STEPS = 20, TF = [];               // precomputed badge transforms: zero allocations while held
+  for (var s = 0; s <= STEPS; s++) TF.push('translateX(-50%) scale(' + (1 + 0.35 * s / STEPS).toFixed(4) + ')');
+  var HIDE_TF = 'translateX(-50%) scale(0.85)';
+  var heldSince = 0, needRelease = true, leaving = false, badge = null, lastStep = -2;
+  var player = null;
+
+  function comboDown(pads) {
+    for (var i = 0; i < pads.length; i++) {
+      var gp = pads[i];
+      if (!gp || gp.connected === false) continue;
+      var b = gp.buttons;
+      if ((b[16] && b[16].pressed) || (b[8] && b[8].pressed && b[9] && b[9].pressed)) return true;
+    }
+    return false;
+  }
+  function makeBadge() {
+    badge = document.createElement('div');
+    badge.id = '__gfx_exit';
+    badge.textContent = IS_BOOK ? '◄ ARCADE' : '◄ BOOK';
+    badge.style.cssText = 'position:fixed;top:12px;left:50%;z-index:2147483001;pointer-events:none;' +
+      'padding:7px 18px;border-radius:999px;background:#10172a;color:#ffd23f;border:3px solid #ffd23f;' +
+      'font:bold 18px/1 "Trebuchet MS","Arial Rounded MT Bold",sans-serif;letter-spacing:1px;white-space:nowrap;' +
+      'transform-origin:50% 0;opacity:0;transform:' + HIDE_TF + ';transition:opacity .12s;';
+    (document.body || document.documentElement).appendChild(badge);
+  }
+  function setBadge(step) {            // step -1 = hidden, 0..STEPS = hold progress
+    if (step === lastStep) return;
+    lastStep = step;
+    if (step < 0) { if (badge) { badge.style.opacity = '0'; badge.style.transform = HIDE_TF; } return; }
+    if (!badge) makeBadge();
+    badge.style.opacity = '1';
+    badge.style.transform = TF[step];
+  }
+  function inGame() {
+    try { return window.parent !== window && typeof window.parent.closeGame === 'function'; } catch (e) { return false; }
+  }
+  function leave() {
+    leaving = true;                    // never navigate twice
+    if (!IS_BOOK && inGame()) { setBadge(-1); try { window.parent.closeGame(); } catch (e) {} return; }
+    location.href = IS_BOOK ? '/' : '/factory/';
+  }
+  hub.fns.push(function (now, pads) {
+    if (leaving) return;
+    var down = comboDown(pads);
+    if (IS_BOOK) {
+      if (!player) player = document.getElementById('player');
+      if (player && player.classList.contains('open')) {   // the game's own overlay handles this hold
+        if (down) needRelease = true;
+        heldSince = 0; setBadge(-1); return;
+      }
+    }
+    if (needRelease) {                 // a hold that started elsewhere never counts here
+      if (down) return;
+      needRelease = false;
+    }
+    if (!down) { heldSince = 0; setBadge(-1); return; }
+    if (!heldSince) heldSince = now;
+    var p = (now - heldSince) / HOLD_MS;
+    setBadge(Math.round((p > 1 ? 1 : p) * STEPS));
+    if (p >= 1) leave();
+  });
+})();
+</script>
+<!-- injected by scripts/inject-factory.py — console (low-fx) mode only: no-op canvas
+     shadowBlur and kill CSS backdrop-filter (both measured fps killers on the Pi).
+     The mouse cursor is hidden only while the pad cursor is installed. -->
+<script id="__gf_lowfx">
+(function () {
+  var on = false;
+  try {
+    if (/[?&]fx=low\b/.test(location.search)) { on = true; localStorage.setItem('arcade_lowfx', '1'); }
+    else if (/[?&]fx=full\b/.test(location.search)) { localStorage.setItem('arcade_lowfx', '0'); }
+    else { on = localStorage.getItem('arcade_lowfx') === '1'; }
+  } catch (e) {}
+  if (!on) return;
+  try {
+    Object.defineProperty(CanvasRenderingContext2D.prototype, 'shadowBlur', {
+      set: function () {}, get: function () { return 0; }, configurable: true
+    });
+  } catch (e) {}
+  try {
+    var st = document.createElement('style');
+    st.textContent = '* { backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }' +
+      ' html.__gfx_padcursor, html.__gfx_padcursor * { cursor: none !important; }';
+    (document.head || document.documentElement).appendChild(st);
+  } catch (e) {}
+})();
+</script>
+<!-- injected by scripts/inject-factory.py — console mode only: the TV has no printer,
+     so window.print shows a friendly toast instead of a dead print dialog. -->
+<script id="__gf_print">
+(function () {
+  var on = false;
+  try { on = /[?&]fx=low\b/.test(location.search) || localStorage.getItem('arcade_lowfx') === '1'; } catch (e) {}
+  if (!on) return;
+  var toast = null, timer = 0;
+  function hide() { if (toast) toast.style.opacity = '0'; }
+  window.print = function () {
+    try {
+      if (!toast) {
+        toast = document.createElement('div');
+        toast.id = '__gfx_print';
+        toast.textContent = '🖨️ Printing works on the iPad — not on the TV!';
+        toast.style.cssText = 'position:fixed;left:50%;bottom:48px;transform:translateX(-50%);z-index:2147483001;' +
+          'pointer-events:none;padding:14px 26px;border-radius:16px;background:#10172a;color:#ffd23f;' +
+          'border:3px solid #ffd23f;font:bold 24px/1.2 "Trebuchet MS","Arial Rounded MT Bold",sans-serif;' +
+          'white-space:nowrap;opacity:0;transition:opacity .2s;';
+        (document.body || document.documentElement).appendChild(toast);
+      }
+      toast.style.opacity = '1';
+      clearTimeout(timer);
+      timer = setTimeout(hide, 2500);
+    } catch (e) {}
+  };
+})();
+</script>
+<!-- injected by scripts/inject-factory.py — pad cursor: a pad-driven mouse pointer so
+     tap/click-only games play on the console. Right stick moves it (left stick too in
+     pointer games); X / R1 clicks and drags (pointer + mouse events, like touchpad.js
+     turns fingers into mouse events). Never consumes pad input. -->
+<script id="__gf_cursor">
+(function () {
+  window.__GF_CURSOR_LEFT = false; /*@gf:cursor_left*/
+  var IS_BOOK = false; /*@gf:is_book*/
+  var LEFT = window.__GF_CURSOR_LEFT === true;
+  var DZ = 0.2, SPEED = 900, SLEEP_MS = 4000, CLICK_SLOP = 12;
+  // one rAF loop per page reads the pads for every __gf overlay
+  var hub = window.__gfHub;
+  if (!hub) {
+    hub = window.__gfHub = { fns: [], pads: [] };
+    (function () {
+      var NONE = [];
+      function loop(now) {
+        var p = null;
+        try { p = navigator.getGamepads ? navigator.getGamepads() : null; } catch (e) {}
+        hub.pads = p || NONE;
+        for (var i = 0; i < hub.fns.length; i++) { try { hub.fns[i](now, hub.pads); } catch (e) {} }
+        requestAnimationFrame(loop);
+      }
+      requestAnimationFrame(loop);
+    })();
+  }
+
+  var S = window.__gfCursorState = { installed: false, awake: false, held: false, x: 0, y: 0 };
+  var el = null, x = 0, y = 0, awake = false, lastMove = 0, lastT = 0;
+  var held = false, target = null, sx = 0, sy = 0, prevBtn = false, vx = 0, vy = 0, player = null;
+  var INIT = { bubbles: true, cancelable: true, composed: true, view: window, detail: 0,
+    clientX: 0, clientY: 0, screenX: 0, screenY: 0, button: 0, buttons: 0,
+    pointerId: 1, pointerType: 'mouse', isPrimary: true, width: 1, height: 1, pressure: 0 };
+  var HAS_PE = typeof window.PointerEvent === 'function';
+
+  function install() {
+    if (S.installed) return;
+    S.installed = true;
+    x = Math.round((window.innerWidth || 1280) / 2); y = Math.round((window.innerHeight || 720) / 2);
+    el = document.createElement('div');
+    el.id = '__gfx_cursor';
+    el.style.cssText = 'position:fixed;left:0;top:0;width:28px;height:28px;pointer-events:none;z-index:2147483000;' +
+      'opacity:0;transition:opacity .25s;will-change:transform;';
+    el.innerHTML = '<svg width="28" height="28" viewBox="0 0 28 28" style="display:block;overflow:visible">' +
+      '<path d="M3 2 L3 23.5 L8.6 18.3 L12.6 26.6 L17 24.5 L13 16.4 L20.8 16.4 Z" fill="#fff" stroke="#10172a" ' +
+      'stroke-width="2.2" stroke-linejoin="round"/></svg>';
+    (document.body || document.documentElement).appendChild(el);
+    try { document.documentElement.classList.add('__gfx_padcursor'); } catch (e) {}
+    place();
+  }
+  function place() {
+    el.style.transform = 'translate3d(' + (x - 3) + 'px,' + (y - 2) + 'px,0)';
+    S.x = x; S.y = y;
+  }
+  function wake() { awake = S.awake = true; el.style.opacity = '1'; }
+  function sleep() { awake = S.awake = false; el.style.opacity = '0'; }
+  function fire(type, node, buttons, pointer) {
+    if (!node) return;
+    INIT.clientX = x; INIT.clientY = y;
+    INIT.screenX = (window.screenX || 0) + x; INIT.screenY = (window.screenY || 0) + y;
+    INIT.buttons = buttons; INIT.pressure = buttons ? 0.5 : 0;
+    INIT.detail = type === 'click' ? 1 : 0;
+    var ev;
+    try { ev = pointer && HAS_PE ? new PointerEvent(type, INIT) : new MouseEvent(type, INIT); } catch (e) { return; }
+    try { node.dispatchEvent(ev); } catch (e) {}
+  }
+  function at() { return document.elementFromPoint(x, y) || document.body || document.documentElement; }
+  function press(now) {
+    target = at(); held = S.held = true; sx = x; sy = y; lastMove = now;
+    fire('pointermove', target, 0, true); fire('mousemove', target, 0, false);
+    fire('pointerdown', target, 1, true); fire('mousedown', target, 1, false);
+  }
+  function release(clickOk) {
+    var t = target;
+    held = S.held = false; target = null;
+    fire('pointerup', t, 0, true); fire('mouseup', t, 0, false);
+    if (clickOk) { var dx = x - sx, dy = y - sy; if (dx * dx + dy * dy < CLICK_SLOP * CLICK_SLOP) fire('click', t, 0, false); }
+  }
+  function stick(ax, ay) {
+    ax = +ax || 0; ay = +ay || 0;
+    var m = Math.sqrt(ax * ax + ay * ay);
+    if (m <= DZ) return;
+    var e = ((m > 1 ? 1 : m) - DZ) / (1 - DZ);
+    e = e * e * SPEED / m;              // mild ease: squared magnitude, ~900 px/s at full tilt
+    vx += ax * e; vy += ay * e;
+  }
+
+  window.addEventListener('gamepadconnected', install);
+  hub.fns.push(function (now, pads) {
+    var i, p, a, b, btn = false;
+    if (!S.installed) {
+      for (i = 0; i < pads.length; i++) { p = pads[i]; if (p && p.mapping === 'standard') { install(); break; } }
+      if (!S.installed) return;
+    }
+    var dt = lastT ? (now - lastT) / 1000 : 0;
+    if (dt > 0.05) dt = 0.05;
+    lastT = now;
+    vx = 0; vy = 0;
+    for (i = 0; i < pads.length; i++) {
+      p = pads[i];
+      if (!p || p.connected === false) continue;
+      a = p.axes; b = p.buttons;
+      if (a) { stick(a[2], a[3]); if (LEFT) stick(a[0], a[1]); }
+      if ((b[0] && b[0].pressed) || (b[5] && b[5].pressed)) btn = true;
+    }
+    if (IS_BOOK) {                      // the book: asleep and silent while a game is open
+      if (!player) player = document.getElementById('player');
+      if (player && player.classList.contains('open')) {
+        if (held) release(false);
+        if (awake) sleep();
+        prevBtn = btn; return;
+      }
+    }
+    if (vx !== 0 || vy !== 0) {
+      var w = window.innerWidth || 1280, h = window.innerHeight || 720;
+      x += vx * dt; y += vy * dt;
+      if (x < 0) x = 0; else if (x > w - 1) x = w - 1;
+      if (y < 0) y = 0; else if (y > h - 1) y = h - 1;
+      lastMove = now;
+      if (!awake) wake();
+      place();
+      if (held) { fire('pointermove', target, 1, true); fire('mousemove', target, 1, false); }
+      else { var t = at(); fire('pointermove', t, 0, true); fire('mousemove', t, 0, false); }
+    } else if (awake && !held && now - lastMove > SLEEP_MS) {
+      sleep();
+    }
+    if (btn && !prevBtn) { if (awake) press(now); }
+    else if (!btn && prevBtn) { if (held) release(true); }
+    if (held) lastMove = now;
+    prevBtn = btn;
+  });
+})();
+</script>
+<!-- injected by scripts/inject-factory.py — after 15 idle minutes (no pad / keyboard /
+     pointer / touch input): a game closes back to the book, anything else returns to
+     Stephens Arcade. Test override: ?idle=<seconds>. -->
+<script id="__gf_idle">
+(function () {
+  var IS_BOOK = false; /*@gf:is_book*/
+  var qs = null;
+  try { qs = new URLSearchParams(location.search).get('idle'); } catch (e) {}
+  var IDLE_MS = (qs ? Math.max(10, parseFloat(qs) || 900) : 15 * 60) * 1000;
+  var DEADZONE = 0.25;
+  // one rAF loop per page reads the pads for every __gf overlay
+  var hub = window.__gfHub;
+  if (!hub) {
+    hub = window.__gfHub = { fns: [], pads: [] };
+    (function () {
+      var NONE = [];
+      function loop(now) {
+        var p = null;
+        try { p = navigator.getGamepads ? navigator.getGamepads() : null; } catch (e) {}
+        hub.pads = p || NONE;
+        for (var i = 0; i < hub.fns.length; i++) { try { hub.fns[i](now, hub.pads); } catch (e) {} }
+        requestAnimationFrame(loop);
+      }
+      requestAnimationFrame(loop);
+    })();
+  }
+  var last = performance.now(), leaving = false, player = null;
+  function bump() { last = performance.now(); }
+  window.addEventListener('keydown', bump, { capture: true });
+  window.addEventListener('pointerdown', bump, { capture: true });
+  window.addEventListener('touchstart', bump, { capture: true, passive: true });
+  function padActive(pads) {
+    for (var i = 0; i < pads.length; i++) {
+      var gp = pads[i];
+      if (!gp || gp.connected === false) continue;
+      for (var b = 0; b < gp.buttons.length; b++) if (gp.buttons[b].pressed) return true;
+      for (var a = 0; a < gp.axes.length; a++) if (Math.abs(gp.axes[a]) > DEADZONE) return true;
+    }
+    return false;
+  }
+  hub.fns.push(function (now, pads) {
+    if (leaving) return;
+    if (IS_BOOK) {                     // while a game is open its own overlay owns the idle timer
+      if (!player) player = document.getElementById('player');
+      if (player && player.classList.contains('open')) { last = now; return; }
+    }
+    if (padActive(pads)) last = now;
+    if (now - last < IDLE_MS) return;
+    leaving = true;
+    var g = false;
+    try { g = window.parent !== window && typeof window.parent.closeGame === 'function'; } catch (e) {}
+    if (g) { try { window.parent.closeGame(); } catch (e) {} }
+    else location.href = '/';          // pagehide fires -> games persist their state
+  });
+})();
+</script>

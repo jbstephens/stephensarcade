@@ -1,0 +1,1182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Brother Blast</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; background: #1b1440; overflow: hidden;
+    touch-action: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+  body { display: flex; align-items: center; justify-content: center; }
+  canvas { display: block; touch-action: none; background: #6ad0ff; border-radius: 10px; }
+</style>
+</head>
+<body>
+<canvas id="c" width="960" height="520"></canvas>
+<!-- injected by scripts/inject-factory.py (HEAD, before touchpad.js) — hide phantom
+     DualShock sub-devices ("... Motion Sensors", "... Touchpad") and, when a
+     standard-mapping pad exists, every non-standard device. Original indices
+     are kept (filtered slots read null), exactly like lib/controller.js. -->
+<script id="__gf_padfilter">
+(function () {
+  var nav = window.navigator;
+  if (!nav || typeof nav.getGamepads !== 'function' || nav.__gfPadFilter) return;
+  var orig = nav.getGamepads;
+  var PHANTOM = /motion sensors|touchpad/i;
+  var out = [];                       // reused every call: no per-frame allocation
+  function filtered() {
+    var src = orig.call(nav);
+    if (!src) return src;
+    var n = src.length, anyStd = false, i, p;
+    for (i = 0; i < n; i++) { p = src[i]; if (p && p.mapping === 'standard') anyStd = true; }
+    out.length = n;
+    for (i = 0; i < n; i++) {
+      p = src[i];
+      out[i] = (!p || PHANTOM.test(p.id || '') || (anyStd && p.mapping !== 'standard')) ? null : p;
+    }
+    return out;
+  }
+  try { nav.getGamepads = filtered; } catch (e) {}
+  if (nav.getGamepads !== filtered) {
+    try { Object.defineProperty(nav, 'getGamepads', { value: filtered, configurable: true, writable: true }); } catch (e) {}
+  }
+  try { nav.__gfPadFilter = true; } catch (e) {}
+})();
+</script>
+<script>
+// ===== BROTHER BLAST — a secret 2-player game for Ben and his brother =====
+const W = 960, H = 520;
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+// ---------- screen fitting ----------
+function fitCanvas() {
+  const s = Math.min(window.innerWidth / W, window.innerHeight / H);
+  canvas.style.width = Math.floor(W * s) + 'px';
+  canvas.style.height = Math.floor(H * s) + 'px';
+}
+window.addEventListener('resize', fitCanvas);
+fitCanvas();
+
+// ---------- helpers ----------
+const rand = (a, b) => a + Math.random() * (b - a);
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+const DT = 1 / 60;
+
+// ---------- game settings ----------
+const WIN_POINTS = 30;      // first to 30 wins the round
+const ROUND_TIME = 90;      // ...or most points after 90 seconds
+const ROUNDS_TO_WIN = 2;    // best of 3
+const COOP_GOAL = 40;       // Team Up mode: grab 40 stars together
+const STUN_TIME = 1.3;
+
+// ---------- game state ----------
+let state = 'title';        // title | play | roundEnd | matchEnd
+let mode = 'battle';        // battle | coop
+let roundNum = 1, roundTimer = ROUND_TIME, stateTimer = 0, clockT = 0;
+let wins = [0, 0], roundWinner = -1, matchWinner = -1;
+let coopScore = 0;
+let showTouch = /[?&]touch=1/.test(location.search) || ('ontouchstart' in window);
+let shake = 0;
+
+// ---------- sound & music ----------
+let AC = null, musicOn = true, musicNext = 0, musicStep = 0;
+const MUSIC_BPM = 148;
+// "Brother Blast" theme — eighth notes, MIDI numbers, 0 = rest
+const MELODY = [
+  72,76,79,76, 81,79,76,72,   74,77,81,77, 79,0,79,0,
+  72,76,79,84, 83,79,76,74,   72,0,67,0,   72,0,0,0,
+  77,81,84,81, 79,76,72,76,   74,79,83,79, 77,74,71,74,
+  76,79,84,79, 81,77,74,71,   72,74,76,79, 72,0,0,0
+];
+const BASS = [48, 50, 48, 43, 53, 55, 52, 48]; // one root per bar (8 eighths)
+const midiHz = m => 440 * Math.pow(2, (m - 69) / 12);
+
+function wakeAudio() {
+  try {
+    if (!AC) {
+      const A = window.AudioContext || window.webkitAudioContext;
+      if (!A) return;
+      AC = new A();
+    }
+    if (AC.state === 'suspended') AC.resume();
+    // tiny silent blip unlocks iPad audio
+    const o = AC.createOscillator(), g = AC.createGain();
+    g.gain.value = 0; o.connect(g); g.connect(AC.destination);
+    o.start(); o.stop(AC.currentTime + 0.01);
+  } catch (e) {}
+}
+
+function tone(freq, start, len, type, vol, slideTo) {
+  if (!AC) return;
+  const o = AC.createOscillator(), g = AC.createGain();
+  o.type = type; o.frequency.setValueAtTime(freq, start);
+  if (slideTo) o.frequency.exponentialRampToValueAtTime(slideTo, start + len);
+  g.gain.setValueAtTime(vol, start);
+  g.gain.exponentialRampToValueAtTime(0.001, start + len);
+  o.connect(g); g.connect(AC.destination);
+  o.start(start); o.stop(start + len + 0.02);
+}
+
+function sfx(name) {
+  if (!AC) return;
+  const t = AC.currentTime;
+  if (name === 'jump') tone(330, t, 0.12, 'square', 0.06, 660);
+  else if (name === 'star') { tone(988, t, 0.07, 'square', 0.06); tone(1319, t + 0.06, 0.1, 'square', 0.06); }
+  else if (name === 'gold') [784, 988, 1175, 1568].forEach((f, i) => tone(f, t + i * 0.06, 0.12, 'square', 0.06));
+  else if (name === 'bop') { tone(600, t, 0.08, 'square', 0.08, 200); tone(1200, t + 0.08, 0.25, 'triangle', 0.08, 700); }
+  else if (name === 'spring') tone(200, t, 0.3, 'triangle', 0.1, 900);
+  else if (name === 'ball') tone(140, t, 0.15, 'triangle', 0.12, 90);
+  else if (name === 'magnet') [523, 659, 784, 1047, 784, 1047].forEach((f, i) => tone(f, t + i * 0.05, 0.08, 'sawtooth', 0.04));
+  else if (name === 'win') [523, 659, 784, 1047, 0, 784, 1047].forEach((f, i) => f && tone(f, t + i * 0.12, 0.2, 'square', 0.07));
+  else if (name === 'go') { tone(523, t, 0.15, 'square', 0.06); tone(1047, t + 0.15, 0.3, 'square', 0.06); }
+}
+
+function updateMusic() {
+  if (!AC || !musicOn) return;
+  const step = 60 / MUSIC_BPM / 2; // one eighth note
+  if (musicNext < AC.currentTime) musicNext = AC.currentTime + 0.05;
+  while (musicNext < AC.currentTime + 0.2) {
+    const i = musicStep % MELODY.length;
+    const n = MELODY[i];
+    if (n) tone(midiHz(n), musicNext, step * 0.85, 'square', 0.035);
+    if (i % 2 === 0) {
+      const root = BASS[Math.floor(i / 8) % BASS.length];
+      tone(midiHz(i % 4 === 0 ? root : root + 12), musicNext, step * 1.6, 'triangle', 0.07);
+    }
+    musicNext += step; musicStep++;
+  }
+}
+
+// ---------- the arena ----------
+const FLOOR = 450;
+const PLATFORMS = [ // one-way: land on them from above
+  { x: 70,  y: 345, w: 190, c: '#ff6fb5' },
+  { x: 700, y: 345, w: 190, c: '#7c6cff' },
+  { x: 370, y: 265, w: 220, c: '#ffb52e' },
+  { x: 90,  y: 180, w: 160, c: '#3fd98b' },
+  { x: 710, y: 180, w: 160, c: '#3fd98b' },
+  { x: 405, y: 105, w: 150, c: '#ff5a5a' },
+];
+const SPRINGS = [
+  { x: 20, y: FLOOR, w: 50, squish: 0 },
+  { x: 890, y: FLOOR, w: 50, squish: 0 },
+  { x: 455, y: 265, w: 50, squish: 0 },
+];
+// spots where stars can appear (on top of things)
+function starSpot() {
+  if (Math.random() < 0.3) return { x: rand(90, 870), y: FLOOR - 30 };
+  const p = PLATFORMS[Math.floor(Math.random() * PLATFORMS.length)];
+  return { x: rand(p.x + 20, p.x + p.w - 20), y: p.y - 30 };
+}
+
+let stars = [], parts = [], popups = [], ball, magnet, starClock = 0, magnetClock = 0;
+
+function resetWorld() {
+  stars = []; parts = []; popups = [];
+  starClock = 0.3; magnetClock = 12;
+  ball = { x: W / 2, y: 60, vx: Math.random() < 0.5 ? -200 : 200, vy: 0, r: 22, spin: 0 };
+  magnet = null;
+  for (let i = 0; i < 4; i++) addStar(false);
+}
+
+function addStar(golden, x, y, vx, vy) {
+  const s = starSpot();
+  stars.push({
+    x: x ?? s.x, y: y ?? s.y, vx: vx || 0, vy: vy || 0, loose: x !== undefined,
+    gold: golden === undefined ? Math.random() < 0.12 : golden,
+    t: rand(0, 6), age: 0, life: x !== undefined ? 6 : 99
+  });
+}
+
+function burst(x, y, color, n, speed) {
+  for (let i = 0; i < n; i++) {
+    const a = rand(0, Math.PI * 2), s = rand(speed * 0.3, speed);
+    parts.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s - 60, life: rand(0.4, 0.8), c: color, r: rand(3, 6) });
+  }
+}
+
+function popup(x, y, text, color) { popups.push({ x, y, text, color, life: 1 }); }
+
+function updateWorld() {
+  // new stars keep popping up
+  starClock -= DT;
+  const maxStars = mode === 'coop' ? 7 : 6;
+  if (starClock <= 0) { starClock = rand(0.7, 1.3); if (stars.filter(s => !s.loose).length < maxStars) addStar(); }
+  for (const s of stars) {
+    s.t += DT; s.age += DT;
+    if (s.loose) { // dropped stars fly out and land
+      s.vy += 1400 * DT; s.x += s.vx * DT; s.y += s.vy * DT;
+      if (s.x < 15 || s.x > W - 15) { s.vx *= -1; s.x = clamp(s.x, 15, W - 15); }
+      if (s.y > FLOOR - 18) { s.y = FLOOR - 18; s.vy *= -0.4; s.vx *= 0.8; }
+    }
+  }
+  stars = stars.filter(s => s.age < s.life);
+
+  // magnet power-up appears now and then
+  magnetClock -= DT;
+  if (!magnet && magnetClock <= 0) { const s = starSpot(); magnet = { x: s.x, y: s.y - 6, t: 0 }; }
+  if (magnet) { magnet.t += DT; if (magnet.t > 10) { magnet = null; magnetClock = rand(10, 16); } }
+
+  // bouncy beach ball
+  ball.vy += 900 * DT; ball.x += ball.vx * DT; ball.y += ball.vy * DT; ball.spin += ball.vx * DT / ball.r;
+  if (ball.x < ball.r) { ball.x = ball.r; ball.vx = Math.abs(ball.vx); }
+  if (ball.x > W - ball.r) { ball.x = W - ball.r; ball.vx = -Math.abs(ball.vx); }
+  if (ball.y > FLOOR - ball.r) { ball.y = FLOOR - ball.r; ball.vy = -Math.max(Math.abs(ball.vy) * 0.9, 640); }
+  if (Math.abs(ball.vx) < 150) ball.vx = (ball.vx < 0 ? -1 : 1) * 150;
+
+  for (const sp of SPRINGS) sp.squish = Math.max(0, sp.squish - DT * 4);
+  for (const p of parts) { p.vy += 900 * DT; p.x += p.vx * DT; p.y += p.vy * DT; p.life -= DT; }
+  parts = parts.filter(p => p.life > 0);
+  for (const p of popups) { p.y -= 50 * DT; p.life -= DT; }
+  popups = popups.filter(p => p.life > 0);
+}
+
+// ---------- the two players ----------
+const PW = 40, PH = 50;
+const NAMES = ['ROBO', 'SPARKS'];
+const COLORS = ['#3aa0ff', '#ff8a2a'];
+let players = [];
+
+function makePlayer(i) {
+  return {
+    i, x: i === 0 ? 150 : W - 150 - PW, y: FLOOR - PH, vx: 0, vy: 0, kx: 0,
+    face: i === 0 ? 1 : -1, onGround: true, hover: 0, jumpHeld: false,
+    stun: 0, safe: 0, score: 0, magnet: 0, ballHit: 0, walk: 0, squash: 0
+  };
+}
+
+// input from keyboard + touch, filled in by the input section
+const keys = {};
+const touchPad = [{ left: false, right: false, jump: false }, { left: false, right: false, jump: false }];
+function control(i) {
+  const k = i === 0
+    ? { left: keys['a'], right: keys['d'], jump: keys['w'] }
+    : { left: keys['ArrowLeft'], right: keys['ArrowRight'], jump: keys['ArrowUp'] };
+  const t = touchPad[i];
+  return { left: !!(k.left || t.left), right: !!(k.right || t.right), jump: !!(k.jump || t.jump) };
+}
+
+function addPoints(p, n, x, y) {
+  if (mode === 'coop') coopScore += n; else p.score += n;
+  popup(x, y, '+' + n, n >= 5 ? '#ffd400' : '#fff');
+}
+
+function updatePlayer(p) {
+  const c = control(p.i);
+  p.safe = Math.max(0, p.safe - DT);
+  p.ballHit = Math.max(0, p.ballHit - DT);
+  p.magnet = Math.max(0, p.magnet - DT);
+  p.squash = Math.max(0, p.squash - DT * 5);
+  if (p.stun > 0) { p.stun -= DT; if (p.stun <= 0) p.safe = 1; }
+  const can = p.stun <= 0;
+
+  // running
+  const dir = can ? (c.right ? 1 : 0) - (c.left ? 1 : 0) : 0;
+  const target = dir * 290;
+  p.vx += (target - p.vx) * Math.min(1, DT * (p.onGround ? 14 : 7));
+  if (dir) p.face = dir;
+  p.kx *= Math.pow(0.02, DT);
+
+  // jumping (hold to hover a little)
+  if (can && c.jump && !p.jumpHeld && p.onGround) {
+    p.vy = -640; p.onGround = false; p.hover = 0.45; sfx('jump');
+    burst(p.x + PW / 2, p.y + PH, '#ffffff', 5, 120);
+  }
+  p.jumpHeld = c.jump;
+  let g = 1800;
+  if (can && c.jump && p.vy > -120 && p.hover > 0) { g = 380; p.hover -= DT; if (p.vy > 90) p.vy = 90; }
+  p.vy = Math.min(p.vy + g * DT, 900);
+
+  // move + land on the floor / platforms
+  const oldBottom = p.y + PH;
+  p.x += (p.vx + p.kx) * DT; p.y += p.vy * DT;
+  if (p.x < 0) { p.x = 0; p.kx = Math.abs(p.kx) * 0.5; }
+  if (p.x > W - PW) { p.x = W - PW; p.kx = -Math.abs(p.kx) * 0.5; }
+  if (p.y < -40) { p.y = -40; p.vy = Math.max(p.vy, 0); }
+  const wasGround = p.onGround;
+  p.onGround = false;
+  if (p.y + PH >= FLOOR) { p.y = FLOOR - PH; p.vy = 0; p.onGround = true; }
+  else if (p.vy >= 0) {
+    for (const pl of PLATFORMS) {
+      if (p.x + PW > pl.x + 4 && p.x < pl.x + pl.w - 4 && oldBottom <= pl.y + 1 && p.y + PH >= pl.y) {
+        p.y = pl.y - PH; p.vy = 0; p.onGround = true; break;
+      }
+    }
+  }
+  if (p.onGround && !wasGround) { p.squash = 1; p.hover = 0.45; }
+  if (p.onGround && Math.abs(p.vx) > 30) p.walk += DT * Math.abs(p.vx) / 25;
+
+  // spring pads — BOING!
+  for (const sp of SPRINGS) {
+    if (p.onGround && p.y + PH === sp.y && p.x + PW > sp.x + 6 && p.x < sp.x + sp.w - 6) {
+      p.vy = -1060; p.onGround = false; sp.squish = 1; sfx('spring');
+      popup(sp.x + sp.w / 2, sp.y - 60, 'BOING!', '#fff');
+    }
+  }
+
+  // grab stars
+  const cx = p.x + PW / 2, cy = p.y + PH / 2;
+  for (const s of stars) {
+    if (p.magnet > 0) { // magnet pulls stars in
+      const dx = cx - s.x, dy = cy - s.y, d = Math.hypot(dx, dy) || 1;
+      if (d < 420) { s.x += dx / d * 330 * DT; s.y += dy / d * 330 * DT; }
+    }
+    if (can && Math.abs(s.x - cx) < 34 && Math.abs(s.y - cy) < 40 && !s.got) {
+      s.got = true;
+      addPoints(p, s.gold ? 5 : 1, s.x, s.y - 20);
+      sfx(s.gold ? 'gold' : 'star');
+      burst(s.x, s.y, s.gold ? '#ffd400' : '#fff36b', s.gold ? 18 : 8, 220);
+    }
+  }
+  stars = stars.filter(s => !s.got);
+
+  // magnet power-up
+  if (magnet && can && Math.abs(magnet.x - cx) < 36 && Math.abs(magnet.y - cy) < 42) {
+    p.magnet = 8; magnet = null; magnetClock = rand(14, 20); sfx('magnet');
+    popup(cx, p.y - 20, 'MAGNET!', '#ff4d6d');
+  }
+
+  // beach ball knocks you back
+  if (p.ballHit <= 0) {
+    const nx = clamp(ball.x, p.x, p.x + PW), ny = clamp(ball.y, p.y, p.y + PH);
+    if (Math.hypot(ball.x - nx, ball.y - ny) < ball.r) {
+      const side = cx < ball.x ? -1 : 1;
+      p.kx = side * 480; p.vy = Math.min(p.vy, -320); p.onGround = false; p.ballHit = 0.6;
+      ball.vx = -side * Math.max(Math.abs(ball.vx), 260); ball.vy = -420;
+      sfx('ball'); popup(cx, p.y - 10, 'BONK!', '#fff');
+    }
+  }
+}
+
+// head bop: land on the other player's head
+function checkBop(a, b) {
+  if (a.vy <= 0 || a.stun > 0) return;
+  const overlapX = a.x + PW > b.x + 6 && a.x < b.x + PW - 6;
+  const feet = a.y + PH;
+  if (!overlapX || feet < b.y - 4 || feet > b.y + 20) return;
+  a.vy = -560; a.onGround = false; a.hover = 0.45;
+  burst(a.x + PW / 2, feet, '#ffffff', 10, 200);
+  if (mode === 'coop') { // teammates give a super boost instead!
+    a.vy = -900; sfx('spring'); popup(b.x + PW / 2, b.y - 20, 'TEAM BOOST!', '#7dffb0'); return;
+  }
+  if (b.stun > 0 || b.safe > 0) return;
+  b.stun = STUN_TIME; b.vx = 0; shake = 0.25; sfx('bop');
+  popup(b.x + PW / 2, b.y - 20, 'BOP!', '#ffe14d');
+  const drop = Math.min(2, b.score); // drop up to 2 stars that anyone can grab
+  b.score -= drop;
+  for (let i = 0; i < drop; i++) addStar(false, b.x + PW / 2, b.y + 10, rand(-260, 260), rand(-520, -360));
+}
+
+// ---------- drawing ----------
+function rr(x, y, w, h, r) {
+  ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+}
+function starPath(x, y, r1, r2, n, rot) {
+  ctx.beginPath();
+  for (let i = 0; i < n * 2; i++) {
+    const r = i % 2 ? r2 : r1, a = rot + i * Math.PI / n - Math.PI / 2;
+    ctx.lineTo(x + Math.cos(a) * r, y + Math.sin(a) * r);
+  }
+  ctx.closePath();
+}
+function text(t, x, y, size, color, align, outline) {
+  ctx.font = 'bold ' + size + 'px "Arial Rounded MT Bold", "Trebuchet MS", Arial, sans-serif';
+  ctx.textAlign = align || 'center'; ctx.textBaseline = 'middle';
+  ctx.lineJoin = 'round';
+  if (outline !== false) { ctx.lineWidth = Math.max(4, size / 6); ctx.strokeStyle = '#2a1a5e'; ctx.strokeText(t, x, y); }
+  ctx.fillStyle = color; ctx.fillText(t, x, y);
+}
+
+function drawBackground() {
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#5ec8ff'); g.addColorStop(1, '#c6f1ff');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  // sun + clouds
+  ctx.fillStyle = '#fff59a'; ctx.beginPath(); ctx.arc(860, 70, 40, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,0.85)';
+  for (let i = 0; i < 4; i++) {
+    const x = ((clockT * 12 + i * 270) % (W + 200)) - 100, y = 50 + (i % 2) * 60;
+    ctx.beginPath(); ctx.arc(x, y, 22, 0, 7); ctx.arc(x + 25, y - 10, 28, 0, 7); ctx.arc(x + 52, y, 22, 0, 7); ctx.fill();
+  }
+  // hills
+  ctx.fillStyle = '#8fe07a';
+  ctx.beginPath(); ctx.moveTo(0, FLOOR);
+  for (let x = 0; x <= W; x += 40) ctx.lineTo(x, FLOOR - 40 - Math.sin(x / 90) * 25);
+  ctx.lineTo(W, FLOOR); ctx.fill();
+  // floor
+  ctx.fillStyle = '#4cc34a'; ctx.fillRect(0, FLOOR, W, 14);
+  ctx.fillStyle = '#a0662f'; ctx.fillRect(0, FLOOR + 14, W, H - FLOOR - 14);
+  ctx.fillStyle = '#8a5526';
+  for (let x = 10; x < W; x += 60) { ctx.fillRect(x, FLOOR + 30, 22, 8); ctx.fillRect(x + 30, FLOOR + 50, 16, 7); }
+}
+
+function drawPlatforms() {
+  for (const p of PLATFORMS) {
+    ctx.fillStyle = 'rgba(0,0,0,0.15)'; rr(p.x + 4, p.y + 6, p.w, 20, 9); ctx.fill();
+    ctx.fillStyle = p.c; rr(p.x, p.y, p.w, 20, 9); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.45)'; rr(p.x + 6, p.y + 3, p.w - 12, 6, 3); ctx.fill();
+  }
+  for (const s of SPRINGS) {
+    const sq = s.squish * 8, top = s.y - 16 + sq;
+    ctx.strokeStyle = '#666'; ctx.lineWidth = 4; ctx.beginPath();
+    for (let i = 0; i <= 4; i++) ctx.lineTo(s.x + 12 + (i % 2) * 26, s.y - (16 - sq) * i / 4);
+    ctx.stroke();
+    ctx.fillStyle = '#ff3b6b'; rr(s.x, top - 8, s.w, 10, 4); ctx.fill();
+    ctx.fillStyle = '#ffd1dc'; ctx.fillRect(s.x + 6, top - 6, s.w - 12, 3);
+  }
+}
+
+function drawStars() {
+  for (const s of stars) {
+    if (s.life - s.age < 1.5 && Math.floor(s.age * 10) % 2) continue; // blink before vanishing
+    const bob = s.loose ? 0 : Math.sin(s.t * 3) * 4, r = s.gold ? 20 : 14;
+    if (s.gold) { ctx.fillStyle = 'rgba(255,230,80,0.35)'; ctx.beginPath(); ctx.arc(s.x, s.y + bob, 30 + Math.sin(s.t * 6) * 4, 0, 7); ctx.fill(); }
+    starPath(s.x, s.y + bob, r, r * 0.45, 5, Math.sin(s.t * 2) * 0.3);
+    ctx.fillStyle = s.gold ? '#ffc400' : '#fff36b'; ctx.fill();
+    ctx.lineWidth = 3; ctx.strokeStyle = s.gold ? '#c27a00' : '#e0a800'; ctx.stroke();
+    ctx.fillStyle = '#5a3d00'; ctx.fillRect(s.x - 5, s.y + bob - 3, 3, 5); ctx.fillRect(s.x + 2, s.y + bob - 3, 3, 5);
+    if (s.gold) text('5', s.x, s.y + bob - 30, 16, '#fff');
+  }
+  if (magnet) {
+    const x = magnet.x, y = magnet.y + Math.sin(magnet.t * 4) * 5;
+    ctx.fillStyle = 'rgba(255,80,110,0.25)'; ctx.beginPath(); ctx.arc(x, y, 30, 0, 7); ctx.fill();
+    ctx.lineWidth = 12; ctx.strokeStyle = '#ff3b55'; ctx.lineCap = 'butt';
+    ctx.beginPath(); ctx.arc(x, y - 2, 13, Math.PI, 0, false); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x - 13, y - 2); ctx.lineTo(x - 13, y + 12); ctx.moveTo(x + 13, y - 2); ctx.lineTo(x + 13, y + 12); ctx.stroke();
+    ctx.fillStyle = '#ddd'; ctx.fillRect(x - 19, y + 8, 12, 8); ctx.fillRect(x + 7, y + 8, 12, 8);
+  }
+}
+
+function drawBall() {
+  ctx.save(); ctx.translate(ball.x, ball.y); ctx.rotate(ball.spin);
+  const cols = ['#ff4d4d', '#ffffff', '#3aa0ff', '#ffffff', '#ffd400', '#ffffff'];
+  for (let i = 0; i < 6; i++) {
+    ctx.fillStyle = cols[i]; ctx.beginPath(); ctx.moveTo(0, 0);
+    ctx.arc(0, 0, ball.r, i * Math.PI / 3, (i + 1) * Math.PI / 3); ctx.fill();
+  }
+  ctx.lineWidth = 2; ctx.strokeStyle = '#333'; ctx.beginPath(); ctx.arc(0, 0, ball.r, 0, 7); ctx.stroke();
+  ctx.restore();
+}
+
+function drawEffects() {
+  for (const p of parts) { ctx.globalAlpha = Math.min(1, p.life * 2); ctx.fillStyle = p.c; ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, 7); ctx.fill(); }
+  ctx.globalAlpha = 1;
+  for (const p of popups) { ctx.globalAlpha = Math.min(1, p.life * 2); text(p.text, p.x, p.y, 24, p.color); }
+  ctx.globalAlpha = 1;
+}
+
+// ---------- characters (drawn standing on point x,y = feet) ----------
+function drawRobo(x, y, face, o) {
+  o = o || {};
+  const legSwing = o.air ? 0 : Math.sin(o.walk || 0) * 5, sq = (o.squash || 0) * 5;
+  ctx.save(); ctx.translate(x, y); ctx.scale(face * (1 + sq / 60), 1 - sq / 60);
+  if (o.air) { // jet boot flames
+    const f = 8 + Math.random() * 8;
+    ctx.fillStyle = '#ffb000'; ctx.beginPath(); ctx.moveTo(-14, 0); ctx.lineTo(-8, f); ctx.lineTo(-2, 0); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(2, 0); ctx.lineTo(8, f); ctx.lineTo(14, 0); ctx.fill();
+    ctx.fillStyle = '#fff2a0'; ctx.fillRect(-11, 0, 6, f / 2); ctx.fillRect(5, 0, 6, f / 2);
+  }
+  // legs + jet boots
+  ctx.fillStyle = '#cfd6e0'; ctx.fillRect(-11 + legSwing, -14, 6, 8); ctx.fillRect(5 - legSwing, -14, 6, 8);
+  ctx.fillStyle = '#5b6577'; rr(-15 + legSwing, -8, 14, 8, 3); ctx.fill(); rr(1 - legSwing, -8, 14, 8, 3); ctx.fill();
+  // body
+  ctx.fillStyle = '#ffffff'; ctx.strokeStyle = '#9aa6b8'; ctx.lineWidth = 2;
+  rr(-17, -38, 34, 25, 8); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = '#3aa0ff'; ctx.beginPath(); ctx.arc(0, -26, 5, 0, 7); ctx.fill();
+  // arm (reaches out for handshakes)
+  ctx.fillStyle = '#e8edf3';
+  if (o.armOut) { rr(10, -32 + (o.shakeY || 0), 24, 8, 4); ctx.fill(); ctx.beginPath(); ctx.arc(35, -28 + (o.shakeY || 0), 6, 0, 7); ctx.fill(); }
+  else { rr(12, -34 + legSwing / 2, 8, 18, 4); ctx.fill(); }
+  // head
+  ctx.fillStyle = '#ffffff'; rr(-16, -62, 32, 25, 9); ctx.fill(); ctx.stroke();
+  ctx.strokeStyle = '#9aa6b8'; ctx.beginPath(); ctx.moveTo(0, -62); ctx.lineTo(0, -72); ctx.stroke();
+  ctx.fillStyle = '#ff4d6d'; ctx.beginPath(); ctx.arc(0, -73, 4, 0, 7); ctx.fill();
+  // dark visor with glowing blue eyes
+  ctx.fillStyle = '#1d2333'; rr(-12, -57, 26, 13, 5); ctx.fill();
+  if (o.stun) {
+    ctx.strokeStyle = '#7fd4ff'; ctx.lineWidth = 2;
+    for (const ex of [-4, 7]) { ctx.beginPath(); ctx.moveTo(ex - 3, -53); ctx.lineTo(ex + 3, -47); ctx.moveTo(ex + 3, -53); ctx.lineTo(ex - 3, -47); ctx.stroke(); }
+  } else {
+    ctx.fillStyle = 'rgba(80,190,255,0.45)';
+    ctx.beginPath(); ctx.arc(-3, -50, 6, 0, 7); ctx.arc(8, -50, 6, 0, 7); ctx.fill();
+    ctx.fillStyle = '#7fe0ff'; ctx.beginPath(); ctx.arc(-3, -50, 3.5, 0, 7); ctx.arc(8, -50, 3.5, 0, 7); ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawSparks(x, y, face, o) {
+  o = o || {};
+  const legSwing = o.air ? 3 : Math.sin(o.walk || 0) * 5, sq = (o.squash || 0) * 5;
+  const wag = Math.sin(clockT * 14) * 0.5;
+  ctx.save(); ctx.translate(x, y); ctx.scale(face * (1 + sq / 60), 1 - sq / 60);
+  const fur = '#c9772f', dark = '#8a4a1c';
+  // tail
+  ctx.save(); ctx.translate(-18, -24); ctx.rotate(-0.8 + wag);
+  ctx.fillStyle = fur; rr(-4, -18, 8, 20, 4); ctx.fill(); ctx.restore();
+  // legs
+  ctx.fillStyle = dark;
+  ctx.fillRect(-15 + legSwing, -12, 7, 12); ctx.fillRect(-5 - legSwing, -12, 7, 12);
+  ctx.fillRect(5 + legSwing, -12, 7, 12); ctx.fillRect(12 - legSwing, -12, 7, 12);
+  // body
+  ctx.fillStyle = fur; ctx.beginPath(); ctx.ellipse(0, -20, 21, 13, 0, 0, 7); ctx.fill();
+  ctx.fillStyle = '#f2c28e'; ctx.beginPath(); ctx.ellipse(3, -15, 12, 6, 0, 0, 7); ctx.fill();
+  // paw out for handshakes
+  if (o.armOut) { ctx.fillStyle = fur; rr(10, -26 + (o.shakeY || 0), 24, 8, 4); ctx.fill(); ctx.fillStyle = '#f2c28e'; ctx.beginPath(); ctx.arc(34, -22 + (o.shakeY || 0), 6, 0, 7); ctx.fill(); }
+  // head
+  ctx.fillStyle = fur; ctx.beginPath(); ctx.arc(13, -38, 14, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(25, -34, 9, 7, 0, 0, 7); ctx.fill();
+  ctx.fillStyle = '#f2c28e'; ctx.beginPath(); ctx.ellipse(27, -32, 6, 4, 0, 0, 7); ctx.fill();
+  ctx.fillStyle = '#222'; ctx.beginPath(); ctx.arc(33, -36, 4, 0, 7); ctx.fill();
+  // floppy ear
+  ctx.fillStyle = dark; ctx.save(); ctx.translate(6, -48); ctx.rotate(0.35 + (o.air ? -0.6 : wag * 0.2));
+  ctx.beginPath(); ctx.ellipse(0, 9, 6, 12, 0, 0, 7); ctx.fill(); ctx.restore();
+  // eye
+  if (o.stun) {
+    ctx.strokeStyle = '#222'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(15, -45); ctx.lineTo(21, -39); ctx.moveTo(21, -45); ctx.lineTo(15, -39); ctx.stroke();
+  } else {
+    ctx.fillStyle = '#222'; ctx.beginPath(); ctx.arc(18, -42, 3.5, 0, 7); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(19, -43, 1.2, 0, 7); ctx.fill();
+  }
+  // tongue + red collar
+  ctx.fillStyle = '#ff7a9c'; rr(22, -28, 5, 7, 2); ctx.fill();
+  ctx.fillStyle = '#e8202a'; rr(2, -30, 8, 14, 3); ctx.fill();
+  ctx.fillStyle = '#ffd400'; ctx.beginPath(); ctx.arc(8, -17, 3, 0, 7); ctx.fill();
+  ctx.restore();
+}
+
+function drawPlayer(p) {
+  if (p.safe > 0 && Math.floor(p.safe * 12) % 2) return; // blink after waking up
+  const x = p.x + PW / 2, y = p.y + PH;
+  if (p.magnet > 0) {
+    ctx.strokeStyle = 'rgba(255,60,100,' + (0.4 + Math.sin(clockT * 10) * 0.2) + ')'; ctx.lineWidth = 4;
+    ctx.beginPath(); ctx.arc(x, y - 28, 40, 0, 7); ctx.stroke();
+  }
+  const o = { walk: p.walk, air: !p.onGround, stun: p.stun > 0, squash: p.squash };
+  (p.i === 0 ? drawRobo : drawSparks)(x, y, p.face, o);
+  if (p.stun > 0) { // cartoon dizzy stars
+    for (let k = 0; k < 3; k++) {
+      const a = clockT * 6 + k * 2.1;
+      starPath(x + Math.cos(a) * 22, y - 72 + Math.sin(a) * 6, 7, 3, 5, a);
+      ctx.fillStyle = '#ffe14d'; ctx.fill();
+    }
+  } else {
+    // little arrow so each kid can spot their guy
+    ctx.fillStyle = COLORS[p.i]; ctx.beginPath();
+    ctx.moveTo(x - 7, y - 92); ctx.lineTo(x + 7, y - 92); ctx.lineTo(x, y - 83); ctx.fill();
+    text(p.i === 0 ? 'P1' : 'P2', x, y - 102, 14, COLORS[p.i]);
+  }
+}
+
+// ---------- game flow ----------
+let countdown = 0;
+function startMatch(m) {
+  mode = m; wins = [0, 0]; roundNum = 1; matchWinner = -1;
+  startRound();
+}
+function startRound() {
+  players = [makePlayer(0), makePlayer(1)];
+  resetWorld(); coopScore = 0;
+  roundTimer = ROUND_TIME; countdown = 2; state = 'play'; stateTimer = 0;
+  sfx('go');
+}
+function endRound() {
+  const [a, b] = players;
+  roundWinner = a.score > b.score ? 0 : b.score > a.score ? 1 : -1;
+  if (roundWinner >= 0) wins[roundWinner]++;
+  state = 'roundEnd'; stateTimer = 0; sfx('win');
+  burst(W / 2, 200, '#ffd400', 30, 400);
+}
+function endMatch() {
+  if (mode === 'coop') matchWinner = coopScore >= COOP_GOAL ? 2 : 3; // 2 = team did it, 3 = so close
+  else matchWinner = wins[0] > wins[1] ? 0 : wins[1] > wins[0] ? 1 : -1;
+  state = 'matchEnd'; stateTimer = 0; sfx('win');
+}
+function nextAfterRound() {
+  if (wins[0] >= ROUNDS_TO_WIN || wins[1] >= ROUNDS_TO_WIN || roundNum >= 3) endMatch();
+  else { roundNum++; startRound(); }
+}
+
+function update() {
+  clockT += DT; stateTimer += DT; shake = Math.max(0, shake - DT);
+  if (state === 'play') {
+    if (countdown > 0) { countdown -= DT; updateWorld(); return; }
+    roundTimer -= DT;
+    for (const p of players) updatePlayer(p);
+    checkBop(players[0], players[1]); checkBop(players[1], players[0]);
+    updateWorld();
+    if (mode === 'coop') { if (coopScore >= COOP_GOAL || roundTimer <= 0) endMatch(); }
+    else if (players[0].score >= WIN_POINTS || players[1].score >= WIN_POINTS || roundTimer <= 0) endRound();
+  } else {
+    for (const p of parts) { p.vy += 900 * DT; p.x += p.vx * DT; p.y += p.vy * DT; p.life -= DT; }
+    parts = parts.filter(p => p.life > 0);
+    if (state === 'roundEnd' && stateTimer > 3.5) nextAfterRound();
+    if (state === 'matchEnd' && Math.random() < 0.15) burst(rand(100, 860), rand(60, 200), ['#ffd400', '#ff6fb5', '#3fd98b', '#3aa0ff'][Math.floor(rand(0, 4))], 6, 250);
+  }
+}
+
+// "press start" from Enter / Space / tap. which = 'battle' | 'coop' | undefined
+function pressStart(which) {
+  wakeAudio();
+  if (state === 'title') startMatch(which || 'battle');
+  else if (state === 'roundEnd' && stateTimer > 1.2) nextAfterRound();
+  else if (state === 'matchEnd' && stateTimer > 2.5) { state = 'title'; stateTimer = 0; }
+}
+
+// ---------- big buttons ----------
+const TITLE_BTNS = [
+  { x: 210, y: 300, w: 250, h: 80, label: 'BATTLE!', sub: 'Enter', c: '#ff5a5a', mode: 'battle' },
+  { x: 500, y: 300, w: 250, h: 80, label: 'TEAM UP!', sub: 'press T', c: '#3fd98b', mode: 'coop' },
+];
+// touch zones go all the way up the screen; buttons are drawn at the bottom
+const TOUCH_BTNS = [
+  { p: 0, act: 'left',  x0: 0,   x1: 110, cx: 56,  label: '◀' },
+  { p: 0, act: 'right', x0: 110, x1: 220, cx: 166, label: '▶' },
+  { p: 0, act: 'jump',  x0: 220, x1: 480, cx: 320, label: 'JUMP' },
+  { p: 1, act: 'jump',  x0: 480, x1: 740, cx: 640, label: 'JUMP' },
+  { p: 1, act: 'left',  x0: 740, x1: 850, cx: 794, label: '◀' },
+  { p: 1, act: 'right', x0: 850, x1: 961, cx: 904, label: '▶' },
+];
+
+function drawTouchButtons() {
+  if (!showTouch || state !== 'play') return;
+  ctx.fillStyle = 'rgba(255,255,255,0.18)'; ctx.fillRect(W / 2 - 2, 60, 4, H - 60);
+  for (const b of TOUCH_BTNS) {
+    const on = touchPad[b.p][b.act], big = b.act === 'jump', r = big ? 46 : 40;
+    ctx.fillStyle = on ? 'rgba(255,255,255,0.75)' : (b.p === 0 ? 'rgba(58,160,255,0.45)' : 'rgba(255,138,42,0.45)');
+    ctx.beginPath(); ctx.arc(b.cx, 470, r, 0, 7); ctx.fill();
+    ctx.lineWidth = 4; ctx.strokeStyle = 'rgba(255,255,255,0.8)'; ctx.stroke();
+    text(b.label, b.cx, 471, big ? 24 : 34, '#fff');
+  }
+}
+
+function drawHUD() {
+  const p0 = players[0], p1 = players[1];
+  if (mode === 'coop') {
+    ctx.fillStyle = 'rgba(42,26,94,0.75)'; rr(W / 2 - 170, 8, 340, 50, 16); ctx.fill();
+    text('⭐ TEAM: ' + coopScore + ' / ' + COOP_GOAL, W / 2, 26, 26, '#fff36b');
+    text(Math.ceil(Math.max(0, roundTimer)) + 's', W / 2, 49, 16, '#fff', 'center', false);
+    return;
+  }
+  for (const i of [0, 1]) {
+    const x = i === 0 ? 10 : W - 230;
+    ctx.fillStyle = 'rgba(42,26,94,0.75)'; rr(x, 8, 220, 50, 16); ctx.fill();
+    ctx.fillStyle = COLORS[i]; rr(x + 4, 12, 10, 42, 5); ctx.fill();
+    text(NAMES[i] + '  ⭐ ' + players[i].score, x + 115, 27, 24, '#fff');
+    for (let k = 0; k < ROUNDS_TO_WIN; k++) {
+      ctx.fillStyle = k < wins[i] ? '#ffd400' : 'rgba(255,255,255,0.25)';
+      ctx.beginPath(); ctx.arc(x + 100 + k * 26, 47, 7, 0, 7); ctx.fill();
+    }
+  }
+  ctx.fillStyle = 'rgba(42,26,94,0.75)'; rr(W / 2 - 75, 8, 150, 50, 16); ctx.fill();
+  const t = Math.ceil(Math.max(0, roundTimer));
+  text(t + '', W / 2, 26, 26, t <= 10 ? '#ff6b6b' : '#fff');
+  text('ROUND ' + roundNum + ' • first to ' + WIN_POINTS, W / 2, 49, 12, '#ffe', 'center', false);
+}
+
+// ---------- screens ----------
+function panel(x, y, w, h) {
+  ctx.fillStyle = 'rgba(42,26,94,0.82)'; rr(x, y, w, h, 22); ctx.fill();
+  ctx.lineWidth = 5; ctx.strokeStyle = '#ffd400'; ctx.stroke();
+}
+
+function drawTitle() {
+  drawBackground(); drawPlatforms();
+  const b = Math.abs(Math.sin(clockT * 4)) * 18;
+  drawRobo(120, FLOOR - b, 1, { air: b > 4 });
+  drawSparks(840, FLOOR - (18 - b), -1, { air: b < 14 });
+  const s = 1 + Math.sin(clockT * 3) * 0.04;
+  ctx.save(); ctx.translate(W / 2, 80); ctx.scale(s, s); ctx.rotate(Math.sin(clockT * 2) * 0.03);
+  text('BROTHER BLAST!', 0, 0, 72, '#ffd400'); ctx.restore();
+  text('🤫 a secret game for two brothers', W / 2, 135, 20, '#fff');
+  panel(150, 160, 660, 120);
+  text('🤖 ROBO (left side):  A D = run   W = jump', W / 2, 188, 20, '#9fd4ff', 'center', false);
+  text('🐶 SPARKS (right side):  ← → = run   ↑ = jump', W / 2, 215, 20, '#ffc58a', 'center', false);
+  text('Grab ⭐ stars! Gold ones = 5!  Bop your brother\'s head to make him dizzy!', W / 2, 245, 16, '#fff', 'center', false);
+  text('First to ' + WIN_POINTS + ' stars wins the round. Best of 3!', W / 2, 266, 16, '#fff', 'center', false);
+  for (const bt of TITLE_BTNS) {
+    const wob = Math.sin(clockT * 5 + bt.x) * 3;
+    ctx.fillStyle = 'rgba(0,0,0,0.25)'; rr(bt.x + 4, bt.y + 8, bt.w, bt.h, 20); ctx.fill();
+    ctx.fillStyle = bt.c; rr(bt.x, bt.y + wob, bt.w, bt.h, 20); ctx.fill();
+    ctx.lineWidth = 4; ctx.strokeStyle = '#fff'; ctx.stroke();
+    text(bt.label, bt.x + bt.w / 2, bt.y + 32 + wob, 34, '#fff');
+    text(bt.sub, bt.x + bt.w / 2, bt.y + 64 + wob, 14, '#fff', 'center', false);
+  }
+  text('Tap a button to start!  •  M = music on/off', W / 2, 410, 16, '#2a1a5e', 'center', false);
+}
+
+function drawPlay() {
+  drawBackground(); drawPlatforms(); drawStars(); drawBall();
+  for (const p of players) drawPlayer(p);
+  drawEffects(); drawHUD(); drawTouchButtons();
+  if (countdown > 0) text(countdown > 0.8 ? 'READY...' : 'GO!', W / 2, 200, 80, countdown > 0.8 ? '#fff' : '#ffd400');
+  else if (mode !== 'coop' && roundTimer < 10.5 && roundTimer > 0) text(Math.ceil(roundTimer) + '', W / 2, 200, 70, 'rgba(255,90,90,0.8)');
+}
+
+function winText(w) { return w === 0 ? 'ROBO WINS!' : w === 1 ? 'SPARKS WINS!' : 'TIE!'; }
+
+function drawRoundEnd() {
+  drawPlay();
+  ctx.fillStyle = 'rgba(0,0,0,0.25)'; ctx.fillRect(0, 0, W, H);
+  panel(220, 120, 520, 230);
+  text('ROUND ' + roundNum + ':', W / 2, 160, 30, '#fff');
+  const sc = 1 + Math.max(0, 0.6 - stateTimer) * 1.5;
+  ctx.save(); ctx.translate(W / 2, 215); ctx.scale(sc, sc);
+  text(winText(roundWinner), 0, 0, 58, roundWinner === 1 ? '#ffb05a' : roundWinner === 0 ? '#7fd0ff' : '#ffd400');
+  ctx.restore();
+  text('🤖 ' + players[0].score + '  ⭐  ' + players[1].score + ' 🐶', W / 2, 270, 28, '#fff');
+  text('Rounds won:  Robo ' + wins[0] + '  –  Sparks ' + wins[1], W / 2, 315, 18, '#ffe', 'center', false);
+}
+
+function drawMatchEnd() {
+  drawBackground(); drawPlatforms();
+  // both buddies walk to the middle and do a silly handshake
+  const walkIn = Math.min(1, stateTimer / 1.5);
+  const rx = 160 + (W / 2 - 42 - 160) * walkIn, sx = W - 160 - (W - 160 - (W / 2 + 42)) * walkIn;
+  const shaking = walkIn >= 1;
+  const shakeY = shaking ? Math.sin(stateTimer * 18) * 7 : 0;
+  const hop = shaking ? Math.abs(Math.sin(stateTimer * 9)) * 10 : 0;
+  drawRobo(rx, FLOOR - hop, 1, { walk: stateTimer * 12, armOut: shaking, shakeY });
+  drawSparks(sx, FLOOR - (shaking ? 10 - hop : 0), -1, { walk: stateTimer * 12, armOut: shaking, shakeY });
+  if (shaking) {
+    ctx.fillStyle = '#fff'; rr(W / 2 - 95, 290, 190, 50, 18); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(W / 2 - 10, 338); ctx.lineTo(W / 2, 360); ctx.lineTo(W / 2 + 10, 338); ctx.fill();
+    text('Good game! 🤝', W / 2, 315, 26, '#2a1a5e', 'center', false);
+  }
+  drawEffects();
+  let big, col;
+  if (matchWinner === 2) { big = 'TEAM WINS!'; col = '#7dffb0'; }
+  else if (matchWinner === 3) { big = 'SO CLOSE!'; col = '#ffd400'; }
+  else { big = winText(matchWinner); col = matchWinner === 0 ? '#7fd0ff' : matchWinner === 1 ? '#ffb05a' : '#ffd400'; }
+  const sc = 1 + Math.sin(clockT * 5) * 0.06;
+  ctx.save(); ctx.translate(W / 2, 100); ctx.scale(sc, sc); text(big, 0, 0, 84, col); ctx.restore();
+  if (mode === 'coop') text('You grabbed ' + coopScore + ' stars together!', W / 2, 175, 28, '#fff');
+  else text('Rounds:  Robo ' + wins[0] + '  –  Sparks ' + wins[1], W / 2, 175, 28, '#fff');
+  if (stateTimer > 2.5) text('Tap or press Enter to play again!', W / 2, 230, 22, '#fff36b');
+}
+
+function render() {
+  ctx.save();
+  if (shake > 0) ctx.translate(rand(-5, 5) * shake * 4, rand(-5, 5) * shake * 4);
+  if (state === 'title') drawTitle();
+  else if (state === 'play') drawPlay();
+  else if (state === 'roundEnd') drawRoundEnd();
+  else drawMatchEnd();
+  ctx.restore();
+  if (!musicOn) text('🔇 M', W - 30, H - 20, 16, '#fff', 'center', false);
+}
+
+// ---------- keyboard ----------
+window.addEventListener('keydown', e => {
+  const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+  if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', ' '].includes(k)) e.preventDefault();
+  keys[k] = true;
+  wakeAudio();
+  if (e.repeat) return;
+  if (k === 'Enter' || k === ' ') pressStart();
+  else if (k === 't' && state === 'title') pressStart('coop');
+  else if (k === 'm') { musicOn = !musicOn; musicNext = 0; }
+});
+window.addEventListener('keyup', e => {
+  const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+  keys[k] = false;
+});
+window.addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
+
+// ---------- multi-touch: left half = Robo, right half = Sparks ----------
+const activeTouches = new Map(); // touch identifier -> {x, y} in game coordinates
+function toGame(t) {
+  const r = canvas.getBoundingClientRect();
+  const rw = r.width || W, rh = r.height || H;
+  return { x: clamp((t.clientX - r.left) * W / rw, 0, W), y: clamp((t.clientY - r.top) * H / rh, 0, H) };
+}
+function refreshTouchPad() {
+  for (const tp of touchPad) tp.left = tp.right = tp.jump = false;
+  for (const pt of activeTouches.values()) {
+    for (const b of TOUCH_BTNS) if (pt.x >= b.x0 && pt.x < b.x1) { touchPad[b.p][b.act] = true; break; }
+  }
+}
+function onTouchStart(e) {
+  e.preventDefault(); wakeAudio(); showTouch = true;
+  for (const t of e.changedTouches) {
+    const pt = toGame(t);
+    activeTouches.set(t.identifier, pt);
+    if (state !== 'play') {
+      let which;
+      if (state === 'title') for (const b of TITLE_BTNS) if (pt.x > b.x && pt.x < b.x + b.w && pt.y > b.y - 10 && pt.y < b.y + b.h + 10) which = b.mode;
+      pressStart(which);
+    }
+  }
+  refreshTouchPad();
+}
+function onTouchMove(e) {
+  e.preventDefault();
+  for (const t of e.changedTouches) if (activeTouches.has(t.identifier)) activeTouches.set(t.identifier, toGame(t));
+  refreshTouchPad();
+}
+function onTouchEnd(e) {
+  e.preventDefault();
+  for (const t of e.changedTouches) activeTouches.delete(t.identifier);
+  refreshTouchPad();
+}
+document.addEventListener('touchstart', onTouchStart, { passive: false });
+document.addEventListener('touchmove', onTouchMove, { passive: false });
+document.addEventListener('touchend', onTouchEnd, { passive: false });
+document.addEventListener('touchcancel', onTouchEnd, { passive: false });
+document.addEventListener('gesturestart', e => e.preventDefault(), { passive: false });
+document.addEventListener('dblclick', e => e.preventDefault());
+// mouse click works on title / end screens too
+canvas.addEventListener('mousedown', e => {
+  if (state === 'play') return;
+  const pt = toGame(e);
+  let which;
+  if (state === 'title') for (const b of TITLE_BTNS) if (pt.x > b.x && pt.x < b.x + b.w && pt.y > b.y - 10 && pt.y < b.y + b.h + 10) which = b.mode;
+  pressStart(which);
+});
+
+// ---------- fixed-timestep main loop ----------
+let lastT = 0, acc = 0;
+function frame(now) {
+  if (!lastT) lastT = now;
+  acc += Math.min(0.1, (now - lastT) / 1000); lastT = now;
+  let n = 0;
+  while (acc >= DT && n < 6) { update(); acc -= DT; n++; }
+  if (n === 6) acc = 0;
+  updateMusic();
+  render();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+<!-- injected by scripts/inject-factory.py — hold PS (or SELECT+START) for 1s to go
+     up one level: game -> the book (parent.closeGame), standalone game -> /factory/,
+     the book -> Stephens Arcade (/). Shares one rAF pad poll with the cursor + idle overlays. -->
+<script id="__gf_pad_exit">
+(function () {
+  var IS_BOOK = false; /*@gf:is_book*/
+  var HOLD_MS = 1000;
+  // one rAF loop per page reads the pads for every __gf overlay
+  var hub = window.__gfHub;
+  if (!hub) {
+    hub = window.__gfHub = { fns: [], pads: [] };
+    (function () {
+      var NONE = [];
+      function loop(now) {
+        var p = null;
+        try { p = navigator.getGamepads ? navigator.getGamepads() : null; } catch (e) {}
+        hub.pads = p || NONE;
+        for (var i = 0; i < hub.fns.length; i++) { try { hub.fns[i](now, hub.pads); } catch (e) {} }
+        requestAnimationFrame(loop);
+      }
+      requestAnimationFrame(loop);
+    })();
+  }
+
+  var STEPS = 20, TF = [];               // precomputed badge transforms: zero allocations while held
+  for (var s = 0; s <= STEPS; s++) TF.push('translateX(-50%) scale(' + (1 + 0.35 * s / STEPS).toFixed(4) + ')');
+  var HIDE_TF = 'translateX(-50%) scale(0.85)';
+  var heldSince = 0, needRelease = true, leaving = false, badge = null, lastStep = -2;
+  var player = null;
+
+  function comboDown(pads) {
+    for (var i = 0; i < pads.length; i++) {
+      var gp = pads[i];
+      if (!gp || gp.connected === false) continue;
+      var b = gp.buttons;
+      if ((b[16] && b[16].pressed) || (b[8] && b[8].pressed && b[9] && b[9].pressed)) return true;
+    }
+    return false;
+  }
+  function makeBadge() {
+    badge = document.createElement('div');
+    badge.id = '__gfx_exit';
+    badge.textContent = IS_BOOK ? '◄ ARCADE' : '◄ BOOK';
+    badge.style.cssText = 'position:fixed;top:12px;left:50%;z-index:2147483001;pointer-events:none;' +
+      'padding:7px 18px;border-radius:999px;background:#10172a;color:#ffd23f;border:3px solid #ffd23f;' +
+      'font:bold 18px/1 "Trebuchet MS","Arial Rounded MT Bold",sans-serif;letter-spacing:1px;white-space:nowrap;' +
+      'transform-origin:50% 0;opacity:0;transform:' + HIDE_TF + ';transition:opacity .12s;';
+    (document.body || document.documentElement).appendChild(badge);
+  }
+  function setBadge(step) {            // step -1 = hidden, 0..STEPS = hold progress
+    if (step === lastStep) return;
+    lastStep = step;
+    if (step < 0) { if (badge) { badge.style.opacity = '0'; badge.style.transform = HIDE_TF; } return; }
+    if (!badge) makeBadge();
+    badge.style.opacity = '1';
+    badge.style.transform = TF[step];
+  }
+  function inGame() {
+    try { return window.parent !== window && typeof window.parent.closeGame === 'function'; } catch (e) { return false; }
+  }
+  function leave() {
+    leaving = true;                    // never navigate twice
+    if (!IS_BOOK && inGame()) { setBadge(-1); try { window.parent.closeGame(); } catch (e) {} return; }
+    location.href = IS_BOOK ? '/' : '/factory/';
+  }
+  hub.fns.push(function (now, pads) {
+    if (leaving) return;
+    var down = comboDown(pads);
+    if (IS_BOOK) {
+      if (!player) player = document.getElementById('player');
+      if (player && player.classList.contains('open')) {   // the game's own overlay handles this hold
+        if (down) needRelease = true;
+        heldSince = 0; setBadge(-1); return;
+      }
+    }
+    if (needRelease) {                 // a hold that started elsewhere never counts here
+      if (down) return;
+      needRelease = false;
+    }
+    if (!down) { heldSince = 0; setBadge(-1); return; }
+    if (!heldSince) heldSince = now;
+    var p = (now - heldSince) / HOLD_MS;
+    setBadge(Math.round((p > 1 ? 1 : p) * STEPS));
+    if (p >= 1) leave();
+  });
+})();
+</script>
+<!-- injected by scripts/inject-factory.py — console (low-fx) mode only: no-op canvas
+     shadowBlur and kill CSS backdrop-filter (both measured fps killers on the Pi).
+     The mouse cursor is hidden only while the pad cursor is installed. -->
+<script id="__gf_lowfx">
+(function () {
+  var on = false;
+  try {
+    if (/[?&]fx=low\b/.test(location.search)) { on = true; localStorage.setItem('arcade_lowfx', '1'); }
+    else if (/[?&]fx=full\b/.test(location.search)) { localStorage.setItem('arcade_lowfx', '0'); }
+    else { on = localStorage.getItem('arcade_lowfx') === '1'; }
+  } catch (e) {}
+  if (!on) return;
+  try {
+    Object.defineProperty(CanvasRenderingContext2D.prototype, 'shadowBlur', {
+      set: function () {}, get: function () { return 0; }, configurable: true
+    });
+  } catch (e) {}
+  try {
+    var st = document.createElement('style');
+    st.textContent = '* { backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }' +
+      ' html.__gfx_padcursor, html.__gfx_padcursor * { cursor: none !important; }';
+    (document.head || document.documentElement).appendChild(st);
+  } catch (e) {}
+})();
+</script>
+<!-- injected by scripts/inject-factory.py — console mode only: the TV has no printer,
+     so window.print shows a friendly toast instead of a dead print dialog. -->
+<script id="__gf_print">
+(function () {
+  var on = false;
+  try { on = /[?&]fx=low\b/.test(location.search) || localStorage.getItem('arcade_lowfx') === '1'; } catch (e) {}
+  if (!on) return;
+  var toast = null, timer = 0;
+  function hide() { if (toast) toast.style.opacity = '0'; }
+  window.print = function () {
+    try {
+      if (!toast) {
+        toast = document.createElement('div');
+        toast.id = '__gfx_print';
+        toast.textContent = '🖨️ Printing works on the iPad — not on the TV!';
+        toast.style.cssText = 'position:fixed;left:50%;bottom:48px;transform:translateX(-50%);z-index:2147483001;' +
+          'pointer-events:none;padding:14px 26px;border-radius:16px;background:#10172a;color:#ffd23f;' +
+          'border:3px solid #ffd23f;font:bold 24px/1.2 "Trebuchet MS","Arial Rounded MT Bold",sans-serif;' +
+          'white-space:nowrap;opacity:0;transition:opacity .2s;';
+        (document.body || document.documentElement).appendChild(toast);
+      }
+      toast.style.opacity = '1';
+      clearTimeout(timer);
+      timer = setTimeout(hide, 2500);
+    } catch (e) {}
+  };
+})();
+</script>
+<!-- injected by scripts/inject-factory.py — pad cursor: a pad-driven mouse pointer so
+     tap/click-only games play on the console. Right stick moves it (left stick too in
+     pointer games); X / R1 clicks and drags (pointer + mouse events, like touchpad.js
+     turns fingers into mouse events). Never consumes pad input. -->
+<script id="__gf_cursor">
+(function () {
+  window.__GF_CURSOR_LEFT = true; /*@gf:cursor_left*/
+  var IS_BOOK = false; /*@gf:is_book*/
+  var LEFT = window.__GF_CURSOR_LEFT === true;
+  var DZ = 0.2, SPEED = 900, SLEEP_MS = 4000, CLICK_SLOP = 12;
+  // one rAF loop per page reads the pads for every __gf overlay
+  var hub = window.__gfHub;
+  if (!hub) {
+    hub = window.__gfHub = { fns: [], pads: [] };
+    (function () {
+      var NONE = [];
+      function loop(now) {
+        var p = null;
+        try { p = navigator.getGamepads ? navigator.getGamepads() : null; } catch (e) {}
+        hub.pads = p || NONE;
+        for (var i = 0; i < hub.fns.length; i++) { try { hub.fns[i](now, hub.pads); } catch (e) {} }
+        requestAnimationFrame(loop);
+      }
+      requestAnimationFrame(loop);
+    })();
+  }
+
+  var S = window.__gfCursorState = { installed: false, awake: false, held: false, x: 0, y: 0 };
+  var el = null, x = 0, y = 0, awake = false, lastMove = 0, lastT = 0;
+  var held = false, target = null, sx = 0, sy = 0, prevBtn = false, vx = 0, vy = 0, player = null;
+  var INIT = { bubbles: true, cancelable: true, composed: true, view: window, detail: 0,
+    clientX: 0, clientY: 0, screenX: 0, screenY: 0, button: 0, buttons: 0,
+    pointerId: 1, pointerType: 'mouse', isPrimary: true, width: 1, height: 1, pressure: 0 };
+  var HAS_PE = typeof window.PointerEvent === 'function';
+
+  function install() {
+    if (S.installed) return;
+    S.installed = true;
+    x = Math.round((window.innerWidth || 1280) / 2); y = Math.round((window.innerHeight || 720) / 2);
+    el = document.createElement('div');
+    el.id = '__gfx_cursor';
+    el.style.cssText = 'position:fixed;left:0;top:0;width:28px;height:28px;pointer-events:none;z-index:2147483000;' +
+      'opacity:0;transition:opacity .25s;will-change:transform;';
+    el.innerHTML = '<svg width="28" height="28" viewBox="0 0 28 28" style="display:block;overflow:visible">' +
+      '<path d="M3 2 L3 23.5 L8.6 18.3 L12.6 26.6 L17 24.5 L13 16.4 L20.8 16.4 Z" fill="#fff" stroke="#10172a" ' +
+      'stroke-width="2.2" stroke-linejoin="round"/></svg>';
+    (document.body || document.documentElement).appendChild(el);
+    try { document.documentElement.classList.add('__gfx_padcursor'); } catch (e) {}
+    place();
+  }
+  function place() {
+    el.style.transform = 'translate3d(' + (x - 3) + 'px,' + (y - 2) + 'px,0)';
+    S.x = x; S.y = y;
+  }
+  function wake() { awake = S.awake = true; el.style.opacity = '1'; }
+  function sleep() { awake = S.awake = false; el.style.opacity = '0'; }
+  function fire(type, node, buttons, pointer) {
+    if (!node) return;
+    INIT.clientX = x; INIT.clientY = y;
+    INIT.screenX = (window.screenX || 0) + x; INIT.screenY = (window.screenY || 0) + y;
+    INIT.buttons = buttons; INIT.pressure = buttons ? 0.5 : 0;
+    INIT.detail = type === 'click' ? 1 : 0;
+    var ev;
+    try { ev = pointer && HAS_PE ? new PointerEvent(type, INIT) : new MouseEvent(type, INIT); } catch (e) { return; }
+    try { node.dispatchEvent(ev); } catch (e) {}
+  }
+  function at() { return document.elementFromPoint(x, y) || document.body || document.documentElement; }
+  function press(now) {
+    target = at(); held = S.held = true; sx = x; sy = y; lastMove = now;
+    fire('pointermove', target, 0, true); fire('mousemove', target, 0, false);
+    fire('pointerdown', target, 1, true); fire('mousedown', target, 1, false);
+  }
+  function release(clickOk) {
+    var t = target;
+    held = S.held = false; target = null;
+    fire('pointerup', t, 0, true); fire('mouseup', t, 0, false);
+    if (clickOk) { var dx = x - sx, dy = y - sy; if (dx * dx + dy * dy < CLICK_SLOP * CLICK_SLOP) fire('click', t, 0, false); }
+  }
+  function stick(ax, ay) {
+    ax = +ax || 0; ay = +ay || 0;
+    var m = Math.sqrt(ax * ax + ay * ay);
+    if (m <= DZ) return;
+    var e = ((m > 1 ? 1 : m) - DZ) / (1 - DZ);
+    e = e * e * SPEED / m;              // mild ease: squared magnitude, ~900 px/s at full tilt
+    vx += ax * e; vy += ay * e;
+  }
+
+  window.addEventListener('gamepadconnected', install);
+  hub.fns.push(function (now, pads) {
+    var i, p, a, b, btn = false;
+    if (!S.installed) {
+      for (i = 0; i < pads.length; i++) { p = pads[i]; if (p && p.mapping === 'standard') { install(); break; } }
+      if (!S.installed) return;
+    }
+    var dt = lastT ? (now - lastT) / 1000 : 0;
+    if (dt > 0.05) dt = 0.05;
+    lastT = now;
+    vx = 0; vy = 0;
+    for (i = 0; i < pads.length; i++) {
+      p = pads[i];
+      if (!p || p.connected === false) continue;
+      a = p.axes; b = p.buttons;
+      if (a) { stick(a[2], a[3]); if (LEFT) stick(a[0], a[1]); }
+      if ((b[0] && b[0].pressed) || (b[5] && b[5].pressed)) btn = true;
+    }
+    if (IS_BOOK) {                      // the book: asleep and silent while a game is open
+      if (!player) player = document.getElementById('player');
+      if (player && player.classList.contains('open')) {
+        if (held) release(false);
+        if (awake) sleep();
+        prevBtn = btn; return;
+      }
+    }
+    if (vx !== 0 || vy !== 0) {
+      var w = window.innerWidth || 1280, h = window.innerHeight || 720;
+      x += vx * dt; y += vy * dt;
+      if (x < 0) x = 0; else if (x > w - 1) x = w - 1;
+      if (y < 0) y = 0; else if (y > h - 1) y = h - 1;
+      lastMove = now;
+      if (!awake) wake();
+      place();
+      if (held) { fire('pointermove', target, 1, true); fire('mousemove', target, 1, false); }
+      else { var t = at(); fire('pointermove', t, 0, true); fire('mousemove', t, 0, false); }
+    } else if (awake && !held && now - lastMove > SLEEP_MS) {
+      sleep();
+    }
+    if (btn && !prevBtn) { if (awake) press(now); }
+    else if (!btn && prevBtn) { if (held) release(true); }
+    if (held) lastMove = now;
+    prevBtn = btn;
+  });
+})();
+</script>
+<!-- injected by scripts/inject-factory.py — after 15 idle minutes (no pad / keyboard /
+     pointer / touch input): a game closes back to the book, anything else returns to
+     Stephens Arcade. Test override: ?idle=<seconds>. -->
+<script id="__gf_idle">
+(function () {
+  var IS_BOOK = false; /*@gf:is_book*/
+  var qs = null;
+  try { qs = new URLSearchParams(location.search).get('idle'); } catch (e) {}
+  var IDLE_MS = (qs ? Math.max(10, parseFloat(qs) || 900) : 15 * 60) * 1000;
+  var DEADZONE = 0.25;
+  // one rAF loop per page reads the pads for every __gf overlay
+  var hub = window.__gfHub;
+  if (!hub) {
+    hub = window.__gfHub = { fns: [], pads: [] };
+    (function () {
+      var NONE = [];
+      function loop(now) {
+        var p = null;
+        try { p = navigator.getGamepads ? navigator.getGamepads() : null; } catch (e) {}
+        hub.pads = p || NONE;
+        for (var i = 0; i < hub.fns.length; i++) { try { hub.fns[i](now, hub.pads); } catch (e) {} }
+        requestAnimationFrame(loop);
+      }
+      requestAnimationFrame(loop);
+    })();
+  }
+  var last = performance.now(), leaving = false, player = null;
+  function bump() { last = performance.now(); }
+  window.addEventListener('keydown', bump, { capture: true });
+  window.addEventListener('pointerdown', bump, { capture: true });
+  window.addEventListener('touchstart', bump, { capture: true, passive: true });
+  function padActive(pads) {
+    for (var i = 0; i < pads.length; i++) {
+      var gp = pads[i];
+      if (!gp || gp.connected === false) continue;
+      for (var b = 0; b < gp.buttons.length; b++) if (gp.buttons[b].pressed) return true;
+      for (var a = 0; a < gp.axes.length; a++) if (Math.abs(gp.axes[a]) > DEADZONE) return true;
+    }
+    return false;
+  }
+  hub.fns.push(function (now, pads) {
+    if (leaving) return;
+    if (IS_BOOK) {                     // while a game is open its own overlay owns the idle timer
+      if (!player) player = document.getElementById('player');
+      if (player && player.classList.contains('open')) { last = now; return; }
+    }
+    if (padActive(pads)) last = now;
+    if (now - last < IDLE_MS) return;
+    leaving = true;
+    var g = false;
+    try { g = window.parent !== window && typeof window.parent.closeGame === 'function'; } catch (e) {}
+    if (g) { try { window.parent.closeGame(); } catch (e) {} }
+    else location.href = '/';          // pagehide fires -> games persist their state
+  });
+})();
+</script>
+</body>
+</html>

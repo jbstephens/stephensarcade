@@ -32,7 +32,7 @@ LOCALREF='/lib/controller.js'
 # node_modules/, .git/, CLAUDE.md, verify-shots/ …) is build/tooling and is
 # intentionally NOT shipped into the offline tree.
 FILES=(index.html games.js games.json humans.txt robots.txt sitemap.xml)
-DIRS=(games lib site arcade)
+DIRS=(games lib site arcade factory)
 
 command -v perl >/dev/null 2>&1 || { echo "build-local: needs perl (present on Pi OS + macOS)" >&2; exit 1; }
 

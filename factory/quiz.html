@@ -1,0 +1,664 @@
+<meta charset="utf-8">
+<title>Game Factory Quiz</title>
+<!-- injected by scripts/inject-factory.py (HEAD, before touchpad.js) — hide phantom
+     DualShock sub-devices ("... Motion Sensors", "... Touchpad") and, when a
+     standard-mapping pad exists, every non-standard device. Original indices
+     are kept (filtered slots read null), exactly like lib/controller.js. -->
+<script id="__gf_padfilter">
+(function () {
+  var nav = window.navigator;
+  if (!nav || typeof nav.getGamepads !== 'function' || nav.__gfPadFilter) return;
+  var orig = nav.getGamepads;
+  var PHANTOM = /motion sensors|touchpad/i;
+  var out = [];                       // reused every call: no per-frame allocation
+  function filtered() {
+    var src = orig.call(nav);
+    if (!src) return src;
+    var n = src.length, anyStd = false, i, p;
+    for (i = 0; i < n; i++) { p = src[i]; if (p && p.mapping === 'standard') anyStd = true; }
+    out.length = n;
+    for (i = 0; i < n; i++) {
+      p = src[i];
+      out[i] = (!p || PHANTOM.test(p.id || '') || (anyStd && p.mapping !== 'standard')) ? null : p;
+    }
+    return out;
+  }
+  try { nav.getGamepads = filtered; } catch (e) {}
+  if (nav.getGamepads !== filtered) {
+    try { Object.defineProperty(nav, 'getGamepads', { value: filtered, configurable: true, writable: true }); } catch (e) {}
+  }
+  try { nav.__gfPadFilter = true; } catch (e) {}
+})();
+</script>
+<script src="touchpad.js?v=2"></script>
+<style>
+  html, body { height: 100%; }
+  body { margin: 0; background: #14102a; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+  canvas { width: min(100vw, calc(100vh * 960 / 520)); height: auto; display: block; border-radius: 12px; box-shadow: 0 10px 40px rgba(0,0,0,.5); cursor: pointer; }
+</style>
+<canvas id="game" width="960" height="520"></canvas>
+<script>
+const C = document.getElementById('game'), ctx = C.getContext('2d');
+const W = 960, H = 520;
+let frame = 0;
+const pick = a => a[Math.floor(Math.random() * a.length)];
+const shuffle = a => { a = a.slice(); for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; };
+
+// ---------- Sound ----------
+let actx = null;
+function audio() { if (!actx) { try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch (_) {} } return actx; }
+function note(f, start, dur, wave = 'square', vol = 0.07, slide = null) {
+  if (!actx) return;
+  const t = actx.currentTime + start, o = actx.createOscillator(), g = actx.createGain();
+  o.type = wave; o.frequency.setValueAtTime(f, t); if (slide) o.frequency.exponentialRampToValueAtTime(slide, t + dur);
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g); g.connect(actx.destination); o.start(t); o.stop(t + dur);
+}
+const sfx = {
+  click: () => note(700, 0, 0.05, 'square', 0.04),
+  right: () => [784, 988, 1175, 1568].forEach((f, i) => note(f, i * 0.07, 0.15, 'square', 0.07)),
+  wrong: () => { note(200, 0, 0.4, 'sawtooth', 0.08); note(150, 0.05, 0.4, 'sawtooth', 0.06); },
+  whoosh: () => note(300, 0, 0.2, 'sine', 0.06, 900),
+  fifty: () => { note(600, 0, 0.1); note(400, 0.1, 0.1); note(800, 0.2, 0.2); },
+  fanfare: () => [523, 659, 784, 1047, 784, 1047, 1319].forEach((f, i) => note(f, i * 0.13, 0.28, 'square', 0.08)),
+  drum: () => { for (let i = 0; i < 12; i++) note(120 + Math.random() * 40, i * 0.06, 0.05, 'triangle', 0.08); },
+};
+
+// ---------- Questions about Ben's games ----------
+// a: the right answer, w: three wrong answers
+const Q = [
+  { g: 'Robo Jump', i: '🤖', q: 'In Robo Jump, what happens when you hold SPACE in the air?', a: 'You hover with jet boots', w: ['You swim', 'You dig a hole', 'You turn into a car'] },
+  { g: 'Robo Jump', i: '🤖', q: 'What is the boss of the Moon Base level called?', a: 'King Gloop', w: ['Captain Pinch', 'The Dragon King', 'Mega Teddy'] },
+  { g: 'Robo Jump', i: '🤖', q: 'What kind of animal is the boss Captain Pinch?', a: 'A crab', w: ['A shark', 'A frog', 'A bat'] },
+  { g: 'Robo Jump', i: '🤖', q: 'How does your robot leave at the end of a Robo Jump level?', a: 'In a rocket', w: ['On a bike', 'In a boat', 'Down a slide'] },
+  { g: 'Sparks!', i: '🐶', q: 'In Sparks!, who drives the robot dog?', a: 'Two cats', w: ['Two hamsters', 'A wizard', 'A robot'] },
+  { g: 'Sparks!', i: '🐶', q: 'Who do you rescue in Sparks!?', a: 'Kittens', w: ['Penguins', 'Dinosaurs', 'Fish'] },
+  { g: 'Sparks!', i: '🐶', q: 'What treats does Sparks collect?', a: 'Fish treats', w: ['Cookies', 'Bananas', 'Carrots'] },
+  { g: 'Sparks!', i: '🐶', q: 'Which Sparks! boss throws stuffing?', a: 'Mecha Teddy', w: ['Robo-Vac 3000', 'Evil Sparks', 'Robo-Crab'] },
+  { g: 'Sparks!', i: '🐶', q: 'Who flies a stroller in the Rooftops at Night level?', a: 'Princess', w: ['King Gloop', 'Zorp', 'Juniper'] },
+  { g: 'Sports Party', i: '🏟️', q: 'How many sports games are in Sports Party?', a: '5', w: ['3', '10', '2'] },
+  { g: 'Sports Party', i: '🏟️', q: 'In basketball, when should you press SPACE?', a: 'When the meter is green', w: ['When the ball is blue', 'When a bird flies by', 'Never'] },
+  { g: 'Sports Party', i: '🏟️', q: 'In football, what does SPACE do?', a: 'A speed burst', w: ['A dance', 'A big kick', 'A nap'] },
+  { g: "Ben's Quest", i: '⚔️', q: "Who gives you the sword in Ben's Quest?", a: 'The old man in the cave', w: ['A talking tree', 'The Dragon King', 'A pizza alien'] },
+  { g: "Ben's Quest", i: '⚔️', q: "What are you trying to find in Ben's Quest?", a: 'The Crystal of Light', w: ['The Golden Pizza', 'A lost kitten', 'A rocket ship'] },
+  { g: "Ben's Quest", i: '⚔️', q: "Who is the big boss in Ben's Quest?", a: 'The Dragon King', w: ['The Glitch', 'King Blob', 'Captain Pinch'] },
+  { g: "Ben's Quest", i: '⚔️', q: "Where is the temple key hidden?", a: 'On Misty Mountain', w: ['In the lake', 'Under the bed', 'In the graveyard'] },
+  { g: 'Turbo Racers', i: '🏎️', q: 'What makes your car go super fast in Turbo Racers?', a: 'Yellow boost arrows', w: ['Bananas', 'Pressing M', 'Honking'] },
+  { g: 'Turbo Racers', i: '🏎️', q: 'Which one is NOT a racer in Turbo Racers?', a: 'Squidly', w: ['Zoomy', 'Speedy', 'Rocket'] },
+  { g: 'Turbo Racers', i: '🏎️', q: 'Which one is a Turbo Racers track?', a: 'Snowy Mountain', w: ['Cheese Canyon', 'Moon Base', 'Candy Lane'] },
+  { g: 'Build It!', i: '🏠', q: 'In Build It!, which button builds a giant fancy house in one click?', a: 'MANSION', w: ['Castle', 'Rocket', 'Pizza'] },
+  { g: 'Build It!', i: '🏠', q: 'What happens at night in Build It!?', a: 'Windows and lamps glow', w: ['The houses disappear', 'It snows pizza', 'Zombies come out'] },
+  { g: 'Build It!', i: '🏠', q: 'Who walks around inside your Build It! houses?', a: 'People and dogs', w: ['Dinosaurs', 'Robots', 'Ghosts'] },
+  { g: 'Brawl Buddies', i: '🥊', q: 'Which Brawl Buddy breathes fire?', a: 'Dino Rex', w: ['Ninja Kit', 'Wizard Zap', 'Robo Max'] },
+  { g: 'Brawl Buddies', i: '🥊', q: 'Which Brawl Buddy shoots lasers?', a: 'Robo Max', w: ['Dino Rex', 'Ninja Kit', 'Wizard Zap'] },
+  { g: 'Brawl Buddies', i: '🥊', q: 'How many rounds do you need to win in Brawl Buddies?', a: '2', w: ['5', '10', '1'] },
+  { g: 'Zombie Maze', i: '🧟', q: 'What do you throw at zombies in Zombie Maze?', a: 'Water balloons', w: ['Tomatoes', 'Pillows', 'Snowballs'] },
+  { g: 'Zombie Maze', i: '🧟', q: 'What does the purple potion do in Zombie Maze?', a: 'Turns zombies into people', w: ['Makes you tiny', 'Makes it rain', 'Turns you green'] },
+  { g: 'Zombie Maze', i: '🧟', q: 'How many treasure chests do you need to find in each maze?', a: '4', w: ['1', '7', '100'] },
+  { g: 'Monster Pals', i: '🐾', q: 'Which one is a starter monster in Monster Pals?', a: 'Emberpup', w: ['Pebblet', 'Fluffum', 'Hootvolt'] },
+  { g: 'Monster Pals', i: '🐾', q: 'What does Emberpup grow into?', a: 'Flarewolf', w: ['Tidalotl', 'Solmane', 'Boulderbear'] },
+  { g: 'Monster Pals', i: '🐾', q: 'What is Prismo?', a: 'A rainbow unicorn', w: ['A fire dragon', 'A pizza', 'A robot bee'] },
+  { g: 'Monster Pals', i: '🐾', q: 'What is the name of the Champion in Monster Pals?', a: 'Juniper', w: ['Prof. Pip', 'Nurse Nibbles', 'Princess'] },
+  { g: 'Monster Pals', i: '🐾', q: 'In Monster Pals, fire beats...', a: 'Leaf', w: ['Water', 'Rock', 'Nothing'] },
+  { g: 'Pet Park', i: '🐰', q: 'Which pet costs the most coins in Pet Park?', a: 'The Baby Dragon', w: ['The Puppy', 'The Hamster', 'The Kitty'] },
+  { g: 'Pet Park', i: '🐰', q: 'Which one is a trick you can teach in Pet Park?', a: 'Roll Over', w: ['Cartwheel', 'Moonwalk', 'Juggle'] },
+  { g: 'Pet Park', i: '🐰', q: 'How do you give your pet a bath?', a: 'Scrub it with the mouse', w: ['Throw it in a lake', 'Press M', 'Wait for rain'] },
+  { g: 'Paint Studio', i: '🎨', q: 'In Paint Studio, what does the Mirror button do?', a: 'Paints both sides at once', w: ['Makes everything black', 'Shows your face', 'Deletes your picture'] },
+  { g: 'Paint Studio', i: '🎨', q: 'Which Paint Studio tool fills a shape with color?', a: 'The Fill bucket', w: ['The Eraser', 'The Spray can', 'The Undo button'] },
+  { g: 'Math Rocket', i: '🧮', q: 'What is the first planet in Math Rocket?', a: 'The Moon', w: ['Saturn', 'Neptune', 'Star Station'] },
+  { g: 'Math Rocket', i: '🧮', q: 'Math time! On Mars you take away. What is 9 − 4?', a: '5', w: ['4', '6', '13'] },
+  { g: 'Math Rocket', i: '🧮', q: 'Math time! On the Moon you add. What is 6 + 3?', a: '9', w: ['8', '10', '63'] },
+  { g: 'Math Rocket', i: '🧮', q: 'What do you pop in the other Math Rocket game?', a: 'Balloons', w: ['Bubbles', 'Popcorn', 'Bugs'] },
+  { g: 'Order Up!', i: '🍕', q: 'Where is the pizza shop in Order Up?', a: 'On a space station', w: ['Under the sea', 'In a castle', 'On a boat'] },
+  { g: 'Order Up!', i: '🍕', q: 'What color is Comet Sauce?', a: 'Blue', w: ['Red', 'Green', 'Purple'] },
+  { g: 'Order Up!', i: '🍕', q: 'Which silly topping do the aliens LOVE?', a: 'Googly Eyes', w: ['Socks', 'Ice cubes', 'Pencils'] },
+  { g: 'Castle Defense', i: '🏰', q: 'Which Castle Defense tower makes monsters walk slow?', a: 'The Ice tower', w: ['The Cannon', 'The Archer', 'The Lightning tower'] },
+  { g: 'Castle Defense', i: '🏰', q: 'Who comes on wave 10 in Castle Defense?', a: 'King Blob', w: ['The Dragon King', 'Captain Pinch', 'The Glitch'] },
+  { g: 'Book Cat', i: '🐱', q: 'What is the name of the cat in Book Cat?', a: 'Pages', w: ['Whiskers', 'Sparky', 'Mr. Fluff'] },
+  { g: 'Book Cat', i: '🐱', q: 'What is the secret boss in Book Cat?', a: 'The Bookworm King', w: ['The Pencil Monster', 'King Gloop', 'The Glitch'] },
+  { g: 'Book Cat', i: '🐱', q: 'What does Pages the cat wear?', a: 'A red bookmark scarf', w: ['A tiny hat', 'Sunglasses', 'A cape'] },
+  { g: 'Glitch Factory', i: '👾', q: 'In Glitch Factory, which hero can TRIPLE jump?', a: 'Pages', w: ['Robo', 'Dino Rex', 'Sparks'] },
+  { g: 'Glitch Factory', i: '👾', q: 'In Glitch Factory, which hero shoots fireballs?', a: 'Emberpup', w: ['Ninja Kit', 'Robo', 'Pages'] },
+  { g: 'Glitch Factory', i: '👾', q: 'What is the final boss in Glitch Factory called?', a: 'The Glitch', w: ['The Bug', 'King Blob', 'The Eraser'] },
+  { g: 'The Game Factory', i: '📖', q: 'What sound does The Game Factory book make when you flip a page?', a: 'A video game blip', w: ['A dog bark', 'A doorbell', 'A big burp'] },
+  { g: 'The Game Factory', i: '📖', q: 'What color is the cover of The Game Factory book?', a: 'Green', w: ['Pink', 'Black', 'Orange'] },
+  { g: 'The Game Factory', i: '📖', q: 'What color are the arrow buttons in The Game Factory book?', a: 'Light blue', w: ['Red', 'Yellow', 'Pink'] },
+];
+const GAMES = [...new Set(Q.map(q => q.g))];
+const HOST_RIGHT = ['YES! You know your games!', 'Correct-a-mundo!', 'Ding ding ding!', 'You made this game, so of course you knew!', 'Super smart!', 'Nailed it!', 'Game Factory genius!'];
+const HOST_WRONG = ['Oopsie! So close!', 'Not quite! Now you know!', "Hmm, that one's tricky!", 'Nope! But good guess!'];
+
+let best = 0;
+try { best = +(localStorage.getItem('gfQuizBest') || 0); } catch (_) {}
+
+// ---------- Quiz state ----------
+let scene = 'title', list = [], qi = 0, score = 0, streak = 0, rightCount = 0, choice = null, opts = [], hidden = [], fiftyLeft = 1, hostMsg = '', resultT = 0, mode = 'all', particles = [], mouse = { x: 0, y: 0 }, gamePick = 0;
+function startQuiz(onlyGame) {
+  mode = onlyGame || 'all';
+  const pool = onlyGame ? Q.filter(q => q.g === onlyGame) : Q;
+  list = shuffle(pool).slice(0, Math.min(10, pool.length));
+  qi = 0; score = 0; streak = 0; rightCount = 0; fiftyLeft = 1;
+  scene = 'quiz'; loadQ(); sfx.drum();
+}
+function loadQ() {
+  const q = list[qi];
+  opts = shuffle([q.a, ...q.w]); hidden = []; choice = null; resultT = 0;
+  hostMsg = qi === 0 ? 'Here comes question 1! You can do it!' : pick(['Next question!', 'Ooh, this one is good!', 'Think hard!', 'Ready?']);
+}
+function answer(k) {
+  if (choice !== null || hidden.includes(k)) return;
+  choice = k; resultT = 0;
+  const q = list[qi];
+  if (opts[k] === q.a) {
+    streak++; rightCount++; const pts = 100 + (streak - 1) * 25; score += pts;
+    hostMsg = streak >= 3 ? `${streak} in a row! You're on FIRE! 🔥` : pick(HOST_RIGHT);
+    sfx.right(); confetti(40);
+  } else { streak = 0; hostMsg = pick(HOST_WRONG); sfx.wrong(); }
+}
+function next() {
+  qi++;
+  if (qi >= list.length) {
+    scene = 'end'; resultT = 0; sfx.fanfare(); confetti(120);
+    if (score > best) { best = score; newBest = true; try { localStorage.setItem('gfQuizBest', best); } catch (_) {} } else newBest = false;
+  } else { loadQ(); sfx.whoosh(); }
+}
+let newBest = false;
+function useFifty() {
+  if (fiftyLeft <= 0 || choice !== null) return;
+  fiftyLeft--; const q = list[qi];
+  hidden = shuffle(opts.map((o, i) => i).filter(i => opts[i] !== q.a)).slice(0, 2);
+  hostMsg = 'Poof! Two wrong answers are gone!'; sfx.fifty();
+}
+function confetti(n) { for (let i = 0; i < n; i++) particles.push({ x: Math.random() * W, y: -Math.random() * 150, vx: Math.random() * 2 - 1, vy: Math.random() * 3 + 1, life: 160, c: pick(['#ff5252', '#ffd740', '#69f0ae', '#40c4ff', '#e040fb']), r: Math.random() * 6 }); }
+
+// ---------- Buttons ----------
+let buttons = [];
+function btn(x, y, w, h, o) { buttons.push({ x, y, w, h, ...o }); }
+const ANS_COL = ['#e53935', '#1e88e5', '#fdd835', '#43a047'];
+const ANS_LETTER = ['A', 'B', 'C', 'D'];
+function buildButtons() {
+  buttons = [];
+  if (scene === 'title') {
+    btn(W / 2 - 300, 330, 280, 80, { label: '🎲 Big Quiz!', sub: '10 questions from ALL games', fn: () => startQuiz(), color: '#e040fb' });
+    btn(W / 2 + 20, 330, 280, 80, { label: '🎮 Pick a game', sub: 'Questions about just one game', fn: () => { scene = 'pick'; }, color: '#00b8d4' });
+  } else if (scene === 'pick') {
+    GAMES.forEach((g, i) => btn(40 + (i % 4) * 222, 100 + Math.floor(i / 4) * 78, 208, 66, { label: `${Q.find(q => q.g === g).i} ${g}`, fn: () => startQuiz(g), color: '#3949ab', small: true }));
+    btn(20, 20, 110, 42, { label: '◀ Back', fn: () => { scene = 'title'; }, color: '#546e7a', small: true });
+  } else if (scene === 'quiz') {
+    opts.forEach((o, k) => btn(40 + (k % 2) * 450, 300 + Math.floor(k / 2) * 92, 430, 80, { ans: k, label: o, fn: () => answer(k) }));
+    if (choice === null && fiftyLeft > 0) btn(W - 160, 236, 130, 46, { label: '✂️ 50/50', fn: useFifty, color: '#ff9800', small: true });
+    if (choice !== null && resultT > 30) btn(W / 2 - 110, 236, 220, 52, { label: qi + 1 < list.length ? 'Next ▶' : 'See my score! 🏆', fn: next, color: '#43a047', small: true });
+  } else if (scene === 'end') {
+    btn(W / 2 - 300, 420, 280, 70, { label: '🔁 Play again', fn: () => startQuiz(mode === 'all' ? null : mode), color: '#43a047' });
+    btn(W / 2 + 20, 420, 280, 70, { label: '🏠 Menu', fn: () => { scene = 'title'; }, color: '#3949ab' });
+  }
+}
+function pos(e) { const r = C.getBoundingClientRect(); return [(e.clientX - r.left) * W / r.width, (e.clientY - r.top) * H / r.height]; }
+C.addEventListener('mousedown', e => {
+  audio(); buildButtons();
+  const [x, y] = pos(e);
+  for (const b of buttons) if (x > b.x && x < b.x + b.w && y > b.y && y < b.y + b.h) { if (b.ans === undefined) sfx.click(); b.fn(); return; }
+});
+C.addEventListener('mousemove', e => { [mouse.x, mouse.y] = pos(e); });
+addEventListener('keydown', e => {
+  audio();
+  const k = e.key.toLowerCase();
+  if (scene === 'quiz') {
+    const idx = { '1': 0, '2': 1, '3': 2, '4': 3, a: 0, b: 1, c: 2, d: 3 }[k];
+    if (idx !== undefined) answer(idx);
+    if ((k === ' ' || k === 'enter') && choice !== null && resultT > 30) next();
+  } else if (scene === 'title' && (k === ' ' || k === 'enter')) startQuiz();
+  if (k === ' ') e.preventDefault();
+});
+
+// ---------- Drawing ----------
+function rr(x, y, w, h, r, fill, stroke, lw = 3) { ctx.beginPath(); ctx.roundRect(x, y, w, h, r); if (fill) { ctx.fillStyle = fill; ctx.fill(); } if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lw; ctx.stroke(); } }
+function circle(x, y, r, c) { ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fillStyle = c; ctx.fill(); }
+function text(s, x, y, size, color = '#fff', align = 'center', outline = '#1b1b2f') {
+  ctx.font = `bold ${size}px "Comic Sans MS", "Chalkboard SE", sans-serif`; ctx.textAlign = align; ctx.lineJoin = 'round';
+  if (outline) { ctx.lineWidth = size / 5; ctx.strokeStyle = outline; ctx.strokeText(s, x, y); }
+  ctx.fillStyle = color; ctx.fillText(s, x, y);
+}
+function fitText(s, x, y, maxW, size, color, align = 'center', outline) {   // shrinks long words to fit
+  ctx.font = `bold ${size}px "Comic Sans MS", sans-serif`;
+  while (ctx.measureText(s).width > maxW && size > 12) { size--; ctx.font = `bold ${size}px "Comic Sans MS", sans-serif`; }
+  text(s, x, y, size, color, align, outline);
+}
+function wrapText(s, x, y, maxW, size, color) {
+  ctx.font = `bold ${size}px "Comic Sans MS", sans-serif`;
+  const words = s.split(' '), lines = []; let line = '';
+  for (const w of words) { if (ctx.measureText(line + w).width > maxW && line) { lines.push(line.trim()); line = ''; } line += w + ' '; }
+  lines.push(line.trim());
+  lines.forEach((l, i) => text(l, x, y + i * (size + 8) - (lines.length - 1) * (size + 8) / 2, size, color, 'center', null));
+}
+function drawHost(x, y, mood) {        // Quizbot, the game show host
+  const bob = Math.sin(frame * 0.08) * 4;
+  ctx.save(); ctx.translate(x, y + bob);
+  ctx.fillStyle = '#b0bec5'; ctx.fillRect(-4, -78, 8, 14); circle(0, -82, 7, frame % 40 < 20 ? '#ff4081' : '#ffd740');
+  rr(-32, -66, 64, 52, 14, '#eceff1', '#90a4ae', 3);
+  rr(-24, -58, 48, 30, 10, '#263238');
+  const happy = mood !== 'sad';
+  ctx.fillStyle = '#40c4ff';
+  if (happy) { ctx.beginPath(); ctx.arc(-11, -40, 6, Math.PI, 0); ctx.fill(); ctx.beginPath(); ctx.arc(11, -40, 6, Math.PI, 0); ctx.fill(); }
+  else { ctx.fillRect(-16, -44, 10, 4); ctx.fillRect(6, -44, 10, 4); }
+  rr(-26, -12, 52, 44, 10, '#cfd8dc', '#90a4ae', 3);
+  ctx.fillStyle = '#e53935'; ctx.beginPath(); ctx.moveTo(0, -8); ctx.lineTo(-14, -16); ctx.lineTo(-14, 0); ctx.closePath(); ctx.fill(); ctx.beginPath(); ctx.moveTo(0, -8); ctx.lineTo(14, -16); ctx.lineTo(14, 0); ctx.closePath(); ctx.fill(); circle(0, -8, 4, '#b71c1c');   // bow tie
+  ctx.strokeStyle = '#90a4ae'; ctx.lineWidth = 6; ctx.lineCap = 'round';
+  const wave = Math.sin(frame * 0.15) * 0.4;
+  ctx.beginPath(); ctx.moveTo(-26, 0); ctx.lineTo(-44, -18 + wave * 20); ctx.moveTo(26, 0); ctx.lineTo(44, 14); ctx.stroke();
+  circle(46, 18, 7, '#455a64');                                                                  // microphone
+  ctx.restore();
+}
+function stage() {
+  const g = ctx.createLinearGradient(0, 0, 0, H); g.addColorStop(0, '#311b92'); g.addColorStop(1, '#880e4f');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  for (let i = 0; i < 9; i++) {                          // spotlights
+    ctx.fillStyle = `rgba(255,255,255,${0.04 + 0.03 * Math.sin(frame * 0.03 + i)})`;
+    ctx.beginPath(); ctx.moveTo(60 + i * 105, 0); ctx.lineTo(10 + i * 105 + Math.sin(frame * 0.02 + i) * 40, H); ctx.lineTo(110 + i * 105 + Math.sin(frame * 0.02 + i) * 40, H); ctx.fill();
+  }
+  for (let i = 0; i < 24; i++) circle(20 + i * 40, 8, 5, (Math.floor(frame / 10) + i) % 3 === 0 ? '#ffd740' : '#7c4dff');
+}
+function drawButtons() {
+  for (const b of buttons) {
+    const hover = mouse.x > b.x && mouse.x < b.x + b.w && mouse.y > b.y && mouse.y < b.y + b.h;
+    if (b.ans !== undefined) {
+      const q = list[qi], isRight = opts[b.ans] === q.a, gone = hidden.includes(b.ans);
+      let col = ANS_COL[b.ans], alpha = gone ? 0.15 : 1;
+      if (choice !== null) { if (isRight) col = '#00c853'; else if (b.ans === choice) col = '#b71c1c'; else alpha = 0.35; }
+      ctx.globalAlpha = alpha;
+      rr(b.x, b.y + 6, b.w, b.h, 18, 'rgba(0,0,0,.35)');
+      rr(b.x, b.y - (hover && choice === null && !gone ? 3 : 0), b.w, b.h, 18, col, '#fff', choice !== null && isRight ? 6 : 3);
+      circle(b.x + 40, b.y + b.h / 2, 24, 'rgba(255,255,255,.3)');
+      text(ANS_LETTER[b.ans], b.x + 40, b.y + b.h / 2 + 10, 28, '#fff');
+      if (!gone) fitText(b.label, b.x + 75, b.y + b.h / 2 + 9, b.w - 95, 26, '#fff', 'left');
+      if (choice !== null && isRight) text('✔', b.x + b.w - 30, b.y + b.h / 2 + 12, 34, '#fff');
+      if (choice !== null && b.ans === choice && !isRight) text('✘', b.x + b.w - 30, b.y + b.h / 2 + 12, 34, '#fff');
+      ctx.globalAlpha = 1;
+      continue;
+    }
+    rr(b.x, b.y + 5, b.w, b.h, 16, 'rgba(0,0,0,.35)'); rr(b.x, b.y - (hover ? 3 : 0), b.w, b.h, 16, b.color, '#fff', 3);
+    if (b.sub) { text(b.label, b.x + b.w / 2, b.y + 36 - (hover ? 3 : 0), 28); text(b.sub, b.x + b.w / 2, b.y + 64 - (hover ? 3 : 0), 15, '#fff', 'center', null); }
+    else fitText(b.label, b.x + b.w / 2, b.y + b.h / 2 + 8 - (hover ? 3 : 0), b.w - 16, b.small ? 19 : 24, '#fff');
+  }
+}
+function draw() {
+  stage();
+  if (scene === 'title') {
+    drawHost(W / 2, 250, 'happy');
+    text('GAME FACTORY', W / 2, 90, 64, '#ffd740', 'center', '#4a148c');
+    text('QUIZ SHOW!', W / 2, 150, 54, '#fff', 'center', '#4a148c');
+    text(`How well do you know YOUR games?   🏆 Best score: ${best}`, W / 2, 470, 20, '#e1bee7', 'center', null);
+  } else if (scene === 'pick') {
+    text('Pick a game to be quizzed on!', W / 2, 70, 36, '#ffd740', 'center', '#4a148c');
+  } else if (scene === 'quiz') {
+    const q = list[qi];
+    drawHost(90, 210, choice !== null && opts[choice] !== q.a ? 'sad' : 'happy');
+    rr(150, 150, 300, 56, 18, '#fff', '#ffd740', 3);              // host speech bubble
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.moveTo(150, 186); ctx.lineTo(132, 196); ctx.lineTo(156, 172); ctx.fill();
+    fitText(hostMsg, 300, 185, 280, 17, '#4a148c', 'center', null);
+    text(`Question ${qi + 1} of ${list.length}`, 30, 44, 22, '#fff', 'left');
+    text(`⭐ ${score}`, 30, 80, 24, '#ffd740', 'left');
+    if (streak >= 2) text(`🔥 ${streak}`, 160, 80, 22, '#ff9800', 'left');
+    rr(250, 20, 680, 120, 22, 'rgba(255,255,255,.96)', '#ffd740', 5);  // the question card
+    text(`${q.i} ${q.g}`, 590, 46, 18, '#7c4dff', 'center', null);
+    wrapText(q.q, 590, 98, 640, 25, '#1b1b2f');
+    if (choice !== null && resultT > 30) {} else if (choice === null) text('Click an answer (or press 1 2 3 4)', 690, 232, 16, '#e1bee7', 'center', null);
+  } else if (scene === 'end') {
+    const pct = rightCount / list.length;
+    const title = pct === 1 ? '🏆 GAME FACTORY MASTER!' : pct >= 0.7 ? '🌟 Game Factory Expert!' : pct >= 0.4 ? '👍 Game Factory Fan!' : '🎮 Keep playing your games!';
+    drawHost(W / 2, 250, 'happy');
+    text(title, W / 2, 80, 44, '#ffd740', 'center', '#4a148c');
+    text(`You got ${rightCount} out of ${list.length} right!`, W / 2, 132, 30, '#fff');
+    text(`⭐ ${score} points`, W / 2, 330, 36, '#ffd740');
+    text(newBest ? '🎉 NEW BEST SCORE! 🎉' : `Best score: ${best}`, W / 2, 380, 24, newBest ? '#69f0ae' : '#e1bee7');
+  }
+  drawButtons();
+  for (const p of particles) { ctx.globalAlpha = Math.min(1, p.life / 30); ctx.fillStyle = p.c; ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(p.r); ctx.fillRect(-4, -2, 8, 4); ctx.restore(); }
+  ctx.globalAlpha = 1;
+}
+function update() {
+  frame++;
+  if ((scene === 'quiz' && choice !== null) || scene === 'end') resultT++;
+  for (const p of particles) { p.x += p.vx; p.y += p.vy; p.r += 0.1; p.life--; }
+  particles = particles.filter(p => p.life > 0 && p.y < H + 20);
+  buildButtons();
+}
+buildButtons();
+let last = performance.now(), acc = 0;
+function loop(now) {
+  acc += Math.min(100, now - last); last = now;
+  while (acc >= 1000 / 60) { update(); acc -= 1000 / 60; }
+  draw();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+<!-- injected by scripts/inject-factory.py — hold PS (or SELECT+START) for 1s to go
+     up one level: game -> the book (parent.closeGame), standalone game -> /factory/,
+     the book -> Stephens Arcade (/). Shares one rAF pad poll with the cursor + idle overlays. -->
+<script id="__gf_pad_exit">
+(function () {
+  var IS_BOOK = false; /*@gf:is_book*/
+  var HOLD_MS = 1000;
+  // one rAF loop per page reads the pads for every __gf overlay
+  var hub = window.__gfHub;
+  if (!hub) {
+    hub = window.__gfHub = { fns: [], pads: [] };
+    (function () {
+      var NONE = [];
+      function loop(now) {
+        var p = null;
+        try { p = navigator.getGamepads ? navigator.getGamepads() : null; } catch (e) {}
+        hub.pads = p || NONE;
+        for (var i = 0; i < hub.fns.length; i++) { try { hub.fns[i](now, hub.pads); } catch (e) {} }
+        requestAnimationFrame(loop);
+      }
+      requestAnimationFrame(loop);
+    })();
+  }
+
+  var STEPS = 20, TF = [];               // precomputed badge transforms: zero allocations while held
+  for (var s = 0; s <= STEPS; s++) TF.push('translateX(-50%) scale(' + (1 + 0.35 * s / STEPS).toFixed(4) + ')');
+  var HIDE_TF = 'translateX(-50%) scale(0.85)';
+  var heldSince = 0, needRelease = true, leaving = false, badge = null, lastStep = -2;
+  var player = null;
+
+  function comboDown(pads) {
+    for (var i = 0; i < pads.length; i++) {
+      var gp = pads[i];
+      if (!gp || gp.connected === false) continue;
+      var b = gp.buttons;
+      if ((b[16] && b[16].pressed) || (b[8] && b[8].pressed && b[9] && b[9].pressed)) return true;
+    }
+    return false;
+  }
+  function makeBadge() {
+    badge = document.createElement('div');
+    badge.id = '__gfx_exit';
+    badge.textContent = IS_BOOK ? '◄ ARCADE' : '◄ BOOK';
+    badge.style.cssText = 'position:fixed;top:12px;left:50%;z-index:2147483001;pointer-events:none;' +
+      'padding:7px 18px;border-radius:999px;background:#10172a;color:#ffd23f;border:3px solid #ffd23f;' +
+      'font:bold 18px/1 "Trebuchet MS","Arial Rounded MT Bold",sans-serif;letter-spacing:1px;white-space:nowrap;' +
+      'transform-origin:50% 0;opacity:0;transform:' + HIDE_TF + ';transition:opacity .12s;';
+    (document.body || document.documentElement).appendChild(badge);
+  }
+  function setBadge(step) {            // step -1 = hidden, 0..STEPS = hold progress
+    if (step === lastStep) return;
+    lastStep = step;
+    if (step < 0) { if (badge) { badge.style.opacity = '0'; badge.style.transform = HIDE_TF; } return; }
+    if (!badge) makeBadge();
+    badge.style.opacity = '1';
+    badge.style.transform = TF[step];
+  }
+  function inGame() {
+    try { return window.parent !== window && typeof window.parent.closeGame === 'function'; } catch (e) { return false; }
+  }
+  function leave() {
+    leaving = true;                    // never navigate twice
+    if (!IS_BOOK && inGame()) { setBadge(-1); try { window.parent.closeGame(); } catch (e) {} return; }
+    location.href = IS_BOOK ? '/' : '/factory/';
+  }
+  hub.fns.push(function (now, pads) {
+    if (leaving) return;
+    var down = comboDown(pads);
+    if (IS_BOOK) {
+      if (!player) player = document.getElementById('player');
+      if (player && player.classList.contains('open')) {   // the game's own overlay handles this hold
+        if (down) needRelease = true;
+        heldSince = 0; setBadge(-1); return;
+      }
+    }
+    if (needRelease) {                 // a hold that started elsewhere never counts here
+      if (down) return;
+      needRelease = false;
+    }
+    if (!down) { heldSince = 0; setBadge(-1); return; }
+    if (!heldSince) heldSince = now;
+    var p = (now - heldSince) / HOLD_MS;
+    setBadge(Math.round((p > 1 ? 1 : p) * STEPS));
+    if (p >= 1) leave();
+  });
+})();
+</script>
+<!-- injected by scripts/inject-factory.py — console (low-fx) mode only: no-op canvas
+     shadowBlur and kill CSS backdrop-filter (both measured fps killers on the Pi).
+     The mouse cursor is hidden only while the pad cursor is installed. -->
+<script id="__gf_lowfx">
+(function () {
+  var on = false;
+  try {
+    if (/[?&]fx=low\b/.test(location.search)) { on = true; localStorage.setItem('arcade_lowfx', '1'); }
+    else if (/[?&]fx=full\b/.test(location.search)) { localStorage.setItem('arcade_lowfx', '0'); }
+    else { on = localStorage.getItem('arcade_lowfx') === '1'; }
+  } catch (e) {}
+  if (!on) return;
+  try {
+    Object.defineProperty(CanvasRenderingContext2D.prototype, 'shadowBlur', {
+      set: function () {}, get: function () { return 0; }, configurable: true
+    });
+  } catch (e) {}
+  try {
+    var st = document.createElement('style');
+    st.textContent = '* { backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }' +
+      ' html.__gfx_padcursor, html.__gfx_padcursor * { cursor: none !important; }';
+    (document.head || document.documentElement).appendChild(st);
+  } catch (e) {}
+})();
+</script>
+<!-- injected by scripts/inject-factory.py — console mode only: the TV has no printer,
+     so window.print shows a friendly toast instead of a dead print dialog. -->
+<script id="__gf_print">
+(function () {
+  var on = false;
+  try { on = /[?&]fx=low\b/.test(location.search) || localStorage.getItem('arcade_lowfx') === '1'; } catch (e) {}
+  if (!on) return;
+  var toast = null, timer = 0;
+  function hide() { if (toast) toast.style.opacity = '0'; }
+  window.print = function () {
+    try {
+      if (!toast) {
+        toast = document.createElement('div');
+        toast.id = '__gfx_print';
+        toast.textContent = '🖨️ Printing works on the iPad — not on the TV!';
+        toast.style.cssText = 'position:fixed;left:50%;bottom:48px;transform:translateX(-50%);z-index:2147483001;' +
+          'pointer-events:none;padding:14px 26px;border-radius:16px;background:#10172a;color:#ffd23f;' +
+          'border:3px solid #ffd23f;font:bold 24px/1.2 "Trebuchet MS","Arial Rounded MT Bold",sans-serif;' +
+          'white-space:nowrap;opacity:0;transition:opacity .2s;';
+        (document.body || document.documentElement).appendChild(toast);
+      }
+      toast.style.opacity = '1';
+      clearTimeout(timer);
+      timer = setTimeout(hide, 2500);
+    } catch (e) {}
+  };
+})();
+</script>
+<!-- injected by scripts/inject-factory.py — pad cursor: a pad-driven mouse pointer so
+     tap/click-only games play on the console. Right stick moves it (left stick too in
+     pointer games); X / R1 clicks and drags (pointer + mouse events, like touchpad.js
+     turns fingers into mouse events). Never consumes pad input. -->
+<script id="__gf_cursor">
+(function () {
+  window.__GF_CURSOR_LEFT = true; /*@gf:cursor_left*/
+  var IS_BOOK = false; /*@gf:is_book*/
+  var LEFT = window.__GF_CURSOR_LEFT === true;
+  var DZ = 0.2, SPEED = 900, SLEEP_MS = 4000, CLICK_SLOP = 12;
+  // one rAF loop per page reads the pads for every __gf overlay
+  var hub = window.__gfHub;
+  if (!hub) {
+    hub = window.__gfHub = { fns: [], pads: [] };
+    (function () {
+      var NONE = [];
+      function loop(now) {
+        var p = null;
+        try { p = navigator.getGamepads ? navigator.getGamepads() : null; } catch (e) {}
+        hub.pads = p || NONE;
+        for (var i = 0; i < hub.fns.length; i++) { try { hub.fns[i](now, hub.pads); } catch (e) {} }
+        requestAnimationFrame(loop);
+      }
+      requestAnimationFrame(loop);
+    })();
+  }
+
+  var S = window.__gfCursorState = { installed: false, awake: false, held: false, x: 0, y: 0 };
+  var el = null, x = 0, y = 0, awake = false, lastMove = 0, lastT = 0;
+  var held = false, target = null, sx = 0, sy = 0, prevBtn = false, vx = 0, vy = 0, player = null;
+  var INIT = { bubbles: true, cancelable: true, composed: true, view: window, detail: 0,
+    clientX: 0, clientY: 0, screenX: 0, screenY: 0, button: 0, buttons: 0,
+    pointerId: 1, pointerType: 'mouse', isPrimary: true, width: 1, height: 1, pressure: 0 };
+  var HAS_PE = typeof window.PointerEvent === 'function';
+
+  function install() {
+    if (S.installed) return;
+    S.installed = true;
+    x = Math.round((window.innerWidth || 1280) / 2); y = Math.round((window.innerHeight || 720) / 2);
+    el = document.createElement('div');
+    el.id = '__gfx_cursor';
+    el.style.cssText = 'position:fixed;left:0;top:0;width:28px;height:28px;pointer-events:none;z-index:2147483000;' +
+      'opacity:0;transition:opacity .25s;will-change:transform;';
+    el.innerHTML = '<svg width="28" height="28" viewBox="0 0 28 28" style="display:block;overflow:visible">' +
+      '<path d="M3 2 L3 23.5 L8.6 18.3 L12.6 26.6 L17 24.5 L13 16.4 L20.8 16.4 Z" fill="#fff" stroke="#10172a" ' +
+      'stroke-width="2.2" stroke-linejoin="round"/></svg>';
+    (document.body || document.documentElement).appendChild(el);
+    try { document.documentElement.classList.add('__gfx_padcursor'); } catch (e) {}
+    place();
+  }
+  function place() {
+    el.style.transform = 'translate3d(' + (x - 3) + 'px,' + (y - 2) + 'px,0)';
+    S.x = x; S.y = y;
+  }
+  function wake() { awake = S.awake = true; el.style.opacity = '1'; }
+  function sleep() { awake = S.awake = false; el.style.opacity = '0'; }
+  function fire(type, node, buttons, pointer) {
+    if (!node) return;
+    INIT.clientX = x; INIT.clientY = y;
+    INIT.screenX = (window.screenX || 0) + x; INIT.screenY = (window.screenY || 0) + y;
+    INIT.buttons = buttons; INIT.pressure = buttons ? 0.5 : 0;
+    INIT.detail = type === 'click' ? 1 : 0;
+    var ev;
+    try { ev = pointer && HAS_PE ? new PointerEvent(type, INIT) : new MouseEvent(type, INIT); } catch (e) { return; }
+    try { node.dispatchEvent(ev); } catch (e) {}
+  }
+  function at() { return document.elementFromPoint(x, y) || document.body || document.documentElement; }
+  function press(now) {
+    target = at(); held = S.held = true; sx = x; sy = y; lastMove = now;
+    fire('pointermove', target, 0, true); fire('mousemove', target, 0, false);
+    fire('pointerdown', target, 1, true); fire('mousedown', target, 1, false);
+  }
+  function release(clickOk) {
+    var t = target;
+    held = S.held = false; target = null;
+    fire('pointerup', t, 0, true); fire('mouseup', t, 0, false);
+    if (clickOk) { var dx = x - sx, dy = y - sy; if (dx * dx + dy * dy < CLICK_SLOP * CLICK_SLOP) fire('click', t, 0, false); }
+  }
+  function stick(ax, ay) {
+    ax = +ax || 0; ay = +ay || 0;
+    var m = Math.sqrt(ax * ax + ay * ay);
+    if (m <= DZ) return;
+    var e = ((m > 1 ? 1 : m) - DZ) / (1 - DZ);
+    e = e * e * SPEED / m;              // mild ease: squared magnitude, ~900 px/s at full tilt
+    vx += ax * e; vy += ay * e;
+  }
+
+  window.addEventListener('gamepadconnected', install);
+  hub.fns.push(function (now, pads) {
+    var i, p, a, b, btn = false;
+    if (!S.installed) {
+      for (i = 0; i < pads.length; i++) { p = pads[i]; if (p && p.mapping === 'standard') { install(); break; } }
+      if (!S.installed) return;
+    }
+    var dt = lastT ? (now - lastT) / 1000 : 0;
+    if (dt > 0.05) dt = 0.05;
+    lastT = now;
+    vx = 0; vy = 0;
+    for (i = 0; i < pads.length; i++) {
+      p = pads[i];
+      if (!p || p.connected === false) continue;
+      a = p.axes; b = p.buttons;
+      if (a) { stick(a[2], a[3]); if (LEFT) stick(a[0], a[1]); }
+      if ((b[0] && b[0].pressed) || (b[5] && b[5].pressed)) btn = true;
+    }
+    if (IS_BOOK) {                      // the book: asleep and silent while a game is open
+      if (!player) player = document.getElementById('player');
+      if (player && player.classList.contains('open')) {
+        if (held) release(false);
+        if (awake) sleep();
+        prevBtn = btn; return;
+      }
+    }
+    if (vx !== 0 || vy !== 0) {
+      var w = window.innerWidth || 1280, h = window.innerHeight || 720;
+      x += vx * dt; y += vy * dt;
+      if (x < 0) x = 0; else if (x > w - 1) x = w - 1;
+      if (y < 0) y = 0; else if (y > h - 1) y = h - 1;
+      lastMove = now;
+      if (!awake) wake();
+      place();
+      if (held) { fire('pointermove', target, 1, true); fire('mousemove', target, 1, false); }
+      else { var t = at(); fire('pointermove', t, 0, true); fire('mousemove', t, 0, false); }
+    } else if (awake && !held && now - lastMove > SLEEP_MS) {
+      sleep();
+    }
+    if (btn && !prevBtn) { if (awake) press(now); }
+    else if (!btn && prevBtn) { if (held) release(true); }
+    if (held) lastMove = now;
+    prevBtn = btn;
+  });
+})();
+</script>
+<!-- injected by scripts/inject-factory.py — after 15 idle minutes (no pad / keyboard /
+     pointer / touch input): a game closes back to the book, anything else returns to
+     Stephens Arcade. Test override: ?idle=<seconds>. -->
+<script id="__gf_idle">
+(function () {
+  var IS_BOOK = false; /*@gf:is_book*/
+  var qs = null;
+  try { qs = new URLSearchParams(location.search).get('idle'); } catch (e) {}
+  var IDLE_MS = (qs ? Math.max(10, parseFloat(qs) || 900) : 15 * 60) * 1000;
+  var DEADZONE = 0.25;
+  // one rAF loop per page reads the pads for every __gf overlay
+  var hub = window.__gfHub;
+  if (!hub) {
+    hub = window.__gfHub = { fns: [], pads: [] };
+    (function () {
+      var NONE = [];
+      function loop(now) {
+        var p = null;
+        try { p = navigator.getGamepads ? navigator.getGamepads() : null; } catch (e) {}
+        hub.pads = p || NONE;
+        for (var i = 0; i < hub.fns.length; i++) { try { hub.fns[i](now, hub.pads); } catch (e) {} }
+        requestAnimationFrame(loop);
+      }
+      requestAnimationFrame(loop);
+    })();
+  }
+  var last = performance.now(), leaving = false, player = null;
+  function bump() { last = performance.now(); }
+  window.addEventListener('keydown', bump, { capture: true });
+  window.addEventListener('pointerdown', bump, { capture: true });
+  window.addEventListener('touchstart', bump, { capture: true, passive: true });
+  function padActive(pads) {
+    for (var i = 0; i < pads.length; i++) {
+      var gp = pads[i];
+      if (!gp || gp.connected === false) continue;
+      for (var b = 0; b < gp.buttons.length; b++) if (gp.buttons[b].pressed) return true;
+      for (var a = 0; a < gp.axes.length; a++) if (Math.abs(gp.axes[a]) > DEADZONE) return true;
+    }
+    return false;
+  }
+  hub.fns.push(function (now, pads) {
+    if (leaving) return;
+    if (IS_BOOK) {                     // while a game is open its own overlay owns the idle timer
+      if (!player) player = document.getElementById('player');
+      if (player && player.classList.contains('open')) { last = now; return; }
+    }
+    if (padActive(pads)) last = now;
+    if (now - last < IDLE_MS) return;
+    leaving = true;
+    var g = false;
+    try { g = window.parent !== window && typeof window.parent.closeGame === 'function'; } catch (e) {}
+    if (g) { try { window.parent.closeGame(); } catch (e) {} }
+    else location.href = '/';          // pagehide fires -> games persist their state
+  });
+})();
+</script>

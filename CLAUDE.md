@@ -76,6 +76,24 @@ New game: `games.json` entry (slug/title/genre/icon/source) + an
 ICON_BUILDERS canvas icon in index.html. The menu carousel scales to any
 count. Use the `/new-game` skill for the full checklist.
 
+## The Game Factory (Ben's arcade) — mirrored, never edited
+
+Ben's own arcade lives in `jbstephens/bensarcade` (GitHub Pages). It is
+**READ-ONLY for everyone and every agent**: never clone it into a
+project path, never commit, never PR. The console plays a mirrored copy
+under `factory/` in this repo, reached from the GAME FACTORY card
+(`games.json` entry with `href`/`iconSrc` and no `source` — scripts skip
+link-only cards). `scripts/bundle-factory.sh` fetches Ben's `main`
+tarball, validates, rewrites the CDN three.js reference to
+`/lib/three-r128.min.js`, injects the console overlays via
+`scripts/inject-factory.py` (`scripts/factory-overlays/`: phantom-pad
+filter, PS-hold exit → `parent.closeGame()`, low-fx, print stub, pad
+cursor, idle return, wormhole → `/`) and swaps the tree in atomically.
+The 30-min sync Action runs it, so Ben's pushes reach the TV by
+themselves. Never hand-edit files under `factory/`. Design + build
+brief: `docs/game-factory.md`. Verify with
+`node --experimental-websocket scripts/verify-factory.mjs`.
+
 ## Game conventions (every game, no exceptions)
 
 - `<script src="https://ses.q5labs.co/lib/controller.js"></script>` in

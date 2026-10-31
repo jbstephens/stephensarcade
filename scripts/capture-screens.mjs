@@ -62,7 +62,7 @@ function connect(wsUrl) {
 
 async function main() {
   fs.mkdirSync(OUT, { recursive: true });
-  const games = JSON.parse(fs.readFileSync(path.join(ROOT, 'games.json'), 'utf8'));
+  const games = JSON.parse(fs.readFileSync(path.join(ROOT, 'games.json'), 'utf8')).filter(g => g.source);   // link-only cards (href, no source) have no games/<slug>/ bundle
   const only = process.argv[2];
   const srv = await serveRepo();
   const userDir = fs.mkdtempSync('/tmp/ses-shots-');

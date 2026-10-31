@@ -1,0 +1,1092 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Robo Rhythm</title>
+<!-- injected by scripts/inject-factory.py (HEAD, before touchpad.js) — hide phantom
+     DualShock sub-devices ("... Motion Sensors", "... Touchpad") and, when a
+     standard-mapping pad exists, every non-standard device. Original indices
+     are kept (filtered slots read null), exactly like lib/controller.js. -->
+<script id="__gf_padfilter">
+(function () {
+  var nav = window.navigator;
+  if (!nav || typeof nav.getGamepads !== 'function' || nav.__gfPadFilter) return;
+  var orig = nav.getGamepads;
+  var PHANTOM = /motion sensors|touchpad/i;
+  var out = [];                       // reused every call: no per-frame allocation
+  function filtered() {
+    var src = orig.call(nav);
+    if (!src) return src;
+    var n = src.length, anyStd = false, i, p;
+    for (i = 0; i < n; i++) { p = src[i]; if (p && p.mapping === 'standard') anyStd = true; }
+    out.length = n;
+    for (i = 0; i < n; i++) {
+      p = src[i];
+      out[i] = (!p || PHANTOM.test(p.id || '') || (anyStd && p.mapping !== 'standard')) ? null : p;
+    }
+    return out;
+  }
+  try { nav.getGamepads = filtered; } catch (e) {}
+  if (nav.getGamepads !== filtered) {
+    try { Object.defineProperty(nav, 'getGamepads', { value: filtered, configurable: true, writable: true }); } catch (e) {}
+  }
+  try { nav.__gfPadFilter = true; } catch (e) {}
+})();
+</script>
+<script src="touchpad.js?v=2"></script>
+<style>
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: #05060f; display: flex;
+    align-items: center; justify-content: center; overflow: hidden;
+  }
+  canvas {
+    width: min(100vw, calc(100vh * 960 / 520));
+    height: auto; display: block; border-radius: 12px;
+    box-shadow: 0 10px 40px rgba(0,0,0,.5);
+    touch-action: none;
+  }
+</style>
+<canvas id="game" width="960" height="520"></canvas>
+<script>
+// ROBO RHYTHM: Robo dances to the songs from Ben's games!
+// Arrows fall down 4 lanes. Hit them on the line with the arrow keys (or tap the 4 big lanes on the iPad).
+// PERFECT / GREAT / OK / MISS, combos, 3 stars per song. Songs ALWAYS finish: no game over, ever.
+const C = document.getElementById('game'), ctx = C.getContext('2d');
+const W = 960, H = 520;
+
+// ---------- Saves, trophies, stickers ----------
+function trophy(id) { try { const t = JSON.parse(localStorage.getItem('gfTrophies') || '{}'); t[id] = 1; localStorage.setItem('gfTrophies', JSON.stringify(t)); } catch (_) {} }   // for the Trophy Room in the Game Factory book
+let stickerNew = 0;
+function sticker(id) { try { const s = JSON.parse(localStorage.getItem('gfStickers') || '{}'); if (!s[id]) { s[id] = 1; localStorage.setItem('gfStickers', JSON.stringify(s)); stickerNew = 150; } } catch (_) {} }   // for the Sticker Book in the Game Factory book
+let save = { best: {}, offset: 0, diff: 1, song: 0 };
+try { const s = JSON.parse(localStorage.getItem('roboRhythm') || 'null'); if (s && typeof s === 'object') save = Object.assign(save, s); } catch (_) {}
+if (!save.best || typeof save.best !== 'object') save.best = {};
+if (!isFinite(save.offset)) save.offset = 0;
+function writeSave() { try { localStorage.setItem('roboRhythm', JSON.stringify(save)); } catch (_) {} }
+
+// ---------- 🎵 The songs: copied from the Jukebox (JUKE list) in the Game Factory book ----------
+const SONGS = [
+  {"icon": "🤖", "name": "Robo Jump", "step": 0.23076923076923078, "len": 3, "wave": "sine", "mel": [81, 0, 0, 0, 79, 0, 76, 0, 77, 0, 0, 0, 76, 0, 72, 0, 76, 0, 0, 0, 74, 0, 72, 0, 74, 0, 0, 0, 0, 0, 0, 0, 81, 0, 0, 0, 84, 0, 83, 0, 81, 0, 0, 0, 77, 0, 76, 0, 79, 0, 0, 0, 76, 0, 72, 0, 71, 0, 0, 0, 0, 0, 0, 0], "chords": [[69, 72, 76], [65, 69, 72], [60, 64, 67], [67, 71, 74]], "arp": [0, 1, 2, 3, 2, 1, 0, 1], "bass": [1, 0, 0, 0, 1, 0, 2, 0]},
+  {"icon": "👾", "name": "Robo Jump 2", "step": 0.21428571428571427, "len": 3, "wave": "sine", "mel": [76, 0, 79, 0, 83, 0, 81, 79, 76, 0, 0, 74, 76, 0, 0, 0, 72, 0, 76, 0, 79, 0, 77, 76, 72, 0, 0, 71, 72, 0, 0, 0, 74, 0, 78, 0, 81, 0, 79, 78, 74, 0, 76, 0, 78, 0, 81, 0, 83, 0, 81, 0, 78, 0, 74, 0, 71, 0, 74, 0, 78, 0, 0, 0], "chords": [[64, 67, 71], [60, 64, 67], [62, 66, 69], [59, 62, 66]], "arp": [0, 1, 2, 3, 2, 1, 0, 1], "bass": [1, 0, 0, 0, 1, 0, 2, 0]},
+  {"icon": "🌌", "name": "Robo Jump 3", "step": 0.22727272727272727, "len": 0.9, "wave": "sine", "vol": 0.05, "mel": [72, 0, 76, 0, 79, 0, 0, 76, 77, 0, 76, 0, 74, 0, 0, 0, 72, 0, 69, 0, 72, 0, 76, 0, 74, 0, 0, 0, 0, 0, 0, 0, 76, 0, 79, 0, 84, 0, 0, 83, 81, 0, 79, 0, 77, 0, 0, 0, 76, 0, 74, 0, 72, 0, 74, 0, 72, 0, 0, 0, 0, 0, 0, 0]},
+  {"icon": "🔮", "name": "Robo Jump 4", "step": 0.21428571428571427, "len": 0.9, "wave": "square", "vol": 0.04, "mel": [0, 73, 73, 73, 0, 71, 69, 0, 69, 0, 66, 0, 69, 0, 71, 0, 73, 0, 73, 71, 73, 0, 76, 0, 71, 0, 0, 69, 68, 0, 64, 0, 0, 73, 73, 73, 0, 71, 69, 0, 69, 0, 66, 0, 69, 0, 74, 0, 74, 0, 73, 0, 74, 0, 78, 0, 76, 0, 0, 0, 0, 76, 78, 80, 81, 0, 80, 81, 0, 76, 0, 0, 83, 0, 81, 83, 0, 80, 0, 0, 85, 0, 83, 85, 0, 81, 0, 78, 81, 0, 78, 0, 74, 0, 76, 78, 81, 0, 80, 81, 0, 76, 0, 0, 83, 0, 81, 83, 0, 80, 76, 0, 74, 0, 78, 81, 0, 80, 0, 83, 81, 0, 0, 0, 0, 0, 76, 76]},
+  {"icon": "🐶", "name": "Sparks!", "step": 0.21428571428571427, "len": 1.6, "wave": "square", "vol": 0.04, "mel": [72, 0, 74, 76, 0, 79, 0, 76, 77, 0, 76, 74, 72, 0, 0, 0, 69, 0, 72, 74, 76, 0, 74, 72, 74, 0, 0, 0, 79, 0, 0, 0, 72, 0, 74, 76, 0, 79, 0, 84, 81, 0, 79, 76, 77, 0, 74, 0, 76, 0, 74, 0, 72, 0, 71, 0, 72, 0, 0, 0, 0, 0, 0, 0], "chords": [[60, 64, 67], [57, 60, 64], [53, 57, 60], [55, 59, 62]], "arp": [0, 1, 2, 1, 3, 2, 1, 2], "bass": [1, 0, 3, 0, 2, 0, 3, 0]},
+  {"icon": "🦸", "name": "Captain Woof", "step": 0.2, "len": 0.9, "wave": "square", "vol": 0.035, "mel": [67, 0, 72, 0, 72, 74, 76, 0, 74, 72, 0, 67, 69, 0, 72, 0, 77, 0, 76, 74, 72, 0, 74, 0, 76, 0, 0, 79, 76, 0, 0, 0, 67, 0, 72, 0, 72, 74, 76, 0, 79, 0, 77, 76, 74, 0, 72, 0, 69, 71, 72, 0, 74, 0, 71, 0, 72, 0, 0, 0, 0, 0, 79, 0]},
+  {"icon": "🏎️", "name": "Kart Party", "step": 0.19736842105263158, "len": 2, "wave": "square", "vol": 0.035, "mel": [72, 0, 76, 79, 0, 76, 79, 84, 83, 0, 79, 0, 76, 0, 74, 0, 72, 0, 76, 81, 0, 79, 76, 74, 72, 0, 69, 0, 72, 0, 0, 0, 77, 0, 81, 0, 84, 0, 81, 77, 79, 0, 77, 76, 74, 0, 77, 0, 79, 0, 83, 0, 86, 0, 83, 79, 81, 0, 79, 77, 76, 0, 74, 0, 76, 76, 0, 79, 0, 84, 0, 79, 81, 0, 79, 76, 72, 0, 76, 0, 81, 0, 0, 79, 76, 0, 72, 0, 74, 0, 76, 0, 69, 0, 0, 0, 77, 77, 0, 81, 0, 84, 0, 81, 79, 0, 77, 0, 74, 0, 72, 0, 74, 0, 76, 0, 77, 0, 79, 0, 83, 0, 86, 0, 84, 0, 0, 0]},
+  {"icon": "🧬", "name": "Clone Factory", "step": 0.21428571428571427, "len": 0.9, "wave": "square", "vol": 0.035, "mel": [72, 0, 76, 0, 79, 0, 76, 0, 77, 0, 74, 0, 71, 0, 67, 0, 72, 0, 76, 79, 84, 0, 79, 0, 81, 79, 77, 76, 74, 0, 0, 0, 69, 0, 72, 0, 77, 0, 72, 0, 76, 0, 79, 0, 84, 0, 79, 0, 77, 76, 74, 72, 71, 0, 74, 0, 72, 0, 67, 0, 72, 0, 0, 0]},
+  {"icon": "❓", "name": "The Final Factory", "step": 0.19230769230769232, "len": 0.9, "wave": "square", "vol": 0.04, "mel": [74, 0, 77, 81, 0, 81, 79, 77, 76, 0, 77, 79, 81, 0, 0, 0, 74, 0, 77, 81, 0, 86, 84, 81, 82, 0, 81, 79, 77, 0, 0, 0, 79, 0, 82, 86, 0, 86, 84, 82, 81, 0, 79, 77, 76, 0, 73, 76, 74, 0, 77, 81, 79, 77, 76, 73, 74, 0, 0, 62, 74, 0, 0, 0]},
+  {"icon": "⚡", "name": "HYPER FACTORY", "step": 0.17857142857142858, "len": 0.8, "wave": "square", "vol": 0.035, "mel": [72, 0, 76, 79, 76, 0, 72, 0, 74, 0, 77, 81, 79, 0, 0, 0, 69, 0, 72, 0, 76, 0, 75, 0, 74, 0, 72, 0, 71, 0, 0, 0, 69, 0, 72, 76, 81, 0, 79, 76, 77, 0, 76, 74, 72, 0, 74, 76, 69, 0, 72, 76, 75, 0, 76, 0, 69, 0, 72, 76, 79, 0, 76, 0, 72, 0, 76, 0, 79, 0, 76, 74, 72, 0, 74, 76, 74, 0, 0, 0, 81, 0, 79, 0, 76, 0, 74, 0, 72, 0, 74, 0, 76, 0, 0, 0, 72, 0, 76, 79, 84, 0, 79, 0, 81, 79, 77, 76, 74, 0, 0, 0, 76, 79, 84, 79, 76, 79, 84, 88, 86, 84, 83, 81, 84, 0, 84, 0], "bassEvery": 4, "bassLine": [48, 48, 53, 55, 45, 45, 43, 43, 45, 45, 41, 43, 45, 45, 44, 45, 48, 48, 43, 43, 45, 45, 43, 45, 48, 48, 53, 55, 48, 52, 55, 48]}
+];
+
+// ---------- 🔊 Audio: Jukebox note math, played through a fat lead (vibrato + echo), arps, bass and drums ----------
+let actx = null, master = null, musicBus = null, sfxBus = null, delayIn = null, delayNode = null, noiseBuf = null;
+let fakeT = 0;                                         // a clock for when there is no sound card (or in tests)
+const midi = n => 440 * Math.pow(2, (n - 69) / 12);
+function initAudio() {
+  if (!actx) {
+    try {
+      actx = new (window.AudioContext || window.webkitAudioContext)();
+      master = actx.createGain(); master.gain.value = 0.9;
+      if (actx.createDynamicsCompressor) {
+        const comp = actx.createDynamicsCompressor();
+        comp.threshold.value = -14; comp.ratio.value = 4; comp.attack.value = 0.005; comp.release.value = 0.2;
+        master.connect(comp); comp.connect(actx.destination);
+      } else master.connect(actx.destination);
+      musicBus = actx.createGain(); musicBus.gain.value = 1; musicBus.connect(master);
+      sfxBus = actx.createGain(); sfxBus.gain.value = 0.8; sfxBus.connect(master);
+      delayIn = actx.createGain(); delayIn.gain.value = 0.22;
+      delayNode = actx.createDelay(2); delayNode.delayTime.value = 0.32;
+      const fb = actx.createGain(); fb.gain.value = 0.3;
+      const dlp = actx.createBiquadFilter(); dlp.type = 'lowpass'; dlp.frequency.value = 2400;
+      delayIn.connect(delayNode); delayNode.connect(dlp); dlp.connect(fb); fb.connect(delayNode); dlp.connect(musicBus);
+      noiseBuf = actx.createBuffer(1, actx.sampleRate, actx.sampleRate);
+      const d = noiseBuf.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    } catch (_) { actx = null; }
+  }
+  if (actx && actx.state === 'suspended' && actx.resume) actx.resume();
+}
+const clock = () => actx ? actx.currentTime : fakeT;
+// one note, exactly like the Jukebox's jbNote (start at full volume, fade to nothing), but into a bus
+function jbNote(m, at, dur, wave, vol, out) {
+  if (!actx || !m) return;
+  const o = actx.createOscillator(), g = actx.createGain();
+  o.type = wave; o.frequency.value = midi(m);
+  g.gain.setValueAtTime(vol, at); g.gain.exponentialRampToValueAtTime(0.001, at + dur);
+  o.connect(g); g.connect(out || musicBus); o.start(at); o.stop(at + dur + 0.05);
+}
+// 🎺 the LEAD: the song's own wave + a detuned twin, vibrato on long notes, and an echo
+function leadNote(m, at, dur, wave, vol) {
+  if (!actx || !m) return;
+  const f = midi(m), g = actx.createGain();
+  g.gain.setValueAtTime(0, at); g.gain.linearRampToValueAtTime(vol, at + 0.008); g.gain.exponentialRampToValueAtTime(0.001, at + dur);
+  const lp = actx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = wave === 'square' ? 2600 : 4000;
+  lp.connect(g); g.connect(musicBus); g.connect(delayIn);
+  const o1 = actx.createOscillator(), o2 = actx.createOscillator();
+  o1.type = wave; o2.type = wave === 'sine' ? 'triangle' : wave;
+  o1.frequency.value = f; o2.frequency.value = f; o1.detune.value = -6; o2.detune.value = 6;
+  const mix = actx.createGain(); mix.gain.value = 0.6; o1.connect(mix); o2.connect(mix); mix.connect(lp);
+  if (dur > 0.3) {
+    const lfo = actx.createOscillator(), lg = actx.createGain(); lfo.frequency.value = 5.6;
+    lg.gain.setValueAtTime(0, at); lg.gain.linearRampToValueAtTime(0, at + 0.12); lg.gain.linearRampToValueAtTime(f * 0.008, at + 0.4);
+    lfo.connect(lg); lg.connect(o1.frequency); lg.connect(o2.frequency); lfo.start(at); lfo.stop(at + dur + 0.05);
+  }
+  for (const o of [o1, o2]) { o.start(at); o.stop(at + dur + 0.05); }
+}
+function noiseHit(t, type, freq, vol, decay, out) {
+  if (!actx || !noiseBuf) return;
+  const s = actx.createBufferSource(); s.buffer = noiseBuf;
+  const fl = actx.createBiquadFilter(); fl.type = type; fl.frequency.value = freq;
+  const g = actx.createGain(); g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(vol, t + 0.002); g.gain.exponentialRampToValueAtTime(0.001, t + decay);
+  s.connect(fl); fl.connect(g); g.connect(out || musicBus); s.start(t); s.stop(t + decay + 0.05);
+}
+// 🥁 DRUMS
+function drum(kind, t, vol, out) {
+  if (!actx) return;
+  out = out || musicBus;
+  if (kind === 'k') {
+    const o = actx.createOscillator(), g = actx.createGain(); o.frequency.setValueAtTime(150, t); o.frequency.exponentialRampToValueAtTime(42, t + 0.12);
+    g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(vol, t + 0.003); g.gain.exponentialRampToValueAtTime(0.001, t + 0.3);
+    o.connect(g); g.connect(out); o.start(t); o.stop(t + 0.35);
+  } else if (kind === 's') { noiseHit(t, 'highpass', 1400, vol * 0.7, 0.15, out); jbNote(55, t, 0.08, 'triangle', vol * 0.4, out); }
+  else if (kind === 'h') noiseHit(t, 'highpass', 7500, vol, 0.04, out);
+  else if (kind === 'x') noiseHit(t, 'highpass', 4000, vol, 1.0, out);
+  else if (kind === 'click') jbNote(96, t, 0.05, 'square', vol, out);
+}
+// play step k of a song (k = which half-beat). Same math as the Jukebox: melody, chord arps, bass, bass line.
+function playStep(T, k, at, drums) {
+  const stepDur = T.step;
+  const m = T.mel[k % T.mel.length]; if (m) leadNote(m, at, Math.max(0.12, stepDur * T.len), T.wave, (T.vol || 0.06) * 1.6);
+  if (T.chords) {
+    const ch = T.chords[Math.floor(k / 8) % 4]; const ai = T.arp[k % 8];
+    jbNote(ai === 3 ? ch[0] + 12 : ch[ai], at, stepDur * 0.8, 'triangle', 0.03);
+    if (T.bass[k % 8]) jbNote(ch[0] - (T.bass[k % 8] === 1 ? 24 : T.bass[k % 8] === 3 ? 17 : 12), at, stepDur * 0.9, 'triangle', 0.08);
+  }
+  if (T.bassEvery && k % T.bassEvery === 0) jbNote(T.bassLine[Math.floor(k / T.bassEvery) % T.bassLine.length], at, stepDur * T.bassEvery * 0.75, 'sine', 0.1);
+  if (!T.chords && !T.bassEvery && k % 4 === 0) jbNote(rootOf(T, k) - 24, at, stepDur * 3, 'triangle', 0.09);   // a simple bass so every song has one
+  if (drums) {
+    if (k % 4 === 0) drum('k', at, 0.32);
+    if (k % 8 === 4) drum('s', at, 0.22);
+    drum('h', at, k % 2 ? 0.05 : 0.08);
+    if (k % (T.mel.length) === 0) drum('x', at, 0.08);
+  }
+}
+// for songs with no chords: bass follows the lowest melody note of each 4-step chunk
+function rootOf(T, k) {
+  const b = k - (k % 4); let lo = 0;
+  for (let i = 0; i < 4; i++) { const m = T.mel[(b + i) % T.mel.length]; if (m && (!lo || m < lo)) lo = m; }
+  if (!lo) { for (let i = 1; i < T.mel.length; i++) { const m = T.mel[((b - i) % T.mel.length + T.mel.length) % T.mel.length]; if (m) { lo = m; break; } } }
+  while (lo > 64) lo -= 12;
+  return lo || 60;
+}
+// sound effects
+const sfx = {
+  hit(g) { if (!actx) return; const t = actx.currentTime; jbNote(g === 0 ? 96 : g === 1 ? 91 : 84, t, 0.06, 'sine', 0.05, sfxBus); },
+  miss() { if (!actx) return; const t = actx.currentTime; const o = actx.createOscillator(), g = actx.createGain(); o.type = 'triangle'; o.frequency.setValueAtTime(220, t); o.frequency.exponentialRampToValueAtTime(110, t + 0.15); g.gain.setValueAtTime(0.06, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.18); o.connect(g); g.connect(sfxBus); o.start(t); o.stop(t + 0.2); },
+  pick() { if (!actx) return; jbNote(84, actx.currentTime, 0.08, 'square', 0.04, sfxBus); },
+  go() { if (!actx) return; const t = actx.currentTime; [72, 76, 79, 84].forEach((m, i) => jbNote(m, t + i * 0.07, 0.2, 'square', 0.04, sfxBus)); },
+  star(i) { if (!actx) return; jbNote(79 + i * 5, actx.currentTime, 0.4, 'triangle', 0.08, sfxBus); },
+};
+
+// ---------- 🎯 Turning a song into arrows ----------
+const LANES = ['←', '↓', '↑', '→'], LANE_KEYS = ['ArrowLeft', 'ArrowDown', 'ArrowUp', 'ArrowRight'];
+const LANE_COL = ['#ff4fa3', '#40c4ff', '#76ff03', '#ffb300'];
+const DIFFS = [
+  { name: 'Easy', icon: '🙂', win: [0.075, 0.13, 0.2], speed: 300, col: '#66bb6a' },
+  { name: 'Normal', icon: '😎', win: [0.055, 0.1, 0.15], speed: 380, col: '#29b6f6' },
+  { name: 'Hard', icon: '🔥', win: [0.045, 0.085, 0.13], speed: 460, col: '#ff7043' },
+];
+const GRADES = [['PERFECT', '#ffea00', 300, 1], ['GREAT', '#76ff03', 200, 0.8], ['OK', '#40c4ff', 100, 0.5], ['MISS', '#ff8a80', 0, 0]];
+const COUNT_IN = 8;                                    // 4 beats of "1, 2, 3, 4" before the song starts
+const loopsOf = T => T.mel.length >= 128 ? 2 : 3;
+const totalSteps = T => loopsOf(T) * T.mel.length;
+// each melody note gets an arrow chosen by its pitch: low notes on the left, high notes on the right
+function laneMap(T) {
+  const ps = [...new Set(T.mel.filter(m => m))].sort((a, b) => a - b), map = {};
+  ps.forEach((p, i) => map[p] = Math.min(3, Math.floor(i * 4 / ps.length)));
+  return map;
+}
+function buildChart(T, diff) {
+  const map = laneMap(T), notes = [], N = totalSteps(T);
+  let count = 0, last = -99;
+  for (let k = 0; k < N; k++) {
+    const m = T.mel[k % T.mel.length]; if (!m) continue;
+    count++;
+    if (diff === 0 && count % 2 === 0) continue;                // 🙂 Easy: every other note
+    if (diff === 1 && k - last < 2) continue;                   // 😎 Normal: skip the super-fast ones
+    last = k;
+    const lane = map[m];
+    notes.push({ t: k * T.step, lane, k, m, done: false });
+    if (diff === 2 && k % 8 === 0) notes.push({ t: k * T.step, lane: (lane + 2) % 4, k, m, done: false, harmony: true });   // 🔥 Hard: harmony notes too
+  }
+  return notes;
+}
+
+// ---------- Game state ----------
+let state = 'title', frame = 0, sel = save.song | 0, diff = save.diff | 0;
+if (sel < 0 || sel >= SONGS.length) sel = 0;
+if (diff < 0 || diff > 2) diff = 1;
+let game = null, results = null, calib = null, preview = null;
+let parts = [], pops = [], wobble = 0, flash = [0, 0, 0, 0], hold = [0, 0, 0, 0], cheer = 0, menuHover = -1;
+const bestKey = (i, d) => SONGS[i].name + '|' + d;
+function startSong() {
+  initAudio(); preview = null; sfx.go();
+  const T = SONGS[sel];
+  save.song = sel; save.diff = diff; writeSave();
+  const notes = buildChart(T, diff);
+  game = { T, d: DIFFS[diff], notes, start: clock() + 0.4 + COUNT_IN * T.step, k: -COUNT_IN, score: 0, combo: 0, maxCombo: 0,
+           counts: [0, 0, 0, 0], last: notes.length ? notes[notes.length - 1].t : 0, grade: null, gradeT: 0, endAt: 0 };
+  game.endSong = totalSteps(T) * T.step;
+  parts = []; pops = []; wobble = 0;
+  state = 'play';
+}
+const songTime = () => game ? clock() - game.start - save.offset : 0;
+function schedule() {
+  if (!actx) return;
+  const ahead = clock() + 0.2;
+  if (state === 'play' && game) {
+    const T = game.T, N = totalSteps(T);
+    while (game.k < N && game.start + game.k * T.step < ahead) {
+      const at = game.start + game.k * T.step;
+      if (at >= actx.currentTime - 0.02) {
+        if (game.k < 0) { if ((game.k + COUNT_IN) % 2 === 0) { drum('h', at, 0.12); jbNote(game.k === -COUNT_IN ? 84 : 79, at, 0.1, 'square', 0.05); } }
+        else playStep(T, game.k, at, true);
+      }
+      game.k++;
+    }
+  } else if ((state === 'title' || state === 'songs') && preview) {
+    const T = preview.T;
+    while (preview.start + preview.k * T.step < ahead) {
+      const at = preview.start + preview.k * T.step;
+      if (at >= actx.currentTime - 0.02) playStep(T, preview.k, at, state === 'title');
+      preview.k++;
+    }
+  } else if (state === 'calib' && calib) {
+    while (calib.start + calib.k * calib.beat < ahead) {
+      const at = calib.start + calib.k * calib.beat;
+      if (at >= actx.currentTime - 0.02) { drum('k', at, 0.35); jbNote(calib.k % 4 === 0 ? 84 : 77, at, 0.1, 'square', 0.06); }
+      calib.k++;
+    }
+  }
+}
+function startPreview(i) { if (!actx) return; preview = { T: SONGS[i], start: clock() + 0.15, k: 0 }; }
+setInterval(schedule, 40);
+
+// 💥 pressing a lane
+function hitLane(lane) {
+  flash[lane] = 10; hold[lane] = 8;
+  if (state !== 'play' || !game) return;
+  const t = songTime(), win = game.d.win;
+  let best = null;
+  for (const n of game.notes) {
+    if (n.done || n.lane !== lane) continue;
+    if (n.t - t > win[2]) break;
+    if (Math.abs(n.t - t) <= win[2] && (!best || Math.abs(n.t - t) < Math.abs(best.t - t))) best = n;
+  }
+  if (!best) return;                                   // pressing with no arrow there is fine: no penalty!
+  const e = Math.abs(best.t - t), g = e <= win[0] ? 0 : e <= win[1] ? 1 : 2;
+  judge(best, g);
+}
+function judge(n, g) {
+  n.done = true; n.g = g;
+  game.counts[g]++;
+  if (g < 3) {
+    game.combo++; game.maxCombo = Math.max(game.maxCombo, game.combo);
+    game.score += Math.round(GRADES[g][2] * (1 + Math.min(game.combo, 40) / 40));
+    sfx.hit(g); cheer = 20;
+    const x = laneX(n.lane) + LANE_W / 2;
+    for (let i = 0; i < (g === 0 ? 14 : 8); i++) { const a = Math.random() * 7; parts.push({ x, y: HIT_Y, vx: Math.cos(a) * (2 + Math.random() * 4), vy: Math.sin(a) * (2 + Math.random() * 4) - 2, life: 30, col: g === 0 ? '#ffea00' : LANE_COL[n.lane] }); }
+  } else { game.combo = 0; wobble = 40; sfx.miss(); }
+  game.grade = g; game.gradeT = 40;
+}
+
+// ---------- 🏁 The song always finishes, then: stars! ----------
+function finishSong() {
+  const n = game.notes.length || 1;
+  const acc = game.notes.reduce((s, x) => s + (x.done ? GRADES[x.g][3] : 0), 0) / n;
+  const stars = acc >= 0.85 ? 3 : acc >= 0.6 ? 2 : 1;
+  const key = bestKey(sel, diff), old = save.best[key] || { score: 0, stars: 0 };
+  const newBest = game.score > old.score;
+  save.best[key] = { score: Math.max(old.score, game.score), stars: Math.max(old.stars, stars) };
+  writeSave();
+  if (stars === 3 && diff === 1) trophy('rhythmStar');   // 🏆 3 stars on any song on Normal
+  sticker('dancing-robo');                              // ⭐ for finishing any song
+  results = { stars, acc, score: game.score, newBest, best: save.best[key].score, counts: game.counts.slice(), maxCombo: game.maxCombo, t: 0, song: game.T, d: game.d };
+  state = 'results';
+}
+function quitSong() { game = null; state = 'songs'; startPreview(sel); }
+
+// ---------- 🥁 Tap to the beat (sound delay setting) ----------
+function startCalib() { initAudio(); preview = null; calib = { beat: 0.6, start: clock() + 0.3, k: 0, taps: [], avg: save.offset }; state = 'calib'; }
+function calibTap() {
+  if (!calib) return;
+  const tt = clock(), i = Math.round((tt - calib.start) / calib.beat);
+  if (i < 0) return;
+  const d = tt - (calib.start + i * calib.beat);
+  if (Math.abs(d) > 0.3) return;
+  calib.taps.push(d); if (calib.taps.length > 8) calib.taps.shift();
+  calib.avg = calib.taps.reduce((a, b) => a + b, 0) / calib.taps.length;
+  calib.flash = 12;
+}
+function calibSave() { if (calib && calib.taps.length >= 3) { save.offset = Math.max(-0.3, Math.min(0.3, calib.avg)); writeSave(); } calib = null; state = 'songs'; startPreview(sel); }
+function calibReset() { save.offset = 0; writeSave(); if (calib) { calib.taps = []; calib.avg = 0; } }
+
+// ---------- Layout ----------
+const HL = 220, LANE_W = 130, HR = HL + LANE_W * 4, HIT_Y = 380, PAD_Y = 412;
+const laneX = i => HL + i * LANE_W;
+// buttons on each screen: [x, y, w, h, action]
+function songButtons() {
+  const b = [];
+  DIFFS.forEach((d, i) => b.push([250 + i * 160, 62, 148, 46, () => { diff = i; save.diff = i; writeSave(); sfx.pick(); }]));
+  SONGS.forEach((s, i) => b.push([60 + (i % 2) * 430, 122 + Math.floor(i / 2) * 60, 410, 52, () => { if (sel === i) startSong(); else { sel = i; sfx.pick(); startPreview(i); } }]));
+  b.push([300, 438, 360, 66, startSong]);
+  b.push([700, 446, 220, 50, startCalib]);
+  b.push([40, 446, 160, 50, () => { state = 'title'; }]);
+  return b;
+}
+function calibButtons() { return [[300, 420, 170, 60, calibSave], [490, 420, 170, 60, calibReset], [40, 440, 150, 50, () => { calib = null; state = 'songs'; startPreview(sel); }]]; }
+function resultButtons() { return [[230, 430, 240, 66, startSong], [490, 430, 240, 66, quitSong]]; }
+const inBox = (x, y, b) => x >= b[0] && x <= b[0] + b[2] && y >= b[1] && y <= b[1] + b[3];
+
+// ---------- Input ----------
+addEventListener('keydown', e => {
+  const k = e.key;
+  if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', ' '].includes(k) && e.preventDefault) e.preventDefault();
+  initAudio();
+  if (state === 'play') {
+    const lane = LANE_KEYS.indexOf(k);
+    if (lane >= 0 && !e.repeat) hitLane(lane);
+    if (k === 'Escape') quitSong();
+    return;
+  }
+  if (e.repeat) return;
+  if (state === 'title') { if (k === ' ' || k === 'Enter') { state = 'songs'; sfx.pick(); startPreview(sel); } return; }
+  if (state === 'songs') {
+    if (k === 'ArrowLeft' || k === 'ArrowRight') sel = sel ^ 1;
+    else if (k === 'ArrowUp') sel = (sel - 2 + SONGS.length) % SONGS.length;
+    else if (k === 'ArrowDown') sel = (sel + 2) % SONGS.length;
+    else if (k === 'x' || k === 'X') { diff = (diff + 1) % 3; save.diff = diff; writeSave(); }
+    else if (k === ' ' || k === 'Enter') { startSong(); return; }
+    else if (k === 'Escape') { state = 'title'; return; }
+    else return;
+    sfx.pick(); if (k.startsWith('Arrow')) startPreview(sel);
+    return;
+  }
+  if (state === 'results') { if (results && results.t < 30) return; if (k === ' ') startSong(); else if (k === 'Enter' || k === 'Escape') quitSong(); return; }
+  if (state === 'calib') {
+    if (k === ' ' || LANE_KEYS.includes(k)) calibTap();
+    else if (k === 'Enter') calibSave();
+    else if (k === 'Escape') { calib = null; state = 'songs'; startPreview(sel); }
+  }
+});
+function canvasXY(e) { const r = C.getBoundingClientRect(); return [(e.clientX - r.left) * W / r.width, (e.clientY - r.top) * H / r.height]; }
+function laneAt(x, y) {
+  if (y < PAD_Y - 10 && (x < HL || x > HR)) return -1;          // the stage and the crowd are not lanes
+  if (y < 60) return -1;
+  return Math.max(0, Math.min(3, Math.floor((x - HL) / LANE_W)));   // the bottom pads stretch to the edges
+}
+function press(x, y) {
+  initAudio();
+  if (state === 'play') {
+    if (x > W - 70 && y < 60) { quitSong(); return; }   // the ✖ button
+    const l = laneAt(x, y); if (l >= 0) hitLane(l);
+    return;
+  }
+  if (state === 'title') { state = 'songs'; sfx.pick(); startPreview(sel); return; }
+  let bs = state === 'songs' ? songButtons() : state === 'calib' ? calibButtons() : state === 'results' ? resultButtons() : [];
+  if (state === 'results' && results && results.t < 30) return;
+  for (const b of bs) if (inBox(x, y, b)) { b[4](); return; }
+  if (state === 'calib') calibTap();
+}
+// iPad: every finger counts (so you can hit two arrows at once). Menus use touchpad.js's finger-to-mouse.
+C.addEventListener('touchstart', e => {
+  if (state !== 'play') return;
+  e.preventDefault(); e.stopPropagation();
+  for (const t of e.changedTouches) { const [x, y] = canvasXY(t); press(x, y); }
+}, { passive: false });
+C.addEventListener('mousedown', e => { const [x, y] = canvasXY(e); press(x, y); });
+C.addEventListener('mousemove', e => { const [x, y] = canvasXY(e); const bs = state === 'songs' ? songButtons() : []; menuHover = bs.findIndex(b => inBox(x, y, b)); });
+document.addEventListener('visibilitychange', () => { if (document.hidden && state === 'play') quitSong(); });
+
+// ---------- 🎨 Drawing helpers ----------
+function roundRect(x, y, w, h, r, fill) {
+  ctx.fillStyle = fill; ctx.beginPath();
+  if (ctx.roundRect) ctx.roundRect(x, y, Math.max(0, w), Math.max(0, h), r); else ctx.rect(x, y, Math.max(0, w), Math.max(0, h));
+  ctx.fill();
+}
+function circle(x, y, r, fill) { ctx.fillStyle = fill; ctx.beginPath(); ctx.arc(x, y, Math.max(0, r), 0, 7); ctx.fill(); }
+function ellipse(x, y, rx, ry, fill, rot = 0) { ctx.fillStyle = fill; ctx.beginPath(); ctx.ellipse(x, y, Math.max(0, rx), Math.max(0, ry), rot, 0, 7); ctx.fill(); }
+function drawStar(x, y, r, fill, rot = 0) {
+  ctx.fillStyle = fill; ctx.beginPath();
+  for (let i = 0; i < 10; i++) { const a = rot + i * Math.PI / 5 - Math.PI / 2, rr = i % 2 ? r * 0.45 : r; ctx.lineTo(x + Math.cos(a) * rr, y + Math.sin(a) * rr); }
+  ctx.fill();
+}
+function text(str, x, y, size, color = '#fff', align = 'center') {
+  ctx.font = `bold ${size}px "Trebuchet MS", Arial, sans-serif`;
+  ctx.textAlign = align; ctx.lineJoin = 'round';
+  ctx.strokeStyle = 'rgba(0,0,0,.6)'; ctx.lineWidth = Math.max(3, size / 6);
+  ctx.strokeText(str, x, y); ctx.fillStyle = color; ctx.fillText(str, x, y);
+}
+function button(b, label, fill, size = 26, on = false) {
+  const [x, y, w, h] = b;
+  roundRect(x, y + 5, w, h, 16, 'rgba(0,0,0,.35)');
+  roundRect(x, y, w, h, 16, fill);
+  if (on) { ctx.strokeStyle = '#fff'; ctx.lineWidth = 4; ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(x, y, w, h, 16); else ctx.rect(x, y, w, h); ctx.stroke(); }
+  text(label, x + w / 2, y + h / 2 + size * 0.36, size);
+}
+// an arrow pointing the lane's way (← ↓ ↑ →)
+function drawArrow(cx, cy, s, lane, fill, edge = '#fff') {
+  ctx.save(); ctx.translate(cx, cy); ctx.rotate([-Math.PI / 2, Math.PI, 0, Math.PI / 2][lane]);
+  ctx.beginPath();
+  ctx.moveTo(0, -s); ctx.lineTo(s, 0); ctx.lineTo(s * 0.4, 0); ctx.lineTo(s * 0.4, s * 0.9);
+  ctx.lineTo(-s * 0.4, s * 0.9); ctx.lineTo(-s * 0.4, 0); ctx.lineTo(-s, 0); ctx.closePath();
+  ctx.fillStyle = fill; ctx.fill();
+  ctx.lineWidth = Math.max(1, s * 0.12); ctx.lineJoin = 'round'; ctx.strokeStyle = edge; ctx.stroke();
+  ctx.restore();
+}
+
+// ---------- 🤖 Robo (same look as Robo Jump 4: white round robot, dark visor, blue eyes, blue ear pods) + dancing arms ----------
+const PAL_ROBO = { head: '#ffffff', body: '#f5f7ff', visor: '#111827', eye: '#40c4ff', legs: '#3d5afe', pod: '#2979ff' };
+// (cx, feet) = where he stands, sc = size, beat = beats so far, level = how fancy his dance is (0-3), wob = wobble after a miss
+function drawRoboDancer(cx, feet, sc, beat, level, wob) {
+  const pal = PAL_ROBO, ph = beat % 1, bounce = Math.abs(Math.sin(beat * Math.PI));
+  let dx = 0, dy = 0, rot = 0, armL = 0.3, armR = 0.3, squash = 1, legKick = 0;
+  if (level === 0) { dy = -bounce * 4; armL = 0.4 + Math.sin(beat * Math.PI) * 0.3; armR = 0.4 - Math.sin(beat * Math.PI) * 0.3; squash = 1 - (1 - bounce) * 0.05; }
+  else if (level === 1) { dx = Math.sin(beat * Math.PI) * 14; dy = -bounce * 6; armL = Math.floor(beat) % 2 ? 2.6 : 0.5; armR = Math.floor(beat) % 2 ? 0.5 : 2.6; legKick = Math.floor(beat) % 2 ? 1 : -1; }
+  else if (level === 2) { dy = -bounce * 22; armL = 2.4 + Math.sin(beat * Math.PI * 2) * 0.5; armR = 2.4 - Math.sin(beat * Math.PI * 2) * 0.5; squash = bounce < 0.25 ? 0.88 : 1.04; }
+  else { const b2 = (beat / 2) % 1; dy = -Math.abs(Math.sin(beat * Math.PI / 2)) * 34; rot = b2 * Math.PI * 2; armL = armR = 2.8; squash = 1.05; }
+  if (wob > 0) { rot = Math.sin(wob * 0.5) * 0.35 * (wob / 40); dy = 0; dx = Math.sin(wob * 0.5) * 6; armL = 1.6 + Math.sin(wob) * 0.6; armR = 1.6 - Math.sin(wob) * 0.6; }
+  if (!isFinite(dy)) dy = 0;
+  ctx.save();
+  ellipse(cx, feet + 4, 34 * sc * (1 - Math.min(0.5, -dy / 80)), 7 * sc, 'rgba(0,0,0,.35)');   // shadow
+  ctx.translate(cx + dx, feet + dy); ctx.scale(sc, sc);
+  ctx.translate(0, -20); ctx.rotate(rot); ctx.translate(0, 20);
+  const w = 30 / squash, h = 40 * squash, x = -w / 2, y = -h;
+  // arms (behind the body): little blue arms with round hands
+  ctx.strokeStyle = pal.legs; ctx.lineWidth = 4; ctx.lineCap = 'round';
+  for (const [side, a] of [[-1, armL], [1, armR]]) {
+    const sx = side * (w / 2 - 1), sy = y + h * 0.62, ex = sx + side * Math.sin(a) * 13, ey = sy + Math.cos(a) * 13;
+    ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(ex, ey); ctx.stroke(); circle(ex, ey, 3.5, pal.pod);
+  }
+  ctx.fillStyle = pal.legs;
+  ctx.fillRect(x + 4 + (legKick < 0 ? -3 : 0), y + h - 7 * (h / 40) - (legKick < 0 ? 3 : 0), 8, 7 * (h / 40));
+  ctx.fillRect(x + w - 12 + (legKick > 0 ? 3 : 0), y + h - 7 * (h / 40) - (legKick > 0 ? 3 : 0), 8, 7 * (h / 40));
+  roundRect(x + 2, y + h * 0.5, w - 4, h * 0.4, 6 * (w / 30), pal.body);
+  circle(x + w / 2, y + h * 0.7, 3 * (w / 30), level >= 3 ? ['#ff4fa3', '#ffea00', '#76ff03', '#40c4ff'][Math.floor(beat * 2) % 4] : pal.pod);
+  roundRect(x - 5, y + h * 0.3 - 3, 6, 9 * (h / 40), 3, pal.pod);
+  roundRect(x + w - 1, y + h * 0.3 - 3, 6, 9 * (h / 40), 3, pal.pod);
+  roundRect(x - 2, y, w + 4, h * 0.55, 12 * (w / 30), pal.head);
+  roundRect(x + 2, y + 4, w - 4, h * 0.55 - 9, 9 * (w / 30), pal.visor);
+  const ex = x + w / 2, ey = y + h * 0.27, es = w / 30;
+  if (wob > 0) {                                       // dizzy swirly eyes
+    ctx.strokeStyle = pal.eye; ctx.lineWidth = 1.5;
+    for (const s of [-1, 1]) { ctx.beginPath(); ctx.arc(ex + s * 6 * es, ey, 3 * es, wob * 0.3, wob * 0.3 + 5); ctx.stroke(); }
+  } else if (level >= 2) {                             // happy ^ ^ eyes
+    ctx.strokeStyle = pal.eye; ctx.lineWidth = 2;
+    for (const s of [-1, 1]) { ctx.beginPath(); ctx.arc(ex + s * 6 * es, ey + 2, 3.5 * es, Math.PI * 1.1, Math.PI * 1.9); ctx.stroke(); }
+  } else {
+    const blink = frame % 180 < 6 ? 1 : 5 * (h / 40);
+    ctx.fillStyle = pal.eye; ctx.beginPath();
+    ctx.ellipse(ex - 6 * es, ey, 3.5 * es, Math.max(0.5, blink), 0, 0, 7); ctx.ellipse(ex + 6 * es, ey, 3.5 * es, Math.max(0.5, blink), 0, 0, 7); ctx.fill();
+  }
+  ctx.restore();
+  if (wob > 0) for (let i = 0; i < 3; i++) { const a = frame * 0.15 + i * 2.1; drawStar(cx + dx + Math.cos(a) * 26 * sc / 2.4, feet - 44 * sc + Math.sin(a) * 8, 8, '#ffea00', a); }
+}
+
+// ---------- 🎉 The crowd: King Gloop, Sparks and Captain Woof ----------
+function cheerFace(x, y, s, happy, col = '#222') {
+  ctx.strokeStyle = col; ctx.lineWidth = 3;
+  if (happy) { for (const sx of [-s, s]) { ctx.beginPath(); ctx.arc(x + sx, y, 5, Math.PI * 1.1, Math.PI * 1.9); ctx.stroke(); } }
+  else { ellipse(x - s, y, 3.5, frame % 200 < 6 ? 1 : 5, col); ellipse(x + s, y, 3.5, frame % 200 < 6 ? 1 : 5, col); }
+  ctx.fillStyle = '#c62828'; ctx.beginPath(); ctx.arc(x, y + 12, happy ? 8 : 5, 0.1, Math.PI - 0.1); ctx.closePath(); ctx.fill();
+}
+function crowdArms(y, len, col, up) {                  // two waving arms
+  ctx.strokeStyle = col; ctx.lineWidth = 8; ctx.lineCap = 'round';
+  const wave = Math.sin(frame * 0.3) * 0.4;
+  for (const s of [-1, 1]) {
+    const ex = s * 20 + s * len * (up ? 0.55 + wave * s * 0.3 : 0.5), ey = y + (up ? -len * 0.85 : len * 0.7);
+    ctx.beginPath(); ctx.moveTo(s * 20, y); ctx.lineTo(ex, ey); ctx.stroke();
+  }
+}
+function drawGloop(x, feet, sc, hop, happy) {          // 👑 King Gloop: purple goo king with a gold crown
+  ctx.save(); ctx.translate(x, feet - hop); ctx.scale(sc, sc);
+  const wob = Math.sin(frame * 0.1) * 3;
+  if (happy) crowdArms(-60, 30, '#9c27b0', true);
+  ctx.fillStyle = '#9c27b0'; ctx.beginPath();
+  ctx.moveTo(-44, 0); ctx.quadraticCurveTo(-50 - wob, -60, -20, -100); ctx.quadraticCurveTo(0, -112, 20, -100); ctx.quadraticCurveTo(50 + wob, -60, 44, 0); ctx.closePath(); ctx.fill();
+  ellipse(-18, -80, 8, 14, 'rgba(255,255,255,.25)', 0.3);
+  ctx.fillStyle = '#ffd740'; ctx.beginPath();
+  const cr = [-24, -100, -26, -128, -12, -114, 0, -134, 12, -114, 26, -128, 24, -100];
+  ctx.moveTo(cr[0], cr[1]); for (let i = 2; i < cr.length; i += 2) ctx.lineTo(cr[i], cr[i + 1]); ctx.closePath(); ctx.fill();
+  circle(0, -112, 4, '#e53935'); circle(-16, -108, 3, '#2979ff'); circle(16, -108, 3, '#00e676');
+  cheerFace(0, -70, 13, happy, '#311b92');
+  ctx.restore();
+}
+function drawSparks(x, feet, sc, hop, happy) {         // 🐶 Sparks the brave puppy
+  ctx.save(); ctx.translate(x, feet - hop); ctx.scale(sc, sc);
+  ctx.strokeStyle = '#8d5a2b'; ctx.lineWidth = 8; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(22, -24); ctx.lineTo(44, -50 + Math.sin(frame * (happy ? 0.8 : 0.3)) * 8); ctx.stroke();   // wagging tail
+  if (happy) crowdArms(-40, 22, '#f4b942', true);
+  ellipse(0, -30, 30, 30, '#f4b942'); ellipse(0, -24, 18, 20, '#ffe0a3');
+  roundRect(-22, -10, 14, 10, 5, '#8d5a2b'); roundRect(8, -10, 14, 10, 5, '#8d5a2b');
+  ctx.fillStyle = '#e53935'; ctx.fillRect(-24, -62, 48, 8); circle(0, -52, 6, '#ffd740');
+  circle(0, -92, 32, '#f4b942');
+  ellipse(-30, -92, 11, 24, '#8d5a2b', 0.3); ellipse(30, -92, 11, 24, '#8d5a2b', -0.3);
+  ellipse(0, -76, 17, 13, '#ffe0a3'); ellipse(0, -84, 7, 5, '#222');
+  cheerFace(0, -100, 12, happy);
+  ctx.restore();
+}
+function drawWoof(x, feet, sc, hop, happy) {           // 🦸 Captain Woof: blue cape, gold star, red sneakers, goggles
+  ctx.save(); ctx.translate(x, feet - hop); ctx.scale(sc, sc);
+  const FUR = '#d9a066', DARK = '#a86b32', flap = Math.sin(frame * 0.3) * 5;
+  ctx.fillStyle = '#1e88e5'; ctx.beginPath(); ctx.moveTo(-18, -80); ctx.lineTo(18, -80);
+  ctx.quadraticCurveTo(42 + flap, -34, 38 + flap, -6); ctx.lineTo(-38 - flap, -6); ctx.quadraticCurveTo(-42 - flap, -34, -18, -80); ctx.fill();
+  roundRect(-16, -28, 12, 20, 4, DARK); roundRect(4, -28, 12, 20, 4, DARK);
+  for (const lx of [-21, 1]) { roundRect(lx, -12, 20, 12, 5, '#e53935'); ctx.fillStyle = '#fff'; ctx.fillRect(lx + 1, -4, 18, 3); }
+  roundRect(-20, -82, 40, 58, 14, FUR); ellipse(0, -50, 12, 16, '#f3d9b1');
+  drawStar(0, -60, 11, '#ffd600');
+  crowdArms(-70, 24, FUR, happy);
+  circle(0, -104, 26, FUR);
+  ellipse(-24, -100, 8, 18, '#7b4a1e', 0.35); ellipse(24, -100, 8, 18, '#7b4a1e', -0.35);
+  ctx.fillStyle = '#455a64'; ctx.fillRect(-22, -122, 44, 6); circle(-9, -119, 6, '#80deea'); circle(9, -119, 6, '#80deea');   // goggles on his head
+  ellipse(0, -92, 14, 10, '#f3d9b1'); ellipse(0, -97, 6, 4, '#212121');
+  cheerFace(0, -108, 10, happy);
+  ctx.restore();
+}
+function drawCrowd(beat, level, sadT) {
+  const happy = level >= 1 || cheer > 0, b = Math.abs(Math.sin(beat * Math.PI));
+  const hop = k => sadT > 0 ? 0 : level >= 2 ? b * (10 + k * 3) : cheer > 0 ? b * 6 : b * 2;
+  const x0 = HR + 110;
+  drawGloop(x0 - 52, 392, 0.62, hop(0), happy);
+  drawWoof(x0 + 56, 392, 0.62, hop(2), happy);
+  drawSparks(x0, 404, 0.6, hop(1), happy);
+  if (level >= 2 && !sadT) { text(['YAY!', 'GO ROBO!', 'WOOF!', 'WOW!'][Math.floor(beat / 4) % 4], x0, 250 - b * 6, 26, '#ffea00'); }
+}
+
+// ---------- 🔁 Update ----------
+const comboLevel = c => c >= 30 ? 3 : c >= 15 ? 2 : c >= 5 ? 1 : 0;
+function update() {
+  frame++;
+  schedule();
+  if (state === 'play' && game) {
+    const t = songTime(), win = game.d.win;
+    for (const n of game.notes) { if (n.t > t) break; if (!n.done && t - n.t > win[2]) judge(n, 3); }
+    if (t > game.endSong + 0.6 && game.notes.every(n => n.done)) finishSong();
+    if (game && game.gradeT > 0) game.gradeT--;
+  }
+  for (let i = 0; i < 4; i++) { if (flash[i] > 0) flash[i]--; if (hold[i] > 0) hold[i]--; }
+  if (wobble > 0) wobble--;
+  if (cheer > 0) cheer--;
+  if (stickerNew > 0) stickerNew--;
+  if (results) results.t++;
+  if (calib && calib.flash > 0) calib.flash--;
+  for (const p of parts) { p.x += p.vx; p.y += p.vy; p.vy += 0.2; p.life--; }
+  parts = parts.filter(p => p.life > 0);
+}
+function menuBeat() {
+  if (preview && actx) { const b = (clock() - preview.start) / (preview.T.step * 2); return isFinite(b) && b > 0 ? b : 0; }
+  return frame / 32;
+}
+
+// ---------- 🖼️ Draw ----------
+function drawBG(beat) {
+  const g = ctx.createLinearGradient(0, 0, 0, H); g.addColorStop(0, '#1a0b3d'); g.addColorStop(1, '#3a1060');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  const pulse = 1 - (beat % 1);
+  const cols = ['rgba(255,79,163,', 'rgba(64,196,255,', 'rgba(118,255,3,', 'rgba(255,179,0,'];
+  for (let i = 0; i < 4; i++) {                        // swinging spotlights
+    const a = Math.sin(beat * Math.PI / 2 + i * 1.7) * 0.5, x = 120 + i * 240;
+    ctx.fillStyle = cols[i] + (0.08 + pulse * 0.08) + ')';
+    ctx.beginPath(); ctx.moveTo(x, -10); ctx.lineTo(x + Math.sin(a) * 400 - 90, H); ctx.lineTo(x + Math.sin(a) * 400 + 90, H); ctx.closePath(); ctx.fill();
+  }
+  for (let i = 0; i < 40; i++) { const x = (i * 197) % W, y = (i * 71) % 300; circle(x, y, 1 + ((i + Math.floor(beat)) % 3 === 0 ? 1.5 : 0), 'rgba(255,255,255,.5)'); }
+}
+function drawStage(beat, level, wob) {
+  roundRect(8, 330, HL - 16, 56, 12, '#5d2a8a'); roundRect(8, 330, HL - 16, 10, 6, '#8e44ad');
+  for (let i = 0; i < 6; i++) circle(26 + i * 34, 360, 6, (Math.floor(beat) + i) % 2 ? '#ffea00' : '#ff4fa3');   // stage lights
+  if (level >= 3) {                                    // 🪩 disco ball
+    ctx.strokeStyle = '#ccc'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(HL / 2, 60); ctx.lineTo(HL / 2, 90); ctx.stroke();
+    circle(HL / 2, 108, 20, '#cfd8dc');
+    for (let i = 0; i < 8; i++) { const a = frame * 0.05 + i * 0.8; circle(HL / 2 + Math.cos(a) * 12, 108 + Math.sin(i * 1.3) * 12, 3, ['#fff', '#80deea', '#f48fb1'][i % 3]); }
+  }
+  drawRoboDancer(HL / 2, 334, 2.4, beat, level, wob);
+  const names = ['Groovin\'', 'Side Step!', 'JUMP JAM!', 'SUPER SPIN!'];
+  text(names[level], HL / 2, 310 - 150, 22, ['#fff', '#76ff03', '#40c4ff', '#ffea00'][level]);
+}
+function drawPads() {
+  for (let i = 0; i < 4; i++) {
+    let x = laneX(i) + 6, w = LANE_W - 12;
+    if (i === 0) { w += x - 10; x = 10; }
+    if (i === 3) w = W - 10 - x;
+    const on = hold[i] > 0;
+    roundRect(x, PAD_Y + (on ? 4 : 0), w, 96, 18, 'rgba(0,0,0,.4)');
+    roundRect(x, PAD_Y + (on ? 4 : 0), w, 92, 18, on ? LANE_COL[i] : 'rgba(255,255,255,.14)');
+    drawArrow(laneX(i) + LANE_W / 2, PAD_Y + 46 + (on ? 4 : 0), 26, i, on ? '#fff' : LANE_COL[i]);
+  }
+}
+function drawHighway(t, speed) {
+  roundRect(HL, 0, LANE_W * 4, PAD_Y - 6, 0, 'rgba(0,0,0,.38)');
+  for (let i = 0; i <= 4; i++) { ctx.fillStyle = 'rgba(255,255,255,.12)'; ctx.fillRect(laneX(i) - 1, 0, 2, PAD_Y - 6); }
+  const beatLen = game.T.step * 2;                     // a line for every beat, scrolling down
+  for (let b = Math.ceil(t / beatLen); b < Math.ceil(t / beatLen) + 10; b++) {
+    const y = HIT_Y - (b * beatLen - t) * speed; if (y < 0) break;
+    ctx.fillStyle = b % 4 === 0 ? 'rgba(255,255,255,.18)' : 'rgba(255,255,255,.06)'; ctx.fillRect(HL, y - 1, LANE_W * 4, b % 4 === 0 ? 3 : 2);
+  }
+  for (let i = 0; i < 4; i++) {                        // the hit line: arrow outlines that light up
+    const cx = laneX(i) + LANE_W / 2;
+    if (flash[i] > 0) circle(cx, HIT_Y, 34 + flash[i] * 2, 'rgba(255,255,255,' + flash[i] * 0.03 + ')');
+    drawArrow(cx, HIT_Y + 4, 34, i, flash[i] > 0 ? LANE_COL[i] : 'rgba(255,255,255,.12)', 'rgba(255,255,255,.8)');
+  }
+  for (const n of game.notes) {
+    if (n.done) continue;
+    const y = HIT_Y + 4 - (n.t - t) * speed;
+    if (y < -40) break;
+    if (y > PAD_Y + 20) continue;
+    drawArrow(laneX(n.lane) + LANE_W / 2, y, n.harmony ? 28 : 32, n.lane, LANE_COL[n.lane], n.harmony ? '#ffea00' : '#fff');
+  }
+}
+function drawPlay() {
+  const t = songTime(), beat = Math.max(0, t / (game.T.step * 2)), level = comboLevel(game.combo);
+  drawBG(beat);
+  drawStage(beat, level, wobble);
+  drawHighway(t, game.d.speed);
+  drawCrowd(beat, level, wobble);
+  drawPads();
+  for (const p of parts) circle(p.x, p.y, p.life / 6, p.col);
+  // top bar
+  text(game.T.icon + ' ' + game.T.name, 12, 34, 22, '#fff', 'left');
+  text(game.d.icon + ' ' + game.d.name, 12, 62, 20, game.d.col, 'left');
+  text('SCORE', HR + 110, 34, 18, '#b39ddb'); text(String(game.score), HR + 110, 66, 32, '#fff');
+  roundRect(W - 62, 10, 52, 44, 12, 'rgba(255,255,255,.2)'); text('✖', W - 36, 42, 26);
+  const prog = Math.max(0, Math.min(1, t / game.endSong));
+  roundRect(HL, 4, LANE_W * 4, 8, 4, 'rgba(255,255,255,.15)'); roundRect(HL, 4, LANE_W * 4 * prog, 8, 4, '#76ff03');
+  if (game.combo >= 3) { text(game.combo + ' COMBO', (HL + HR) / 2, 300, 34 + Math.min(16, game.combo / 3), ['#fff', '#76ff03', '#40c4ff', '#ffea00'][level]); }
+  if (game.gradeT > 0 && game.grade !== null) { const G = GRADES[game.grade]; text(G[0] + (game.grade === 0 ? '!' : ''), (HL + HR) / 2, 230 - (40 - game.gradeT) * 0.4, 46 + Math.max(0, game.gradeT - 32) * 2, G[1]); }
+  if (t < 0) {                                         // count-in
+    const left = Math.ceil(-t / (game.T.step * 2));
+    text(left > 3 ? 'Get ready!' : left > 0 ? String(left) : 'GO!', (HL + HR) / 2, 200, 70, '#ffea00');
+    text('Hit the arrows when they reach the line!', (HL + HR) / 2, 260, 22);
+  }
+}
+function starsStr(n) { return '★'.repeat(n) + '☆'.repeat(3 - n); }
+function drawTitle() {
+  const beat = menuBeat();
+  drawBG(beat);
+  const word = 'ROBO RHYTHM', cols = ['#ff4fa3', '#ffb300', '#ffea00', '#76ff03', '#40c4ff', '#b388ff'];
+  ctx.font = 'bold 76px "Trebuchet MS", Arial, sans-serif';
+  let x = W / 2 - ctx.measureText(word).width / 2;
+  for (let i = 0; i < word.length; i++) {
+    const ch = word[i]; ctx.font = 'bold 76px "Trebuchet MS", Arial, sans-serif'; const cw = ctx.measureText(ch).width;
+    text(ch, x + cw / 2, 100 - Math.abs(Math.sin(beat * Math.PI + i * 0.4)) * 14, 76, cols[i % cols.length]);
+    x += cw;
+  }
+  text('Dance to the songs from YOUR games!', W / 2, 150, 26, '#fff');
+  roundRect(W / 2 - 150, 330, 300, 30, 10, '#5d2a8a');
+  drawRoboDancer(W / 2, 334, 2.6, beat, Math.floor(beat / 8) % 4, 0);
+  drawGloop(150, 470, 0.7, Math.abs(Math.sin(beat * Math.PI)) * 10, true);
+  drawSparks(270, 480, 0.65, Math.abs(Math.sin(beat * Math.PI + 1)) * 10, true);
+  drawWoof(800, 470, 0.7, Math.abs(Math.sin(beat * Math.PI + 2)) * 10, true);
+  for (let i = 0; i < 4; i++) drawArrow(W / 2 - 135 + i * 90, 405, 26, i, LANE_COL[i]);
+  if (frame % 60 < 42) text('Press SPACE or TAP to start!', W / 2, 475, 32, '#ffea00');
+  text('Arrow keys (or tap the 4 lanes) to hit the arrows', W / 2, 508, 18, '#e1bee7');
+  if (stickerNew > 0) { roundRect(W / 2 - 170, 230, 340, 48, 16, 'rgba(80,0,90,.75)'); text('⭐ NEW STICKER! ⭐', W / 2, 265, 30, '#ffea00'); }
+}
+function drawSongs() {
+  const beat = menuBeat(), bs = songButtons();
+  drawBG(beat);
+  text('🎵 Pick a song! 🎵', W / 2, 46, 36, '#ffea00');
+  DIFFS.forEach((d, i) => button(bs[i], d.icon + ' ' + d.name, i === diff ? d.col : 'rgba(255,255,255,.15)', 24, i === diff));
+  SONGS.forEach((s, i) => {
+    const b = bs[3 + i], on = i === sel, best = save.best[bestKey(i, diff)];
+    button(b, '', on ? '#7e57c2' : 'rgba(255,255,255,.12)', 22, on);
+    text(s.icon + ' ' + s.name, b[0] + 16, b[1] + 35, 24, '#fff', 'left');
+    text(best ? starsStr(best.stars) : '☆☆☆', b[0] + b[2] - 14, b[1] + 35, 24, best ? '#ffea00' : 'rgba(255,255,255,.35)', 'right');
+  });
+  const best = save.best[bestKey(sel, diff)];
+  button(bs[13], '▶ PLAY!', '#43a047', 34);
+  button(bs[14], '🥁 Tap Timing', '#5c6bc0', 22);
+  button(bs[15], '↩ Back', '#8e24aa', 22);
+  text(best ? 'Best: ' + best.score : 'Not played yet!', W / 2, 432, 18, '#e1bee7');
+  text('Arrows = pick   SPACE = play   X = change level', W / 2, 516, 15, '#b39ddb');
+}
+function drawResults() {
+  const R = results, beat = frame / 30;
+  drawBG(beat);
+  text(R.song.icon + ' ' + R.song.name + '  ' + R.d.icon + ' ' + R.d.name, W / 2, 50, 30, '#fff');
+  text('SONG COMPLETE!', W / 2, 96, 40, '#ffea00');
+  for (let i = 0; i < 3; i++) {
+    const show = R.t > 30 + i * 25, got = i < R.stars, pop = show ? Math.min(1, (R.t - 30 - i * 25) / 10) : 0;
+    if (show && R.t === 31 + i * 25 && got) sfx.star(i);
+    drawStar(W / 2 - 110 + i * 110, 170, 44 * (got ? (0.6 + pop * 0.4) : 0.8), got && show ? '#ffd600' : 'rgba(255,255,255,.18)', 0);
+  }
+  text('Score: ' + R.score, W / 2, 260, 34);
+  if (R.newBest) text('🎉 NEW BEST! 🎉', W / 2, 296, 26, '#76ff03'); else text('Best: ' + R.best, W / 2, 296, 22, '#e1bee7');
+  GRADES.forEach((G, i) => text(G[0] + ' ' + R.counts[i], 220 + i * 175, 344, 24, G[1]));
+  text('Biggest combo: ' + R.maxCombo, W / 2, 384, 22, '#fff');
+  drawRoboDancer(110, 380, 2.2, beat, R.stars, 0);
+  drawSparks(860, 400, 0.7, Math.abs(Math.sin(beat * Math.PI)) * 12, true);
+  const rb = resultButtons();
+  button(rb[0], '🔁 Again (SPACE)', '#43a047', 24); button(rb[1], '🎵 Songs (ENTER)', '#7e57c2', 24);
+  if (R.stars === 3 && R.d.name === 'Normal') text('🏆 Rhythm Star trophy!', W / 2, 420, 22, '#ffd600');
+  if (stickerNew > 0) text('⭐ NEW STICKER: Dancing Robo! ⭐', W / 2, 20 + 4, 18, '#ffea00');
+}
+function drawCalib() {
+  const beat = calib ? Math.max(0, (clock() - calib.start) / calib.beat) : 0;
+  drawBG(beat);
+  text('🥁 Tap to the Beat', W / 2, 60, 40, '#ffea00');
+  text('Tap SPACE (or tap the screen) on every BEEP!', W / 2, 104, 24);
+  const p = 1 - (beat % 1);
+  circle(W / 2, 230, 50 + p * 30, 'rgba(255,79,163,' + (0.3 + p * 0.5) + ')');
+  circle(W / 2, 230, 44, calib && calib.flash > 0 ? '#ffea00' : '#ff4fa3');
+  drawRoboDancer(180, 300, 2, beat, 0, 0);
+  const ms = Math.round((calib ? calib.avg : save.offset) * 1000);
+  text('Taps: ' + (calib ? calib.taps.length : 0) + '   Sound delay: ' + (ms >= 0 ? '+' : '') + ms + ' ms', W / 2, 350, 26);
+  text(calib && calib.taps.length >= 3 ? 'Press ENTER or tap SAVE when you\'re done!' : 'Tap at least 3 times...', W / 2, 390, 20, '#e1bee7');
+  const cb = calibButtons();
+  button(cb[0], '✅ SAVE', '#43a047', 26); button(cb[1], '0 Reset', '#ef6c00', 26); button(cb[2], '↩ Back', '#8e24aa', 22);
+}
+function draw() {
+  ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.globalAlpha = 1;
+  if (state === 'play' && game) drawPlay();
+  else if (state === 'songs') drawSongs();
+  else if (state === 'results' && results) drawResults();
+  else if (state === 'calib') drawCalib();
+  else drawTitle();
+}
+let lastTS = 0;
+function loop(ts) {
+  const dt = lastTS ? Math.min(0.1, (ts - lastTS) / 1000) : 1 / 60; lastTS = ts;
+  if (isFinite(dt)) fakeT += dt;
+  update(); draw();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+<!-- injected by scripts/inject-factory.py — hold PS (or SELECT+START) for 1s to go
+     up one level: game -> the book (parent.closeGame), standalone game -> /factory/,
+     the book -> Stephens Arcade (/). Shares one rAF pad poll with the cursor + idle overlays. -->
+<script id="__gf_pad_exit">
+(function () {
+  var IS_BOOK = false; /*@gf:is_book*/
+  var HOLD_MS = 1000;
+  // one rAF loop per page reads the pads for every __gf overlay
+  var hub = window.__gfHub;
+  if (!hub) {
+    hub = window.__gfHub = { fns: [], pads: [] };
+    (function () {
+      var NONE = [];
+      function loop(now) {
+        var p = null;
+        try { p = navigator.getGamepads ? navigator.getGamepads() : null; } catch (e) {}
+        hub.pads = p || NONE;
+        for (var i = 0; i < hub.fns.length; i++) { try { hub.fns[i](now, hub.pads); } catch (e) {} }
+        requestAnimationFrame(loop);
+      }
+      requestAnimationFrame(loop);
+    })();
+  }
+
+  var STEPS = 20, TF = [];               // precomputed badge transforms: zero allocations while held
+  for (var s = 0; s <= STEPS; s++) TF.push('translateX(-50%) scale(' + (1 + 0.35 * s / STEPS).toFixed(4) + ')');
+  var HIDE_TF = 'translateX(-50%) scale(0.85)';
+  var heldSince = 0, needRelease = true, leaving = false, badge = null, lastStep = -2;
+  var player = null;
+
+  function comboDown(pads) {
+    for (var i = 0; i < pads.length; i++) {
+      var gp = pads[i];
+      if (!gp || gp.connected === false) continue;
+      var b = gp.buttons;
+      if ((b[16] && b[16].pressed) || (b[8] && b[8].pressed && b[9] && b[9].pressed)) return true;
+    }
+    return false;
+  }
+  function makeBadge() {
+    badge = document.createElement('div');
+    badge.id = '__gfx_exit';
+    badge.textContent = IS_BOOK ? '◄ ARCADE' : '◄ BOOK';
+    badge.style.cssText = 'position:fixed;top:12px;left:50%;z-index:2147483001;pointer-events:none;' +
+      'padding:7px 18px;border-radius:999px;background:#10172a;color:#ffd23f;border:3px solid #ffd23f;' +
+      'font:bold 18px/1 "Trebuchet MS","Arial Rounded MT Bold",sans-serif;letter-spacing:1px;white-space:nowrap;' +
+      'transform-origin:50% 0;opacity:0;transform:' + HIDE_TF + ';transition:opacity .12s;';
+    (document.body || document.documentElement).appendChild(badge);
+  }
+  function setBadge(step) {            // step -1 = hidden, 0..STEPS = hold progress
+    if (step === lastStep) return;
+    lastStep = step;
+    if (step < 0) { if (badge) { badge.style.opacity = '0'; badge.style.transform = HIDE_TF; } return; }
+    if (!badge) makeBadge();
+    badge.style.opacity = '1';
+    badge.style.transform = TF[step];
+  }
+  function inGame() {
+    try { return window.parent !== window && typeof window.parent.closeGame === 'function'; } catch (e) { return false; }
+  }
+  function leave() {
+    leaving = true;                    // never navigate twice
+    if (!IS_BOOK && inGame()) { setBadge(-1); try { window.parent.closeGame(); } catch (e) {} return; }
+    location.href = IS_BOOK ? '/' : '/factory/';
+  }
+  hub.fns.push(function (now, pads) {
+    if (leaving) return;
+    var down = comboDown(pads);
+    if (IS_BOOK) {
+      if (!player) player = document.getElementById('player');
+      if (player && player.classList.contains('open')) {   // the game's own overlay handles this hold
+        if (down) needRelease = true;
+        heldSince = 0; setBadge(-1); return;
+      }
+    }
+    if (needRelease) {                 // a hold that started elsewhere never counts here
+      if (down) return;
+      needRelease = false;
+    }
+    if (!down) { heldSince = 0; setBadge(-1); return; }
+    if (!heldSince) heldSince = now;
+    var p = (now - heldSince) / HOLD_MS;
+    setBadge(Math.round((p > 1 ? 1 : p) * STEPS));
+    if (p >= 1) leave();
+  });
+})();
+</script>
+<!-- injected by scripts/inject-factory.py — console (low-fx) mode only: no-op canvas
+     shadowBlur and kill CSS backdrop-filter (both measured fps killers on the Pi).
+     The mouse cursor is hidden only while the pad cursor is installed. -->
+<script id="__gf_lowfx">
+(function () {
+  var on = false;
+  try {
+    if (/[?&]fx=low\b/.test(location.search)) { on = true; localStorage.setItem('arcade_lowfx', '1'); }
+    else if (/[?&]fx=full\b/.test(location.search)) { localStorage.setItem('arcade_lowfx', '0'); }
+    else { on = localStorage.getItem('arcade_lowfx') === '1'; }
+  } catch (e) {}
+  if (!on) return;
+  try {
+    Object.defineProperty(CanvasRenderingContext2D.prototype, 'shadowBlur', {
+      set: function () {}, get: function () { return 0; }, configurable: true
+    });
+  } catch (e) {}
+  try {
+    var st = document.createElement('style');
+    st.textContent = '* { backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }' +
+      ' html.__gfx_padcursor, html.__gfx_padcursor * { cursor: none !important; }';
+    (document.head || document.documentElement).appendChild(st);
+  } catch (e) {}
+})();
+</script>
+<!-- injected by scripts/inject-factory.py — console mode only: the TV has no printer,
+     so window.print shows a friendly toast instead of a dead print dialog. -->
+<script id="__gf_print">
+(function () {
+  var on = false;
+  try { on = /[?&]fx=low\b/.test(location.search) || localStorage.getItem('arcade_lowfx') === '1'; } catch (e) {}
+  if (!on) return;
+  var toast = null, timer = 0;
+  function hide() { if (toast) toast.style.opacity = '0'; }
+  window.print = function () {
+    try {
+      if (!toast) {
+        toast = document.createElement('div');
+        toast.id = '__gfx_print';
+        toast.textContent = '🖨️ Printing works on the iPad — not on the TV!';
+        toast.style.cssText = 'position:fixed;left:50%;bottom:48px;transform:translateX(-50%);z-index:2147483001;' +
+          'pointer-events:none;padding:14px 26px;border-radius:16px;background:#10172a;color:#ffd23f;' +
+          'border:3px solid #ffd23f;font:bold 24px/1.2 "Trebuchet MS","Arial Rounded MT Bold",sans-serif;' +
+          'white-space:nowrap;opacity:0;transition:opacity .2s;';
+        (document.body || document.documentElement).appendChild(toast);
+      }
+      toast.style.opacity = '1';
+      clearTimeout(timer);
+      timer = setTimeout(hide, 2500);
+    } catch (e) {}
+  };
+})();
+</script>
+<!-- injected by scripts/inject-factory.py — pad cursor: a pad-driven mouse pointer so
+     tap/click-only games play on the console. Right stick moves it (left stick too in
+     pointer games); X / R1 clicks and drags (pointer + mouse events, like touchpad.js
+     turns fingers into mouse events). Never consumes pad input. -->
+<script id="__gf_cursor">
+(function () {
+  window.__GF_CURSOR_LEFT = true; /*@gf:cursor_left*/
+  var IS_BOOK = false; /*@gf:is_book*/
+  var LEFT = window.__GF_CURSOR_LEFT === true;
+  var DZ = 0.2, SPEED = 900, SLEEP_MS = 4000, CLICK_SLOP = 12;
+  // one rAF loop per page reads the pads for every __gf overlay
+  var hub = window.__gfHub;
+  if (!hub) {
+    hub = window.__gfHub = { fns: [], pads: [] };
+    (function () {
+      var NONE = [];
+      function loop(now) {
+        var p = null;
+        try { p = navigator.getGamepads ? navigator.getGamepads() : null; } catch (e) {}
+        hub.pads = p || NONE;
+        for (var i = 0; i < hub.fns.length; i++) { try { hub.fns[i](now, hub.pads); } catch (e) {} }
+        requestAnimationFrame(loop);
+      }
+      requestAnimationFrame(loop);
+    })();
+  }
+
+  var S = window.__gfCursorState = { installed: false, awake: false, held: false, x: 0, y: 0 };
+  var el = null, x = 0, y = 0, awake = false, lastMove = 0, lastT = 0;
+  var held = false, target = null, sx = 0, sy = 0, prevBtn = false, vx = 0, vy = 0, player = null;
+  var INIT = { bubbles: true, cancelable: true, composed: true, view: window, detail: 0,
+    clientX: 0, clientY: 0, screenX: 0, screenY: 0, button: 0, buttons: 0,
+    pointerId: 1, pointerType: 'mouse', isPrimary: true, width: 1, height: 1, pressure: 0 };
+  var HAS_PE = typeof window.PointerEvent === 'function';
+
+  function install() {
+    if (S.installed) return;
+    S.installed = true;
+    x = Math.round((window.innerWidth || 1280) / 2); y = Math.round((window.innerHeight || 720) / 2);
+    el = document.createElement('div');
+    el.id = '__gfx_cursor';
+    el.style.cssText = 'position:fixed;left:0;top:0;width:28px;height:28px;pointer-events:none;z-index:2147483000;' +
+      'opacity:0;transition:opacity .25s;will-change:transform;';
+    el.innerHTML = '<svg width="28" height="28" viewBox="0 0 28 28" style="display:block;overflow:visible">' +
+      '<path d="M3 2 L3 23.5 L8.6 18.3 L12.6 26.6 L17 24.5 L13 16.4 L20.8 16.4 Z" fill="#fff" stroke="#10172a" ' +
+      'stroke-width="2.2" stroke-linejoin="round"/></svg>';
+    (document.body || document.documentElement).appendChild(el);
+    try { document.documentElement.classList.add('__gfx_padcursor'); } catch (e) {}
+    place();
+  }
+  function place() {
+    el.style.transform = 'translate3d(' + (x - 3) + 'px,' + (y - 2) + 'px,0)';
+    S.x = x; S.y = y;
+  }
+  function wake() { awake = S.awake = true; el.style.opacity = '1'; }
+  function sleep() { awake = S.awake = false; el.style.opacity = '0'; }
+  function fire(type, node, buttons, pointer) {
+    if (!node) return;
+    INIT.clientX = x; INIT.clientY = y;
+    INIT.screenX = (window.screenX || 0) + x; INIT.screenY = (window.screenY || 0) + y;
+    INIT.buttons = buttons; INIT.pressure = buttons ? 0.5 : 0;
+    INIT.detail = type === 'click' ? 1 : 0;
+    var ev;
+    try { ev = pointer && HAS_PE ? new PointerEvent(type, INIT) : new MouseEvent(type, INIT); } catch (e) { return; }
+    try { node.dispatchEvent(ev); } catch (e) {}
+  }
+  function at() { return document.elementFromPoint(x, y) || document.body || document.documentElement; }
+  function press(now) {
+    target = at(); held = S.held = true; sx = x; sy = y; lastMove = now;
+    fire('pointermove', target, 0, true); fire('mousemove', target, 0, false);
+    fire('pointerdown', target, 1, true); fire('mousedown', target, 1, false);
+  }
+  function release(clickOk) {
+    var t = target;
+    held = S.held = false; target = null;
+    fire('pointerup', t, 0, true); fire('mouseup', t, 0, false);
+    if (clickOk) { var dx = x - sx, dy = y - sy; if (dx * dx + dy * dy < CLICK_SLOP * CLICK_SLOP) fire('click', t, 0, false); }
+  }
+  function stick(ax, ay) {
+    ax = +ax || 0; ay = +ay || 0;
+    var m = Math.sqrt(ax * ax + ay * ay);
+    if (m <= DZ) return;
+    var e = ((m > 1 ? 1 : m) - DZ) / (1 - DZ);
+    e = e * e * SPEED / m;              // mild ease: squared magnitude, ~900 px/s at full tilt
+    vx += ax * e; vy += ay * e;
+  }
+
+  window.addEventListener('gamepadconnected', install);
+  hub.fns.push(function (now, pads) {
+    var i, p, a, b, btn = false;
+    if (!S.installed) {
+      for (i = 0; i < pads.length; i++) { p = pads[i]; if (p && p.mapping === 'standard') { install(); break; } }
+      if (!S.installed) return;
+    }
+    var dt = lastT ? (now - lastT) / 1000 : 0;
+    if (dt > 0.05) dt = 0.05;
+    lastT = now;
+    vx = 0; vy = 0;
+    for (i = 0; i < pads.length; i++) {
+      p = pads[i];
+      if (!p || p.connected === false) continue;
+      a = p.axes; b = p.buttons;
+      if (a) { stick(a[2], a[3]); if (LEFT) stick(a[0], a[1]); }
+      if ((b[0] && b[0].pressed) || (b[5] && b[5].pressed)) btn = true;
+    }
+    if (IS_BOOK) {                      // the book: asleep and silent while a game is open
+      if (!player) player = document.getElementById('player');
+      if (player && player.classList.contains('open')) {
+        if (held) release(false);
+        if (awake) sleep();
+        prevBtn = btn; return;
+      }
+    }
+    if (vx !== 0 || vy !== 0) {
+      var w = window.innerWidth || 1280, h = window.innerHeight || 720;
+      x += vx * dt; y += vy * dt;
+      if (x < 0) x = 0; else if (x > w - 1) x = w - 1;
+      if (y < 0) y = 0; else if (y > h - 1) y = h - 1;
+      lastMove = now;
+      if (!awake) wake();
+      place();
+      if (held) { fire('pointermove', target, 1, true); fire('mousemove', target, 1, false); }
+      else { var t = at(); fire('pointermove', t, 0, true); fire('mousemove', t, 0, false); }
+    } else if (awake && !held && now - lastMove > SLEEP_MS) {
+      sleep();
+    }
+    if (btn && !prevBtn) { if (awake) press(now); }
+    else if (!btn && prevBtn) { if (held) release(true); }
+    if (held) lastMove = now;
+    prevBtn = btn;
+  });
+})();
+</script>
+<!-- injected by scripts/inject-factory.py — after 15 idle minutes (no pad / keyboard /
+     pointer / touch input): a game closes back to the book, anything else returns to
+     Stephens Arcade. Test override: ?idle=<seconds>. -->
+<script id="__gf_idle">
+(function () {
+  var IS_BOOK = false; /*@gf:is_book*/
+  var qs = null;
+  try { qs = new URLSearchParams(location.search).get('idle'); } catch (e) {}
+  var IDLE_MS = (qs ? Math.max(10, parseFloat(qs) || 900) : 15 * 60) * 1000;
+  var DEADZONE = 0.25;
+  // one rAF loop per page reads the pads for every __gf overlay
+  var hub = window.__gfHub;
+  if (!hub) {
+    hub = window.__gfHub = { fns: [], pads: [] };
+    (function () {
+      var NONE = [];
+      function loop(now) {
+        var p = null;
+        try { p = navigator.getGamepads ? navigator.getGamepads() : null; } catch (e) {}
+        hub.pads = p || NONE;
+        for (var i = 0; i < hub.fns.length; i++) { try { hub.fns[i](now, hub.pads); } catch (e) {} }
+        requestAnimationFrame(loop);
+      }
+      requestAnimationFrame(loop);
+    })();
+  }
+  var last = performance.now(), leaving = false, player = null;
+  function bump() { last = performance.now(); }
+  window.addEventListener('keydown', bump, { capture: true });
+  window.addEventListener('pointerdown', bump, { capture: true });
+  window.addEventListener('touchstart', bump, { capture: true, passive: true });
+  function padActive(pads) {
+    for (var i = 0; i < pads.length; i++) {
+      var gp = pads[i];
+      if (!gp || gp.connected === false) continue;
+      for (var b = 0; b < gp.buttons.length; b++) if (gp.buttons[b].pressed) return true;
+      for (var a = 0; a < gp.axes.length; a++) if (Math.abs(gp.axes[a]) > DEADZONE) return true;
+    }
+    return false;
+  }
+  hub.fns.push(function (now, pads) {
+    if (leaving) return;
+    if (IS_BOOK) {                     // while a game is open its own overlay owns the idle timer
+      if (!player) player = document.getElementById('player');
+      if (player && player.classList.contains('open')) { last = now; return; }
+    }
+    if (padActive(pads)) last = now;
+    if (now - last < IDLE_MS) return;
+    leaving = true;
+    var g = false;
+    try { g = window.parent !== window && typeof window.parent.closeGame === 'function'; } catch (e) {}
+    if (g) { try { window.parent.closeGame(); } catch (e) {} }
+    else location.href = '/';          // pagehide fires -> games persist their state
+  });
+})();
+</script>

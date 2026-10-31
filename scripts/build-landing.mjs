@@ -16,7 +16,7 @@ const CHROME = process.env.CHROME || '/Applications/Google Chrome.app/Contents/M
 const HTTP_PORT = 8932, CDP_PORT = 9332;
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-const games = JSON.parse(fs.readFileSync(path.join(ROOT, 'games.json'), 'utf8'));
+const games = JSON.parse(fs.readFileSync(path.join(ROOT, 'games.json'), 'utf8')).filter(g => g.source);   // link-only cards have no bundle/landing
 const landing = JSON.parse(fs.readFileSync(path.join(ROOT, 'site', 'landing.json'), 'utf8'));
 const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 

@@ -67,6 +67,8 @@ def validate(data: bytes, existing: int):
 
 ok, skipped = [], []
 for g in games:
+    if "source" not in g:   # link-only card (e.g. GAME FACTORY → /factory/), nothing to fetch
+        continue
     slug, src = g["slug"], g["source"]
     out = pathlib.Path(f"games/{slug}/index.html")
     out.parent.mkdir(parents=True, exist_ok=True)

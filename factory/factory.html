@@ -1,0 +1,1035 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Inside the Game Factory</title>
+<!-- injected by scripts/inject-factory.py (HEAD, before touchpad.js) — hide phantom
+     DualShock sub-devices ("... Motion Sensors", "... Touchpad") and, when a
+     standard-mapping pad exists, every non-standard device. Original indices
+     are kept (filtered slots read null), exactly like lib/controller.js. -->
+<script id="__gf_padfilter">
+(function () {
+  var nav = window.navigator;
+  if (!nav || typeof nav.getGamepads !== 'function' || nav.__gfPadFilter) return;
+  var orig = nav.getGamepads;
+  var PHANTOM = /motion sensors|touchpad/i;
+  var out = [];                       // reused every call: no per-frame allocation
+  function filtered() {
+    var src = orig.call(nav);
+    if (!src) return src;
+    var n = src.length, anyStd = false, i, p;
+    for (i = 0; i < n; i++) { p = src[i]; if (p && p.mapping === 'standard') anyStd = true; }
+    out.length = n;
+    for (i = 0; i < n; i++) {
+      p = src[i];
+      out[i] = (!p || PHANTOM.test(p.id || '') || (anyStd && p.mapping !== 'standard')) ? null : p;
+    }
+    return out;
+  }
+  try { nav.getGamepads = filtered; } catch (e) {}
+  if (nav.getGamepads !== filtered) {
+    try { Object.defineProperty(nav, 'getGamepads', { value: filtered, configurable: true, writable: true }); } catch (e) {}
+  }
+  try { nav.__gfPadFilter = true; } catch (e) {}
+})();
+</script>
+<script src="touchpad.js?v=2"></script>
+<style>
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: #1a1230; display: flex;
+    align-items: center; justify-content: center; overflow: hidden;
+    touch-action: manipulation; -webkit-user-select: none; user-select: none;
+  }
+  canvas {
+    width: min(100vw, calc(100vh * 960 / 520));
+    height: auto; display: block; border-radius: 12px;
+    box-shadow: 0 10px 40px rgba(0,0,0,.5);
+  }
+</style>
+<canvas id="game" width="960" height="520"></canvas>
+<script>
+// INSIDE THE GAME FACTORY: the secret room in the Game Factory book.
+// Orders come in, tap the part machines (or press 1-4) in the right order, the assembler builds it, and it ships!
+function trophy(id) { try { const t = JSON.parse(localStorage.getItem('gfTrophies') || '{}'); t[id] = 1; localStorage.setItem('gfTrophies', JSON.stringify(t)); } catch (_) {} }   // for the Trophy Room in the Game Factory book
+const C = document.getElementById('game'), ctx = C.getContext('2d');
+const W = 960, H = 520;
+const SHIFT_FRAMES = 150 * 60;                 // a shift is 2 and a half minutes
+const STAR_AT = [3, 6, 10];                    // products shipped for 1, 2, 3 stars
+const BELT_Y = 384, BELT_X0 = 30, BELT_X1 = 776, ASM_X = 832, DOOR_X = 900;
+const MACH_X = [112, 270, 428, 586], MACH_Y = 150, MACH_W = 132, MACH_H = 176;
+let best = 0;
+try { best = (JSON.parse(localStorage.getItem('factoryFloor') || '{}') || {}).best || 0; } catch (_) {}
+function saveBest() { try { localStorage.setItem('factoryFloor', JSON.stringify({ best })); } catch (_) {} }
+
+// ---------- Little drawing helpers ----------
+function rr(x, y, w, h, r, col) {
+  ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+  if (col) { ctx.fillStyle = col; ctx.fill(); }
+}
+function circ(x, y, r, col) { ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); if (col) { ctx.fillStyle = col; ctx.fill(); } }
+function text(s, x, y, size, col, align = 'center', stroke = null) {
+  ctx.font = `bold ${size}px "Trebuchet MS", "Arial Rounded MT Bold", sans-serif`;
+  ctx.textAlign = align; ctx.textBaseline = 'middle';
+  if (stroke) { ctx.lineWidth = Math.max(3, size / 6); ctx.strokeStyle = stroke; ctx.lineJoin = 'round'; ctx.strokeText(s, x, y); }
+  ctx.fillStyle = col; ctx.fillText(s, x, y);
+}
+function gear(x, y, r, teeth, ang, col) {
+  ctx.save(); ctx.translate(x, y); ctx.rotate(ang); ctx.fillStyle = col; ctx.beginPath();
+  for (let i = 0; i < teeth * 2; i++) {
+    const a = i * Math.PI / teeth, rad = i % 2 ? r : r * 1.22;
+    ctx.lineTo(Math.cos(a - 0.18) * rad, Math.sin(a - 0.18) * rad); ctx.lineTo(Math.cos(a + 0.18) * rad, Math.sin(a + 0.18) * rad);
+  }
+  ctx.closePath(); ctx.fill(); circ(0, 0, r * 0.35, 'rgba(0,0,0,.35)'); ctx.restore();
+}
+
+// ---------- Sound ----------
+let actx = null;
+function wakeAudio() { if (!actx) { try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch (_) {} } if (actx && actx.state === 'suspended') actx.resume(); }
+function note(freq, start, dur, wave = 'square', vol = 0.1, slideTo = null) {
+  if (!actx) return;
+  const t = actx.currentTime + start;
+  const o = actx.createOscillator(), g = actx.createGain();
+  o.type = wave; o.frequency.setValueAtTime(freq, t);
+  if (slideTo) o.frequency.exponentialRampToValueAtTime(slideTo, t + dur);
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g); g.connect(actx.destination); o.start(t); o.stop(t + dur);
+}
+const sfx = {
+  clank:  () => { note(180, 0, 0.08, 'square', 0.09, 90); note(1400, 0, 0.04, 'square', 0.03, 700); },
+  stamp:  () => { note(120, 0, 0.12, 'triangle', 0.2, 50); note(900, 0.02, 0.05, 'square', 0.04); },
+  plop:   () => note(500, 0, 0.1, 'sine', 0.14, 200),
+  click:  () => note(800, 0, 0.05, 'sine', 0.12),
+  good:   () => { note(880, 0, 0.08, 'square', 0.06); note(1175, 0.07, 0.12, 'square', 0.06); },
+  ding:   () => { note(1568, 0, 0.6, 'sine', 0.16); note(2093, 0.12, 0.7, 'sine', 0.12); note(1047, 0, 0.3, 'triangle', 0.1); },
+  bzzt:   () => { note(110, 0, 0.35, 'sawtooth', 0.09, 70); note(150, 0.05, 0.3, 'square', 0.05, 90); },
+  trash:  () => { for (let i = 0; i < 5; i++) note(500 - i * 70, i * 0.05, 0.08, 'triangle', 0.1); },
+  whirr:  () => note(200, 0, 0.35, 'sawtooth', 0.04, 600),
+  steam:  () => note(3000, 0, 0.12, 'triangle', 0.015, 1500),
+  order:  () => { note(660, 0, 0.08, 'square', 0.05); note(990, 0.1, 0.1, 'square', 0.05); },
+  oops:   () => { note(400, 0, 0.18, 'triangle', 0.1, 250); note(300, 0.18, 0.25, 'triangle', 0.1, 180); },
+  whistle: () => { note(1200, 0, 0.5, 'square', 0.05, 1300); note(900, 0.55, 0.5, 'square', 0.05, 950); },
+  win:    () => [523, 659, 784, 1047, 784, 1047, 1319].forEach((f, i) => note(f, i * 0.12, 0.22, 'square', 0.08)),
+};
+
+// ---------- Music: "Conveyor Belt Boogie" (a brand new bouncy factory song) ----------
+let musicOn = true, nextNoteTime = 0, step = 0;
+const MUSIC_BPM = 144;
+const MELODY = [
+  65,0,69,72, 0,72,70,69, 67,0,70,0, 74,0,72,0,   65,0,69,72, 0,77,76,74, 72,0,0,70, 69,0,0,0,
+  70,0,74,77, 0,77,76,74, 72,0,69,0, 72,0,77,0,   76,74,72,70, 69,0,67,0, 65,0,72,0, 65,0,0,0,
+];
+const CHORDS = [53, 58, 60, 53];                             // F, Bb, C, F (one chord per 16 eighth notes)
+const BASS = CHORDS.flatMap(r => [r - 12, 0, r, 0, r - 12, r - 12, r + 7, 0, r - 12, 0, r, 0, r - 12, 0, r + 7, r + 4]);
+const midi = n => 440 * Math.pow(2, (n - 69) / 12);
+function playMusic() {
+  if (!actx || !musicOn) return;
+  const stepDur = 60 / MUSIC_BPM / 2;
+  if (nextNoteTime < actx.currentTime) nextNoteTime = actx.currentTime + 0.05;
+  while (nextNoteTime < actx.currentTime + 0.2) {
+    const t = nextNoteTime - actx.currentTime;
+    const m = MELODY[step % MELODY.length], b = BASS[step % BASS.length];
+    if (m) note(midi(m), t, stepDur * 0.9, 'square', 0.045);
+    if (b) note(midi(b), t, stepDur * 0.8, 'triangle', 0.1);
+    if (step % 4 === 2) note(2400, t, 0.03, 'square', 0.012, 1800);   // clanky hi-hat
+    if (step % 8 === 0) note(140, t, 0.1, 'triangle', 0.14, 60);     // thump
+    nextNoteTime += stepDur; step++;
+  }
+}
+
+// ---------- Parts and products (every part is drawn with shapes, in the style of the real characters) ----------
+// Each part is drawn in "product space": (0,0) is the middle of the product's feet, up is negative y.
+const PARTS = {
+  // --- Robo ---
+  rhead: { name: 'ROBO HEAD', cy: -70, draw() {
+    ctx.strokeStyle = '#90a4ae'; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(0, -88); ctx.lineTo(0, -100); ctx.stroke();
+    circ(0, -102, 5, frame % 40 < 20 ? '#ff5252' : '#ff8a80');
+    circ(0, -70, 21, '#f5f7fa'); ctx.lineWidth = 3; ctx.strokeStyle = '#b0bec5'; ctx.stroke();
+    rr(-15, -78, 30, 15, 7, '#263238');
+    circ(-7, -71, 4, '#40c4ff'); circ(7, -71, 4, '#40c4ff');
+    circ(-21, -70, 4, '#90a4ae'); circ(21, -70, 4, '#90a4ae');
+  } },
+  rbody: { name: 'ROBO BODY', cy: -32, draw() {
+    rr(-30, -44, 10, 22, 5, '#b0bec5'); rr(20, -44, 10, 22, 5, '#b0bec5');           // arms
+    rr(-20, -50, 40, 36, 8, '#eceff1'); ctx.lineWidth = 3; ctx.strokeStyle = '#b0bec5'; ctx.stroke();
+    const glow = 0.5 + 0.5 * Math.sin(frame * 0.15);
+    circ(0, -32, 11, `rgba(64,196,255,${0.25 + glow * 0.3})`); circ(0, -32, 7, '#29b6f6'); circ(-2, -34, 2.5, '#e1f5fe');
+  } },
+  rboots: { name: 'JET BOOTS', cy: -8, draw() {
+    for (const s of [-1, 1]) {
+      const fl = 6 + Math.sin(frame * 0.8 + s) * 3;
+      ctx.fillStyle = '#ffab40'; ctx.beginPath(); ctx.moveTo(s * 10 - 6, 0); ctx.lineTo(s * 10, fl + 4); ctx.lineTo(s * 10 + 6, 0); ctx.fill();
+      ctx.fillStyle = '#ffee58'; ctx.beginPath(); ctx.moveTo(s * 10 - 3, 0); ctx.lineTo(s * 10, fl); ctx.lineTo(s * 10 + 3, 0); ctx.fill();
+      rr(s * 10 - 9, -15, 18, 15, 5, '#546e7a'); rr(s * 10 - 9, -15, 18, 5, 3, '#78909c');
+    }
+  } },
+  // --- Kart ---
+  wheels: { name: 'WHEELS', cy: -12, draw() {
+    rr(-34, -15, 68, 5, 2, '#424242');
+    for (const s of [-1, 1]) {
+      circ(s * 30, -12, 13, '#212121'); circ(s * 30, -12, 6, '#bdbdbd');
+      const a = frame * 0.2; ctx.strokeStyle = '#757575'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(s * 30 + Math.cos(a) * 10, -12 + Math.sin(a) * 10); ctx.lineTo(s * 30 - Math.cos(a) * 10, -12 - Math.sin(a) * 10); ctx.stroke();
+    }
+  } },
+  kbody: { name: 'KART BODY', cy: -24, draw() {
+    ctx.fillStyle = '#e53935'; ctx.beginPath();
+    ctx.moveTo(-46, -12); ctx.lineTo(-42, -30); ctx.lineTo(-8, -32); ctx.lineTo(0, -38); ctx.lineTo(22, -38);
+    ctx.lineTo(34, -26); ctx.lineTo(48, -22); ctx.lineTo(46, -12); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.fillRect(-40, -24, 82, 4);
+    circ(-22, -22, 8, '#fff'); text('1', -22, -21, 12, '#e53935');
+    rr(-44, -40, 8, 12, 2, '#ffca28');                                            // little spoiler
+  } },
+  steer: { name: 'STEERING WHEEL', cy: -46, draw() {
+    ctx.strokeStyle = '#616161'; ctx.lineWidth = 4; ctx.beginPath(); ctx.moveTo(4, -30); ctx.lineTo(10, -44); ctx.stroke();
+    ctx.save(); ctx.translate(12, -48); ctx.rotate(Math.sin(frame * 0.1) * 0.3);
+    ctx.strokeStyle = '#263238'; ctx.lineWidth = 4; ctx.beginPath(); ctx.arc(0, 0, 10, 0, Math.PI * 2); ctx.stroke();
+    ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(-10, 0); ctx.lineTo(10, 0); ctx.moveTo(0, 0); ctx.lineTo(0, 10); ctx.stroke();
+    circ(0, 0, 3, '#ffca28'); ctx.restore();
+  } },
+  // --- King Gloop ---
+  goo: { name: 'PURPLE GOO', cy: -28, draw() {
+    const w = 1 + Math.sin(frame * 0.12) * 0.04;
+    ctx.save(); ctx.scale(w, 2 - w);
+    ctx.fillStyle = '#8e24aa'; ctx.beginPath(); ctx.moveTo(-40, 0);
+    ctx.bezierCurveTo(-46, -40, -24, -58, 0, -58); ctx.bezierCurveTo(24, -58, 46, -40, 40, 0); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#ab47bc'; ctx.beginPath(); ctx.ellipse(-16, -40, 9, 6, -0.5, 0, Math.PI * 2); ctx.fill();
+    circ(-30, -2, 6, '#8e24aa'); circ(28, 1, 5, '#8e24aa'); circ(-4, 2, 4, '#8e24aa');
+    ctx.strokeStyle = '#4a148c'; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(0, -16, 10, 0.2, Math.PI - 0.2); ctx.stroke();
+    ctx.restore();
+  } },
+  crown: { name: 'CROWN', cy: -66, draw() {
+    ctx.fillStyle = '#ffca28'; ctx.beginPath();
+    ctx.moveTo(-20, -56); ctx.lineTo(-22, -76); ctx.lineTo(-10, -66); ctx.lineTo(0, -80); ctx.lineTo(10, -66); ctx.lineTo(22, -76); ctx.lineTo(20, -56);
+    ctx.closePath(); ctx.fill(); ctx.strokeStyle = '#f57f17'; ctx.lineWidth = 2; ctx.stroke();
+    circ(0, -62, 4, '#e53935'); circ(-12, -61, 3, '#29b6f6'); circ(12, -61, 3, '#66bb6a');
+    if (frame % 50 < 6) circ(-22, -76, 3, '#fff');
+  } },
+  eyes: { name: 'GOOGLY EYES', cy: -36, draw() {
+    for (const s of [-1, 1]) {
+      circ(s * 13, -36, 11, '#fff'); ctx.strokeStyle = '#4a148c'; ctx.lineWidth = 2; ctx.stroke();
+      const a = frame * 0.15 * s;
+      circ(s * 13 + Math.cos(a) * 4, -36 + Math.sin(a) * 4 + 1, 5, '#111');
+    }
+  } },
+  // --- Sparks the dog ---
+  dhead: { name: 'DOG HEAD', cy: -62, draw() {
+    rr(-4, -78, 30, 26, 10, '#e0a85a');
+    rr(14, -66, 18, 13, 5, '#f0c27b');                                               // snout
+    circ(31, -63, 4, '#111'); circ(14, -70, 3, '#111'); circ(15, -71, 1, '#fff');
+    ctx.fillStyle = '#8d5a2b'; ctx.beginPath(); ctx.ellipse(0, -68, 6, 13, 0.4 + Math.sin(frame * 0.2) * 0.1, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = '#6d3a1b'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(24, -57, 4, 0.2, Math.PI - 0.2); ctx.stroke();
+  } },
+  dbody: { name: 'DOG BODY', cy: -28, draw() {
+    const run = Math.sin(frame * 0.3) * 3;
+    ctx.strokeStyle = '#b07a3a'; ctx.lineWidth = 6; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(-26, -36); ctx.lineTo(-38, -50 + Math.sin(frame * 0.5) * 5); ctx.stroke();     // wagging tail
+    ctx.fillStyle = '#b07a3a';
+    ctx.fillRect(-22 + run, -14, 8, 14); ctx.fillRect(14 - run, -14, 8, 14);
+    ctx.fillRect(-12 - run, -14, 8, 14); ctx.fillRect(4 + run, -14, 8, 14);
+    rr(-28, -46, 56, 34, 13, '#e0a85a');
+    circ(-6, -30, 6, '#f0c27b'); ctx.lineCap = 'butt';
+  } },
+  collar: { name: 'RED COLLAR', cy: -52, draw() {
+    rr(-2, -55, 28, 7, 3, '#e53935');
+    circ(12, -46, 4, '#ffca28'); ctx.strokeStyle = '#f57f17'; ctx.lineWidth = 1.5; ctx.stroke();
+  } },
+  // --- Pizza (from Pizza Party!) ---
+  dough: { name: 'PIZZA DOUGH', cy: -12, draw() {
+    ctx.fillStyle = '#c98a3e'; ctx.beginPath(); ctx.ellipse(0, -10, 46, 15, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#f3c77a'; ctx.beginPath(); ctx.ellipse(0, -13, 40, 11, 0, 0, Math.PI * 2); ctx.fill();
+  } },
+  sauce: { name: 'TOMATO SAUCE', cy: -14, draw() {
+    ctx.fillStyle = '#d32f2f'; ctx.beginPath(); ctx.ellipse(0, -14, 34, 9, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#ef5350'; ctx.beginPath(); ctx.ellipse(-10, -16, 10, 3, 0, 0, Math.PI * 2); ctx.fill();
+  } },
+  cheese: { name: 'CHEESE + PEPPERONI', cy: -16, draw() {
+    ctx.fillStyle = '#ffe082';
+    for (const [x, y, r] of [[-18, -15, 9], [0, -17, 10], [17, -15, 9], [-6, -12, 8], [10, -12, 7]]) { ctx.beginPath(); ctx.ellipse(x, y, r, r * 0.4, 0, 0, Math.PI * 2); ctx.fill(); }
+    for (const [x, y] of [[-16, -15], [4, -17], [18, -13], [-3, -11]]) { ctx.fillStyle = '#b71c1c'; ctx.beginPath(); ctx.ellipse(x, y, 5, 2.4, 0, 0, Math.PI * 2); ctx.fill(); }
+  } },
+};
+const PRODUCTS = [
+  { id: 'robo',   name: 'a ROBO!',            short: 'ROBO',       need: ['rhead', 'rbody', 'rboots'], layers: ['rboots', 'rbody', 'rhead'], move: 'fly',    col: '#29b6f6' },
+  { id: 'kart',   name: 'a KART!',            short: 'KART',       need: ['wheels', 'kbody', 'steer'], layers: ['steer', 'kbody', 'wheels'], move: 'drive',  col: '#e53935' },
+  { id: 'gloop',  name: 'a BOSS (King Gloop)!', short: 'KING GLOOP', need: ['goo', 'crown', 'eyes'],   layers: ['goo', 'eyes', 'crown'],     move: 'bounce', col: '#8e24aa' },
+  { id: 'sparks', name: 'a SPARKS!',          short: 'SPARKS',     need: ['dhead', 'dbody', 'collar'], layers: ['dbody', 'dhead', 'collar'], move: 'walk',   col: '#ef6c00' },
+  { id: 'pizza',  name: 'a PIZZA!',           short: 'PIZZA',      need: ['dough', 'sauce', 'cheese'], layers: ['dough', 'sauce', 'cheese'], move: 'slide',  col: '#f9a825' },
+];
+const PROD = {}; for (const p of PRODUCTS) PROD[p.id] = p;
+function drawPart(id, x, y, s = 1) {                 // one part on its own, centered at x, y
+  ctx.save(); ctx.translate(x, y); ctx.scale(s, s); ctx.translate(0, -PARTS[id].cy); PARTS[id].draw(); ctx.restore();
+}
+function drawProduct(prod, have, x, y, s = 1) {      // a product with just the parts it has so far; x, y = its feet
+  ctx.save(); ctx.translate(x, y); ctx.scale(s, s);
+  for (const id of prod.layers) if (have.includes(id)) PARTS[id].draw();
+  ctx.restore();
+}
+
+// ---------- Game state ----------
+let scene = 'title', mode = 'shift', frame = 0, t = 0, shipped = 0, newBest = false, endT = 0, endStars = 0;
+let orders = [], stack = [], machines = [], belt = [], shipping = [], parts = [], pops = [], puffs = [];
+let spawnT = 0, hintT = 0, lastProd = '', shake = 0, asmBump = 0, banner = null;
+const lerp = (a, b, k) => a + (b - a) * Math.max(0, Math.min(1, k));
+const progress = () => mode === 'shift' ? t / SHIFT_FRAMES : 0;            // 0 at the start of a shift, 1 at the end
+const beltSpeed = () => lerp(3.4, 4.4, progress());
+const patienceFrames = () => mode === 'shift' ? Math.round(lerp(42, 28, progress()) * 60) : Infinity;
+const spawnGap = () => Math.round((mode === 'shift' ? lerp(13, 8, progress()) : 15) * 60);
+
+function newOrder() {
+  let p; do { p = PRODUCTS[Math.floor(Math.random() * PRODUCTS.length)]; } while (p.id === lastProd);
+  lastProd = p.id;
+  return { prod: p, pat: 0, max: 0, pop: 0 };
+}
+function pop(s, x, y, col = '#fff', size = 34, life = 70) { pops.push({ s, x, y, col, size, t: 0, life }); }
+function sparkle(x, y, n = 24, cols = ['#ffeb3b', '#fff', '#40c4ff', '#ff4081', '#76ff03']) {
+  for (let i = 0; i < n; i++) { const a = Math.random() * Math.PI * 2, v = 2 + Math.random() * 5;
+    parts.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 2, life: 40 + Math.random() * 30, col: cols[i % cols.length], star: i % 3 === 0 }); }
+}
+function puff(x, y, n = 10, col = '#eceff1') {
+  for (let i = 0; i < n; i++) puffs.push({ x: x + (Math.random() - 0.5) * 30, y: y + (Math.random() - 0.5) * 20, r: 8 + Math.random() * 12,
+    vx: (Math.random() - 0.5) * 2, vy: -0.5 - Math.random(), life: 40 + Math.random() * 20, max: 60, col });
+}
+
+// The part machines get re-tooled for each new order: the 3 parts it needs plus 1 silly extra part, all mixed up.
+function activate() {
+  if (!orders.length) orders.push(newOrder());
+  const o = orders[0]; o.max = patienceFrames(); o.pat = o.max;
+  const others = PRODUCTS.filter(p => p !== o.prod), d = others[Math.floor(Math.random() * others.length)];
+  const list = [...o.prod.need, d.need[Math.floor(Math.random() * 3)]];
+  for (let i = list.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [list[i], list[j]] = [list[j], list[i]]; }
+  machines = list.map((part, i) => ({ part, cool: 0, retool: 36 + i * 6, bump: 0 }));
+  stack = []; hintT = 0;
+  if (scene === 'play') sfx.whirr();
+}
+const neededPart = () => orders.length && stack.length < 3 ? orders[0].prod.need[stack.length] : null;
+
+function startShift() {
+  wakeAudio();
+  scene = 'play'; t = 0; shipped = 0; newBest = false; lastProd = '';
+  orders = [newOrder(), newOrder()]; belt = []; shipping = []; parts = []; pops = []; stack = [];
+  spawnT = spawnGap(); banner = { s: mode === 'shift' ? 'SHIFT START! Build what the orders say!' : 'RELAXED MODE: build as many as you like!', t: 150 };
+  activate(); sfx.whistle();
+}
+function endShift() {
+  scene = 'end'; endT = 0;
+  endStars = STAR_AT.filter(n => shipped >= n).length;
+  if (mode === 'shift') {
+    if (shipped > best) { best = shipped; newBest = true; saveBest(); }
+    if (endStars === 3) trophy('factoryFloor');
+  }
+  sfx.whistle(); if (endStars >= 2) setTimeout(sfx.win, 600);
+}
+
+// ---------- Player actions ----------
+function dropPart(i) {
+  const m = machines[i];
+  if (scene !== 'play' || !m || m.retool > 0 || m.cool > 0) return false;
+  m.cool = 22; m.bump = 12; sfx.stamp();
+  belt.push({ part: m.part, x: MACH_X[i], y: MACH_Y + MACH_H + 4, vy: 0, onBelt: false });
+  return true;
+}
+function trashStack() {
+  if (scene !== 'play') return;
+  if (stack.length) { puff(ASM_X, BELT_Y - 40, 14, '#bdbdbd'); pop('WHOOSH! All clear!', ASM_X - 40, 250, '#b2ff59', 26); }
+  stack = []; sfx.trash(); hintT = 0;
+}
+
+// A part reaches the ASSEMBLER at the end of the belt
+function arrive(b) {
+  const want = neededPart();
+  if (b.part === want) {
+    stack.push(b.part); asmBump = 10; sfx.good(); hintT = 0;
+    sparkle(ASM_X, BELT_Y - 40, 10);
+    if (stack.length === 3) {                                   // finished!
+      const o = orders.shift();
+      shipping.push({ prod: o.prod, x: ASM_X, y: BELT_Y + 20, t: 0 });
+      shipped++; sfx.ding(); sparkle(ASM_X, BELT_Y - 60, 40); shake = 6;
+      pop('DING!', ASM_X - 20, 230, '#ffeb3b', 46); pop(o.prod.short + ' SHIPPED!', ASM_X - 60, 278, '#fff', 22, 90);
+      activate();
+    }
+  } else {
+    sfx.bzzt(); puff(ASM_X, BELT_Y - 40, 16, '#9e9e9e'); shake = 5; asmBump = 10;
+    pop('BZZZT!', ASM_X - 20, 240, '#ff5252', 42);
+    if (want) pop('Oops! Needed ' + PARTS[want].name, ASM_X - 120, 282, '#fff', 18, 100);
+    stack = []; hintT = 0;
+  }
+}
+
+// ---------- Update (fixed 60 steps a second) ----------
+function update() {
+  frame++;
+  if (shake > 0) shake--;
+  if (asmBump > 0) asmBump--;
+  if (banner && --banner.t <= 0) banner = null;
+  if (frame % 70 === 0) {                                          // steam puffs from the pipes
+    const px = [60, 330, 640][Math.floor(Math.random() * 3)];
+    puff(px, 132, 4, 'rgba(255,255,255,.8)'); if (scene === 'play' && Math.random() < 0.5) sfx.steam();
+  }
+  for (const p of puffs) { p.x += p.vx; p.y += p.vy; p.r += 0.4; p.life--; }
+  puffs = puffs.filter(p => p.life > 0);
+  for (const p of parts) { p.x += p.vx; p.y += p.vy; p.vy += 0.15; p.life--; }
+  parts = parts.filter(p => p.life > 0);
+  for (const p of pops) { p.t++; p.y -= 0.6; }
+  pops = pops.filter(p => p.t < p.life);
+  for (const s of shipping) {
+    s.t++;
+    const sp = { fly: 4, drive: 6, bounce: 3, walk: 2.6, slide: 3.4 }[s.prod.move];
+    if (s.t > 30) s.x += sp;                                      // wait a moment so you can see it finished
+  }
+  shipping = shipping.filter(s => s.x < W + 80);
+  if (scene === 'title' && frame % 170 === 0) shipping.push({ prod: PRODUCTS[Math.floor(frame / 170) % PRODUCTS.length], x: ASM_X, y: BELT_Y + 20, t: 0 });
+  if (scene === 'end') {
+    endT++;
+    for (let k = 0; k < endStars; k++) if (endT === 31 + k * 25) { sfx.ding(); sparkle(390 + k * 90, 236, 16); }
+    return;
+  }
+  if (scene !== 'play') return;
+
+  t++; hintT++;
+  for (const m of machines) {
+    if (m.retool > 0 && --m.retool === 0) sfx.clank();
+    if (m.cool > 0) m.cool--;
+    if (m.bump > 0) m.bump--;
+  }
+  // parts fall out of the machines, then ride the belt to the assembler
+  const sp = beltSpeed();
+  for (const b of belt) {
+    if (!b.onBelt) { b.vy += 0.8; b.y += b.vy; if (b.y >= BELT_Y - 22) { b.y = BELT_Y - 22; b.onBelt = true; sfx.plop(); } }
+    else b.x += sp;
+  }
+  for (const b of belt) if (b.x >= BELT_X1) { b.done = true; arrive(b); }
+  belt = belt.filter(b => !b.done);
+
+  // orders
+  if (orders.length && orders[0].max !== Infinity) {
+    if (--orders[0].pat <= 0) {                                   // too slow: no problem, that customer just picks a new thing
+      orders.shift(); sfx.oops(); pop('Too slow! Next order!', 330, 140, '#ffd54f', 26, 90);
+      activate();
+    }
+  }
+  for (const o of orders) if (o.pop < 1) o.pop = Math.min(1, o.pop + 0.08);
+  if (--spawnT <= 0) {
+    spawnT = spawnGap();
+    if (orders.length < 3) { orders.push(newOrder()); sfx.order(); }
+  }
+  if (mode === 'shift') {
+    if (t === SHIFT_FRAMES - 600) banner = { s: '10 SECONDS LEFT! Hurry hurry!', t: 120 };
+    if (t >= SHIFT_FRAMES) endShift();
+  }
+}
+
+// ---------- Drawing: the factory floor ----------
+const MCOL = ['#ef5350', '#42a5f5', '#66bb6a', '#ffa726'];
+const BTN = {
+  start: [330, 292, 300, 64], mode: [330, 366, 300, 44],
+  trash: [16, 436, 180, 70], music: [210, 446, 104, 50], done: [800, 440, 146, 60],
+};
+function inBtn(b, x, y) { return x >= b[0] && x <= b[0] + b[2] && y >= b[1] && y <= b[1] + b[3]; }
+function button(b, label, col, size = 26, glow = false) {
+  const [x, y, w, h] = b;
+  if (glow) { ctx.save(); ctx.globalAlpha = 0.35 + 0.25 * Math.sin(frame * 0.12); rr(x - 6, y - 6, w + 12, h + 12, 18, '#fff'); ctx.restore(); }
+  rr(x, y + 5, w, h, 14, 'rgba(0,0,0,.35)'); rr(x, y, w, h, 14, col);
+  rr(x + 4, y + 4, w - 8, h * 0.4, 10, 'rgba(255,255,255,.22)');
+  text(label, x + w / 2, y + h / 2 + 1, size, '#fff', 'center', 'rgba(0,0,0,.45)');
+}
+function drawBackground() {
+  ctx.fillStyle = '#2d2657'; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#352d66';                                         // wall panels
+  for (let x = 0; x < W; x += 120) for (let y = 128; y < 420; y += 96) ctx.fillRect(x + 4, y + 4, 112, 88);
+  ctx.fillStyle = 'rgba(255,255,255,.06)';
+  for (let x = 0; x < W; x += 120) for (let y = 128; y < 420; y += 96) { circ(x + 12, y + 12, 3); ctx.fill(); circ(x + 108, y + 12, 3); ctx.fill(); }
+  // big turning gears behind the machines
+  gear(190, 300, 34, 10, frame * 0.02, '#4a4080'); gear(350, 250, 24, 8, -frame * 0.03, '#4f458a');
+  gear(508, 300, 30, 9, frame * 0.025, '#4a4080'); gear(700, 230, 40, 12, -frame * 0.015, '#4f458a');
+  // pipes
+  ctx.fillStyle = '#78909c'; ctx.fillRect(0, 130, W, 12); ctx.fillStyle = '#b0bec5'; ctx.fillRect(0, 131, W, 3);
+  for (const px of [60, 330, 640]) { rr(px - 10, 120, 20, 14, 4, '#90a4ae'); }
+  for (const px of [20, 250, 500, 750]) { ctx.fillStyle = '#607d8b'; ctx.fillRect(px - 5, 130, 10, 6); }
+  // blinking lights
+  const lc = ['#ff5252', '#ffeb3b', '#69f0ae', '#40c4ff'];
+  for (let i = 0; i < 24; i++) { const on = (Math.floor(frame / 12) + i) % 4 === 0; circ(20 + i * 40, 150, 4, on ? lc[i % 4] : '#3f3770'); }
+  // floor
+  ctx.fillStyle = '#433b6e'; ctx.fillRect(0, 420, W, 100);
+  for (let x = -20; x < W; x += 40) { ctx.fillStyle = '#ffca28'; ctx.beginPath(); ctx.moveTo(x, 420); ctx.lineTo(x + 20, 420); ctx.lineTo(x + 32, 430); ctx.lineTo(x + 12, 430); ctx.fill(); }
+  ctx.fillStyle = '#212121'; ctx.fillRect(0, 430, W, 2);
+}
+function drawMachine(i) {
+  const m = machines[i]; if (!m) return;
+  const x = MACH_X[i], press = m.bump > 0 ? Math.sin(m.bump / 12 * Math.PI) * 8 : 0;
+  const want = neededPart(), hint = scene === 'play' && m.part === want && hintT > 300 && m.retool <= 0;
+  const L = x - MACH_W / 2, T = MACH_Y + press;
+  if (hint) { ctx.save(); ctx.globalAlpha = 0.4 + 0.3 * Math.sin(frame * 0.2); rr(L - 8, T - 8, MACH_W + 16, MACH_H + 16, 20, '#ffeb3b'); ctx.restore(); }
+  // hopper chute
+  ctx.fillStyle = '#546e7a'; ctx.beginPath(); ctx.moveTo(x - 34, MACH_Y + MACH_H - 4); ctx.lineTo(x + 34, MACH_Y + MACH_H - 4);
+  ctx.lineTo(x + 20, BELT_Y - 30); ctx.lineTo(x - 20, BELT_Y - 30); ctx.fill();
+  gear(x - 34, T + 4, 13, 7, frame * 0.08 * (i % 2 ? 1 : -1), '#90a4ae'); gear(x + 34, T + 4, 13, 7, -frame * 0.08 * (i % 2 ? 1 : -1), '#90a4ae');
+  rr(L, T, MACH_W, MACH_H - press, 16, MCOL[i]);
+  rr(L + 6, T + 6, MACH_W - 12, 14, 7, 'rgba(255,255,255,.25)');
+  rr(L + 12, T + 22, MACH_W - 24, 92, 10, '#102027');               // screen
+  if (m.retool > 0) {
+    gear(x, T + 68, 22, 8, frame * 0.25, '#ffca28'); text('NEW PARTS...', x, T + 102, 12, '#ffca28');
+  } else {
+    rr(L + 16, T + 26, MACH_W - 32, 84, 8, '#e3f2fd');
+    drawPart(m.part, x, T + 68, 0.78);
+  }
+  const name = m.retool > 0 ? '' : PARTS[m.part].name;
+  let fs = 15; ctx.font = `bold ${fs}px sans-serif`; while (ctx.measureText(name).width > MACH_W - 14 && fs > 9) { fs--; ctx.font = `bold ${fs}px sans-serif`; }
+  text(name, x, T + 130, fs, '#fff', 'center', 'rgba(0,0,0,.5)');
+  circ(L + 4, T + 4, 17, '#fff'); circ(L + 4, T + 4, 13, '#263238'); text(String(i + 1), L + 4, T + 5, 18, '#fff');
+  circ(x, T + 156, 8, m.cool > 0 ? '#ff5252' : '#69f0ae');           // ready light
+  if (hint) {
+    const by = MACH_Y - 6 + Math.sin(frame * 0.25) * 4;
+    text('TAP ME!', x, by, 18, '#ffeb3b', 'center', '#000');
+  }
+}
+function drawBelt() {
+  rr(BELT_X0 - 6, BELT_Y - 14, BELT_X1 - BELT_X0 + 12, 30, 15, '#37474f');
+  ctx.save(); rr(BELT_X0, BELT_Y - 10, BELT_X1 - BELT_X0, 20, 10); ctx.clip();
+  ctx.fillStyle = '#263238'; ctx.fillRect(BELT_X0, BELT_Y - 10, BELT_X1 - BELT_X0, 20);
+  const off = scene === 'play' ? (t * beltSpeed()) % 30 : (frame * 2) % 30;
+  ctx.fillStyle = '#455a64';
+  for (let x = BELT_X0 - 30 + off; x < BELT_X1; x += 30) { ctx.beginPath(); ctx.moveTo(x, BELT_Y - 10); ctx.lineTo(x + 10, BELT_Y); ctx.lineTo(x, BELT_Y + 10); ctx.lineTo(x + 8, BELT_Y + 10); ctx.lineTo(x + 18, BELT_Y); ctx.lineTo(x + 8, BELT_Y - 10); ctx.fill(); }
+  ctx.restore();
+  for (let x = BELT_X0 + 10; x < BELT_X1; x += 46) { ctx.fillStyle = '#263238'; ctx.fillRect(x, BELT_Y + 16, 8, 24); circ(x + 4, BELT_Y + 16, 6, '#78909c'); }
+  for (const b of belt) drawPart(b.part, b.x, b.y, 0.6);
+}
+function drawAssembler() {
+  const L = ASM_X - 50, press = asmBump > 0 ? Math.sin(asmBump / 10 * Math.PI) * 10 : 0;
+  rr(L - 4, 176, 12, 236, 4, '#607d8b'); rr(L + 92, 176, 12, 236, 4, '#607d8b');   // pillars
+  rr(L - 10, 160, 120, 44, 10, '#ffca28'); text('ASSEMBLER', ASM_X, 176, 15, '#4e342e');
+  for (let k = 0; k < 3; k++) circ(ASM_X - 20 + k * 20, 194, 5, k < stack.length ? '#69f0ae' : '#5d4037');   // one light per part
+  ctx.fillStyle = '#90a4ae'; ctx.fillRect(ASM_X - 4, 204, 8, 22 + press);              // claw arm
+  ctx.strokeStyle = '#90a4ae'; ctx.lineWidth = 5; ctx.beginPath();
+  ctx.moveTo(ASM_X - 16, 240 + press); ctx.lineTo(ASM_X - 8, 226 + press); ctx.lineTo(ASM_X + 8, 226 + press); ctx.lineTo(ASM_X + 16, 240 + press); ctx.stroke();
+  rr(L - 8, BELT_Y + 20, 116, 16, 6, '#455a64'); rr(L - 8, BELT_Y + 20, 116, 5, 3, '#78909c');   // pad
+  const o = orders[0];
+  if (scene === 'play' && o) {
+    const want = neededPart();
+    if (want) { ctx.save(); ctx.globalAlpha = 0.22 + 0.12 * Math.sin(frame * 0.15); ctx.translate(ASM_X, BELT_Y + 20); PARTS[want].draw(); ctx.restore(); }
+    drawProduct(o.prod, stack, ASM_X, BELT_Y + 20);
+  }
+}
+function drawDoor() {
+  rr(DOOR_X - 6, 266, W - DOOR_X + 6, 160, 6, '#5d4037');
+  ctx.fillStyle = '#0d0d1a'; ctx.fillRect(DOOR_X, 284, W - DOOR_X, 136);
+  ctx.fillStyle = 'rgba(255,255,255,.08)'; for (let y = 284; y < 420; y += 14) ctx.fillRect(DOOR_X, y, W - DOOR_X, 6);
+  rr(DOOR_X - 10, 236, W - DOOR_X + 14, 26, 6, '#2e7d32'); text('SHIPPING', DOOR_X + 28, 250, 12, '#fff');
+  circ(DOOR_X + 28, 274, 5, shipping.length && frame % 20 < 10 ? '#69f0ae' : '#1b5e20');
+}
+function drawShipping() {
+  for (const s of shipping) {
+    let y = s.y, k = Math.max(0, s.t - 30);
+    if (s.prod.move === 'fly') y -= Math.min(60, k * 1.4);
+    if (s.prod.move === 'bounce') y -= Math.abs(Math.sin(k * 0.2)) * 34;
+    if (s.prod.move === 'walk') y -= Math.abs(Math.sin(k * 0.3)) * 4;
+    ctx.save(); ctx.globalAlpha = Math.max(0, Math.min(1, 1 - (s.x - DOOR_X - 10) / 50));
+    if (s.t < 30) { const g = 1 + Math.sin(s.t / 30 * Math.PI) * 0.15; drawProduct(s.prod, s.prod.need, s.x, y, g); }
+    else drawProduct(s.prod, s.prod.need, s.x, y);
+    ctx.restore();
+  }
+}
+
+// ---------- Drawing: orders, buttons and screens ----------
+function starShape(x, y, r, col) {
+  ctx.beginPath();
+  for (let i = 0; i < 10; i++) { const a = -Math.PI / 2 + i * Math.PI / 5, rad = i % 2 ? r * 0.45 : r; ctx.lineTo(x + Math.cos(a) * rad, y + Math.sin(a) * rad); }
+  ctx.closePath(); ctx.fillStyle = col; ctx.fill(); ctx.lineWidth = 3; ctx.strokeStyle = 'rgba(0,0,0,.4)'; ctx.stroke();
+}
+function drawOrders() {
+  rr(6, 6, 688, 118, 12, '#4e342e'); rr(10, 10, 680, 110, 10, '#3e2723');
+  if (!orders.length) { text('Orders will pop up here!', 350, 64, 22, '#ffe0b2'); return; }
+  // the order you are building now
+  const o = orders[0], s = o.pop;
+  ctx.save(); ctx.translate(176, 64); ctx.scale(s, s); ctx.translate(-176, -64);
+  rr(14, 12, 330, 106, 10, '#fffde7'); ctx.lineWidth = 5; ctx.strokeStyle = o.prod.col; ctx.stroke();
+  text('Build ' + o.prod.name, 179, 26, o.prod.name.length > 12 ? 17 : 21, o.prod.col, 'center');
+  for (let k = 0; k < 3; k++) {
+    const bx = 24 + k * 108, by = 38, id = o.prod.need[k], done = k < stack.length, next = k === stack.length;
+    if (next) { ctx.save(); ctx.globalAlpha = 0.5 + 0.4 * Math.sin(frame * 0.18); rr(bx - 5, by - 5, 94, 72, 12, '#ffeb3b'); ctx.restore(); }
+    rr(bx, by, 84, 62, 8, done ? '#c8e6c9' : next ? '#fff59d' : '#eeeeee');
+    drawPart(id, bx + 42, by + 31, 0.62);
+    if (done) { ctx.strokeStyle = '#2e7d32'; ctx.lineWidth = 7; ctx.lineCap = 'round'; ctx.beginPath(); ctx.moveTo(bx + 54, by + 44); ctx.lineTo(bx + 64, by + 54); ctx.lineTo(bx + 80, by + 32); ctx.stroke(); ctx.lineCap = 'butt'; }
+    if (next) { rr(bx + 18, by + 50, 48, 18, 8, '#e53935'); text('NEXT!', bx + 42, by + 59, 13, '#fff'); }
+    if (k < 2) text('▶', bx + 96, by + 31, 16, '#8d6e63');
+  }
+  if (o.max !== Infinity) {                                          // patience bar
+    const k = Math.max(0, o.pat / o.max);
+    rr(20, 104, 318, 9, 4, '#d7ccc8'); rr(20, 104, Math.max(9, 318 * k), 9, 4, k > 0.5 ? '#66bb6a' : k > 0.25 ? '#ffca28' : '#ef5350');
+  }
+  ctx.restore();
+  // the orders waiting in line
+  for (let q = 1; q < 3; q++) {
+    const x = 352 + (q - 1) * 170;
+    if (!orders[q]) { rr(x, 14, 160, 102, 10, 'rgba(255,255,255,.06)'); text('...', x + 80, 64, 26, '#6d4c41'); continue; }
+    const w = orders[q], s2 = w.pop;
+    ctx.save(); ctx.translate(x + 80, 64); ctx.scale(s2, s2); ctx.translate(-x - 80, -64);
+    rr(x, 14, 160, 102, 10, '#efebe9'); ctx.lineWidth = 3; ctx.strokeStyle = w.prod.col; ctx.stroke();
+    text(q === 1 ? 'NEXT UP' : 'THEN', x + 80, 26, 12, '#8d6e63');
+    drawProduct(w.prod, w.prod.need, x + 80, 96, 0.55);
+    text(w.prod.short, x + 80, 106, 13, w.prod.col);
+    ctx.restore();
+  }
+}
+function drawHud() {
+  rr(700, 6, 254, 118, 12, '#263238'); rr(704, 10, 246, 110, 10, '#37474f');
+  text('SHIPPED', 770, 30, 16, '#b2ff59'); text(String(shipped), 770, 78, 48, '#fff', 'center', '#000');
+  if (mode === 'shift') {
+    const left = Math.max(0, Math.ceil((SHIFT_FRAMES - t) / 60));
+    circ(890, 58, 34, '#eceff1'); circ(890, 58, 29, '#fff');
+    const a = -Math.PI / 2 + (t / SHIFT_FRAMES) * Math.PI * 2;
+    ctx.fillStyle = left <= 10 ? '#ff8a80' : '#b3e5fc'; ctx.beginPath(); ctx.moveTo(890, 58); ctx.arc(890, 58, 27, -Math.PI / 2, a); ctx.fill();
+    text(Math.floor(left / 60) + ':' + String(left % 60).padStart(2, '0'), 890, 104, 18, left <= 10 && frame % 30 < 15 ? '#ff5252' : '#fff');
+    const n = STAR_AT.filter(v => shipped >= v).length;
+    for (let k = 0; k < 3; k++) starShape(750 + k * 20, 108, 8, k < n ? '#ffeb3b' : '#546e7a');
+  } else text('RELAXED', 890, 60, 18, '#80deea');
+}
+function drawFloorUi() {
+  button(BTN.trash, '🗑️ TRASH', '#8d6e63', 24, stack.length > 0 && hintT > 420);
+  button(BTN.music, musicOn ? '♪ ON' : '♪ OFF', musicOn ? '#7e57c2' : '#616161', 20);
+  const want = neededPart();
+  const tip = want ? 'Tap the machine that makes: ' + PARTS[want].name : 'Building...';
+  text(tip, 560, 458, 18, '#fff', 'center', 'rgba(0,0,0,.5)');
+  text('Keys 1 2 3 4 also work!', 560, 488, 14, '#b39ddb');
+  if (mode === 'relaxed') button(BTN.done, 'DONE ✓', '#43a047', 24);
+}
+function drawEffects() {
+  for (const p of puffs) { ctx.save(); ctx.globalAlpha = Math.max(0, p.life / p.max) * 0.8; circ(p.x, p.y, p.r, p.col); ctx.restore(); }
+  for (const p of parts) { ctx.save(); ctx.globalAlpha = Math.min(1, p.life / 20); if (p.star) starShape(p.x, p.y, 6, p.col); else circ(p.x, p.y, 3.5, p.col); ctx.restore(); }
+  for (const p of pops) {
+    ctx.save(); ctx.globalAlpha = Math.min(1, (p.life - p.t) / 20);
+    const g = p.t < 8 ? 0.6 + p.t / 20 : 1; ctx.translate(p.x, p.y); ctx.scale(g, g);
+    text(p.s, 0, 0, p.size, p.col, 'center', '#000'); ctx.restore();
+  }
+  if (banner) {
+    ctx.save(); ctx.globalAlpha = Math.min(1, banner.t / 20);
+    rr(170, 200, 620, 64, 18, 'rgba(26,18,48,.85)'); text(banner.s, 480, 232, 26, '#ffeb3b', 'center', '#000'); ctx.restore();
+  }
+}
+function drawTitle() {
+  ctx.fillStyle = 'rgba(15,10,35,.55)'; ctx.fillRect(0, 0, W, H);
+  rr(120, 70, 720, 380, 26, 'rgba(0,0,0,.4)'); rr(116, 64, 720, 380, 26, '#ffca28'); rr(126, 74, 700, 360, 20, '#3949ab');
+  for (let k = 0; k < 2; k++) gear(160 + k * 632, 110, 26, 9, frame * 0.04 * (k ? -1 : 1), '#ffca28');
+  const bob = Math.sin(frame * 0.06) * 4;
+  text('INSIDE THE', 476, 112 + bob, 34, '#fff', 'center', '#1a237e');
+  text('GAME FACTORY', 476, 162 + bob, 62, '#ffeb3b', 'center', '#e65100');
+  text('You found the REAL Game Factory!', 476, 214, 26, '#b2ff59', 'center', '#1a237e');
+  text('Orders come in. Tap the machines in the right order.', 476, 250, 18, '#e8eaf6');
+  text('The ASSEMBLER builds it and it ships to your games!', 476, 274, 18, '#e8eaf6');
+  button(BTN.start, '▶ START SHIFT', '#43a047', 30, true);
+  button(BTN.mode, mode === 'shift' ? 'Mode: SHIFT (2½ minutes)' : 'Mode: RELAXED (no clock)', mode === 'shift' ? '#1e88e5' : '#00897b', 19);
+  text(best ? 'Best shift: ' + best + ' shipped' : 'Tap START or press SPACE', 476, 428, 15, '#c5cae9');
+  text('M = music', 900, 506, 13, '#9fa8da');
+}
+const END_MSG = ['Every factory starts somewhere! Try again!', 'Nice work! The machines are warming up!',
+  'Great shift! The games are almost ready!', 'The Game Factory is running at FULL SPEED!'];
+function drawEnd() {
+  ctx.fillStyle = 'rgba(15,10,35,.6)'; ctx.fillRect(0, 0, W, H);
+  rr(176, 60, 608, 400, 26, '#ffca28'); rr(186, 70, 588, 380, 20, '#283593');
+  text(mode === 'shift' ? 'SHIFT OVER!' : 'ALL DONE!', 480, 110, 48, '#ffeb3b', 'center', '#e65100');
+  text('You shipped ' + shipped + (shipped === 1 ? ' thing!' : ' things!'), 480, 166, 30, '#fff', 'center', '#000');
+  if (mode === 'shift') {
+    for (let k = 0; k < 3; k++) {
+      const showAt = 30 + k * 25, on = k < endStars && endT > showAt;
+      const g = on ? Math.min(1, (endT - showAt) / 12) : 1;
+      ctx.save(); ctx.translate(390 + k * 90, 236); ctx.scale(g, g); starShape(0, 0, 36, on ? '#ffeb3b' : '#3949ab'); ctx.restore();
+    }
+    text(END_MSG[endStars], 480, 304, endStars === 3 ? 24 : 22, endStars === 3 ? '#b2ff59' : '#fff', 'center', '#000');
+    if (newBest) text('NEW BEST SHIFT!', 480, 344, 22, '#ff80ab', 'center', '#000');
+    else if (best) text('Best shift: ' + best, 480, 344, 18, '#c5cae9');
+    if (endStars === 3) text('🏆 Trophy unlocked in the Game Factory book!', 480, 378, 17, '#ffeb3b');
+  } else text(shipped >= 10 ? 'The Game Factory is running at FULL SPEED!' : 'What a busy factory worker!', 480, 250, 24, '#b2ff59', 'center', '#000');
+  if (endT > 60) text('Tap to go again!', 480, 420, 22, frame % 40 < 28 ? '#fff' : '#9fa8da');
+}
+function draw() {
+  ctx.save();
+  if (shake) ctx.translate((Math.random() - 0.5) * shake, (Math.random() - 0.5) * shake);
+  drawBackground(); drawDoor(); drawAssembler();
+  for (let i = 0; i < machines.length; i++) drawMachine(i);
+  drawBelt(); drawShipping();
+  ctx.fillStyle = '#5d4037'; ctx.fillRect(DOOR_X - 6, 266, 6, 160);              // door post in front
+  if (scene !== 'title') { drawOrders(); drawHud(); }
+  if (scene === 'play') drawFloorUi();
+  drawEffects();
+  if (scene === 'title') drawTitle();
+  if (scene === 'end') drawEnd();
+  ctx.restore();
+}
+
+// ---------- Input: taps (touchpad.js turns finger taps into mouse clicks) and keys ----------
+function tapAt(x, y) {
+  wakeAudio();
+  if (scene === 'title') {
+    if (inBtn(BTN.mode, x, y)) { mode = mode === 'shift' ? 'relaxed' : 'shift'; sfx.click(); }
+    else startShift();
+    return;
+  }
+  if (scene === 'end') { if (endT > 60) { scene = 'title'; sfx.click(); } return; }
+  if (inBtn(BTN.trash, x, y)) return trashStack();
+  if (inBtn(BTN.music, x, y)) { musicOn = !musicOn; sfx.click(); return; }
+  if (mode === 'relaxed' && inBtn(BTN.done, x, y)) return endShift();
+  for (let i = 0; i < machines.length; i++)
+    if (Math.abs(x - MACH_X[i]) <= MACH_W / 2 + 6 && y >= MACH_Y - 30 && y <= BELT_Y + 10) { dropPart(i); return; }
+}
+C.addEventListener('mousedown', e => {
+  const r = C.getBoundingClientRect();
+  tapAt((e.clientX - r.left) * W / r.width, (e.clientY - r.top) * H / r.height);
+  e.preventDefault();
+});
+window.addEventListener('keydown', e => {
+  wakeAudio();
+  const k = e.key;
+  if (k === 'm' || k === 'M') { musicOn = !musicOn; return; }
+  if (scene === 'title') {
+    if (k === ' ' || k === 'Enter') { e.preventDefault(); startShift(); }
+    else if (k === 'ArrowLeft' || k === 'ArrowRight' || k === 'ArrowUp' || k === 'ArrowDown') { mode = mode === 'shift' ? 'relaxed' : 'shift'; sfx.click(); }
+    return;
+  }
+  if (scene === 'end') { if ((k === ' ' || k === 'Enter') && endT > 60) { e.preventDefault(); scene = 'title'; } return; }
+  if (k >= '1' && k <= '4') dropPart(+k - 1);
+  else if (k === 't' || k === 'T' || k === 'Backspace' || k === 'Delete') trashStack();
+  else if (k === 'Escape') { if (mode === 'relaxed') endShift(); else { scene = 'title'; } }
+  if (k === ' ') e.preventDefault();
+});
+
+// ---------- Main loop (fixed timestep) ----------
+machines = ['rhead', 'wheels', 'crown', 'collar'].map(part => ({ part, cool: 0, retool: 0, bump: 0 }));   // the title screen machines
+let lastTime = 0, acc = 0;
+function loop(now) {
+  if (!lastTime) lastTime = now;
+  acc += Math.min(250, now - lastTime); lastTime = now;
+  while (acc >= 1000 / 60) { update(); acc -= 1000 / 60; }
+  playMusic(); draw();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+<!-- injected by scripts/inject-factory.py — hold PS (or SELECT+START) for 1s to go
+     up one level: game -> the book (parent.closeGame), standalone game -> /factory/,
+     the book -> Stephens Arcade (/). Shares one rAF pad poll with the cursor + idle overlays. -->
+<script id="__gf_pad_exit">
+(function () {
+  var IS_BOOK = false; /*@gf:is_book*/
+  var HOLD_MS = 1000;
+  // one rAF loop per page reads the pads for every __gf overlay
+  var hub = window.__gfHub;
+  if (!hub) {
+    hub = window.__gfHub = { fns: [], pads: [] };
+    (function () {
+      var NONE = [];
+      function loop(now) {
+        var p = null;
+        try { p = navigator.getGamepads ? navigator.getGamepads() : null; } catch (e) {}
+        hub.pads = p || NONE;
+        for (var i = 0; i < hub.fns.length; i++) { try { hub.fns[i](now, hub.pads); } catch (e) {} }
+        requestAnimationFrame(loop);
+      }
+      requestAnimationFrame(loop);
+    })();
+  }
+
+  var STEPS = 20, TF = [];               // precomputed badge transforms: zero allocations while held
+  for (var s = 0; s <= STEPS; s++) TF.push('translateX(-50%) scale(' + (1 + 0.35 * s / STEPS).toFixed(4) + ')');
+  var HIDE_TF = 'translateX(-50%) scale(0.85)';
+  var heldSince = 0, needRelease = true, leaving = false, badge = null, lastStep = -2;
+  var player = null;
+
+  function comboDown(pads) {
+    for (var i = 0; i < pads.length; i++) {
+      var gp = pads[i];
+      if (!gp || gp.connected === false) continue;
+      var b = gp.buttons;
+      if ((b[16] && b[16].pressed) || (b[8] && b[8].pressed && b[9] && b[9].pressed)) return true;
+    }
+    return false;
+  }
+  function makeBadge() {
+    badge = document.createElement('div');
+    badge.id = '__gfx_exit';
+    badge.textContent = IS_BOOK ? '◄ ARCADE' : '◄ BOOK';
+    badge.style.cssText = 'position:fixed;top:12px;left:50%;z-index:2147483001;pointer-events:none;' +
+      'padding:7px 18px;border-radius:999px;background:#10172a;color:#ffd23f;border:3px solid #ffd23f;' +
+      'font:bold 18px/1 "Trebuchet MS","Arial Rounded MT Bold",sans-serif;letter-spacing:1px;white-space:nowrap;' +
+      'transform-origin:50% 0;opacity:0;transform:' + HIDE_TF + ';transition:opacity .12s;';
+    (document.body || document.documentElement).appendChild(badge);
+  }
+  function setBadge(step) {            // step -1 = hidden, 0..STEPS = hold progress
+    if (step === lastStep) return;
+    lastStep = step;
+    if (step < 0) { if (badge) { badge.style.opacity = '0'; badge.style.transform = HIDE_TF; } return; }
+    if (!badge) makeBadge();
+    badge.style.opacity = '1';
+    badge.style.transform = TF[step];
+  }
+  function inGame() {
+    try { return window.parent !== window && typeof window.parent.closeGame === 'function'; } catch (e) { return false; }
+  }
+  function leave() {
+    leaving = true;                    // never navigate twice
+    if (!IS_BOOK && inGame()) { setBadge(-1); try { window.parent.closeGame(); } catch (e) {} return; }
+    location.href = IS_BOOK ? '/' : '/factory/';
+  }
+  hub.fns.push(function (now, pads) {
+    if (leaving) return;
+    var down = comboDown(pads);
+    if (IS_BOOK) {
+      if (!player) player = document.getElementById('player');
+      if (player && player.classList.contains('open')) {   // the game's own overlay handles this hold
+        if (down) needRelease = true;
+        heldSince = 0; setBadge(-1); return;
+      }
+    }
+    if (needRelease) {                 // a hold that started elsewhere never counts here
+      if (down) return;
+      needRelease = false;
+    }
+    if (!down) { heldSince = 0; setBadge(-1); return; }
+    if (!heldSince) heldSince = now;
+    var p = (now - heldSince) / HOLD_MS;
+    setBadge(Math.round((p > 1 ? 1 : p) * STEPS));
+    if (p >= 1) leave();
+  });
+})();
+</script>
+<!-- injected by scripts/inject-factory.py — console (low-fx) mode only: no-op canvas
+     shadowBlur and kill CSS backdrop-filter (both measured fps killers on the Pi).
+     The mouse cursor is hidden only while the pad cursor is installed. -->
+<script id="__gf_lowfx">
+(function () {
+  var on = false;
+  try {
+    if (/[?&]fx=low\b/.test(location.search)) { on = true; localStorage.setItem('arcade_lowfx', '1'); }
+    else if (/[?&]fx=full\b/.test(location.search)) { localStorage.setItem('arcade_lowfx', '0'); }
+    else { on = localStorage.getItem('arcade_lowfx') === '1'; }
+  } catch (e) {}
+  if (!on) return;
+  try {
+    Object.defineProperty(CanvasRenderingContext2D.prototype, 'shadowBlur', {
+      set: function () {}, get: function () { return 0; }, configurable: true
+    });
+  } catch (e) {}
+  try {
+    var st = document.createElement('style');
+    st.textContent = '* { backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }' +
+      ' html.__gfx_padcursor, html.__gfx_padcursor * { cursor: none !important; }';
+    (document.head || document.documentElement).appendChild(st);
+  } catch (e) {}
+})();
+</script>
+<!-- injected by scripts/inject-factory.py — console mode only: the TV has no printer,
+     so window.print shows a friendly toast instead of a dead print dialog. -->
+<script id="__gf_print">
+(function () {
+  var on = false;
+  try { on = /[?&]fx=low\b/.test(location.search) || localStorage.getItem('arcade_lowfx') === '1'; } catch (e) {}
+  if (!on) return;
+  var toast = null, timer = 0;
+  function hide() { if (toast) toast.style.opacity = '0'; }
+  window.print = function () {
+    try {
+      if (!toast) {
+        toast = document.createElement('div');
+        toast.id = '__gfx_print';
+        toast.textContent = '🖨️ Printing works on the iPad — not on the TV!';
+        toast.style.cssText = 'position:fixed;left:50%;bottom:48px;transform:translateX(-50%);z-index:2147483001;' +
+          'pointer-events:none;padding:14px 26px;border-radius:16px;background:#10172a;color:#ffd23f;' +
+          'border:3px solid #ffd23f;font:bold 24px/1.2 "Trebuchet MS","Arial Rounded MT Bold",sans-serif;' +
+          'white-space:nowrap;opacity:0;transition:opacity .2s;';
+        (document.body || document.documentElement).appendChild(toast);
+      }
+      toast.style.opacity = '1';
+      clearTimeout(timer);
+      timer = setTimeout(hide, 2500);
+    } catch (e) {}
+  };
+})();
+</script>
+<!-- injected by scripts/inject-factory.py — pad cursor: a pad-driven mouse pointer so
+     tap/click-only games play on the console. Right stick moves it (left stick too in
+     pointer games); X / R1 clicks and drags (pointer + mouse events, like touchpad.js
+     turns fingers into mouse events). Never consumes pad input. -->
+<script id="__gf_cursor">
+(function () {
+  window.__GF_CURSOR_LEFT = true; /*@gf:cursor_left*/
+  var IS_BOOK = false; /*@gf:is_book*/
+  var LEFT = window.__GF_CURSOR_LEFT === true;
+  var DZ = 0.2, SPEED = 900, SLEEP_MS = 4000, CLICK_SLOP = 12;
+  // one rAF loop per page reads the pads for every __gf overlay
+  var hub = window.__gfHub;
+  if (!hub) {
+    hub = window.__gfHub = { fns: [], pads: [] };
+    (function () {
+      var NONE = [];
+      function loop(now) {
+        var p = null;
+        try { p = navigator.getGamepads ? navigator.getGamepads() : null; } catch (e) {}
+        hub.pads = p || NONE;
+        for (var i = 0; i < hub.fns.length; i++) { try { hub.fns[i](now, hub.pads); } catch (e) {} }
+        requestAnimationFrame(loop);
+      }
+      requestAnimationFrame(loop);
+    })();
+  }
+
+  var S = window.__gfCursorState = { installed: false, awake: false, held: false, x: 0, y: 0 };
+  var el = null, x = 0, y = 0, awake = false, lastMove = 0, lastT = 0;
+  var held = false, target = null, sx = 0, sy = 0, prevBtn = false, vx = 0, vy = 0, player = null;
+  var INIT = { bubbles: true, cancelable: true, composed: true, view: window, detail: 0,
+    clientX: 0, clientY: 0, screenX: 0, screenY: 0, button: 0, buttons: 0,
+    pointerId: 1, pointerType: 'mouse', isPrimary: true, width: 1, height: 1, pressure: 0 };
+  var HAS_PE = typeof window.PointerEvent === 'function';
+
+  function install() {
+    if (S.installed) return;
+    S.installed = true;
+    x = Math.round((window.innerWidth || 1280) / 2); y = Math.round((window.innerHeight || 720) / 2);
+    el = document.createElement('div');
+    el.id = '__gfx_cursor';
+    el.style.cssText = 'position:fixed;left:0;top:0;width:28px;height:28px;pointer-events:none;z-index:2147483000;' +
+      'opacity:0;transition:opacity .25s;will-change:transform;';
+    el.innerHTML = '<svg width="28" height="28" viewBox="0 0 28 28" style="display:block;overflow:visible">' +
+      '<path d="M3 2 L3 23.5 L8.6 18.3 L12.6 26.6 L17 24.5 L13 16.4 L20.8 16.4 Z" fill="#fff" stroke="#10172a" ' +
+      'stroke-width="2.2" stroke-linejoin="round"/></svg>';
+    (document.body || document.documentElement).appendChild(el);
+    try { document.documentElement.classList.add('__gfx_padcursor'); } catch (e) {}
+    place();
+  }
+  function place() {
+    el.style.transform = 'translate3d(' + (x - 3) + 'px,' + (y - 2) + 'px,0)';
+    S.x = x; S.y = y;
+  }
+  function wake() { awake = S.awake = true; el.style.opacity = '1'; }
+  function sleep() { awake = S.awake = false; el.style.opacity = '0'; }
+  function fire(type, node, buttons, pointer) {
+    if (!node) return;
+    INIT.clientX = x; INIT.clientY = y;
+    INIT.screenX = (window.screenX || 0) + x; INIT.screenY = (window.screenY || 0) + y;
+    INIT.buttons = buttons; INIT.pressure = buttons ? 0.5 : 0;
+    INIT.detail = type === 'click' ? 1 : 0;
+    var ev;
+    try { ev = pointer && HAS_PE ? new PointerEvent(type, INIT) : new MouseEvent(type, INIT); } catch (e) { return; }
+    try { node.dispatchEvent(ev); } catch (e) {}
+  }
+  function at() { return document.elementFromPoint(x, y) || document.body || document.documentElement; }
+  function press(now) {
+    target = at(); held = S.held = true; sx = x; sy = y; lastMove = now;
+    fire('pointermove', target, 0, true); fire('mousemove', target, 0, false);
+    fire('pointerdown', target, 1, true); fire('mousedown', target, 1, false);
+  }
+  function release(clickOk) {
+    var t = target;
+    held = S.held = false; target = null;
+    fire('pointerup', t, 0, true); fire('mouseup', t, 0, false);
+    if (clickOk) { var dx = x - sx, dy = y - sy; if (dx * dx + dy * dy < CLICK_SLOP * CLICK_SLOP) fire('click', t, 0, false); }
+  }
+  function stick(ax, ay) {
+    ax = +ax || 0; ay = +ay || 0;
+    var m = Math.sqrt(ax * ax + ay * ay);
+    if (m <= DZ) return;
+    var e = ((m > 1 ? 1 : m) - DZ) / (1 - DZ);
+    e = e * e * SPEED / m;              // mild ease: squared magnitude, ~900 px/s at full tilt
+    vx += ax * e; vy += ay * e;
+  }
+
+  window.addEventListener('gamepadconnected', install);
+  hub.fns.push(function (now, pads) {
+    var i, p, a, b, btn = false;
+    if (!S.installed) {
+      for (i = 0; i < pads.length; i++) { p = pads[i]; if (p && p.mapping === 'standard') { install(); break; } }
+      if (!S.installed) return;
+    }
+    var dt = lastT ? (now - lastT) / 1000 : 0;
+    if (dt > 0.05) dt = 0.05;
+    lastT = now;
+    vx = 0; vy = 0;
+    for (i = 0; i < pads.length; i++) {
+      p = pads[i];
+      if (!p || p.connected === false) continue;
+      a = p.axes; b = p.buttons;
+      if (a) { stick(a[2], a[3]); if (LEFT) stick(a[0], a[1]); }
+      if ((b[0] && b[0].pressed) || (b[5] && b[5].pressed)) btn = true;
+    }
+    if (IS_BOOK) {                      // the book: asleep and silent while a game is open
+      if (!player) player = document.getElementById('player');
+      if (player && player.classList.contains('open')) {
+        if (held) release(false);
+        if (awake) sleep();
+        prevBtn = btn; return;
+      }
+    }
+    if (vx !== 0 || vy !== 0) {
+      var w = window.innerWidth || 1280, h = window.innerHeight || 720;
+      x += vx * dt; y += vy * dt;
+      if (x < 0) x = 0; else if (x > w - 1) x = w - 1;
+      if (y < 0) y = 0; else if (y > h - 1) y = h - 1;
+      lastMove = now;
+      if (!awake) wake();
+      place();
+      if (held) { fire('pointermove', target, 1, true); fire('mousemove', target, 1, false); }
+      else { var t = at(); fire('pointermove', t, 0, true); fire('mousemove', t, 0, false); }
+    } else if (awake && !held && now - lastMove > SLEEP_MS) {
+      sleep();
+    }
+    if (btn && !prevBtn) { if (awake) press(now); }
+    else if (!btn && prevBtn) { if (held) release(true); }
+    if (held) lastMove = now;
+    prevBtn = btn;
+  });
+})();
+</script>
+<!-- injected by scripts/inject-factory.py — after 15 idle minutes (no pad / keyboard /
+     pointer / touch input): a game closes back to the book, anything else returns to
+     Stephens Arcade. Test override: ?idle=<seconds>. -->
+<script id="__gf_idle">
+(function () {
+  var IS_BOOK = false; /*@gf:is_book*/
+  var qs = null;
+  try { qs = new URLSearchParams(location.search).get('idle'); } catch (e) {}
+  var IDLE_MS = (qs ? Math.max(10, parseFloat(qs) || 900) : 15 * 60) * 1000;
+  var DEADZONE = 0.25;
+  // one rAF loop per page reads the pads for every __gf overlay
+  var hub = window.__gfHub;
+  if (!hub) {
+    hub = window.__gfHub = { fns: [], pads: [] };
+    (function () {
+      var NONE = [];
+      function loop(now) {
+        var p = null;
+        try { p = navigator.getGamepads ? navigator.getGamepads() : null; } catch (e) {}
+        hub.pads = p || NONE;
+        for (var i = 0; i < hub.fns.length; i++) { try { hub.fns[i](now, hub.pads); } catch (e) {} }
+        requestAnimationFrame(loop);
+      }
+      requestAnimationFrame(loop);
+    })();
+  }
+  var last = performance.now(), leaving = false, player = null;
+  function bump() { last = performance.now(); }
+  window.addEventListener('keydown', bump, { capture: true });
+  window.addEventListener('pointerdown', bump, { capture: true });
+  window.addEventListener('touchstart', bump, { capture: true, passive: true });
+  function padActive(pads) {
+    for (var i = 0; i < pads.length; i++) {
+      var gp = pads[i];
+      if (!gp || gp.connected === false) continue;
+      for (var b = 0; b < gp.buttons.length; b++) if (gp.buttons[b].pressed) return true;
+      for (var a = 0; a < gp.axes.length; a++) if (Math.abs(gp.axes[a]) > DEADZONE) return true;
+    }
+    return false;
+  }
+  hub.fns.push(function (now, pads) {
+    if (leaving) return;
+    if (IS_BOOK) {                     // while a game is open its own overlay owns the idle timer
+      if (!player) player = document.getElementById('player');
+      if (player && player.classList.contains('open')) { last = now; return; }
+    }
+    if (padActive(pads)) last = now;
+    if (now - last < IDLE_MS) return;
+    leaving = true;
+    var g = false;
+    try { g = window.parent !== window && typeof window.parent.closeGame === 'function'; } catch (e) {}
+    if (g) { try { window.parent.closeGame(); } catch (e) {} }
+    else location.href = '/';          // pagehide fires -> games persist their state
+  });
+})();
+</script>

@@ -1,0 +1,945 @@
+<meta charset="utf-8">
+<title>Order Up! In Space</title>
+<!-- injected by scripts/inject-factory.py (HEAD, before touchpad.js) — hide phantom
+     DualShock sub-devices ("... Motion Sensors", "... Touchpad") and, when a
+     standard-mapping pad exists, every non-standard device. Original indices
+     are kept (filtered slots read null), exactly like lib/controller.js. -->
+<script id="__gf_padfilter">
+(function () {
+  var nav = window.navigator;
+  if (!nav || typeof nav.getGamepads !== 'function' || nav.__gfPadFilter) return;
+  var orig = nav.getGamepads;
+  var PHANTOM = /motion sensors|touchpad/i;
+  var out = [];                       // reused every call: no per-frame allocation
+  function filtered() {
+    var src = orig.call(nav);
+    if (!src) return src;
+    var n = src.length, anyStd = false, i, p;
+    for (i = 0; i < n; i++) { p = src[i]; if (p && p.mapping === 'standard') anyStd = true; }
+    out.length = n;
+    for (i = 0; i < n; i++) {
+      p = src[i];
+      out[i] = (!p || PHANTOM.test(p.id || '') || (anyStd && p.mapping !== 'standard')) ? null : p;
+    }
+    return out;
+  }
+  try { nav.getGamepads = filtered; } catch (e) {}
+  if (nav.getGamepads !== filtered) {
+    try { Object.defineProperty(nav, 'getGamepads', { value: filtered, configurable: true, writable: true }); } catch (e) {}
+  }
+  try { nav.__gfPadFilter = true; } catch (e) {}
+})();
+</script>
+<script src="touchpad.js?v=2"></script>
+<style>
+  html, body { height: 100%; }
+  body { margin: 0; background: #0b1026; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+  canvas { width: min(100vw, calc(100vh * 960 / 520)); height: auto; display: block; border-radius: 12px; box-shadow: 0 10px 40px rgba(0,0,0,.5); cursor: pointer; }
+</style>
+<canvas id="game" width="960" height="520"></canvas>
+<script>
+const C = document.getElementById('game'), ctx = C.getContext('2d');
+const W = 960, H = 520;
+let frame = 0;
+const ri = (a, b) => a + Math.floor(Math.random() * (b - a + 1));
+const pick = a => a[Math.floor(Math.random() * a.length)];
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+
+// ---------- Sound ----------
+function bankCoin(n = 1) { try { const c = JSON.parse(localStorage.getItem('gfCoins') || '{}'); c.pizza = (c.pizza || 0) + n; localStorage.setItem('gfCoins', JSON.stringify(c)); } catch (_) {} }   // coins for the Bundle Room in the Game Factory book
+function labClue(n) { try { const c = JSON.parse(localStorage.getItem('gfLabClues') || '{}'); c[n] = 1; localStorage.setItem('gfLabClues', JSON.stringify(c)); } catch (_) {} }   // Mad Science Lab clue seen (Game Factory book)
+function bundleHas(j) { try { return (JSON.parse(localStorage.getItem('gfBundles') || '{}').opened || []).includes('pizza-' + j); } catch (_) { return false; } }   // unlocked in the Bundle Room
+// ---------- Chef looks (hats + Chef Robo from the Bundle Room) ----------
+const LOOKS = [
+  { id: 'normal', name: 'Chef Pepper', bundle: -1 },
+  { id: 'party', name: 'Party Hat', bundle: 0 }, { id: 'cap', name: 'Cap', bundle: 0 },
+  { id: 'cowboy', name: 'Cowboy Hat', bundle: 1 }, { id: 'crown', name: 'Crown', bundle: 1 },
+  { id: 'robo', name: 'Chef Robo', bundle: 2 },
+];
+const BUNDLE_NAMES = ['Chef Hat Pack', 'Fancy Hat Pack', 'MEGA Chef Robo Pack'];
+const lookOpen = l => l.bundle < 0 || bundleHas(l.bundle);
+let look = 'normal';
+try { const g = JSON.parse(localStorage.getItem('gfLooks') || '{}'); if (g && g.pizza) look = g.pizza; } catch (_) {}
+if (!LOOKS.some(l => l.id === look && lookOpen(l))) look = 'normal';
+let lookView = LOOKS.findIndex(l => l.id === look);   // the look shown in the picker (may be locked)
+function saveLook() { try { const g = JSON.parse(localStorage.getItem('gfLooks') || '{}') || {}; g.pizza = look; localStorage.setItem('gfLooks', JSON.stringify(g)); } catch (_) {} }
+function cycleLook(d) {
+  lookView = (lookView + d + LOOKS.length) % LOOKS.length;
+  const l = LOOKS[lookView];
+  if (lookOpen(l)) { if (look !== l.id) { look = l.id; saveLook(); } } else note(220, 0, 0.12, 'square', 0.05);
+}
+let actx = null, musicOn = true, nextNote = 0, mStep = 0;
+function audio() { if (!actx) { try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch (_) {} } return actx; }
+function note(f, start, dur, wave = 'square', vol = 0.07, slide = null) {
+  if (!actx) return;
+  const t = actx.currentTime + start, o = actx.createOscillator(), g = actx.createGain();
+  o.type = wave; o.frequency.setValueAtTime(f, t); if (slide) o.frequency.exponentialRampToValueAtTime(slide, t + dur);
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g); g.connect(actx.destination); o.start(t); o.stop(t + dur);
+}
+const sfx = {
+  click: () => note(700, 0, 0.05, 'square', 0.04),
+  plop: () => note(260 + Math.random() * 120, 0, 0.08, 'sine', 0.12, 140),
+  squish: () => note(180, 0, 0.18, 'sawtooth', 0.05, 90),
+  oven: () => note(150, 0, 0.4, 'sawtooth', 0.05, 300),
+  ding: () => { note(1568, 0, 0.3, 'sine', 0.12); note(2093, 0.12, 0.4, 'sine', 0.08); },
+  burnt: () => note(300, 0, 0.5, 'sawtooth', 0.08, 100),
+  coin: () => { note(1320, 0, 0.06); note(1760, 0.06, 0.15); },
+  happy: () => [660, 880, 1100].forEach((f, i) => note(f, i * 0.07, 0.12, 'square', 0.06)),
+  sad: () => note(400, 0, 0.5, 'triangle', 0.1, 200),
+  arrive: () => note(500, 0, 0.25, 'sine', 0.08, 1200),
+  trash: () => note(220, 0, 0.2, 'square', 0.06, 110),
+  win: () => [523, 659, 784, 1047, 784, 1047, 1319].forEach((f, i) => note(f, i * 0.12, 0.25, 'square', 0.08)),
+  buy: () => { note(880, 0, 0.08); note(1320, 0.08, 0.08); note(1760, 0.16, 0.2); },
+};
+const TUNE = [67, 0, 71, 74, 0, 71, 69, 0, 67, 0, 64, 67, 0, 0, 69, 0, 71, 0, 74, 76, 0, 74, 71, 0, 69, 0, 67, 69, 67, 0, 0, 0];
+function playMusic() {
+  if (!actx || !musicOn) return;
+  if (nextNote < actx.currentTime) nextNote = actx.currentTime + 0.05;
+  while (nextNote < actx.currentTime + 0.2) {
+    const t = nextNote - actx.currentTime, m = TUNE[mStep % TUNE.length];
+    if (m) note(440 * Math.pow(2, (m - 69) / 12), t, 0.2, 'square', 0.025);
+    if (mStep % 4 === 0) note(440 * Math.pow(2, ([43, 48, 50, 43][(mStep / 8 | 0) % 4] - 69) / 12), t, 0.3, 'triangle', 0.06);
+    nextNote += 0.16; mStep++;
+  }
+}
+
+// ---------- Ingredients ----------
+const SAUCES = { tomato: { name: 'Tomato Sauce', color: '#e53935', day: 1 }, comet: { name: 'Comet Sauce', color: '#2979ff', day: 2 } };
+const CHEESES = { regular: { name: 'Cheese', color: '#ffd54f', day: 1 }, nebula: { name: 'Nebula Cheese', color: '#f48fb1', day: 3 } };
+const TOPS = {
+  pepperoni: { name: 'Pepperoni', day: 1 }, mushroom: { name: 'Mushrooms', day: 1 }, olives: { name: 'Olives', day: 1 },
+  pineapple: { name: 'Pineapple', day: 2 }, peppers: { name: 'Peppers', day: 2 },
+  moonrock: { name: 'Moon Rocks', day: 3 }, stars: { name: 'Star Bits', day: 3 }, eyes: { name: 'Googly Eyes', day: 4 },
+};
+const GOALS = [40, 60, 80, 100, 120];
+const goalFor = d => d <= GOALS.length ? GOALS[d - 1] : Math.min(140, 120 + (d - GOALS.length) * 5);   // after day 5 the goal only grows a tiny bit (Ben found day 7 too hard)
+const DAY_NAMES = ['Grand Opening!', 'Comet Sauce Day', 'Nebula Night', 'Googly Eye Day', 'Super Busy Saturday'];
+
+let S = { day: 1, coins: 0, upgrades: { oven: false, chairs: false, tips: false, sign: false }, best: 0 };
+try { const s = JSON.parse(localStorage.getItem('orderUpSpace') || 'null'); if (s) S = Object.assign(S, s); } catch (_) {}
+function save() { try { localStorage.setItem('orderUpSpace', JSON.stringify(S)); } catch (_) {} }
+const UPGRADES = [
+  { id: 'oven', name: 'Turbo Oven', icon: '🔥', price: 40, desc: 'Pizzas bake way faster!' },
+  { id: 'chairs', name: 'Comfy Space Chairs', icon: '🛋️', price: 50, desc: 'Aliens wait longer happily.' },
+  { id: 'tips', name: 'Golden Tip Jar', icon: '🫙', price: 60, desc: 'Get bigger tips!' },
+  { id: 'sign', name: 'Neon Pizza Sign', icon: '🌟', price: 80, desc: 'More hungry aliens come in!' },
+];
+
+// ---------- Game state ----------
+let scene = 'title', dayTime = 0, earned = 0, served = 0, customers = [], prep = null, oven = null, plate = null, spawnT = 0;
+let particles = [], floaters = [], msg = '', msgT = 0;
+const DAY_LEN = 120 * 60, SLOTS = [180, 480, 780];
+const avail = obj => Object.keys(obj).filter(k => obj[k].day <= S.day);
+function say(t) { msg = t; msgT = 150; }
+
+function startDay() {
+  scene = 'play'; dayTime = DAY_LEN; earned = 0; served = 0; customers = [null, null, null];
+  prep = null; oven = null; plate = null; spawnT = 60;
+  say(`Day ${S.day}: ${DAY_NAMES[S.day - 1] || 'Space Pizza Party!'}  Earn ${goalFor(S.day)} coins!`);
+  sfx.arrive();
+}
+const ALIENS = ['blob', 'cyclops', 'robot', 'catstronaut', 'squid'];
+const NAMES = { blob: 'Zorp', cyclops: 'Glorbo', robot: 'Beep-Bot', catstronaut: 'Captain Whiskers', squid: 'Squidly' };
+function makeOrder() {
+  const tops = avail(TOPS), n = ri(1, Math.min(3, S.day >= 3 ? 3 : 2));
+  const chosen = new Set(); while (chosen.size < n) chosen.add(pick(tops));
+  return { sauce: pick(avail(SAUCES)), cheese: pick(avail(CHEESES)), tops: [...chosen] };
+}
+function spawnCustomer() {
+  const maxSlots = S.day === 1 ? 2 : 3;
+  const free = [0, 1, 2].filter(i => i < maxSlots && !customers[i]);
+  if (!free.length) return;
+  const i = pick(free), kind = pick(ALIENS);
+  const patience = ((S.upgrades.chairs ? 70 : 52) + (S.day > 5 ? 12 : 0)) * 60;   // busy days 6+ get extra-patient aliens
+  customers[i] = { kind, name: NAMES[kind], color: pick(['#76ff03', '#ff80ab', '#40c4ff', '#ffd740', '#b388ff', '#ff9e40']), order: makeOrder(), patience, max: patience, y: -120, state: 'arrive', t: 0, face: 'happy' };
+  sfx.arrive();
+}
+
+// ---------- Pizza actions ----------
+function newDough() { if (prep) return say('You already have a pizza on the counter!'); prep = { sauce: null, cheese: null, tops: [], bake: 0, seed: Math.random() * 1000 }; sfx.squish(); }
+function addSauce(k) { if (!prep) return say('Click the DOUGH first! 🍕'); prep.sauce = k; sfx.squish(); }
+function addCheese(k) { if (!prep) return say('Click the DOUGH first! 🍕'); if (!prep.sauce) return say('Sauce goes on before cheese!'); prep.cheese = k; sfx.plop(); }
+function addTop(k) {
+  if (!prep) return say('Click the DOUGH first! 🍕');
+  if (!prep.cheese) return say('Put on sauce and cheese first!');
+  if (!prep.tops.includes(k)) prep.tops.push(k); else prep.tops = prep.tops.filter(t => t !== k);
+  sfx.plop();
+}
+function useOven() {
+  if (oven) {
+    if (oven.bake < 1) return say('Still baking... wait for the DING! 🔔');
+    if (plate) return say('Serve the pizza on the plate first!');
+    plate = oven; oven = null; sfx.click();
+    if (plate.bake > 1.6) say('Oh no, it got burnt! 🔥 You can still serve it, or trash it.');
+    else say('Yum! Now click the ALIEN (or the plate) to serve it! 👽');
+    return;
+  }
+  if (!prep) return say('Make a pizza first! Click the DOUGH 🍕');
+  if (!prep.sauce || !prep.cheese) return say('Add sauce and cheese before baking!');
+  oven = prep; prep = null; oven.bake = 0; sfx.oven();
+}
+function clickPlate() {
+  if (!plate) { if (oven && oven.bake >= 1) return useOven(); return say('Bake a pizza in the oven first! 🔥'); }
+  const waiting = customers.map((c, i) => c && c.state === 'wait' ? i : -1).filter(i => i >= 0);
+  if (!waiting.length) return say('No aliens are waiting right now!');
+  // give it to the alien whose order matches best
+  const score = i => { const o = customers[i].order; let m = 0; if (o.sauce === plate.sauce) m++; if (o.cheese === plate.cheese) m++; for (const t of o.tops) if (plate.tops.includes(t)) m++; for (const t of plate.tops) if (!o.tops.includes(t)) m--; return m; };
+  waiting.sort((a, b) => score(b) - score(a));
+  serve(waiting[0]);
+}
+function trash() {
+  if (plate) { plate = null; sfx.trash(); say('Into the space trash! 🗑️'); }
+  else if (prep) { prep = null; sfx.trash(); say('Starting over! 🗑️'); }
+}
+function serve(i) {
+  const c = customers[i];
+  if (!c || c.state !== 'wait') return;
+  if (!plate) return say(`${c.name} is waiting for a pizza! Make it, bake it, then click them!`);
+  const o = c.order, p = plate;
+  let wrong = 0;
+  if (p.sauce !== o.sauce) wrong++;
+  if (p.cheese !== o.cheese) wrong++;
+  for (const t of o.tops) if (!p.tops.includes(t)) wrong++;
+  for (const t of p.tops) if (!o.tops.includes(t)) wrong++;
+  const burnt = p.bake > 1.6;
+  let coins, text;
+  if (!wrong && !burnt) { coins = 10 + Math.ceil(c.patience / c.max * (S.upgrades.tips ? 10 : 5)); text = pick(['YUMMY! Perfect pizza!', 'Out of this world!', 'Blorp! Delicious!', '5 stars! ⭐⭐⭐⭐⭐']); c.face = 'love'; sfx.happy(); }
+  else if (wrong <= 1 && !burnt) { coins = 6; text = 'Close enough! Thanks!'; c.face = 'happy'; sfx.coin(); }
+  else { coins = 2; text = burnt ? 'Crunchy... and black?' : 'Hmm... not what I ordered.'; c.face = 'meh'; sfx.sad(); }
+  earned += coins; S.coins += coins; served++; plate = null; bankCoin();
+  floaters.push({ x: SLOTS[i], y: 120, t: `+${coins} 🪙`, life: 70 });
+  c.say = text; c.state = 'leave'; c.t = 0;
+  if (coins >= 10) burst(SLOTS[i], 150, ['#ffd740', '#ff4081', '#69f0ae', '#40c4ff'], 20);
+  save();
+}
+
+// ---------- Update ----------
+function burst(x, y, cols, n) { for (let i = 0; i < n; i++) { const a = Math.random() * 7, s = Math.random() * 4 + 1; particles.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: 40, c: pick(cols) }); } }
+function updatePlay() {
+  dayTime--;
+  if (msgT > 0) msgT--;
+  if (--spawnT <= 0) { spawnCustomer(); spawnT = (S.upgrades.sign ? 6 : 9) * 60 + ri(0, 180); }
+  for (let i = 0; i < 3; i++) {
+    const c = customers[i]; if (!c) continue;
+    c.t++;
+    if (c.state === 'arrive') { c.y += (60 - c.y) * 0.08; if (c.y > 55) { c.state = 'wait'; } }
+    else if (c.state === 'wait') {
+      c.patience--;
+      c.face = c.patience < c.max * 0.3 ? 'grumpy' : 'happy';
+      if (c.patience <= 0) { c.say = 'Too slow! Bye bye!'; c.face = 'grumpy'; c.state = 'leave'; c.t = 0; sfx.sad(); }
+    } else if (c.state === 'leave') { if (c.t > 70) c.y -= 6; if (c.y < -160) customers[i] = null; }
+  }
+  if (oven) {
+    const before = oven.bake;
+    oven.bake += 1 / ((S.upgrades.oven ? 2.6 : 4.2) * 60);
+    if (before < 1 && oven.bake >= 1) sfx.ding();
+    if (before < 1.6 && oven.bake >= 1.6) { sfx.burnt(); say('The pizza is BURNING! Take it out! 🔥'); }
+  }
+  if (dayTime <= 0) endDay();
+}
+function endDay() {
+  const goal = goalFor(S.day);
+  dayWon = earned >= goal;
+  if (dayWon) { S.day++; sfx.win(); confetti(); labClue(3); } else sfx.sad();   // 🧪 secret lab clue on the day-complete screen
+  if (earned > S.best) S.best = earned;
+  save(); scene = 'dayEnd';
+}
+let dayWon = false;
+function confetti() { for (let i = 0; i < 90; i++) particles.push({ x: Math.random() * W, y: -Math.random() * 200, vx: Math.random() - .5, vy: Math.random() * 2 + 1, life: 220, c: pick(['#ff5252', '#ffd740', '#69f0ae', '#40c4ff', '#e040fb']) }); }
+
+// ---------- Buttons ----------
+let buttons = [];
+function btn(x, y, w, h, o) { buttons.push({ x, y, w, h, ...o }); }
+function buildButtons() {
+  buttons = [];
+  if (scene === 'title') {
+    btn(W / 2 - 150, 380, 300, 70, { label: S.day > 1 ? `▶ Open Day ${S.day}` : '▶ Open the shop!', fn: () => startDay(), color: '#ff7043', big: true });
+      btn(22, 214, 46, 64, { label: '◀', fn: () => cycleLook(-1), color: '#7e57c2' });
+    btn(176, 214, 46, 64, { label: '▶', fn: () => cycleLook(1), color: '#7e57c2' });
+    btn(70, 160, 104, 150, { lookPick: true, fn: () => cycleLook(1) });
+    if (S.day > 1) btn(W / 2 - 110, 462, 220, 44, { label: 'Start over', fn: () => { S = { day: 1, coins: 0, upgrades: { oven: false, chairs: false, tips: false, sign: false }, best: S.best }; save(); }, color: '#546e7a' });
+  } else if (scene === 'play') {
+    // customers (click to serve)
+    for (let i = 0; i < 3; i++) btn(SLOTS[i] - 148, 0, 278, 200, { customer: i, fn: () => serve(i) });
+    // dough
+    btn(26, 236, 110, 110, { label: 'Dough', fn: newDough, dough: true });
+    // sauces & cheeses
+    avail(SAUCES).forEach((k, i) => btn(150 + i * 100, 236, 92, 52, { label: SAUCES[k].name.replace(' Sauce', ''), sub: 'sauce', fn: () => addSauce(k), swatch: SAUCES[k].color }));
+    avail(CHEESES).forEach((k, i) => btn(150 + i * 100, 294, 92, 52, { label: k === 'regular' ? 'Cheese' : 'Nebula', sub: 'cheese', fn: () => addCheese(k), swatch: CHEESES[k].color, cheese: true }));
+    avail(TOPS).forEach((k, i) => btn(26 + (i % 4) * 90, 356 + Math.floor(i / 4) * 78, 84, 72, { label: TOPS[k].name, fn: () => addTop(k), top: k, active: prep && prep.tops.includes(k) }));
+    btn(760, 236, 180, 170, { oven: true, fn: useOven });
+    btn(625, 330, 120, 120, { plateBtn: true, fn: clickPlate });
+    btn(780, 420, 140, 46, { label: '🗑️ Trash', fn: trash, color: '#78909c' });
+  } else if (scene === 'dayEnd') {
+    btn(W / 2 - 150, 430, 300, 64, { label: dayWon ? `▶ Day ${S.day}` : '▶ Try again!', fn: startDay, color: '#43a047', big: true });
+    UPGRADES.forEach((u, i) => btn(70 + i * 210, 260, 195, 150, { upgrade: u, fn: () => {
+      if (S.upgrades[u.id]) return;
+      if (S.coins < u.price) { sfx.sad(); return; }
+      S.coins -= u.price; S.upgrades[u.id] = true; sfx.buy(); save();
+    } }));
+  }
+  btn(W - 60, H - 50, 46, 40, { label: musicOn ? '♪' : '♪̸', fn: () => { musicOn = !musicOn; }, color: '#455a64' });
+}
+function pos(e) { const r = C.getBoundingClientRect(); return [(e.clientX - r.left) * W / r.width, (e.clientY - r.top) * H / r.height]; }
+let mouse = { x: 0, y: 0 };
+C.addEventListener('mousedown', e => {
+  audio(); buildButtons();
+  const [x, y] = pos(e);
+  for (const b of buttons.slice().reverse()) if (x > b.x && x < b.x + b.w && y > b.y && y < b.y + b.h) { if (!b.customer) sfx.click(); b.fn(); return; }
+});
+C.addEventListener('mousemove', e => { [mouse.x, mouse.y] = pos(e); });
+addEventListener('keydown', e => { audio(); if (e.key === 'm' || e.key === 'M') musicOn = !musicOn; if (scene === 'title' && (e.key === ' ' || e.key === 'Enter')) startDay();
+  if (scene === 'title' && (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'l' || e.key === 'L')) { sfx.click(); cycleLook(e.key === 'ArrowLeft' ? -1 : 1); } });
+
+// ---------- Drawing ----------
+function rr(x, y, w, h, r, fill, stroke, lw = 3) { ctx.beginPath(); ctx.roundRect(x, y, w, h, r); if (fill) { ctx.fillStyle = fill; ctx.fill(); } if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lw; ctx.stroke(); } }
+function circle(x, y, r, c) { ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fillStyle = c; ctx.fill(); }
+function el(x, y, rx, ry, c, rot = 0) { ctx.beginPath(); ctx.ellipse(x, y, rx, ry, rot, 0, Math.PI * 2); ctx.fillStyle = c; ctx.fill(); }
+function text(s, x, y, size, color = '#fff', align = 'center', outline = '#1b1b3a') {
+  ctx.font = `bold ${size}px "Comic Sans MS", "Chalkboard SE", sans-serif`; ctx.textAlign = align; ctx.lineJoin = 'round';
+  if (outline) { ctx.lineWidth = size / 5; ctx.strokeStyle = outline; ctx.strokeText(s, x, y); }
+  ctx.fillStyle = color; ctx.fillText(s, x, y);
+}
+function star5(x, y, r, c) { ctx.beginPath(); for (let i = 0; i < 10; i++) { const a = -Math.PI / 2 + i * Math.PI / 5, rr2 = i % 2 ? r * 0.45 : r; ctx.lineTo(x + Math.cos(a) * rr2, y + Math.sin(a) * rr2); } ctx.closePath(); ctx.fillStyle = c; ctx.fill(); }
+
+// hats sit on a head whose top is at (x, y); s = size
+function drawHat(id, x, y, s) {
+  ctx.save(); ctx.lineJoin = 'round';
+  if (id === 'toque') {               // the normal white chef hat
+    rr(x - 12 * s, y - 9 * s, 24 * s, 11 * s, 3 * s, '#ffffff', '#cfd8dc', 1.5 * s);
+    for (const [dx, dy, r] of [[-8, -15, 8], [8, -15, 8], [0, -20, 10]]) circle(x + dx * s, y + dy * s, r * s, '#ffffff');
+    ctx.strokeStyle = '#cfd8dc'; ctx.lineWidth = 1.5 * s; ctx.beginPath(); ctx.arc(x, y - 20 * s, 10 * s, Math.PI * 1.1, Math.PI * 1.9); ctx.stroke();
+  } else if (id === 'party') {
+    ctx.beginPath(); ctx.moveTo(x - 13 * s, y + 2 * s); ctx.lineTo(x + 13 * s, y + 2 * s); ctx.lineTo(x + 2 * s, y - 34 * s); ctx.closePath();
+    ctx.fillStyle = '#ff4081'; ctx.fill(); ctx.strokeStyle = '#ad1457'; ctx.lineWidth = 2 * s; ctx.stroke();
+    ctx.save(); ctx.clip(); ctx.strokeStyle = '#ffeb3b'; ctx.lineWidth = 4 * s;
+    for (let i = 0; i < 3; i++) { ctx.beginPath(); ctx.moveTo(x - 20 * s, y - 2 * s - i * 11 * s); ctx.lineTo(x + 20 * s, y - 10 * s - i * 11 * s); ctx.stroke(); }
+    ctx.restore();
+    circle(x + 2 * s, y - 35 * s, 5 * s, '#40c4ff');
+  } else if (id === 'cap') {
+    ctx.beginPath(); ctx.ellipse(x + 13 * s, y + 1 * s, 13 * s, 4 * s, 0, 0, Math.PI * 2); ctx.fillStyle = '#c62828'; ctx.fill();
+    ctx.beginPath(); ctx.arc(x, y + 3 * s, 15 * s, Math.PI, 0); ctx.closePath(); ctx.fillStyle = '#e53935'; ctx.fill(); ctx.strokeStyle = '#b71c1c'; ctx.lineWidth = 2 * s; ctx.stroke();
+    ctx.fillStyle = '#fff'; ctx.fillRect(x - 15 * s, y - 1 * s, 30 * s, 3 * s);
+    circle(x, y - 12 * s, 2.5 * s, '#b71c1c');
+  } else if (id === 'cowboy') {
+    rr(x - 12 * s, y - 18 * s, 24 * s, 20 * s, 7 * s, '#8d6e63', '#5d4037', 2 * s);
+    ctx.fillStyle = '#5d4037'; ctx.beginPath(); ctx.moveTo(x - 4 * s, y - 18 * s); ctx.quadraticCurveTo(x, y - 12 * s, x + 4 * s, y - 18 * s); ctx.fill();
+    ctx.fillStyle = '#ffca28'; ctx.fillRect(x - 12 * s, y - 4 * s, 24 * s, 4 * s);
+    ctx.beginPath(); ctx.ellipse(x, y + 1 * s, 27 * s, 6 * s, 0, 0, Math.PI * 2); ctx.fillStyle = '#795548'; ctx.fill(); ctx.strokeStyle = '#4e342e'; ctx.lineWidth = 2 * s; ctx.stroke();
+  } else if (id === 'crown') {
+    ctx.beginPath(); ctx.moveTo(x - 14 * s, y + 2 * s); ctx.lineTo(x - 15 * s, y - 16 * s); ctx.lineTo(x - 7 * s, y - 7 * s); ctx.lineTo(x, y - 20 * s);
+    ctx.lineTo(x + 7 * s, y - 7 * s); ctx.lineTo(x + 15 * s, y - 16 * s); ctx.lineTo(x + 14 * s, y + 2 * s); ctx.closePath();
+    ctx.fillStyle = '#ffd600'; ctx.fill(); ctx.strokeStyle = '#ff8f00'; ctx.lineWidth = 2 * s; ctx.stroke();
+    circle(x, y - 4 * s, 3 * s, '#e53935'); circle(x - 8 * s, y - 3 * s, 2.2 * s, '#2979ff'); circle(x + 8 * s, y - 3 * s, 2.2 * s, '#00c853');
+    for (const dx of [-15, 0, 15]) circle(x + dx * s, y - (dx ? 16 : 20) * s, 2.5 * s, '#fff59d');
+  }
+  ctx.restore();
+}
+// the chef: head center (x, y), size s. Same size for every look.
+function drawChef(x, y, s, lk) {
+  ctx.save(); ctx.lineCap = 'round';
+  // body: white chef coat
+  rr(x - 20 * s, y + 12 * s, 40 * s, 34 * s, 10 * s, '#ffffff', '#b0bec5', 2 * s);
+  circle(x - 22 * s, y + 30 * s, 6 * s, lk === 'robo' ? '#90a4ae' : '#ffcc99'); circle(x + 22 * s, y + 30 * s, 6 * s, lk === 'robo' ? '#90a4ae' : '#ffcc99');
+  for (const dy of [22, 32]) { circle(x - 6 * s, y + dy * s, 2 * s, '#90a4ae'); circle(x + 6 * s, y + dy * s, 2 * s, '#90a4ae'); }
+  ctx.fillStyle = '#e53935'; ctx.beginPath(); ctx.moveTo(x - 10 * s, y + 12 * s); ctx.lineTo(x + 10 * s, y + 12 * s); ctx.lineTo(x, y + 21 * s); ctx.closePath(); ctx.fill();
+  if (lk === 'robo') {
+    // Chef Robo: big round white head, dark visor, glowing blue eyes, blue ear pods
+    rr(x - 23 * s, y - 4 * s, 6 * s, 10 * s, 3 * s, '#2979ff'); rr(x + 17 * s, y - 4 * s, 6 * s, 10 * s, 3 * s, '#2979ff');
+    rr(x - 19 * s, y - 16 * s, 38 * s, 30 * s, 12 * s, '#ffffff', '#b0bec5', 1.5 * s);
+    rr(x - 15 * s, y - 12 * s, 30 * s, 21 * s, 9 * s, '#111827');
+    const blink = frame % 180 < 6 ? 1 : 4;
+    ctx.fillStyle = '#40c4ff'; ctx.beginPath(); ctx.ellipse(x - 6 * s, y - 2 * s, 3 * s, blink * s, 0, 0, 7); ctx.ellipse(x + 6 * s, y - 2 * s, 3 * s, blink * s, 0, 0, 7); ctx.fill();
+    ctx.strokeStyle = '#40c4ff'; ctx.lineWidth = 1.5 * s; ctx.beginPath(); ctx.arc(x, y + 3 * s, 4 * s, 0.2 * Math.PI, 0.8 * Math.PI); ctx.stroke();
+    circle(x, y + 30 * s, 3 * s, '#2979ff');
+    drawHat('toque', x, y - 15 * s, s);
+  } else {
+    circle(x, y, 16 * s, '#ffcc99');
+    circle(x - 10 * s, y + 5 * s, 3.5 * s, 'rgba(255,128,128,.6)'); circle(x + 10 * s, y + 5 * s, 3.5 * s, 'rgba(255,128,128,.6)');
+    circle(x - 6 * s, y - 3 * s, 2.5 * s, '#1b1b3a'); circle(x + 6 * s, y - 3 * s, 2.5 * s, '#1b1b3a');
+    el(x - 5 * s, y + 5 * s, 6 * s, 3 * s, '#6d4c41', 0.2); el(x + 5 * s, y + 5 * s, 6 * s, 3 * s, '#6d4c41', -0.2);
+    ctx.strokeStyle = '#1b1b3a'; ctx.lineWidth = 1.8 * s; ctx.beginPath(); ctx.arc(x, y + 7 * s, 5 * s, 0.2 * Math.PI, 0.8 * Math.PI); ctx.stroke();
+    drawHat(lk === 'normal' ? 'toque' : lk, x, y - 13 * s, s);
+  }
+  ctx.restore();
+}
+function drawTopping(k, x, y, s = 1) {
+  if (k === 'pepperoni') { circle(x, y, 7 * s, '#c62828'); circle(x - 2 * s, y - 2 * s, 1.5 * s, '#8e0000'); circle(x + 2.5 * s, y + 1.5 * s, 1.3 * s, '#8e0000'); }
+  if (k === 'mushroom') { ctx.fillStyle = '#d7ccc8'; ctx.fillRect(x - 2 * s, y, 4 * s, 6 * s); ctx.beginPath(); ctx.arc(x, y + 1 * s, 6 * s, Math.PI, 0); ctx.fillStyle = '#bcaaa4'; ctx.fill(); }
+  if (k === 'olives') { circle(x, y, 5 * s, '#212121'); circle(x, y, 2 * s, '#8d6e63'); }
+  if (k === 'pineapple') { ctx.fillStyle = '#ffee58'; ctx.beginPath(); ctx.moveTo(x - 6 * s, y + 4 * s); ctx.lineTo(x, y - 6 * s); ctx.lineTo(x + 6 * s, y + 4 * s); ctx.closePath(); ctx.fill(); ctx.strokeStyle = '#f9a825'; ctx.lineWidth = 1.5; ctx.stroke(); }
+  if (k === 'peppers') { ctx.strokeStyle = '#2e7d32'; ctx.lineWidth = 3.5 * s; ctx.lineCap = 'round'; ctx.beginPath(); ctx.arc(x, y + 3 * s, 6 * s, Math.PI * 1.1, Math.PI * 1.9); ctx.stroke(); }
+  if (k === 'moonrock') { circle(x, y, 6 * s, '#90a4ae'); circle(x - 2 * s, y - 1 * s, 1.8 * s, '#607d8b'); circle(x + 2.5 * s, y + 2 * s, 1.3 * s, '#607d8b'); }
+  if (k === 'stars') star5(x, y, 6 * s, '#ffd600');
+  if (k === 'eyes') { circle(x, y, 6 * s, '#fff'); circle(x + 1.5 * s, y + 1 * s, 3 * s, '#000'); }
+}
+function drawPizza(p, x, y, r, small) {
+  const burnt = p.bake > 1.6, golden = p.bake >= 1;
+  circle(x, y, r, burnt ? '#3e2723' : golden ? '#e0a050' : '#f3d9a4');
+  if (p.sauce) circle(x, y, r * 0.84, burnt ? '#4e2a20' : SAUCES[p.sauce].color);
+  if (p.cheese) {
+    ctx.fillStyle = burnt ? '#5d4037' : CHEESES[p.cheese].color;
+    ctx.beginPath(); for (let i = 0; i < 16; i++) { const a = i / 16 * Math.PI * 2, rr2 = r * (0.7 + 0.08 * Math.sin(i * 3 + (p.seed || 0))); ctx.lineTo(x + Math.cos(a) * rr2, y + Math.sin(a) * rr2); } ctx.fill();
+    if (p.cheese === 'nebula' && !burnt) for (let i = 0; i < 6; i++) star5(x + Math.cos(i * 1.1) * r * 0.4, y + Math.sin(i * 1.7) * r * 0.4, r * 0.06, '#fff');
+    if (golden && !burnt && !small) for (let i = 0; i < 8; i++) circle(x + Math.cos(i * 0.8) * r * 0.5, y + Math.sin(i * 1.3) * r * 0.5, r * 0.06, 'rgba(200,120,30,.35)');
+  }
+  p.tops.forEach((k, ti) => {
+    for (let i = 0; i < 5; i++) {
+      const a = (i / 5) * Math.PI * 2 + ti * 1.3 + (p.seed || 0), d = r * (0.25 + ((i * 7 + ti * 3) % 5) * 0.09);
+      ctx.globalAlpha = burnt ? 0.4 : 1; drawTopping(k, x + Math.cos(a) * d, y + Math.sin(a) * d, r / 70); ctx.globalAlpha = 1;
+    }
+  });
+  if (burnt && !small) for (let i = 0; i < 3; i++) circle(x - 20 + i * 20, y - r - 10 - ((frame + i * 20) % 40), 8, 'rgba(80,80,80,.5)');
+}
+function drawAlien(c, x, y) {
+  const bob = Math.sin(frame * 0.08 + x) * 4, col = c.color;
+  y += bob;
+  if (c.kind === 'blob') { el(x, y + 30, 46, 40, col); ctx.strokeStyle = col; ctx.lineWidth = 4; ctx.beginPath(); ctx.moveTo(x - 15, y - 5); ctx.lineTo(x - 25, y - 30); ctx.moveTo(x + 15, y - 5); ctx.lineTo(x + 25, y - 30); ctx.stroke(); circle(x - 25, y - 32, 6, '#fff176'); circle(x + 25, y - 32, 6, '#fff176'); }
+  else if (c.kind === 'cyclops') { el(x, y + 30, 40, 44, col); }
+  else if (c.kind === 'robot') { rr(x - 40, y - 8, 80, 76, 14, '#b0bec5'); ctx.strokeStyle = '#78909c'; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(x, y - 8); ctx.lineTo(x, y - 26); ctx.stroke(); circle(x, y - 28, 6, frame % 30 < 15 ? '#ff5252' : '#ffeb3b'); }
+  else if (c.kind === 'catstronaut') { circle(x, y + 28, 42, 'rgba(200,230,255,.5)'); el(x, y + 32, 32, 30, '#ffb74d'); for (const s of [-1, 1]) { ctx.fillStyle = '#ffb74d'; ctx.beginPath(); ctx.moveTo(x + s * 26, y + 16); ctx.lineTo(x + s * 22, y - 6); ctx.lineTo(x + s * 10, y + 8); ctx.fill(); } }
+  else if (c.kind === 'squid') { el(x, y + 18, 38, 36, col); for (let k = 0; k < 5; k++) { ctx.strokeStyle = col; ctx.lineWidth = 7; ctx.lineCap = 'round'; ctx.beginPath(); ctx.moveTo(x - 28 + k * 14, y + 46); ctx.quadraticCurveTo(x - 32 + k * 14 + Math.sin(frame * 0.1 + k) * 6, y + 62, x - 28 + k * 14, y + 74); ctx.stroke(); } }
+  // face
+  const eyeY = c.kind === 'robot' ? y + 18 : y + 22;
+  if (c.kind === 'cyclops') { circle(x, eyeY, 16, '#fff'); circle(x + 3, eyeY + 2, 7, '#1b1b3a'); }
+  else if (c.kind === 'robot') { rr(x - 26, eyeY - 8, 22, 14, 4, '#40c4ff'); rr(x + 4, eyeY - 8, 22, 14, 4, '#40c4ff'); }
+  else { circle(x - 12, eyeY, 8, '#fff'); circle(x + 12, eyeY, 8, '#fff'); circle(x - 10, eyeY + 2, 4, '#1b1b3a'); circle(x + 14, eyeY + 2, 4, '#1b1b3a'); }
+  ctx.strokeStyle = '#1b1b3a'; ctx.lineWidth = 3; ctx.beginPath();
+  const my = eyeY + 22;
+  if (c.face === 'love' || c.face === 'happy') ctx.arc(x, my - 6, 10, 0.15 * Math.PI, 0.85 * Math.PI);
+  else if (c.face === 'meh') { ctx.moveTo(x - 9, my); ctx.lineTo(x + 9, my); }
+  else ctx.arc(x, my + 6, 9, 1.15 * Math.PI, 1.85 * Math.PI);
+  ctx.stroke();
+  if (c.face === 'love') { text('❤', x - 30, y - 10, 20, '#ff4081', 'center', null); text('❤', x + 32, y - 2, 16, '#ff4081', 'center', null); }
+}
+function drawTicket(o, x, y) {
+  rr(x - 82, y, 164, 84, 10, '#fffde7', '#ffb300', 3);
+  drawPizza({ sauce: o.sauce, cheese: o.cheese, tops: o.tops, bake: 1, seed: 1 }, x - 48, y + 42, 30, true);
+  let ly = y + 20;
+  ctx.font = 'bold 12px "Comic Sans MS", sans-serif'; ctx.textAlign = 'left'; ctx.fillStyle = '#5d4037';
+  ctx.fillText(SAUCES[o.sauce].name.replace(' Sauce', ''), x - 12, ly); ly += 15;
+  ctx.fillText(CHEESES[o.cheese].name, x - 12, ly); ly += 15;
+  for (const t of o.tops) { drawTopping(t, x - 4, ly - 4, 0.75); ctx.fillStyle = '#5d4037'; ctx.fillText(TOPS[t].name, x + 6, ly); ly += 15; }
+}
+function drawButton(b) {
+  const hover = mouse.x > b.x && mouse.x < b.x + b.w && mouse.y > b.y && mouse.y < b.y + b.h;
+  if (b.customer !== undefined || b.lookPick) return;
+  if (b.plateBtn) { if (hover && plate) { ctx.strokeStyle = '#69f0ae'; ctx.lineWidth = 5; ctx.beginPath(); ctx.arc(b.x + 60, b.y + 60, 64, 0, Math.PI * 2); ctx.stroke(); } return; }
+  if (b.dough) {
+    rr(b.x, b.y, b.w, b.h, 16, hover ? '#fff3e0' : '#ffe0b2', hover ? '#ff7043' : '#d7a86e', 3);
+    circle(b.x + 55, b.y + 48, 34, '#f3d9a4'); circle(b.x + 45, b.y + 40, 8, 'rgba(255,255,255,.4)');
+    text('DOUGH', b.x + 55, b.y + 100, 16, '#8d5a2b', 'center', null); return;
+  }
+  if (b.oven) {
+    rr(b.x, b.y, b.w, b.h, 18, '#455a64', hover ? '#ffd740' : '#263238', 4);
+    rr(b.x + 14, b.y + 30, b.w - 28, b.h - 60, 12, oven ? (oven.bake > 1.6 ? '#bf360c' : '#ff8f00') : '#37474f', '#263238', 3);
+    if (oven) { drawPizza(oven, b.x + b.w / 2, b.y + 85, 40); ctx.fillStyle = `rgba(255,140,0,${0.15 + 0.1 * Math.sin(frame * 0.2)})`; ctx.fillRect(b.x + 14, b.y + 30, b.w - 28, b.h - 60); }
+    text('SPACE OVEN', b.x + b.w / 2, b.y + 22, 15, '#ffd740', 'center', null);
+    // bake meter
+    const mx = b.x + 14, mw = b.w - 28, my = b.y + b.h - 22;
+    rr(mx, my, mw, 12, 6, '#263238');
+    ctx.fillStyle = '#69f0ae'; ctx.fillRect(mx + mw * (1 / 2), my, mw * (0.6 / 2), 12);
+    ctx.fillStyle = '#ff5252'; ctx.fillRect(mx + mw * (1.6 / 2), my, mw * (0.4 / 2), 12);
+    if (oven) { ctx.fillStyle = '#fff'; ctx.fillRect(mx + mw * Math.min(1, oven.bake / 2) - 2, my - 4, 4, 20); }
+    text(oven ? (oven.bake < 1 ? 'Baking...' : oven.bake > 1.6 ? 'BURNT! Click!' : '🔔 DONE! Click me!') : 'Click to bake', b.x + b.w / 2, b.y + b.h + 2, 14, oven && oven.bake >= 1 && oven.bake <= 1.6 ? '#69f0ae' : '#fff', 'center', '#1b1b3a');
+    return;
+  }
+  if (b.upgrade) {
+    const u = b.upgrade, owned = S.upgrades[u.id];
+    rr(b.x, b.y, b.w, b.h, 16, owned ? '#c8e6c9' : hover ? '#fff8e1' : '#ffffff', hover && !owned ? '#ff7043' : 'rgba(0,0,0,.2)', 3);
+    ctx.font = '40px sans-serif'; ctx.textAlign = 'center'; ctx.fillText(u.icon, b.x + b.w / 2, b.y + 50);
+    text(u.name, b.x + b.w / 2, b.y + 80, 16, '#5d4037', 'center', null);
+    text(u.desc, b.x + b.w / 2, b.y + 102, 12, '#795548', 'center', null);
+    text(owned ? '✅ Got it!' : `🪙 ${u.price}`, b.x + b.w / 2, b.y + 134, 20, owned ? '#2e7d32' : S.coins >= u.price ? '#ff8f00' : '#bdbdbd', 'center', null);
+    return;
+  }
+  if (b.top) {
+    rr(b.x, b.y, b.w, b.h, 12, b.active ? '#fff59d' : hover ? '#fff8e1' : '#ffffff', b.active ? '#ff9800' : hover ? '#ff7043' : 'rgba(0,0,0,.15)', b.active ? 4 : 2);
+    for (let i = 0; i < 3; i++) drawTopping(b.top, b.x + 22 + i * 20, b.y + 26 + (i % 2) * 6, 1.3);
+    text(b.label, b.x + b.w / 2, b.y + b.h - 10, 12, '#5d4037', 'center', null); return;
+  }
+  if (b.swatch) {
+    rr(b.x, b.y, b.w, b.h, 12, hover ? '#fff8e1' : '#ffffff', hover ? '#ff7043' : 'rgba(0,0,0,.15)', 2);
+    if (b.cheese) { ctx.fillStyle = b.swatch; ctx.beginPath(); ctx.moveTo(b.x + 10, b.y + 40); ctx.lineTo(b.x + 34, b.y + 12); ctx.lineTo(b.x + 34, b.y + 40); ctx.fill(); }
+    else { rr(b.x + 10, b.y + 12, 22, 30, 6, b.swatch); rr(b.x + 13, b.y + 7, 16, 8, 3, '#eeeeee'); }
+    text(b.label, b.x + 62, b.y + 24, 13, '#5d4037', 'center', null); text(b.sub, b.x + 62, b.y + 40, 11, '#a1887f', 'center', null); return;
+  }
+  rr(b.x, b.y + 4, b.w, b.h, 16, 'rgba(0,0,0,.3)'); rr(b.x, b.y - (hover ? 2 : 0), b.w, b.h, 16, b.color || '#5c6bc0', '#fff', 3);
+  text(b.label, b.x + b.w / 2, b.y + b.h / 2 + (b.big ? 10 : 7) - (hover ? 2 : 0), b.big ? 28 : 18, '#fff');
+}
+
+// 🧪 Mad Science Lab clue: a glowing, bubbly panel (a flask + bubbles drawn with shapes)
+function drawLabClue(cx, cy, w, h, msg, liquid, t) {
+  const x = cx - w / 2, y = cy - h / 2, glow = 0.5 + 0.5 * Math.sin(t * 0.08), k = h / 54;
+  ctx.save();
+  ctx.shadowColor = liquid; ctx.shadowBlur = 14 + glow * 16;
+  rr(x, y, w, h, h / 2, 'rgba(30,14,56,.93)');
+  ctx.shadowBlur = 0;
+  rr(x, y, w, h, h / 2, null, liquid, 3 + glow * 2);
+  for (let i = 0; i < 9; i++) {                     // bubbles floating up inside the panel
+    const bx = x + 20 + ((i * 97) % (w - 40)), by = y + h - ((t * 0.6 + i * 23) % h);
+    ctx.globalAlpha = 0.35; ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(bx, by, 3 + (i % 3) * 2, 0, 7); ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+  ctx.translate(x + h * 0.55, cy + 2 * k); ctx.scale(k, k);   // the flask
+  const flask = () => { ctx.beginPath(); ctx.moveTo(-4, -20); ctx.lineTo(-4, -10); ctx.lineTo(-15, 14); ctx.lineTo(15, 14); ctx.lineTo(4, -10); ctx.lineTo(4, -20); };
+  flask(); ctx.fillStyle = 'rgba(255,255,255,.25)'; ctx.fill();
+  ctx.beginPath(); ctx.moveTo(-9, 1); ctx.lineTo(-15, 14); ctx.lineTo(15, 14); ctx.lineTo(9, 1); ctx.closePath(); ctx.fillStyle = liquid; ctx.fill();
+  flask(); ctx.lineWidth = 2; ctx.strokeStyle = '#fff'; ctx.stroke();
+  for (let i = 0; i < 3; i++) circle(-5 + i * 5, -24 - ((t * 0.5 + i * 9) % 18), 2.5 + i * 0.5, liquid);
+  ctx.restore();
+  let size = 22; const room = w - h * 1.5;
+  ctx.font = `bold ${size}px "Comic Sans MS", "Chalkboard SE", sans-serif`;
+  const mw = ctx.measureText(msg).width; if (mw > room) size = Math.max(12, Math.floor(size * room / mw));
+  text(msg, cx + h * 0.4, cy + size * 0.35, size, '#fff');
+}
+function drawSpaceBg() {
+  const g = ctx.createLinearGradient(0, 0, 0, 230); g.addColorStop(0, '#0b1026'); g.addColorStop(1, '#3a1d6e');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, 230);
+  for (let i = 0; i < 70; i++) { ctx.globalAlpha = 0.4 + 0.4 * Math.sin(frame * 0.04 + i); circle((i * 137 - frame * 0.2 * (1 + i % 3)) % W + (i * 137 - frame * 0.2 * (1 + i % 3) < 0 ? W : 0), (i * 53) % 220, 1.3, '#fff'); }
+  ctx.globalAlpha = 1;
+  circle(880, 60, 30, '#ff8a65'); ctx.strokeStyle = 'rgba(255,255,255,.6)'; ctx.lineWidth = 4; ctx.beginPath(); ctx.ellipse(880, 60, 50, 12, -0.3, 0, Math.PI * 2); ctx.stroke();
+  circle(70, 50, 18, '#cfd8dc');
+}
+function draw() {
+  if (scene === 'title') {
+    drawSpaceBg(); ctx.fillStyle = '#2a1650'; ctx.fillRect(0, 230, W, H);
+    const fy = 210 + Math.sin(frame * 0.05) * 12;
+    ctx.save(); ctx.translate(W / 2, fy); ctx.rotate(frame * 0.01);
+    drawPizza({ sauce: 'tomato', cheese: 'nebula', tops: ['pepperoni', 'stars', 'eyes'], bake: 1.2, seed: 2 }, 0, 0, 80); ctx.restore();
+    el(W / 2, fy + 30, 120, 20, 'rgba(120,200,255,.25)');
+    text('ORDER UP!', W / 2, 95, 78, '#ffd740');
+    text('🚀 IN SPACE 🚀', W / 2, 145, 36, '#80d8ff');
+    text(`Make pizzas for hungry aliens!   🪙 ${S.coins} coins   Best day: ${S.best}`, W / 2, 345, 20, '#e1bee7', 'center', null);
+    drawLookPicker();
+    drawAllButtons(); drawParticles(); return;
+  }
+  if (scene === 'dayEnd') {
+    drawSpaceBg(); ctx.fillStyle = '#2a1650'; ctx.fillRect(0, 230, W, H);
+    const up = dayWon ? 14 : 0;   // scoot up a bit to make room for the secret lab clue
+    text(dayWon ? 'DAY COMPLETE! 🎉' : 'Almost!', W / 2, 80 - up, 56, dayWon ? '#69f0ae' : '#ffd740');
+    text(`You earned ${earned} coins and served ${served} pizzas!`, W / 2, 130 - up * 1.4, 26, '#fff');
+    text(dayWon ? 'The aliens LOVE your pizza shop!' : `You needed ${goalFor(S.day)} coins. You can do it!`, W / 2, 170 - up * 1.6, 22, '#e1bee7', 'center', null);
+    if (dayWon) drawLabClue(W / 2, 192, 700, 42, '🧪 SECRET LAB CLUE 3 of 3: The THIRD potion is ORANGE! 🟠', '#ff9100', frame);
+    text(`🪙 ${S.coins} coins to spend on upgrades:`, W / 2, 238, 20, '#ffd740', 'center', null);
+    drawAllButtons(); drawParticles(); return;
+  }
+  // ---- the shop ----
+  drawSpaceBg();
+  // counter
+  ctx.fillStyle = '#7e57c2'; ctx.fillRect(0, 196, W, 30); ctx.fillStyle = '#9575cd'; ctx.fillRect(0, 196, W, 6);
+  // customers + orders
+  for (let i = 0; i < 3; i++) {
+    const c = customers[i]; if (!c) { text('...', SLOTS[i], 130, 24, 'rgba(255,255,255,.2)', 'center', null); continue; }
+    const hover = c.state === 'wait' && mouse.x > SLOTS[i] - 95 && mouse.x < SLOTS[i] + 95 && mouse.y < 200;
+    if (hover && plate) circle(SLOTS[i] - 90, c.y + 40, 60, 'rgba(255,255,255,.12)');
+    drawAlien(c, SLOTS[i] - 90, c.y + 40);
+    if (c.state === 'wait') {
+      drawTicket(c.order, SLOTS[i] + 40, 14);
+      const k = c.patience / c.max;
+      rr(SLOTS[i] - 42, 106, 164, 10, 5, 'rgba(0,0,0,.4)'); rr(SLOTS[i] - 42, 106, 164 * k, 10, 5, k > 0.5 ? '#69f0ae' : k > 0.25 ? '#ffd740' : '#ff5252');
+      text(c.name, SLOTS[i] - 90, c.y + 128 - 10, 14, '#fff');
+      if (plate) { const by = 8 + Math.sin(frame * 0.15) * 5; rr(SLOTS[i] - 150, by - 4, 120, 30, 15, hover ? '#69f0ae' : '#ffd740', '#fff', 2); text('👇 Click me!', SLOTS[i] - 90, by + 17, 16, '#1b1b3a', 'center', null); }
+    } else if (c.say) {
+      rr(SLOTS[i] - 40, 30, 170, 50, 14, '#fff', '#ffb300', 3);
+      ctx.font = 'bold 13px "Comic Sans MS", sans-serif'; ctx.textAlign = 'center'; ctx.fillStyle = '#5d4037';
+      const words = c.say.split(' '), mid = Math.ceil(words.length / 2);
+      ctx.fillText(words.slice(0, mid).join(' '), SLOTS[i] + 45, 52); ctx.fillText(words.slice(mid).join(' '), SLOTS[i] + 45, 70);
+    }
+  }
+  // kitchen
+  ctx.fillStyle = '#4527a0'; ctx.fillRect(0, 226, W, H - 226);
+  ctx.fillStyle = 'rgba(255,255,255,.04)'; for (let x = 0; x < W; x += 40) ctx.fillRect(x, 226, 20, H);
+  rr(380, 236, 230, 230, 20, '#ede7f6', '#b39ddb', 4);                 // prep board
+  text('MAKE IT HERE', 495, 258, 14, '#7e57c2', 'center', null);
+  if (prep) drawPizza(prep, 495, 360, 92);
+  else text('Click DOUGH to start!', 495, 365, 18, '#9575cd', 'center', null);
+  rr(625, 330, 120, 120, 60, '#eceff1', '#b0bec5', 4);                 // plate
+  text('PLATE', 685, 320, 14, '#d1c4e9', 'center', null);
+  if (plate) drawPizza(plate, 685, 390, 50);
+  drawChef(685, 268 + Math.sin(frame * 0.1) * 1.5, 0.9, look);   // the chef, next to the oven
+  drawAllButtons();
+  // HUD
+  rr(380, 474, 366, 40, 12, 'rgba(0,0,0,.35)');
+  text(`🪙 ${earned} / ${goalFor(S.day)}`, 394, 502, 22, earned >= goalFor(S.day) ? '#69f0ae' : '#ffd740', 'left');
+  const secs = Math.ceil(dayTime / 60);
+  text(`⏰ ${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`, 620, 502, 22, secs <= 15 ? '#ff5252' : '#fff', 'left');
+  text(`Day ${S.day}`, 880, 503, 20, '#e1bee7', 'right');
+  for (const f of floaters) text(f.t, f.x, f.y, 24, '#ffd740');
+  drawParticles();
+  if (msgT > 0) {
+    ctx.globalAlpha = Math.min(1, msgT / 20);
+    ctx.font = 'bold 18px "Comic Sans MS", sans-serif'; const w = ctx.measureText(msg).width + 36;
+    rr(W / 2 - w / 2, 196, w, 36, 18, 'rgba(255,255,255,.96)', '#ffb300', 3); text(msg, W / 2, 220, 18, '#5d4037', 'center', null);
+    ctx.globalAlpha = 1;
+  }
+}
+function drawLookPicker() {
+  const l = LOOKS[lookView], open = lookOpen(l);
+  rr(12, 110, 188, 218, 18, 'rgba(0,0,0,.35)', '#b39ddb', 3);
+  text('YOUR CHEF', 106, 134, 16, '#80d8ff', 'center', null);
+  ctx.globalAlpha = open ? 1 : 0.3;
+  drawChef(106, 222 + Math.sin(frame * 0.08) * 3, 1.8, l.id);
+  ctx.globalAlpha = 1;
+  if (!open) {
+    rr(30, 206, 152, 68, 12, 'rgba(27,27,58,.9)', '#ffd740', 2);
+    text('🔒 Open the', 106, 226, 13, '#ffd740', 'center', null);
+    text(BUNDLE_NAMES[l.bundle], 106, 245, 13, '#fff', 'center', null);
+    text('in the Bundle Room!', 106, 264, 13, '#ffd740', 'center', null);
+  }
+  text((open ? '' : '🔒 ') + l.name + (open && l.id === look ? ' ✓' : ''), 106, 318, 17, open ? '#ffd740' : '#9e9e9e');
+}
+function drawAllButtons() { for (const b of buttons) drawButton(b); }
+function drawParticles() { for (const p of particles) { ctx.globalAlpha = Math.min(1, p.life / 20); ctx.fillStyle = p.c; ctx.fillRect(p.x, p.y, 6, 6); } ctx.globalAlpha = 1; }
+
+function update() {
+  frame++;
+  for (const p of particles) { p.x += p.vx; p.y += p.vy; p.vy += 0.08; p.life--; }
+  particles = particles.filter(p => p.life > 0);
+  for (const f of floaters) { f.y -= 0.8; f.life--; }
+  floaters = floaters.filter(f => f.life > 0);
+  if (scene === 'play') updatePlay();
+  buildButtons();
+}
+buildButtons();
+let last = performance.now(), acc = 0;
+function loop(now) {
+  acc += Math.min(100, now - last); last = now;
+  while (acc >= 1000 / 60) { update(); acc -= 1000 / 60; }
+  playMusic();
+  draw();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+<!-- injected by scripts/inject-factory.py — hold PS (or SELECT+START) for 1s to go
+     up one level: game -> the book (parent.closeGame), standalone game -> /factory/,
+     the book -> Stephens Arcade (/). Shares one rAF pad poll with the cursor + idle overlays. -->
+<script id="__gf_pad_exit">
+(function () {
+  var IS_BOOK = false; /*@gf:is_book*/
+  var HOLD_MS = 1000;
+  // one rAF loop per page reads the pads for every __gf overlay
+  var hub = window.__gfHub;
+  if (!hub) {
+    hub = window.__gfHub = { fns: [], pads: [] };
+    (function () {
+      var NONE = [];
+      function loop(now) {
+        var p = null;
+        try { p = navigator.getGamepads ? navigator.getGamepads() : null; } catch (e) {}
+        hub.pads = p || NONE;
+        for (var i = 0; i < hub.fns.length; i++) { try { hub.fns[i](now, hub.pads); } catch (e) {} }
+        requestAnimationFrame(loop);
+      }
+      requestAnimationFrame(loop);
+    })();
+  }
+
+  var STEPS = 20, TF = [];               // precomputed badge transforms: zero allocations while held
+  for (var s = 0; s <= STEPS; s++) TF.push('translateX(-50%) scale(' + (1 + 0.35 * s / STEPS).toFixed(4) + ')');
+  var HIDE_TF = 'translateX(-50%) scale(0.85)';
+  var heldSince = 0, needRelease = true, leaving = false, badge = null, lastStep = -2;
+  var player = null;
+
+  function comboDown(pads) {
+    for (var i = 0; i < pads.length; i++) {
+      var gp = pads[i];
+      if (!gp || gp.connected === false) continue;
+      var b = gp.buttons;
+      if ((b[16] && b[16].pressed) || (b[8] && b[8].pressed && b[9] && b[9].pressed)) return true;
+    }
+    return false;
+  }
+  function makeBadge() {
+    badge = document.createElement('div');
+    badge.id = '__gfx_exit';
+    badge.textContent = IS_BOOK ? '◄ ARCADE' : '◄ BOOK';
+    badge.style.cssText = 'position:fixed;top:12px;left:50%;z-index:2147483001;pointer-events:none;' +
+      'padding:7px 18px;border-radius:999px;background:#10172a;color:#ffd23f;border:3px solid #ffd23f;' +
+      'font:bold 18px/1 "Trebuchet MS","Arial Rounded MT Bold",sans-serif;letter-spacing:1px;white-space:nowrap;' +
+      'transform-origin:50% 0;opacity:0;transform:' + HIDE_TF + ';transition:opacity .12s;';
+    (document.body || document.documentElement).appendChild(badge);
+  }
+  function setBadge(step) {            // step -1 = hidden, 0..STEPS = hold progress
+    if (step === lastStep) return;
+    lastStep = step;
+    if (step < 0) { if (badge) { badge.style.opacity = '0'; badge.style.transform = HIDE_TF; } return; }
+    if (!badge) makeBadge();
+    badge.style.opacity = '1';
+    badge.style.transform = TF[step];
+  }
+  function inGame() {
+    try { return window.parent !== window && typeof window.parent.closeGame === 'function'; } catch (e) { return false; }
+  }
+  function leave() {
+    leaving = true;                    // never navigate twice
+    if (!IS_BOOK && inGame()) { setBadge(-1); try { window.parent.closeGame(); } catch (e) {} return; }
+    location.href = IS_BOOK ? '/' : '/factory/';
+  }
+  hub.fns.push(function (now, pads) {
+    if (leaving) return;
+    var down = comboDown(pads);
+    if (IS_BOOK) {
+      if (!player) player = document.getElementById('player');
+      if (player && player.classList.contains('open')) {   // the game's own overlay handles this hold
+        if (down) needRelease = true;
+        heldSince = 0; setBadge(-1); return;
+      }
+    }
+    if (needRelease) {                 // a hold that started elsewhere never counts here
+      if (down) return;
+      needRelease = false;
+    }
+    if (!down) { heldSince = 0; setBadge(-1); return; }
+    if (!heldSince) heldSince = now;
+    var p = (now - heldSince) / HOLD_MS;
+    setBadge(Math.round((p > 1 ? 1 : p) * STEPS));
+    if (p >= 1) leave();
+  });
+})();
+</script>
+<!-- injected by scripts/inject-factory.py — console (low-fx) mode only: no-op canvas
+     shadowBlur and kill CSS backdrop-filter (both measured fps killers on the Pi).
+     The mouse cursor is hidden only while the pad cursor is installed. -->
+<script id="__gf_lowfx">
+(function () {
+  var on = false;
+  try {
+    if (/[?&]fx=low\b/.test(location.search)) { on = true; localStorage.setItem('arcade_lowfx', '1'); }
+    else if (/[?&]fx=full\b/.test(location.search)) { localStorage.setItem('arcade_lowfx', '0'); }
+    else { on = localStorage.getItem('arcade_lowfx') === '1'; }
+  } catch (e) {}
+  if (!on) return;
+  try {
+    Object.defineProperty(CanvasRenderingContext2D.prototype, 'shadowBlur', {
+      set: function () {}, get: function () { return 0; }, configurable: true
+    });
+  } catch (e) {}
+  try {
+    var st = document.createElement('style');
+    st.textContent = '* { backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }' +
+      ' html.__gfx_padcursor, html.__gfx_padcursor * { cursor: none !important; }';
+    (document.head || document.documentElement).appendChild(st);
+  } catch (e) {}
+})();
+</script>
+<!-- injected by scripts/inject-factory.py — console mode only: the TV has no printer,
+     so window.print shows a friendly toast instead of a dead print dialog. -->
+<script id="__gf_print">
+(function () {
+  var on = false;
+  try { on = /[?&]fx=low\b/.test(location.search) || localStorage.getItem('arcade_lowfx') === '1'; } catch (e) {}
+  if (!on) return;
+  var toast = null, timer = 0;
+  function hide() { if (toast) toast.style.opacity = '0'; }
+  window.print = function () {
+    try {
+      if (!toast) {
+        toast = document.createElement('div');
+        toast.id = '__gfx_print';
+        toast.textContent = '🖨️ Printing works on the iPad — not on the TV!';
+        toast.style.cssText = 'position:fixed;left:50%;bottom:48px;transform:translateX(-50%);z-index:2147483001;' +
+          'pointer-events:none;padding:14px 26px;border-radius:16px;background:#10172a;color:#ffd23f;' +
+          'border:3px solid #ffd23f;font:bold 24px/1.2 "Trebuchet MS","Arial Rounded MT Bold",sans-serif;' +
+          'white-space:nowrap;opacity:0;transition:opacity .2s;';
+        (document.body || document.documentElement).appendChild(toast);
+      }
+      toast.style.opacity = '1';
+      clearTimeout(timer);
+      timer = setTimeout(hide, 2500);
+    } catch (e) {}
+  };
+})();
+</script>
+<!-- injected by scripts/inject-factory.py — pad cursor: a pad-driven mouse pointer so
+     tap/click-only games play on the console. Right stick moves it (left stick too in
+     pointer games); X / R1 clicks and drags (pointer + mouse events, like touchpad.js
+     turns fingers into mouse events). Never consumes pad input. -->
+<script id="__gf_cursor">
+(function () {
+  window.__GF_CURSOR_LEFT = true; /*@gf:cursor_left*/
+  var IS_BOOK = false; /*@gf:is_book*/
+  var LEFT = window.__GF_CURSOR_LEFT === true;
+  var DZ = 0.2, SPEED = 900, SLEEP_MS = 4000, CLICK_SLOP = 12;
+  // one rAF loop per page reads the pads for every __gf overlay
+  var hub = window.__gfHub;
+  if (!hub) {
+    hub = window.__gfHub = { fns: [], pads: [] };
+    (function () {
+      var NONE = [];
+      function loop(now) {
+        var p = null;
+        try { p = navigator.getGamepads ? navigator.getGamepads() : null; } catch (e) {}
+        hub.pads = p || NONE;
+        for (var i = 0; i < hub.fns.length; i++) { try { hub.fns[i](now, hub.pads); } catch (e) {} }
+        requestAnimationFrame(loop);
+      }
+      requestAnimationFrame(loop);
+    })();
+  }
+
+  var S = window.__gfCursorState = { installed: false, awake: false, held: false, x: 0, y: 0 };
+  var el = null, x = 0, y = 0, awake = false, lastMove = 0, lastT = 0;
+  var held = false, target = null, sx = 0, sy = 0, prevBtn = false, vx = 0, vy = 0, player = null;
+  var INIT = { bubbles: true, cancelable: true, composed: true, view: window, detail: 0,
+    clientX: 0, clientY: 0, screenX: 0, screenY: 0, button: 0, buttons: 0,
+    pointerId: 1, pointerType: 'mouse', isPrimary: true, width: 1, height: 1, pressure: 0 };
+  var HAS_PE = typeof window.PointerEvent === 'function';
+
+  function install() {
+    if (S.installed) return;
+    S.installed = true;
+    x = Math.round((window.innerWidth || 1280) / 2); y = Math.round((window.innerHeight || 720) / 2);
+    el = document.createElement('div');
+    el.id = '__gfx_cursor';
+    el.style.cssText = 'position:fixed;left:0;top:0;width:28px;height:28px;pointer-events:none;z-index:2147483000;' +
+      'opacity:0;transition:opacity .25s;will-change:transform;';
+    el.innerHTML = '<svg width="28" height="28" viewBox="0 0 28 28" style="display:block;overflow:visible">' +
+      '<path d="M3 2 L3 23.5 L8.6 18.3 L12.6 26.6 L17 24.5 L13 16.4 L20.8 16.4 Z" fill="#fff" stroke="#10172a" ' +
+      'stroke-width="2.2" stroke-linejoin="round"/></svg>';
+    (document.body || document.documentElement).appendChild(el);
+    try { document.documentElement.classList.add('__gfx_padcursor'); } catch (e) {}
+    place();
+  }
+  function place() {
+    el.style.transform = 'translate3d(' + (x - 3) + 'px,' + (y - 2) + 'px,0)';
+    S.x = x; S.y = y;
+  }
+  function wake() { awake = S.awake = true; el.style.opacity = '1'; }
+  function sleep() { awake = S.awake = false; el.style.opacity = '0'; }
+  function fire(type, node, buttons, pointer) {
+    if (!node) return;
+    INIT.clientX = x; INIT.clientY = y;
+    INIT.screenX = (window.screenX || 0) + x; INIT.screenY = (window.screenY || 0) + y;
+    INIT.buttons = buttons; INIT.pressure = buttons ? 0.5 : 0;
+    INIT.detail = type === 'click' ? 1 : 0;
+    var ev;
+    try { ev = pointer && HAS_PE ? new PointerEvent(type, INIT) : new MouseEvent(type, INIT); } catch (e) { return; }
+    try { node.dispatchEvent(ev); } catch (e) {}
+  }
+  function at() { return document.elementFromPoint(x, y) || document.body || document.documentElement; }
+  function press(now) {
+    target = at(); held = S.held = true; sx = x; sy = y; lastMove = now;
+    fire('pointermove', target, 0, true); fire('mousemove', target, 0, false);
+    fire('pointerdown', target, 1, true); fire('mousedown', target, 1, false);
+  }
+  function release(clickOk) {
+    var t = target;
+    held = S.held = false; target = null;
+    fire('pointerup', t, 0, true); fire('mouseup', t, 0, false);
+    if (clickOk) { var dx = x - sx, dy = y - sy; if (dx * dx + dy * dy < CLICK_SLOP * CLICK_SLOP) fire('click', t, 0, false); }
+  }
+  function stick(ax, ay) {
+    ax = +ax || 0; ay = +ay || 0;
+    var m = Math.sqrt(ax * ax + ay * ay);
+    if (m <= DZ) return;
+    var e = ((m > 1 ? 1 : m) - DZ) / (1 - DZ);
+    e = e * e * SPEED / m;              // mild ease: squared magnitude, ~900 px/s at full tilt
+    vx += ax * e; vy += ay * e;
+  }
+
+  window.addEventListener('gamepadconnected', install);
+  hub.fns.push(function (now, pads) {
+    var i, p, a, b, btn = false;
+    if (!S.installed) {
+      for (i = 0; i < pads.length; i++) { p = pads[i]; if (p && p.mapping === 'standard') { install(); break; } }
+      if (!S.installed) return;
+    }
+    var dt = lastT ? (now - lastT) / 1000 : 0;
+    if (dt > 0.05) dt = 0.05;
+    lastT = now;
+    vx = 0; vy = 0;
+    for (i = 0; i < pads.length; i++) {
+      p = pads[i];
+      if (!p || p.connected === false) continue;
+      a = p.axes; b = p.buttons;
+      if (a) { stick(a[2], a[3]); if (LEFT) stick(a[0], a[1]); }
+      if ((b[0] && b[0].pressed) || (b[5] && b[5].pressed)) btn = true;
+    }
+    if (IS_BOOK) {                      // the book: asleep and silent while a game is open
+      if (!player) player = document.getElementById('player');
+      if (player && player.classList.contains('open')) {
+        if (held) release(false);
+        if (awake) sleep();
+        prevBtn = btn; return;
+      }
+    }
+    if (vx !== 0 || vy !== 0) {
+      var w = window.innerWidth || 1280, h = window.innerHeight || 720;
+      x += vx * dt; y += vy * dt;
+      if (x < 0) x = 0; else if (x > w - 1) x = w - 1;
+      if (y < 0) y = 0; else if (y > h - 1) y = h - 1;
+      lastMove = now;
+      if (!awake) wake();
+      place();
+      if (held) { fire('pointermove', target, 1, true); fire('mousemove', target, 1, false); }
+      else { var t = at(); fire('pointermove', t, 0, true); fire('mousemove', t, 0, false); }
+    } else if (awake && !held && now - lastMove > SLEEP_MS) {
+      sleep();
+    }
+    if (btn && !prevBtn) { if (awake) press(now); }
+    else if (!btn && prevBtn) { if (held) release(true); }
+    if (held) lastMove = now;
+    prevBtn = btn;
+  });
+})();
+</script>
+<!-- injected by scripts/inject-factory.py — after 15 idle minutes (no pad / keyboard /
+     pointer / touch input): a game closes back to the book, anything else returns to
+     Stephens Arcade. Test override: ?idle=<seconds>. -->
+<script id="__gf_idle">
+(function () {
+  var IS_BOOK = false; /*@gf:is_book*/
+  var qs = null;
+  try { qs = new URLSearchParams(location.search).get('idle'); } catch (e) {}
+  var IDLE_MS = (qs ? Math.max(10, parseFloat(qs) || 900) : 15 * 60) * 1000;
+  var DEADZONE = 0.25;
+  // one rAF loop per page reads the pads for every __gf overlay
+  var hub = window.__gfHub;
+  if (!hub) {
+    hub = window.__gfHub = { fns: [], pads: [] };
+    (function () {
+      var NONE = [];
+      function loop(now) {
+        var p = null;
+        try { p = navigator.getGamepads ? navigator.getGamepads() : null; } catch (e) {}
+        hub.pads = p || NONE;
+        for (var i = 0; i < hub.fns.length; i++) { try { hub.fns[i](now, hub.pads); } catch (e) {} }
+        requestAnimationFrame(loop);
+      }
+      requestAnimationFrame(loop);
+    })();
+  }
+  var last = performance.now(), leaving = false, player = null;
+  function bump() { last = performance.now(); }
+  window.addEventListener('keydown', bump, { capture: true });
+  window.addEventListener('pointerdown', bump, { capture: true });
+  window.addEventListener('touchstart', bump, { capture: true, passive: true });
+  function padActive(pads) {
+    for (var i = 0; i < pads.length; i++) {
+      var gp = pads[i];
+      if (!gp || gp.connected === false) continue;
+      for (var b = 0; b < gp.buttons.length; b++) if (gp.buttons[b].pressed) return true;
+      for (var a = 0; a < gp.axes.length; a++) if (Math.abs(gp.axes[a]) > DEADZONE) return true;
+    }
+    return false;
+  }
+  hub.fns.push(function (now, pads) {
+    if (leaving) return;
+    if (IS_BOOK) {                     // while a game is open its own overlay owns the idle timer
+      if (!player) player = document.getElementById('player');
+      if (player && player.classList.contains('open')) { last = now; return; }
+    }
+    if (padActive(pads)) last = now;
+    if (now - last < IDLE_MS) return;
+    leaving = true;
+    var g = false;
+    try { g = window.parent !== window && typeof window.parent.closeGame === 'function'; } catch (e) {}
+    if (g) { try { window.parent.closeGame(); } catch (e) {} }
+    else location.href = '/';          // pagehide fires -> games persist their state
+  });
+})();
+</script>
