@@ -49,6 +49,14 @@ getfile() { # getfile <name> <dest> <mode>
   fi
 }
 
+say "Checking for a color emoji font"
+# Ben's Game Factory (the GAME FACTORY card) draws its whole book out of
+# emoji — without a color emoji font the Pi renders every icon as a box.
+if ! fc-list 2>/dev/null | grep -qi "NotoColorEmoji"; then
+  sudo apt-get install -y fonts-noto-color-emoji
+  fc-cache -f >/dev/null 2>&1 || true
+fi
+
 say "Checking for Chromium"
 if ! command -v chromium-browser >/dev/null && ! command -v chromium >/dev/null; then
   sudo apt-get update
