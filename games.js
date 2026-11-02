@@ -169,6 +169,14 @@ window.GAMES_DATA = [
     "source": "https://ses.q5labs.co/zoomies/index.html"
   },
   {
+    "slug": "hatchling",
+    "title": "HATCHLING",
+    "genre": "FLYING",
+    "status": "PRESS START",
+    "icon": "hatchling",
+    "source": "https://ses.q5labs.co/hatchling/index.html"
+  },
+  {
     "slug": "game-factory",
     "title": "GAME FACTORY",
     "genre": "BY BEN \u00b7 130+ GAMES",
